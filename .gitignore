@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+
+# GSD / assistant planning stays private even after the public flip
+.planning/
+.gsd/
+CLAUDE.local.md
+.claude/settings.local.json

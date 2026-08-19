@@ -1,0 +1,114 @@
+/**
+ * Plugin scaffold command — generates a new plugin directory with a
+ * typed manifest template and handler stub.
+ *
+ * Usage: bun run scripts/scaffold-plugin.ts <plugin-name>
+ *
+ * Per D-10: Plugin names must be lowercase, hyphenated identifiers.
+ * Name is validated against [a-z][a-z0-9-]* — no path traversal possible.
+ */
+import { mkdir, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+// Generated plugins live under <home>/plugins/, outside this repo — relative
+// imports cannot reach warpline's src from there. Resolve the schemas dir to
+// an absolute path at scaffold time. (When warpline ships as a published
+// package with an exports map, this becomes `from 'warpline/schemas/...'`.)
+const SCHEMAS_DIR = fileURLToPath(new URL('../schemas', import.meta.url))
+import { pluginsDir } from '../lib/paths'
+
+export interface ScaffoldResult {
+  created: boolean
+  path: string
+  message: string
+}
+
+export async function scaffoldPlugin(name: string): Promise<ScaffoldResult> {
+  // Validate name: lowercase letters, numbers, hyphens. Must start with a letter.
+  // No path traversal possible with this regex — forward slashes, dots, spaces all rejected.
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) {
+    return {
+      created: false,
+      path: '',
+      message: `Invalid plugin name '${name}'. Use lowercase letters, numbers, hyphens. Must start with a letter.`,
+    }
+  }
+
+  const pluginDir = join(pluginsDir(), name)
+
+  if (existsSync(pluginDir)) {
+    return {
+      created: false,
+      path: pluginDir,
+      message: `Plugin '${name}' already exists at ${pluginDir}`,
+    }
+  }
+
+  await mkdir(pluginDir, { recursive: true })
+
+  // manifest.ts — validated against PluginManifestSchema at import time (D-09 hard-stop)
+  const manifestContent = `import { PluginManifestSchema } from '${SCHEMAS_DIR}/plugin-manifest'
+
+export const manifest = PluginManifestSchema.parse({
+  name: '${name}',
+  version: '1.0.0',
+  description: 'TODO: Describe what this plugin does',
+  inputs: {},
+  outputs: {},
+  capabilities: [],
+  schedule: 'on_run',
+  autonomy_level: 'supervised',
+  side_effects: [],
+  ttl_hours: 24,
+  dependencies: [],
+  timeout_ms: 60_000,
+  max_parallelism: 1,
+})
+`
+
+  // handler.ts — stub returning SkillResult shape
+  const handlerContent = `import type { PluginManifest } from '${SCHEMAS_DIR}/plugin-manifest'
+import type { SkillResult } from '${SCHEMAS_DIR}/skill-result'
+import { manifest } from './manifest'
+
+export async function handler(
+  _manifest: PluginManifest,
+  _args: Record<string, unknown> = {},
+): Promise<SkillResult> {
+  // TODO: Implement plugin logic
+  return {
+    status: 'success',
+    phases_completed: [manifest.name],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: \`\${manifest.name} executed successfully\`,
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`
+
+  await writeFile(join(pluginDir, 'manifest.ts'), manifestContent)
+  await writeFile(join(pluginDir, 'handler.ts'), handlerContent)
+
+  return {
+    created: true,
+    path: pluginDir,
+    message: `Plugin '${name}' scaffolded at ${pluginDir}`,
+  }
+}
+
+// CLI entry point — only runs when executed directly
+if (import.meta.main) {
+  const name = process.argv[2]
+  if (!name) {
+    console.error('Usage: bun run scripts/scaffold-plugin.ts <plugin-name>')
+    process.exit(1)
+  }
+  const result = await scaffoldPlugin(name)
+  console.log(result.message)
+  process.exit(result.created ? 0 : 1)
+}

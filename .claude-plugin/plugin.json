@@ -1,0 +1,9 @@
+{
+  "name": "warpline",
+  "description": "Deterministic plugin runtime with LLM-judgment dispatch and side-effect approval gates. Skills for authoring plugins and consuming [needs-llm] handoffs.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Adnan",
+    "email": "adnan@kernel.associates"
+  }
+}
