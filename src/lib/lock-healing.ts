@@ -6,8 +6,8 @@
  *   - Age: lock mtime > 2 × maxTimeoutMs
  *   - PID-dead: PID in lock file cannot receive signal 0 (process.kill)
  *
- * Implements D-06/D-07 from Phase 103 design decisions.
- * Mitigates T-103-02-01 (DoS via stale lock blocking future runs).
+ * Exists so a stale lock cannot block every future run: a crashed process
+ * leaves its lock behind, and without healing that is a permanent outage.
  */
 import { readFile, writeFile, unlink, stat } from 'node:fs/promises'
 
