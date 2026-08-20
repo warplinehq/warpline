@@ -1,5 +1,5 @@
 /**
- * Phase 121 D-26/D-27 — Run artifact persistence for manual + cron plugin runs.
+ * Run artifact persistence for manual and scheduled plugin runs.
  *
  * Writes `.warpline/runs/<run_id>.json` with the per-attempt extension and a
  * sibling `<run_id>.log` containing captured stdout/stderr with attempt
@@ -21,7 +21,7 @@ export interface RunArtifact {
   completed_at: string | null
   status: 'success' | 'failed' | 'cancelled' | 'timeout' | 'running' | 'delegated'
   summary: string
-  /** D-38: true when the run was dashboard-triggered. */
+  /** True when the run was triggered by a host UI rather than the schedule. */
   user_initiated: boolean
   /** Per-attempt detail from invokePlugin's retry loop. */
   attempts: Array<{
@@ -125,7 +125,7 @@ export async function trimPluginHistory(
 }
 
 /**
- * Phase 121 Plan 04 Task 4.2 - Read up to `limit` newest artifacts for a plugin.
+ * Read up to `limit` newest artifacts for a plugin.
  *
  * Reads every .json in the runs directory, parses each, filters by plugin, sorts
  * by started_at DESC, and slices to `limit`. Silently skips malformed artifacts
@@ -161,7 +161,7 @@ export async function readRecentRunsForPlugin(
 }
 
 /**
- * Phase 121 Plan 04 Task 4.2 - Read the most recent artifact for a plugin, or
+ * Read the most recent artifact for a plugin, or
  * null if there is none.
  */
 export async function readLastRunForPlugin(
