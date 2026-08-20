@@ -13,7 +13,7 @@
  * name is treated as a wildcard, so no plugin name, glob or shell expansion can
  * widen a grant past what the operator typed.
  *
- * Never terminates the process (D-14) — it returns a code to the dispatcher.
+ * Never terminates the process — it returns a code to the dispatcher.
  */
 import { parseArgs } from 'node:util'
 import { loadPluginManifests } from '../runtime/engine.js'
