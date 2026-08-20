@@ -2,8 +2,8 @@
  * Wave 0 — Lock healing tests (stale lock age + PID liveness)
  *
  * Covers decisions:
- *   D-06: acquireLock writes current PID; detectStaleLock checks age (2× maxTimeoutMs) + PID alive
- *   D-07: stale reasons: 'age' (mtime too old) | 'pid-dead' (PID not alive)
+ *   acquireLock writes the current PID; detectStaleLock checks age (2× maxTimeoutMs) + PID alive
+ *   stale reasons: 'age' (mtime too old) | 'pid-dead' (PID not alive)
  *
  * STATUS: RED — `.warpline/shared/lock-healing.ts` does not yet exist.
  * Wave 2 Plan 02 Task 1 will create it and turn these green.
@@ -37,7 +37,7 @@ afterEach(async () => {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('lock-healing — acquireLock + detectStaleLock (D-06/D-07)', () => {
+describe('lock-healing — acquireLock + detectStaleLock', () => {
   test('Test 1: Fresh lock + live PID → stale: false', async () => {
     // acquireLock writes current process.pid to lockPath
     await acquireLock(lockPath)
@@ -60,7 +60,7 @@ describe('lock-healing — acquireLock + detectStaleLock (D-06/D-07)', () => {
     const result = await detectStaleLock(lockPath, 1000)
 
     expect(result.stale).toBe(true)
-    // reason must identify age as the cause (D-07)
+    // reason must identify age as the cause
     expect((result as { stale: true; reason: string }).reason).toBe('age')
   })
 
@@ -74,7 +74,7 @@ describe('lock-healing — acquireLock + detectStaleLock (D-06/D-07)', () => {
     const result = await detectStaleLock(lockPath, 1_000_000)
 
     expect(result.stale).toBe(true)
-    // reason must identify dead PID as the cause (D-07)
+    // reason must identify dead PID as the cause
     expect((result as { stale: true; reason: string }).reason).toBe('pid-dead')
   })
 
