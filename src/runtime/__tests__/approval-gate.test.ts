@@ -114,7 +114,7 @@ describe('revokeApproval', () => {
 })
 
 // ---------------------------------------------------------------------------
-// mergeGrant — additive grants under a first-grant ceiling (plan 02-07, D-23)
+// mergeGrant — additive grants under a first-grant ceiling
 // ---------------------------------------------------------------------------
 
 const HOUR = 60 * 60 * 1000
