@@ -46,9 +46,12 @@ bun run typecheck           # build, then tsc --noEmit (strict; no
 3. **`warplinehq/warpline-attic` is permanently private.** It holds the
    pre-rewrite object store. Never flip it, never pull from it, never push
    to it.
-4. **`npm-stub/` reserves the bare npm name.** Delete it in the same change
-   as the first real `npm publish` (flip `private`, add files whitelist +
-   repository/bugs fields).
+4. **The npm name is held by a real release.** `warpline` publishes from
+   `main` via `release.yml`, triggered by a *published* GitHub Release, using
+   OIDC — there is no token to hold. `scripts/assert-release-tag.sh` runs
+   before the upload and refuses a tag/version mismatch. Correct a bad
+   release forward: `npm deprecate` plus a patch version. Never unpublish,
+   never reuse a version number.
 5. **History stays stable once public** — no force-pushes to main; the
    flip-day ruleset enforces it (see EXTRACTION-NOTES.md checklist).
 

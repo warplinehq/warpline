@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * Non-interactive board CLI — works in any shell including Claude Code.
  *

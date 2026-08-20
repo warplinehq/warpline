@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * Single-plugin invocation, as a library function plus a process-level tail.
  *
