@@ -12,7 +12,6 @@
  * readable required-vs-found line below.
  *
  * If you are here to "clean up" the dynamic import: don't. It is load-bearing.
- * (D-15; RESEARCH Pattern 1, Probe H3.)
  *
  * `engines.node` in package.json does NOT gate execution — npm emits a
  * warning at install time and nothing at run time. This is the actual gate.
