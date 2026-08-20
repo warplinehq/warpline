@@ -92,7 +92,7 @@ export function _getPaths(): StatePaths {
   return { ...activePaths() }
 }
 
-// ── Advisory lock (D-03) ─────────────────────────────────────────
+// ── Advisory lock ────────────────────────────────────────────────
 
 const LOCK_TIMEOUT_MS = 10_000
 
@@ -127,7 +127,7 @@ export async function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
   finally { await release() }
 }
 
-// ── Age badge formatting (absorbed from task-actions.ts per D-27) ─
+// ── Age badge formatting ─────────────────────────────────────────
 
 const HOUR_MS = 3_600_000
 const DAY_MS = 86_400_000
@@ -141,7 +141,7 @@ function formatAge(createdAt: string): string {
   return `${Math.floor(ageMs / WEEK_MS)}w`
 }
 
-// ── Sort helper (absorbed from task-actions.ts per D-27) ─────────
+// ── Sort helper ──────────────────────────────────────────────────
 
 const SEVERITY_ORDER: Record<string, number> = { critical: 0, warning: 1, info: 2 }
 
@@ -151,7 +151,7 @@ function sortByPriority(a: TaskDisplay, b: TaskDisplay): number {
   return a.created_at.localeCompare(b.created_at)
 }
 
-// ── toTaskDisplay (D-23) ─────────────────────────────────────────
+// ── toTaskDisplay ────────────────────────────────────────────────
 
 export function toTaskDisplay(task: TaskAging, deferrals: Deferral[], completedIds: Set<string>): TaskDisplay {
   const deferral = deferrals.find(
@@ -174,7 +174,7 @@ export function toTaskDisplay(task: TaskAging, deferrals: Deferral[], completedI
   }
 }
 
-// ── Mutable state: Tasks (D-04, D-26) ───────────────────────────
+// ── Mutable state: Tasks ────────────────────────────────────────
 
 export async function readTasks(): Promise<TaskDisplay[]> {
   const state = await readEngineState(activePaths().v2StatePath)
@@ -257,7 +257,7 @@ export async function writeAcks(acks: Acknowledgements): Promise<void> {
   })
 }
 
-// ── Append-only state: Events (D-08) ────────────────────────────
+// ── Append-only state: Events ───────────────────────────────────
 
 export async function readEvents(): Promise<BoardEvent[]> {
   let content: string
@@ -288,7 +288,7 @@ export async function appendEvent(event: BoardEvent): Promise<void> {
   appendFileSync(activePaths().eventsPath, JSON.stringify(event) + '\n')
 }
 
-// ── Generic state access (D-04) ──────────────────────────────────
+// ── Generic state access ─────────────────────────────────────────
 
 export async function readState(): Promise<EngineState> {
   return readEngineState(activePaths().v2StatePath)
