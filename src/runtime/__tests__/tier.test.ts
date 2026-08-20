@@ -25,11 +25,11 @@ describe('computeTier', () => {
     expect(computeTier(undefined, BASE)).toBe('normal')
   })
 
-  it('returns normal for empty string (T-109-02 NaN guard)', () => {
+  it('returns normal for empty string (NaN guard)', () => {
     expect(computeTier('', BASE)).toBe('normal')
   })
 
-  it('returns normal for invalid date string (T-109-02 NaN guard)', () => {
+  it('returns normal for invalid date string (NaN guard)', () => {
     expect(computeTier('not-a-date', BASE)).toBe('normal')
   })
 
