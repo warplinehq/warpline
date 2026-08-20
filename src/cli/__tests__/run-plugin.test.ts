@@ -21,6 +21,12 @@ import { runPlugin } from '../run-plugin.js'
 /** The stdout contract the board parses. Order is part of it (T-02-23). */
 const PAYLOAD_KEYS = 'ok,error,duration_ms,attempt_count,cancelled,timed_out'
 
+/**
+ * The same names as raw identifiers. None of them may appear in human output —
+ * that is the observable difference between the two renderings.
+ */
+const RAW_KEY_NAMES = PAYLOAD_KEYS.split(',')
+
 let home: string
 
 beforeAll(() => {
@@ -100,5 +106,82 @@ describe('runPlugin — payload and exit code', () => {
       expect(rejected.usageError).toContain('Usage:')
       expect(rejected.payload.duration_ms).toBeUndefined()
     }
+  })
+})
+
+describe('runPlugin — stdout rendering', () => {
+  test('--json serializes the payload exactly as it always has', async () => {
+    const good = await runPlugin(['success-plugin', 'run', '--json'])
+    const goodJson = JSON.parse(good.stdout)
+    // `error` is undefined on success, so JSON.stringify omits it — five keys
+    // on the wire, six in memory. Serializing it as null instead would change
+    // the bytes the board reads.
+    expect(Object.keys(goodJson).join()).toBe(
+      'ok,duration_ms,attempt_count,cancelled,timed_out',
+    )
+    expect(goodJson.ok).toBe(true)
+
+    const bad = await runPlugin(['nonretryable-fail-plugin', 'run', '--json'])
+    expect(Object.keys(JSON.parse(bad.stdout)).join()).toBe(PAYLOAD_KEYS)
+    // In-memory order is the full six-key contract on both paths.
+    expect(Object.keys(good.payload).join()).toBe(PAYLOAD_KEYS)
+    expect(Object.keys(bad.payload).join()).toBe(PAYLOAD_KEYS)
+  })
+
+  test('the default rendering is prose carrying status, duration and attempts', async () => {
+    const { stdout } = await runPlugin(['success-plugin', 'run'])
+
+    expect(stdout).toContain('succeeded')
+    expect(stdout).toMatch(/\d+ ms/)
+    expect(stdout).toContain('1 attempt')
+    for (const name of RAW_KEY_NAMES) {
+      expect(stdout).not.toContain(name)
+    }
+    expect(() => JSON.parse(stdout)).toThrow()
+  })
+
+  test('a failed invocation names the failure in prose', async () => {
+    const { stdout, code, payload } = await runPlugin([
+      'nonretryable-fail-plugin',
+      'run',
+    ])
+
+    expect(stdout).toContain('failed')
+    expect(stdout).toContain('auth denied')
+    // Exit 0: the invocation ran and reported a logical failure. See the
+    // exit-code test above and SUMMARY deviation 1.
+    expect(code).toBe(0)
+    expect(payload.ok).toBe(false)
+    for (const name of RAW_KEY_NAMES) {
+      expect(stdout).not.toContain(name)
+    }
+  })
+
+  test('timed-out and interrupted invocations render distinguishably', async () => {
+    const timedOut = await runPlugin(['abort-unaware-plugin', 'run'])
+    expect(timedOut.payload.timed_out).toBe(true)
+    expect(timedOut.stdout).toContain('timed out')
+
+    const interrupted = await runPlugin(
+      ['abort-aware-plugin', 'run'],
+      AbortSignal.abort(),
+    )
+    expect(interrupted.payload.cancelled).toBe(true)
+    expect(interrupted.stdout).toContain('interrupted')
+
+    expect(interrupted.stdout).not.toBe(timedOut.stdout)
+    for (const name of RAW_KEY_NAMES) {
+      expect(timedOut.stdout).not.toContain(name)
+      expect(interrupted.stdout).not.toContain(name)
+    }
+  })
+
+  test('the prose duration corresponds to the payloads millisecond value', async () => {
+    const { stdout, payload } = await runPlugin(['success-plugin', 'run'])
+
+    // Sub-second invocations print the raw millisecond value; the machine path
+    // is never rounded, so the two must agree digit for digit here.
+    expect(payload.duration_ms).toBeLessThan(1000)
+    expect(stdout).toContain(`${payload.duration_ms} ms`)
   })
 })
