@@ -13,13 +13,14 @@
  *   emitPluginGated()   — plugin lifecycle: gated (awaiting approval)
  *
  * Design:
- *   D-20: Engine emits structured events for all plugin lifecycle transitions.
- *   Events are appended to events.jsonl — Phase 85 board reads them.
- *   File path injectable for test isolation.
+ *   The engine emits a structured event for every plugin lifecycle transition;
+ *   they are appended to events.jsonl, which the board reads. The file path is
+ *   injectable so tests do not touch a real log.
  *
- * Threat model:
- *   T-84-07: events.jsonl is append-only from engine side. No integrity guarantee
- *   needed — events are ephemeral operational data consumed by board UI.
+ *   events.jsonl is append-only from the engine's side and carries no integrity
+ *   guarantee. That is deliberate rather than an omission: these are ephemeral
+ *   operational breadcrumbs for a UI, not an audit trail, and nothing downstream
+ *   may treat them as one.
  */
 import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
@@ -42,8 +43,8 @@ const EVENTS_LOG_TRIM_SLACK = 2_000
 /**
  * Trim a JSONL event log to its newest `cap` lines. Exported for tests.
  * Atomic rewrite (tmp + rename); a concurrent append landing between the read
- * and the rename can be lost — acceptable for ephemeral operational data
- * (T-84-07), and the engine is single-writer per D-17.
+ * and the rename can be lost — acceptable for ephemeral operational data, and
+ * the engine is single-writer anyway.
  */
 export async function _trimEventsLog(
   eventsPath: string,
@@ -68,7 +69,7 @@ export async function _trimEventsLog(
  *
  * Creates the parent directory if it doesn't exist (idempotent).
  * Uses append mode — safe for concurrent writers within a single process
- * (per D-17, only one engine run at a time). Trims the file back to
+ * (only one engine run at a time). Trims the file back to
  * EVENTS_LOG_CAP once it drifts past cap + slack.
  */
 export async function emitBoardEvent(
@@ -87,7 +88,7 @@ export async function emitBoardEvent(
 
 /**
  * Construct a BoardEvent with required fields and sane defaults.
- * Summary is capped at 200 chars per the Ink single-line constraint (D-21).
+ * Summary is capped at 200 chars per the Ink single-line constraint.
  */
 export function makeEvent(
   type: BoardEvent['type'],
@@ -109,7 +110,7 @@ export function makeEvent(
 }
 
 // -----------------------------------------------------------------------
-// Convenience emitters — per D-20 lifecycle events
+// Convenience emitters — one per lifecycle transition
 // -----------------------------------------------------------------------
 
 /** Emit run_started event — call at the very beginning of runAdvance. */
@@ -144,7 +145,7 @@ export const emitPluginSkipped = (plugin: string, reason: string, eventsPath?: s
   emitBoardEvent(makeEvent('plugin_result', plugin, `${plugin}: skipped — ${reason}`), eventsPath)
 
 /**
- * Emit an attempt_failed notice during invokePlugin's retry loop (Phase 121 D-09).
+ * Emit an attempt_failed notice during invokePlugin's retry loop.
  *
  * Uses `type: 'notice'` because the BoardEvent enum is closed (nine values); the
  * retry sub-type is encoded in `summary` instead. Severity stays `info` — an
