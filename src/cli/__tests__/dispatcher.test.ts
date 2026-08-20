@@ -1,5 +1,5 @@
 /**
- * Dispatcher tests — in-process, no subprocess (D-27).
+ * Dispatcher tests — in-process, no subprocess.
  *
  * `main()` returns a code and writes through process.stdout/stderr, so the
  * whole contract is assertable by swapping the two write functions. Plan
