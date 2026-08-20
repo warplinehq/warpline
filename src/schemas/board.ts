@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 /**
  * Task lifecycle states.
- * Per D-21 state machine:
+ * State machine:
  *   pending -> active -> completed
  *                     -> deferred (with snooze expiry)
  *   deferred -> pending (when snooze expires)
@@ -34,7 +34,6 @@ export type Severity = z.infer<typeof Severity>
  * Complex data goes into metadata_json (serialized string) to avoid
  * React key/render issues in Ink's reconciler.
  *
- * Per D-21, D-22.
  */
 export const BoardEventSchema = z.object({
   /** Unique event identifier */
