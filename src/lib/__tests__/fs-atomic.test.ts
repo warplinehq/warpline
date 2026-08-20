@@ -1,5 +1,5 @@
 /**
- * fs-atomic tests — Phase 119 Plan 01 Task 1.
+ * fs-atomic tests.
  *
  * Covers: atomicWriteJson, atomicWriteText, readJsonOrNull. Pure fs only —
  * no `mock.module` (CLAUDE.md §bun:test gotchas).
