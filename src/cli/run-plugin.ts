@@ -20,12 +20,12 @@
  *   1. The bun shebang on line 1 stays. Only `src/bin/warpline.ts` carries the
  *      node shebang, deliberately. Do not "harmonize" them — repointing the
  *      board is out of scope, and changing a working spawn contract inside a
- *      publish phase is gratuitous risk (D-17).
+ *      publish phase is gratuitous risk.
  *   2. The SIGINT handler and its 130 exit live in the tail below, not in
  *      `runPlugin`, because they install a process-level listener.
  *
  * `runPlugin(argv, signal)` returns `{ payload, code, stdout }` rather than
- * printing and exiting, so every branch is testable in-process (D-27). The
+ * printing and exiting, so every branch is testable in-process. The
  * payload keeps the same six keys in the same order it has always had; it is
  * built once and both renderings read from that one object, so they cannot
  * drift. Duration rounding in the prose is cosmetic and is deliberately not
@@ -46,7 +46,7 @@ const USAGE =
 const RETRIES_ERROR = 'Invalid --retries value; expected integer in [0, 10]'
 
 /**
- * The stdout contract. Key ORDER is part of it (T-02-23), so build this only
+ * The stdout contract. Key ORDER is part of it, so build this only
  * as a single object literal. `error` is `undefined` rather than `null` on
  * success so that `JSON.stringify` omits it, exactly as it always has.
  */
