@@ -35,8 +35,8 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "bun test --timeout 20000",
-    "typecheck": "tsc --noEmit",
+    "test": "bun run build && bun test --timeout 20000",
+    "typecheck": "bun run build && tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "prepack": "tsc -p tsconfig.build.json"
   },

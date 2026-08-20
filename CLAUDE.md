@@ -8,11 +8,21 @@ NOT in any other repo's planning system.
 ## Commands
 
 ```bash
+bun run build               # tsc -p tsconfig.build.json → dist/. MUST run
+                            # before the full suite and before the typecheck:
+                            # examples/plugins/* import `warpline/schemas/*`
+                            # and `warpline/lib/paths`, which resolve by
+                            # package self-reference through the exports map
+                            # into dist/. A bare `bun test` on a clean
+                            # checkout fails on those 9 tests.
+bun run test                # build, then bun test --timeout 20000
 bun test --timeout 20000    # ALWAYS pass the flag: bun's 5s default flakes
                             # ~3% under CPU contention; bunfig [test] timeout
-                            # is silently ignored. CI shards per src/ subdir.
-bun run typecheck           # tsc --noEmit (strict; no noUncheckedIndexedAccess
-                            # yet — raising strictness is a deliberate change)
+                            # is silently ignored. CI shards per src/ subdir
+                            # plus an explicit examples/ shard.
+bun run typecheck           # build, then tsc --noEmit (strict; no
+                            # noUncheckedIndexedAccess yet — raising
+                            # strictness is a deliberate change)
 ```
 
 ## Layout
