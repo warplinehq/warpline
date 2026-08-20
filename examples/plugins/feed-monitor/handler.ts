@@ -1,6 +1,5 @@
-import type { PluginManifest } from '../../../src/schemas/plugin-manifest.js'
-import type { SkillResult } from '../../../src/schemas/skill-result.js'
-import { makeSkillError } from '../../../src/schemas/skill-result.js'
+import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
+import { makeSkillError, type SkillResult } from 'warpline/schemas/skill-result'
 
 export interface FeedEntry {
   title: string

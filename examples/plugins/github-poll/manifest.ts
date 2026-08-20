@@ -1,4 +1,4 @@
-import { PluginManifestSchema } from '../../../src/schemas/plugin-manifest.js'
+import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
 
 /**
  * github-poll — example plugin.
