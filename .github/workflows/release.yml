@@ -1,0 +1,92 @@
+name: Release
+
+# Why this is its own file and not another job in ci.yml: the token-minting
+# permission below must never be reachable from a pull-request-triggered run.
+# ci.yml keeps `permissions: contents: read` and stays that way.
+#
+# Why the upload is inline here rather than delegated to a called or
+# hand-started workflow: npm then validates the *calling* workflow's name
+# instead of the one that actually contains the upload command, which produces
+# configuration mismatches against the registry-side publisher configuration.
+# The release trigger with everything inline avoids the trap entirely. Do not
+# refactor this into a reusable workflow.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  # The critical requirement. This is exchanged with the registry for
+  # short-lived, workflow-scoped authority, which is what removes the
+  # long-lived automation token this repository would otherwise have to hold
+  # and an attacker would otherwise have to steal. The signed attestation
+  # linking the tarball to this workflow, commit and repository is minted
+  # automatically from it — there is no flag to pass and no token to set.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # First, and fatal, before every upload-adjacent step. An assertion that
+      # runs afterwards is decoration: the upload is irreversible, and the
+      # correction path is `npm deprecate` plus a new version number — never an
+      # unpublish, and a version number is never reused.
+      #
+      # The logic lives in a script rather than inline here so it can be run
+      # without cutting a release. That is the only way to observe the guard
+      # failing, and a guard nobody has watched fail is not a guard.
+      #
+      # The tag is read from the environment, never interpolated into the shell
+      # by the workflow expression syntax.
+      - name: assert the tag matches the version and npm-stub is gone
+        run: bash scripts/assert-release-tag.sh "$GITHUB_REF_NAME"
+
+      # Node 24 clears both floors the registry's OIDC publishing requires: it
+      # bundles npm 11.x (the npm floor of 11.5.1) and it is above the
+      # separately stated Node floor of 22.14.0. Do not "simplify" this to Node
+      # 22 — that clears the Node floor but ships npm 10.x, below the npm
+      # floor, and actions/setup-node does not upgrade the bundled npm.
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      # Installed with bun, uploaded with npm. This repository carries bun.lock
+      # and no package-lock.json, so npm has nothing to install from with
+      # pinned resolution — and resolving dependencies unpinned on an
+      # irreversible step is exactly the supply-chain exposure worth keeping
+      # out. Same pattern, same pin, as ci.yml's test job.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.11
+      - run: bun install --frozen-lockfile
+
+      # The `prepack` script rebuilds dist/ as part of packing too, so this is
+      # belt and braces. Both being true is deliberate on a step that cannot be
+      # retried.
+      - run: bun run build
+
+      # The same two-directional gate ci.yml runs on every push, run once more
+      # against the bytes that are about to leave this repository forever.
+      # Cheap, and the last chance to catch a `files` regression.
+      - name: check the artifact against the whitelist
+        run: bash scripts/assert-pack-whitelist.sh
+
+      # No auth environment variable on this step: the OIDC exchange replaces
+      # the registry token entirely, and a stale one here produces a confusing
+      # failure on the one step that cannot cheaply be retried. No attestation
+      # flag either — it is generated automatically and the flag is
+      # unnecessary.
+      #
+      # --access public is a documented first-publication requirement. This
+      # package already exists on the registry at a placeholder version, so the
+      # flag is harmless insurance rather than a necessity. Keep it, but if an
+      # upload fails do not look here first — look at the OIDC exchange, and at
+      # whether package.json's repository owner/name casing matches the
+      # registry-side publisher configuration exactly. The registry validates
+      # that match case-sensitively.
+      - name: upload the release to the registry
+        run: npm publish --access public
