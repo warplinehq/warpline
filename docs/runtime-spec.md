@@ -220,7 +220,10 @@ Pattern:
 describe('my route', () => {
   let spy: ReturnType<typeof spyOn>
   beforeEach(() => {
-    spy = spyOn(engine, 'loadPluginManifests').mockResolvedValue(fixtureMap())
+    spy = spyOn(engine, 'loadPluginManifests').mockResolvedValue({
+      manifests: fixtureMap(),
+      failures: [],
+    })
   })
   afterEach(() => {
     spy.mockRestore()
@@ -228,6 +231,17 @@ describe('my route', () => {
   test('...', async () => { /* ... */ })
 })
 ```
+
+`loadPluginManifests(pluginsDir)` resolves to
+`{ manifests: Map<string, PluginManifest>, failures: LoadFailure[] }`. A plugin
+directory whose `manifest.ts` cannot be imported is absent from `manifests` and
+present in `failures` as `{ plugin, error }`, where `plugin` is the directory
+name (a broken manifest has no trustworthy `name` field) and `error` is the
+thrown `Error.message` — no stack trace. `failures` is sorted by `plugin` inside
+the loader, so alphabetical ordering is a property of the data rather than of
+whichever surface renders it, and it is always an array: an all-valid directory
+and a missing directory both yield `[]`. A mock that returns a bare `Map` no
+longer satisfies the signature.
 
 Fixture plugins live under `<home>/test-utils/fixture-plugins/`:
 

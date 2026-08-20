@@ -57,6 +57,16 @@ import { checkTaskLock as smCheckTaskLock } from '../board/state-manager.js'
 export type PluginFsmState = 'pending' | 'running' | 'gated' | 'approved' | 'completed' | 'failed'
 
 /**
+ * A plugin directory whose `manifest.ts` could not be imported (D-22).
+ * `plugin` is the directory name — a broken manifest has no trustworthy `name`
+ * field to key off. `error` is the thrown `Error.message`, no stack trace.
+ */
+export interface LoadFailure {
+  plugin: string
+  error: string
+}
+
+/**
  * Headless run profile (D-04/D-05).
  * Controls which plugin schedules are eligible to run in non-interactive mode.
  *
@@ -297,8 +307,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // 3b. Emit run_started event
   await emitRunStarted(run_id, eventsPath)
 
-  // 4. Load all plugin manifests from pluginsDir
-  const plugins = await loadPluginManifests(pluginsDir)
+  // 4. Load all plugin manifests from pluginsDir. The loader also returns
+  // per-plugin `failures` (D-22); a run does not surface them yet, so only
+  // `manifests` is taken here and run behaviour is unchanged.
+  const { manifests: plugins } = await loadPluginManifests(pluginsDir)
 
   // 5. Topological sort
   const levels = topoSort(plugins)
@@ -694,15 +706,24 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 // Internal helpers
 // -----------------------------------------------------------------------
 
-export async function loadPluginManifests(pluginsDir: string): Promise<Map<string, PluginManifest>> {
+/**
+ * D-22: `loadPluginManifests` reports what it could not load instead of
+ * discarding it. A broken plugin used to vanish inside a bare `catch {}`,
+ * which made an incomplete due-set indistinguishable from a complete one.
+ */
+export async function loadPluginManifests(pluginsDir: string): Promise<{
+  manifests: Map<string, PluginManifest>
+  failures: LoadFailure[]
+}> {
   const { readdir } = await import('node:fs/promises')
   const plugins = new Map<string, PluginManifest>()
+  const failures: LoadFailure[] = []
 
   let entries: string[]
   try {
     entries = await readdir(pluginsDir)
   } catch {
-    return plugins // empty if dir doesn't exist
+    return { manifests: plugins, failures } // empty if dir doesn't exist
   }
 
   await Promise.all(
@@ -714,11 +735,17 @@ export async function loadPluginManifests(pluginsDir: string): Promise<Map<strin
         if (mod.manifest) {
           plugins.set(entry, mod.manifest as PluginManifest)
         }
-      } catch {
-        // Skip invalid/missing manifests
+      } catch (err) {
+        failures.push({ plugin: entry, error: err instanceof Error ? err.message : String(err) })
       }
     }),
   )
+
+  // Sorted INSIDE the loader so alphabetical ordering is a property of the data
+  // rather than of one renderer — a second surface cannot get it wrong. Plain
+  // codepoint comparison, not localeCompare: locale-dependent ordering would
+  // leak into the byte-identity guarantee `warpline plan` has to make.
+  failures.sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0))
 
   // Phase 112-08: warn on unresolved dependencies (hygiene — topoSort silently ignores these today).
   // Loaded keys are directory names (what `entries` returned). Manifests also declare their own
@@ -738,7 +765,7 @@ export async function loadPluginManifests(pluginsDir: string): Promise<Map<strin
     }
   }
 
-  return plugins
+  return { manifests: plugins, failures }
 }
 
 function getDefaultPluginsDir(): string {
