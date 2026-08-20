@@ -40,7 +40,7 @@ export const RunLogSchema = z.object({
   modes_run: z.array(ModeRunSchema),
   resumed_from: z.string().nullable().default(null),
   summary: z.string(),
-  // Task board fields (Phase 74, D-29)
+  // Task board fields
   tasks_surfaced: z.array(z.object({
     task_id: z.string(),
     severity: z.string(),
@@ -53,11 +53,11 @@ export const RunLogSchema = z.object({
     status: z.string(),
     method: z.string(),
   })).default([]),
-  /** Per-plugin execution log entries (Phase 84, engine loop). */
+  /** Per-plugin execution log entries, written by the engine loop. */
   plugin_entries: z.array(PluginLogEntrySchema).default([]),
 
   /**
-   * Aggregate metrics from this run for self-reporting (Phase 87, D-17).
+   * Aggregate metrics from this run, for self-reporting.
    * Optional — omitted if metrics computation fails or is unavailable.
    */
   metrics_summary: z.object({
