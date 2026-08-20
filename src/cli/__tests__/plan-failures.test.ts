@@ -4,11 +4,11 @@
  * The subject here is not the rendering (plan 02-05 unit-tested all six output
  * states against hand-built models) but the *exit contract*: a preview whose
  * due-set is known to be incomplete must not exit 0, because an exit 0 is the
- * one signal a script reads. T-02-18 is the whole point — an incomplete due-set
+ * one signal a script reads. That is the whole point — an incomplete due-set
  * presented as complete is a repudiation risk, not a cosmetic one.
  *
  * Everything runs in-process through `run(argv)` with the streams captured
- * (D-27); no subprocess, no build step.
+ *; no subprocess, no build step.
  *
  * The broken fixtures are files of deliberately unparseable TypeScript. The
  * assertions name the plugin *directory* and the section headers, never bun's
@@ -163,7 +163,7 @@ describe('load failures', () => {
   test('Test 3: failures list alphabetically by directory name, whatever order they were created in', async () => {
     // Created zulu → alpha → mike; readdir order is filesystem-dependent and
     // the loader resolves them concurrently, so any ordering seen here is the
-    // loader's sort (D-22) rather than an accident of creation or scheduling.
+    // loader's sort rather than an accident of creation or scheduling.
     await writeBrokenPlugin(home, 'zulu-broken')
     await writeBrokenPlugin(home, 'alpha-broken')
     await writeBrokenPlugin(home, 'mike-broken')

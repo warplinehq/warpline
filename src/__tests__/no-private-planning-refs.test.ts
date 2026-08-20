@@ -58,7 +58,6 @@ const PRIVATE_NAME = new RegExp(
  * REMOVE a path here when you clean that file. Never add one.
  */
 const SWEEP_BACKLOG = new Set<string>([
-    'src/cli/__tests__/plan-failures.test.ts',
     'src/cli/__tests__/plan-prohibition.test.ts',
     'src/cli/__tests__/plan-render.test.ts',
     'src/cli/__tests__/plan.test.ts',
