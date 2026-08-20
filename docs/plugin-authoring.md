@@ -19,7 +19,7 @@ plugin + `[needs-llm]` handoff ([needs-llm-contract.md](needs-llm-contract.md)).
 ### manifest.ts
 
 ```typescript
-import { PluginManifestSchema } from '<warpline>/src/schemas/plugin-manifest'  // scaffold resolves this absolutely
+import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
 
 export const manifest = PluginManifestSchema.parse({
   name: 'my-plugin',            // must equal the directory name
@@ -40,6 +40,11 @@ export const manifest = PluginManifestSchema.parse({
 manifest is a hard-stop. Never `safeParse` here — a misconfigured plugin must
 not silently run.
 
+**Nothing else belongs at the top level.** Importing this file *runs* it, and
+that import happens during `warpline plan` — before any approval gate is
+consulted. The imports and the `manifest` export are the whole file. See
+[Runtime constraints](#runtime-constraints) §3.
+
 **Declare every side effect.** The gate is only as honest as the declaration.
 If your handler calls out to any external system — even read-only HTTP —
 declare `external_api`. Undeclared side effects are the one unforgivable
@@ -48,15 +53,21 @@ plugin bug: they bypass the entire human-approval model.
 ### handler.ts
 
 ```typescript
-import type { HandlerFn } from '<warpline>/src/runtime/invoke-plugin'  // scaffold resolves this absolutely
+import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
+import type { SkillResult } from 'warpline/schemas/skill-result'
+import { manifest } from './manifest.ts'   // .ts, not .js — see Runtime constraints
 
-export const handler: HandlerFn = async (manifest, args, signal) => {
+export async function handler(
+  _manifest: PluginManifest,
+  _args: Record<string, unknown> = {},
+  signal?: AbortSignal,
+): Promise<SkillResult> {
   // 1. Validate args — return a failed SkillResult with parse_error, don't throw
   // 2. Do the work. Forward `signal` to fetch()/spawn() so timeouts can cancel I/O
   // 3. Return a SkillResult
   return {
     status: 'success',           // success | partial | failed | skipped
-    phases_completed: ['my-plugin'],
+    phases_completed: [manifest.name],
     phases_failed: [],
     errors: [],                  // makeSkillError(code, message, { impact, retryable })
     data_freshness: { source: new Date().toISOString() },
@@ -80,6 +91,80 @@ Rules the runtime holds you to:
 - **Judgment work exits via `[needs-llm]`**, not via an API call: return
   `status: 'skipped'` with a `[needs-llm] ...` summary. The runtime records it
   as `delegated` and never retries it.
+
+## Runtime constraints
+
+Your manifest and handler are TypeScript that warpline imports **at runtime**.
+Under Node that means [type stripping](https://nodejs.org/api/typescript.html):
+Node erases the types and runs what is left — it does not compile. Three
+consequences bind every plugin. Bun hides all three, so a green Bun-only test
+run is not proof that your plugin loads.
+
+### 1. Erasable syntax only
+
+Syntax that would require Node to *generate* code is refused rather than
+compiled. `enum`, a `namespace` containing runtime code, constructor parameter
+properties (`constructor(private x: number)`), and `import x = require(...)`
+aliases all throw:
+
+```
+ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX
+```
+
+Use a `const` object or a union type instead of `enum`, a plain module instead
+of `namespace`, and ordinary field assignments instead of parameter properties.
+`import type` and inline `type` modifiers erase cleanly and are fine.
+
+A **different** error — do not conflate the two while debugging — means the
+file is in the wrong place rather than the wrong shape:
+
+```
+ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING
+```
+
+Node refuses to strip types for any file under a `node_modules` directory, with
+no opt-out flag. Keep plugins in `<home>/plugins/`, never inside an installed
+package.
+
+Warpline's own `tsconfig.json` sets `erasableSyntaxOnly: true`, which is the
+compile-time half of this rule. Set it in your plugin project too and the
+compiler tells you before Node does.
+
+### 2. Relative specifiers need an explicit extension — and it is `.ts`
+
+Node resolves the literal specifier with no remapping, so a handler importing
+its sibling manifest must spell the extension, and it must be the extension of
+the file that actually exists:
+
+```typescript
+import { manifest } from './manifest.ts'   // correct
+import { manifest } from './manifest.js'   // ERR_MODULE_NOT_FOUND under Node
+```
+
+`warpline scaffold` generates the `.ts` form. The `.js` convention throughout
+warpline's own `src/` is correct *there* and wrong here: that code is compiled
+before it runs, yours is not. Bun remaps `.js` → `.ts` silently, which is
+precisely why this defect survives a green Bun suite.
+
+Bare `warpline/...` specifiers are the exception — they carry no extension and
+resolve through the package's `exports` map. `warpline scaffold` also creates
+`<home>/node_modules/warpline` as a symlink, which is what lets those
+specifiers resolve from a plugin directory that sits outside any package.
+
+### 3. Importing a manifest executes its module top level
+
+This is how the engine reads a manifest and it is not going to change: a
+dynamic `import()` runs the module. So a manifest must be **declarative** — the
+imports and the manifest export, nothing else.
+
+Concretely: code at a manifest's top level runs during `warpline plan`, before
+any approval gate is consulted. `plan` reads and reports; a manifest that
+writes a file or calls an API at import time breaks that guarantee on your
+behalf, unapproved. Every side effect belongs in the handler, where the gate
+can see it.
+
+`src/cli/__tests__/manifest-declarative.test.ts` enforces this mechanically for
+every shipped example manifest and for the text `warpline scaffold` generates.
 
 ## Testing
 
