@@ -101,6 +101,15 @@ describe('renderPlan', () => {
     expect(out).not.toContain('    external_api: ⚠')
   })
 
+  test('Test 1b: every plugin due — the not-due section is still present, explicitly empty', () => {
+    const out = renderPlan(makeModel({ due: [due()], notDue: [] }), NOW)
+
+    // "Always prints a not-due section": an absent section reads as
+    // "I did not check", which a preview must never imply.
+    expect(out).toContain('Not due: none — every plugin passed the filter chain.')
+    expect(out).toContain('Due (1):')
+  })
+
   test('Test 2: byte identity — two renders of one model are strictly equal and carry no ESC', () => {
     const model = makeModel({
       due: [due({ sideEffects: ['external_api'], approved: false })],

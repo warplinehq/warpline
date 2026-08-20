@@ -267,6 +267,8 @@ describe('main([plan]) end to end', () => {
     expect(stdout.indexOf('sends_email')).toBeLessThan(stdout.indexOf('writes_db'))
     expect(stdout).toContain('  alpha (level 0)')
     expect(stdout).toContain('    (no declared side effects)')
+    // Both plugins are due, and the not-due section is still there saying so.
+    expect(stdout).toContain('Not due: none — every plugin passed the filter chain.')
   })
 
   test('none due: exit 0, the distinct message and a not-due entry for every plugin', async () => {

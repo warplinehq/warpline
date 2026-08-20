@@ -196,17 +196,24 @@ export function renderPlan(model: PlanModel, now: number): string {
     lines.push('')
   }
 
-  if (model.notDue.length > 0) {
-    lines.push(`Not due (${model.notDue.length}):`)
+  // The not-due section is ALWAYS present once a plan was computed — an absent
+  // section reads as "I did not check", which is the one thing a preview must
+  // never imply. The three states with no plan at all returned above.
+  if (model.notDue.length === 0) {
+    lines.push('Not due: none — every plugin passed the filter chain.')
     lines.push('')
-    for (const entry of [...model.notDue].sort(byLevelThenName)) {
-      lines.push(`${INDENT}${entry.plugin} — ${entry.detail}`)
-      // Only the gate-blocked skip lists its effects: for every other reason
-      // the effects are irrelevant noise, and this section is a summary.
-      if (entry.reason === 'unapproved') lines.push(...sideEffectLines(entry))
-    }
-    lines.push('')
+    return lines.join('\n')
   }
+
+  lines.push(`Not due (${model.notDue.length}):`)
+  lines.push('')
+  for (const entry of [...model.notDue].sort(byLevelThenName)) {
+    lines.push(`${INDENT}${entry.plugin} — ${entry.detail}`)
+    // Only the gate-blocked skip lists its effects: for every other reason
+    // the effects are irrelevant noise, and this section is a summary.
+    if (entry.reason === 'unapproved') lines.push(...sideEffectLines(entry))
+  }
+  lines.push('')
 
   return lines.join('\n')
 }
