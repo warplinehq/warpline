@@ -211,7 +211,7 @@ describe('emitPluginGated', () => {
 describe('runAdvance event emission', () => {
   // Test 15's dynamic-import `_setPaths` mutates the module-global StatePaths;
   // snapshot/restore it around this describe so the temp lock path never leaks
-  // to a sibling test file (D-01).
+  // to a sibling test file.
   installStatePathIsolation()
 
   let pluginsDir: string
