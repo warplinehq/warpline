@@ -69,7 +69,7 @@ describe('isPluginFresh', () => {
     expect(result.reason).toContain('within TTL')
   })
 
-  // D-14 gate-2 reversal (2026-07-28): past TTL means STALE. Previously this
+  // Past TTL means STALE. An earlier design had this
   // returned fresh:true unless a dependency had re-run, which made ttl_hours a
   // one-way latch — a plugin with no dependencies ran exactly once, ever.
   test('Test 3: TTL expired (25h ago), no deps → fresh: false (TTL is the primary gate)', () => {
@@ -166,7 +166,7 @@ describe('isPluginFresh', () => {
   })
 
   test('Test 6c: TTL expired, dep ran but is OLDER than us → fresh: false (a stale upstream must not block us)', () => {
-    // Pins the design choice called out in the D-14 reversal. Real case:
+    // Pins the gate-ordering choice described in staleness.ts. Real case:
     // `result-watch` depends on `trend-watch`, which is schedule:'weekly'
     // and therefore filtered out of every daily profile run. Under "past TTL AND a
     // dependency is newer", result-watch could never run on a daily profile —
