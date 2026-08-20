@@ -88,3 +88,13 @@ grant file. The run path reads it and only reads it — so a plugin cannot exten
 its own permission, and neither can the engine on its behalf.
 
 Format and exact merge rules: `docs/runtime-spec.md` § 9.
+
+## Why the plugin hands off instead of calling a model
+
+- **Auditability** — deterministic plugins produce identical output for
+  identical input; the judgment work is quarantined where it can be reviewed.
+- **Economics** — the LLM half rides an operator's existing Claude Code
+  session/subscription instead of metered API calls inside a cron job.
+- **The boundary stays inspectable** — a plugin with no `llm_required`
+  capability cannot quietly grow a model dependency; the handoff is visible in
+  every run artifact.

@@ -56,15 +56,10 @@ that an orchestrating Claude session runs. The loop:
    is judgment; SENDING it is a side effect — the draft lands somewhere a
    `sends_email`-declaring plugin (or a human) picks up under approval.
 
-## Why not let the plugin call an LLM API?
+## Why the plugin does not call the model itself
 
-- **Auditability** — deterministic plugins produce identical output for
-  identical input; the judgment work is quarantined where it can be reviewed.
-- **Economics** — the LLM half rides an operator's existing Claude Code
-  session/subscription instead of metered API calls inside a cron job.
-- **The boundary stays inspectable** — a plugin with no `llm_required`
-  capability cannot quietly grow a model dependency; the handoff is visible in
-  every run artifact.
+That is a doctrine question, not a contract detail: see
+[doctrine.md](doctrine.md#why-the-plugin-hands-off-instead-of-calling-a-model).
 
 ## Naming the companion skill
 
