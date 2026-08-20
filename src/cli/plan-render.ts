@@ -1,5 +1,5 @@
 /**
- * `warpline plan`'s renderer — a pure model → string transform (D-21).
+ * `warpline plan`'s renderer — a pure model → string transform.
  *
  * Two shape rules that look like missing features and are not:
  *
@@ -18,7 +18,7 @@
  *      "improve" this file by reintroducing aligned columns.
  *
  * The function returns a string and prints nothing, and every time-derived
- * value comes from the injected `now` (D-19). Reading the wall clock here
+ * value comes from the injected `now`. Reading the wall clock here
  * would break byte identity the moment two renders straddled a minute
  * boundary — which is exactly the guarantee this command sells.
  */
@@ -120,7 +120,7 @@ function pluralDirectories(n: number): string {
 
 /**
  * One line per declared side effect, one indent level under its plugin, in
- * manifest declaration order. Glyph plus words, never colour (T-02-14).
+ * manifest declaration order. Glyph plus words, never colour.
  */
 function sideEffectLines(entry: { sideEffects: string[]; approved: boolean }): string[] {
   const marker = entry.approved ? '✓ approved' : '⚠ unapproved — would be SKIPPED this run'
