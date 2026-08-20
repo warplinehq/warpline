@@ -1,5 +1,7 @@
 /**
- * loadPluginManifests failure reporting (D-22).
+ * The engine's read-only seam: loader failure reporting (D-22), the extracted
+ * evaluatePlugin (D-18/D-19/D-20), and the assertion that the extraction did
+ * not change what a run skips.
  *
  * The loader used to swallow every manifest import error in a bare `catch {}`,
  * so a broken plugin vanished from the due-set with nothing to show for it.
@@ -14,9 +16,10 @@ import { describe, test, expect, beforeEach, afterEach, setSystemTime } from 'bu
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { loadPluginManifests, evaluatePlugin } from '../engine.js'
+import { loadPluginManifests, evaluatePlugin, runAdvance } from '../engine.js'
 import type { EvalContext } from '../engine.js'
-import { defaultEngineState } from '../../schemas/engine-state.js'
+import { computeTier } from '../tier.js'
+import { defaultEngineState, readEngineState, writeEngineState } from '../../schemas/engine-state.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 function makeManifest(name: string, overrides: Partial<PluginManifest> = {}): PluginManifest {
@@ -246,5 +249,104 @@ describe('evaluatePlugin — pure, clock-injected due-ness (D-18)', () => {
 
     expect(first).toEqual(second)
     expect(after).toEqual(before)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Extraction faithfulness
+// ---------------------------------------------------------------------------
+
+const SUCCESS_HANDLER = `
+export async function handler(_manifest, _args) {
+  return {
+    status: 'success',
+    phases_completed: [],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'fixture ok',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`
+
+async function writeRunnablePlugin(manifest: PluginManifest): Promise<void> {
+  const dir = join(pluginsDir, manifest.name)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+  await writeFile(join(dir, 'handler.ts'), SUCCESS_HANDLER)
+}
+
+describe('evaluatePlugin agrees with the run it was extracted from', () => {
+  test('the set runAdvance records as skipped equals the set evaluatePlugin calls not-due', async () => {
+    // No plugin here declares side effects: the dry-run block is deliberately
+    // outside the evaluator (D-20.1), so an approved side-effecting plugin
+    // would make the two disagree by design rather than by defect.
+    const manifests = [
+      makeManifest('fx-due', { schedule: 'on_run' }),
+      makeManifest('fx-fresh', { schedule: 'daily', ttl_hours: 24 }),
+      makeManifest('fx-manual', { autonomy_level: 'manual' }),
+      makeManifest('fx-weekly', { schedule: 'weekly' }),
+      makeManifest('fx-supervised', { autonomy_level: 'supervised' }),
+    ]
+    for (const m of manifests) await writeRunnablePlugin(m)
+
+    const stateDir = join(root, 'state')
+    const runsDir = join(root, 'runs')
+    const statePath = join(stateDir, 'engine-state.json')
+    await mkdir(runsDir, { recursive: true })
+    await mkdir(stateDir, { recursive: true })
+    await writeFile(join(stateDir, 'preferences.json'), JSON.stringify({ review_gate: false }))
+
+    const seed = defaultEngineState()
+    seed.last_interaction_at = new Date().toISOString()
+    // 1h ago against a 24h TTL — deep inside the window, so clock drift between
+    // the run and the evaluation cannot flip this one either way.
+    seed.plugin_runs['fx-fresh'] = {
+      last_run_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      status: 'success',
+    }
+    await writeEngineState(seed, statePath)
+
+    // Evaluate against the PRE-run state: runAdvance mutates plugin_runs and
+    // last_interaction_at and persists them, so a post-run read would report
+    // the just-run plugins as fresh and the two sets would diverge by design.
+    const preState = await readEngineState(statePath)
+    const ctx: EvalContext = {
+      allowedSchedules: new Set(['on_run', 'daily']),
+      profile: 'daily',
+      currentTier: computeTier(preState.last_interaction_at),
+      headless: true,
+      force: false,
+      state: preState,
+      approvalPath: join(root, 'no-such-approval'),
+    }
+    const now = Date.now()
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: statePath,
+      runsDir,
+      eventsPath: join(runsDir, 'events.jsonl'),
+      profile: 'daily',
+    })
+
+    const runSkipped = Array.from(result.plugin_states.entries())
+      .filter(([, status]) => status === 'skipped')
+      .map(([name]) => name)
+      .sort()
+
+    const evalNotDue: string[] = []
+    for (const m of manifests) {
+      const ev = await evaluatePlugin(m.name, m, ctx, now)
+      if (!ev.due) evalNotDue.push(m.name)
+    }
+    evalNotDue.sort()
+
+    expect(evalNotDue).toEqual(runSkipped)
+    // Guard against the assertion passing vacuously on two empty sets.
+    expect(runSkipped).toEqual(['fx-fresh', 'fx-manual', 'fx-supervised', 'fx-weekly'])
+    expect(result.plugin_states.get('fx-due')).toBe('completed')
   })
 })
