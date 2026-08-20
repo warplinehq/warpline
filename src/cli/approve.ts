@@ -45,6 +45,8 @@ function parseDuration(input: string): number | null {
   return ms > 0 ? ms : null
 }
 
+const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
+
 /** Levenshtein distance — only ever called on a typo, so the O(nm) is free. */
 function distance(a: string, b: string): number {
   let prev = Array.from({ length: b.length + 1 }, (_, i) => i)
@@ -155,7 +157,8 @@ export async function run(argv: string[]): Promise<number> {
     const gated = [...manifests.values()].filter((m) => m.side_effects.length > 0)
     const effects = gated.reduce((n, m) => n + m.side_effects.length, 0)
     process.stdout.write(
-      `Blanket approval: ${gated.length} plugins declaring ${effects} side effects may now run them.\n`,
+      `Blanket approval: ${plural(gated.length, 'plugin')} declaring ` +
+        `${plural(effects, 'side effect')} may now run them.\n`,
     )
   }
 
@@ -169,7 +172,7 @@ export async function run(argv: string[]): Promise<number> {
   if (result.scopes === '*') {
     process.stdout.write('Approved scope: * (every plugin)\n')
   } else {
-    process.stdout.write(`Approved ${result.scopes.length} scope(s):\n`)
+    process.stdout.write(`Approved ${plural(result.scopes.length, 'scope')}:\n`)
     for (const scope of result.scopes) process.stdout.write(`  ${scope}\n`)
   }
 
