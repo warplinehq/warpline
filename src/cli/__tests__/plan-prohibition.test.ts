@@ -1,13 +1,13 @@
 /**
  * `warpline plan` — the two prohibitions, proven rather than asserted.
  *
- *   1. **T-02-15 — `plan` writes nothing.** Not to state, not to the runs
+ *   1. **`plan` writes nothing.** Not to state, not to the runs
  *      directory, not to the approval file, not to `events.jsonl`. Event
  *      emission counts as a write, so nothing is excluded from the walk: the
  *      snapshot covers the WHOLE warpline home, and a "harmless" append to the
  *      event log fails this test exactly as loudly as a state rewrite.
  *
- *   2. **T-02-17 — `plan` invokes no handler.** A preview that silently ran
+ *   2. **`plan` invokes no handler.** A preview that silently ran
  *      handlers would defeat the approval gate outright: the gate's whole
  *      premise is that nothing with a side effect happens until an operator
  *      says so, and "I was only looking" is not a defence.
@@ -28,7 +28,7 @@
  * be merged, nor swept into the snapshot homes above:
  *
  *   - the handler sentinel must NOT appear (prohibition 2), and
- *   - the manifest sentinel MUST appear (T-02-05, accepted and documented) —
+ *   - the manifest sentinel MUST appear (accepted and documented) —
  *
  * so one fixture in one home would falsify the other. The manifest-sentinel
  * fixture also deliberately violates the declarative-manifest rule that plan
@@ -183,7 +183,7 @@ afterAll(() => {
   _setPaths(REAL_PATHS)
 })
 
-describe('T-02-15: plan writes nothing under the warpline home', () => {
+describe('plan writes nothing under the warpline home', () => {
   test('Test 1: a normal home is byte-identical, mtime-identical and file-set-identical after plan', async () => {
     await populate(home)
 
@@ -236,7 +236,7 @@ describe('T-02-15: plan writes nothing under the warpline home', () => {
   })
 })
 
-describe('T-02-17: plan invokes no plugin handler', () => {
+describe('plan invokes no plugin handler', () => {
   test('Test 4: the handler sentinel is absent after plan, and present after a real invocation', async () => {
     const sentinel = join(sentinelDir, 'handler-ran')
     // Declarative manifest, side-effect-free and never run, so this plugin is
@@ -272,7 +272,7 @@ export async function handler(_manifest, _args) {
     expect(existsSync(sentinel)).toBe(true)
   })
 
-  test('Test 5: a manifest with top-level code DOES run — importing a manifest executes it (T-02-05)', async () => {
+  test('Test 5: a manifest with top-level code DOES run — importing a manifest executes it', async () => {
     const sentinel = join(sentinelDir, 'manifest-ran')
     const dir = join(home.pluginsDir, 'sentinel-manifest')
     await mkdir(dir, { recursive: true })
