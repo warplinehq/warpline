@@ -1,5 +1,5 @@
 /**
- * `renderPlan` — pure-string assertions, no fixture home, no process spawn (D-27).
+ * `renderPlan` — pure-string assertions, no fixture home, no process spawn.
  *
  * The renderer takes a model and an injected `now` and returns a string, so
  * every one of the six output states is a plain equality/containment check.
@@ -120,7 +120,7 @@ describe('renderPlan', () => {
     const second = renderPlan(model, NOW)
 
     expect(first).toBe(second)
-    // No ANSI, ever (D-21) - a colourised render would differ from a piped one.
+    // No ANSI, ever - a colourised render would differ from a piped one.
     expect(first.includes(String.fromCharCode(0x1b))).toBe(false)
   })
 
