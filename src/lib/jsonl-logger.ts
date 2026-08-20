@@ -5,7 +5,8 @@
  * Each line is a RunJsonlEvent with ts, run_id, level, and event fields.
  * Supports pruning files older than N days (default 30).
  *
- * Implements D-10 (JSONL logging), D-11 (file naming), D-12 (event schema), D-13 (30-day prune).
+ * JSONL run logging: one file per day, one validated event per line, pruned
+ * after 30 days.
  */
 import { mkdir, appendFile, readdir, stat, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
