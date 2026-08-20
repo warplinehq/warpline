@@ -1,5 +1,5 @@
 /**
- * invokePlugin retry loop — Phase 121 Plan 01 Task 1.2.
+ * invokePlugin retry loop.
  *
  * Verifies:
  *   - success on first attempt (no retry)
@@ -23,7 +23,7 @@ import * as engineEvents from '../../board/engine-events.js'
 
 const FIXTURES_DIR = testFixturesDir(import.meta.url, '..', '..', '..', 'test-utils', 'fixture-plugins')
 
-describe('invokePlugin — retry loop (Phase 121 D-01/D-04/D-05/D-06)', () => {
+describe('invokePlugin — retry loop', () => {
   let tmp: string
   let setTimeoutSpy: ReturnType<typeof spyOn<typeof globalThis, 'setTimeout'>>
   let emitAttemptFailedSpy: ReturnType<typeof spyOn<typeof engineEvents, 'emitAttemptFailed'>>
