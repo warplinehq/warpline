@@ -6,10 +6,12 @@
  *
  *   1. Opaque planning identifiers (decision IDs, threat IDs, phase numbers).
  *      They resolve to nothing a reader of this repo can reach. Harmless in
- *      isolation, corrosive in bulk. `src/` still carries a large backlog, so
- *      those files sit in SWEEP_BACKLOG below and the list only ever shrinks —
- *      a file is removed from it the moment it is cleaned, and re-adding one
- *      is the signal that a rewrite regressed.
+ *      isolation, corrosive in bulk. The tree is now clean, so SWEEP_BACKLOG is
+ *      empty and must stay that way: it exists as a ratchet for a partial
+ *      sweep, and adding an entry to it is how a regression gets normalised.
+ *      This covers this repo's own `.planning/` identifiers too — that
+ *      directory is gitignored and never ships, so `T-02-15` is exactly as
+ *      unreachable to a reader as the predecessor's `D-14`.
  *
  *   2. Private deployment specifics — domain names, plugin names, skill names
  *      belonging to the closed-source deployment this runtime was extracted
@@ -54,8 +56,8 @@ const PRIVATE_NAME = new RegExp(
 )
 
 /**
- * Files still carrying class-1 refs, being cleaned one commit at a time.
- * REMOVE a path here when you clean that file. Never add one.
+ * Empty, and meant to stay empty. Only ever populate this to ratchet down a
+ * sweep already in progress; never to admit a new reference.
  */
 const SWEEP_BACKLOG = new Set<string>([
 ])
