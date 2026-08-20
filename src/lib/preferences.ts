@@ -8,7 +8,8 @@
  *   writePreferences() — atomic write (tmp + rename)
  *   isQuietHours()     — check if current time is within quiet hours window
  *
- * Threat model: T-85-12 (atomic write), T-85-14 (Zod validation on write)
+ * Written atomically and Zod-validated on write — a half-written or
+ * malformed preferences file must not be loadable.
  */
 import { readFile, writeFile, rename } from 'node:fs/promises'
 import { z } from 'zod'
