@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { parseFeed, newerThan } from './handler'
+import { parseFeed, newerThan } from './handler.js'
 
 const RSS = `<rss><channel>
 <item><title>First</title><link>https://x.test/1</link><pubDate>Tue, 18 Aug 2026 10:00:00 GMT</pubDate></item>

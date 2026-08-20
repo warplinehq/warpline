@@ -1,6 +1,6 @@
-import type { PluginManifest } from '../../../src/schemas/plugin-manifest'
-import type { SkillResult } from '../../../src/schemas/skill-result'
-import { makeSkillError } from '../../../src/schemas/skill-result'
+import type { PluginManifest } from '../../../src/schemas/plugin-manifest.js'
+import type { SkillResult } from '../../../src/schemas/skill-result.js'
+import { makeSkillError } from '../../../src/schemas/skill-result.js'
 
 interface Issue {
   title: string

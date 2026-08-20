@@ -1,10 +1,10 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { topoSort } from '../engine'
-import { grantApproval } from '../approval-gate'
-import { createTestHome, type TestHome } from './helpers/create-test-home'
-import type { PluginManifest } from '../../schemas/plugin-manifest'
+import { topoSort } from '../engine.js'
+import { grantApproval } from '../approval-gate.js'
+import { createTestHome, type TestHome } from './helpers/create-test-home.js'
+import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 // -----------------------------------------------------------------------
 // Helpers
@@ -129,7 +129,7 @@ describe('topoSort', () => {
 
 describe('RunLogSchema plugin_entries', () => {
   test('Test 8: RunLogSchema.parse succeeds with plugin_entries containing reversible + undo_instruction', async () => {
-    const { RunLogSchema } = await import('../../schemas/run-log')
+    const { RunLogSchema } = await import('../../schemas/run-log.js')
     const result = RunLogSchema.safeParse({
       run_id: 'test-run-id',
       started_at: new Date().toISOString(),
@@ -159,7 +159,7 @@ describe('RunLogSchema plugin_entries', () => {
   })
 
   test('Test 9: RunLogSchema.parse succeeds with empty plugin_entries (default)', async () => {
-    const { RunLogSchema } = await import('../../schemas/run-log')
+    const { RunLogSchema } = await import('../../schemas/run-log.js')
     const result = RunLogSchema.safeParse({
       run_id: 'test-run-id',
       started_at: new Date().toISOString(),
@@ -177,7 +177,7 @@ describe('RunLogSchema plugin_entries', () => {
 
 describe('SkillResultSchema reversibility fields', () => {
   test('Test 10: SkillResultSchema.parse succeeds with reversible + undo_instruction', async () => {
-    const { SkillResultSchema } = await import('../../schemas/skill-result')
+    const { SkillResultSchema } = await import('../../schemas/skill-result.js')
     const result = SkillResultSchema.safeParse({
       status: 'success',
       phases_completed: ['phase-1'],
@@ -195,7 +195,7 @@ describe('SkillResultSchema reversibility fields', () => {
   })
 
   test('Test 11: SkillResultSchema.parse succeeds without reversibility fields (optional)', async () => {
-    const { SkillResultSchema } = await import('../../schemas/skill-result')
+    const { SkillResultSchema } = await import('../../schemas/skill-result.js')
     const result = SkillResultSchema.safeParse({
       status: 'success',
       phases_completed: [],
@@ -286,7 +286,7 @@ export async function handler(manifest, args) {
   }
 
   test('Test 12: runAdvance with 2 independent autonomous plugins → both complete', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createTestPlugin('plugin-a')
     await createTestPlugin('plugin-b')
 
@@ -304,7 +304,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 13: runAdvance skips plugins where isPluginFresh returns true', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createTestPlugin('fresh-plugin')
 
     // Write a state where this plugin ran 1 minute ago with a 24h TTL
@@ -358,7 +358,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 14: runAdvance with manual plugin → skipped with "manual — requires explicit invocation"', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createTestPlugin('manual-plugin', 'manual')
 
     const result = await runAdvance({
@@ -372,7 +372,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 15: runAdvance with supervised plugin → gated (not dry-run)', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createTestPlugin('supervised-plugin', 'supervised')
     // supervised plugins have side_effects: ['writes_db'] — grant approval so the
     // approval gate passes and the supervised-gating logic is reached
@@ -392,7 +392,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 16: runAdvance with dry-run=true and supervised plugin → logs "would pause here", continues', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createTestPlugin('supervised-plugin', 'supervised')
     // supervised plugins have side_effects: ['writes_db'] — in dry-run the side-effect
     // guard fires first and blocks them before the supervised gate is reached.
@@ -412,7 +412,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 17: plugin failure → other plugins in level still complete', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createTestPlugin('plugin-ok')
     await createTestPlugin('plugin-fail', 'autonomous', 'failed')
 
@@ -428,7 +428,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 18: run log contains plugin_entries with elapsed_ms and result_summary', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     const { readFile } = await import('node:fs/promises')
     await createTestPlugin('log-plugin')
 
@@ -449,7 +449,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 19: per-plugin FSM tracks state transitions pending→running→completed/failed/gated', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createTestPlugin('fsm-plugin')
 
     const result = await runAdvance({
@@ -463,7 +463,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 20: run log pruning happens at start of each run', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     const { writeFile: wf } = await import('node:fs/promises')
     await createTestPlugin('prune-plugin')
 
@@ -561,7 +561,7 @@ export async function handler(manifest, args) {
   }
 
   test('Test 21: dryRun=true + side_effects plugin → skipped with "blocked (dry-run)"', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createSideEffectPlugin('side-effect-plugin', ['external_api'])
 
     const result = await runAdvance({
@@ -582,7 +582,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 22: dryRun=true + side_effects=[] plugin → executes normally (completed)', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createSideEffectPlugin('clean-plugin', [])
 
     const result = await runAdvance({
@@ -597,7 +597,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 23: non-dry-run + side_effects + no approval → skipped with "unapproved"', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createSideEffectPlugin('unapproved-plugin', ['writes_db'])
     const approvalPath = join(ctx.root, '.session-approval-test23')
 
@@ -618,7 +618,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 24: non-dry-run + side_effects + valid approval → plugin proceeds (completed)', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createSideEffectPlugin('approved-plugin', ['writes_db'])
     const approvalPath = join(ctx.root, '.session-approval-test24')
     await grantApproval('approved-plugin', 4 * 60 * 60 * 1000, approvalPath)
@@ -635,7 +635,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 25: dryRun=true + mixed plugins (one with side_effects, one without) → side-effect blocked, clean completes', async () => {
-    const { runAdvance } = await import('../engine')
+    const { runAdvance } = await import('../engine.js')
     await createSideEffectPlugin('has-side-effects', ['external_api'])
     await createSideEffectPlugin('no-side-effects', [])
 

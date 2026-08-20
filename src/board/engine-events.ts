@@ -23,8 +23,8 @@
  */
 import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { eventsJsonlPath } from '../lib/paths'
-import type { BoardEvent } from '../schemas/board'
+import { eventsJsonlPath } from '../lib/paths.js'
+import type { BoardEvent } from '../schemas/board.js'
 
 /**
  * Size cap for events.jsonl (2026-08-19, operator decision).

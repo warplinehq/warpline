@@ -14,7 +14,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { acquireLock, detectStaleLock, releaseLock } from '../lock-healing'
+import { acquireLock, detectStaleLock, releaseLock } from '../lock-healing.js'
 
 // ---------------------------------------------------------------------------
 // Test fixture

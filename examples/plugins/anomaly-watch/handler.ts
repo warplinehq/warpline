@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { PluginManifest } from '../../../src/schemas/plugin-manifest'
-import type { SkillResult } from '../../../src/schemas/skill-result'
-import { warplineHome } from '../../../src/lib/paths'
+import type { PluginManifest } from '../../../src/schemas/plugin-manifest.js'
+import type { SkillResult } from '../../../src/schemas/skill-result.js'
+import { warplineHome } from '../../../src/lib/paths.js'
 
 /**
  * Expected metrics file shape:

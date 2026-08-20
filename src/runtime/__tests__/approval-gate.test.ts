@@ -3,7 +3,7 @@ import { writeFile, mkdir, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { checkApproval, grantApproval, revokeApproval } from '../approval-gate'
+import { checkApproval, grantApproval, revokeApproval } from '../approval-gate.js'
 
 let tmpDir: string
 let approvalPath: string

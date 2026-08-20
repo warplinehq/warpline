@@ -11,8 +11,8 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { runAdvance } from '../engine'
-import type { PluginManifest } from '../../schemas/plugin-manifest'
+import { runAdvance } from '../engine.js'
+import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 // ---------------------------------------------------------------------------
 // Helpers

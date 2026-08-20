@@ -6,7 +6,7 @@ import {
   TIER_THRESHOLDS_MS,
   TIER_ORDER,
   type TierName,
-} from '../tier'
+} from '../tier.js'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 

@@ -25,12 +25,12 @@
  *     writeRunArtifact + trimPluginHistory wiring.
  */
 import { join } from 'node:path'
-import { pluginsDir } from '../lib/paths'
-import { SkillResultSchema, makeSkillError } from '../schemas/skill-result'
-import type { SkillResult } from '../schemas/skill-result'
-import type { PluginManifest } from '../schemas/plugin-manifest'
-import { emitAttemptFailed } from '../board/engine-events'
-import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts'
+import { pluginsDir } from '../lib/paths.js'
+import { SkillResultSchema, makeSkillError } from '../schemas/skill-result.js'
+import type { SkillResult } from '../schemas/skill-result.js'
+import type { PluginManifest } from '../schemas/plugin-manifest.js'
+import { emitAttemptFailed } from '../board/engine-events.js'
+import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
 
 /**
  * Resolve the default plugins directory via canonical paths.ts.

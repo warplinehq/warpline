@@ -9,8 +9,8 @@ import {
   ensureRunDir,
   writeRunLog,
   pruneRunLogs,
-} from '../run-log'
-import type { RunLog } from '../run-log'
+} from '../run-log.js'
+import type { RunLog } from '../run-log.js'
 
 const validRunLog: RunLog = {
   run_id: '20260403T120000-a1b2c3d4',

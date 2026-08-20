@@ -5,7 +5,7 @@ import {
   TaskState,
   ActionType,
   AcknowledgementsSchema,
-} from '../board'
+} from '../board.js'
 
 const validEvent = {
   event_id: 'evt-001',

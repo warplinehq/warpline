@@ -28,8 +28,8 @@
  *   plugin_runs timestamps are written by writeStateV2Atomically (Zod-validated);
  *   manual file edits caught by safeParse on next read.
  */
-import type { PluginManifest } from '../schemas/plugin-manifest'
-import type { EngineState } from '../schemas/engine-state'
+import type { PluginManifest } from '../schemas/plugin-manifest.js'
+import type { EngineState } from '../schemas/engine-state.js'
 
 // -------------------------------------------------------------------------
 // Types

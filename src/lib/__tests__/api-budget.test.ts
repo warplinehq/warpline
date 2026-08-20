@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach } from 'bun:test'
-import { ApiBudgetTracker, DEFAULT_BUDGETS } from '../api-budget'
-import type { BudgetSnapshot } from '../api-budget'
+import { ApiBudgetTracker, DEFAULT_BUDGETS } from '../api-budget.js'
+import type { BudgetSnapshot } from '../api-budget.js'
 
 describe('ApiBudgetTracker', () => {
   let tracker: ApiBudgetTracker

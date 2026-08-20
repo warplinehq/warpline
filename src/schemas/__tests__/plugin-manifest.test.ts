@@ -4,7 +4,7 @@ import {
   PluginManifestSchema,
   AutonomyLevel,
   SideEffectType,
-} from '../plugin-manifest'
+} from '../plugin-manifest.js'
 
 const validManifest = {
   name: 'keyword-research',

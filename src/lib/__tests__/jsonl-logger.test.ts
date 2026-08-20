@@ -15,7 +15,7 @@ import { existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { JsonlRunLogger } from '../jsonl-logger'
+import { JsonlRunLogger } from '../jsonl-logger.js'
 
 // ---------------------------------------------------------------------------
 // Helpers

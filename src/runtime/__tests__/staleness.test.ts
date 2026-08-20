@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'bun:test'
-import { isPluginFresh } from '../staleness'
-import type { PluginManifest } from '../../schemas/plugin-manifest'
-import type { EngineState } from '../../schemas/engine-state'
+import { isPluginFresh } from '../staleness.js'
+import type { PluginManifest } from '../../schemas/plugin-manifest.js'
+import type { EngineState } from '../../schemas/engine-state.js'
 
 // Build a minimal valid manifest for testing
 function makeManifest(overrides: Partial<PluginManifest> = {}): PluginManifest {

@@ -1,12 +1,12 @@
 import { z } from 'zod'
 import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { SkillResultSchema } from './skill-result'
+import { SkillResultSchema } from './skill-result.js'
 
 // runsDir() lives in scripts/shared/paths.ts. This file used to redeclare it as a
 // bare '.warpline/runs' literal — a second definition of the same directory that
 // only resolved correctly when the process started at the repo root.
-import { runsDir } from '../lib/paths'
+import { runsDir } from '../lib/paths.js'
 const RETENTION_DAYS = 30
 
 export const SkillInvocationSchema = z.object({

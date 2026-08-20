@@ -4,7 +4,7 @@ import {
   SkillResultSchema,
   DEFAULT_RETRYABLE,
   makeSkillError,
-} from '../skill-result'
+} from '../skill-result.js'
 
 describe('SkillErrorSchema — retryable field', () => {
   it('Test 1: parses without retryable and defaults to false', () => {

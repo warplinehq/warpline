@@ -8,8 +8,8 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, rm, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { grantApproval } from '../../runtime/approval-gate'
-import { installStatePathIsolation } from '../../../test-utils/state-path-isolation'
+import { grantApproval } from '../../runtime/approval-gate.js'
+import { installStatePathIsolation } from '../../../test-utils/state-path-isolation.js'
 import {
   emitBoardEvent,
   _trimEventsLog,
@@ -21,7 +21,7 @@ import {
   emitPluginSkipped,
   emitPluginGated,
   makeEvent,
-} from '../engine-events'
+} from '../engine-events.js'
 
 // -----------------------------------------------------------------------
 // Helpers
@@ -282,7 +282,7 @@ export async function handler(manifest, args) {
   }
 
   test('Test 12: runAdvance emits run_started at beginning and run_completed at end', async () => {
-    const { runAdvance } = await import('../../runtime/engine')
+    const { runAdvance } = await import('../../runtime/engine.js')
     await createPlugin('emit-test-plugin')
 
     await runAdvance({
@@ -299,7 +299,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 13: runAdvance emits plugin_started and plugin_completed for each executed plugin', async () => {
-    const { runAdvance } = await import('../../runtime/engine')
+    const { runAdvance } = await import('../../runtime/engine.js')
     await createPlugin('plugin-evt-a')
     await createPlugin('plugin-evt-b')
 
@@ -321,7 +321,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 14: gate payload stored in pending_gates includes plugin_result from handler', async () => {
-    const { runAdvance } = await import('../../runtime/engine')
+    const { runAdvance } = await import('../../runtime/engine.js')
     const { readFile: rf } = await import('node:fs/promises')
     await createPlugin('supervised-gate', 'supervised')
 
@@ -348,8 +348,8 @@ export async function handler(manifest, args) {
   })
 
   test('Test 15: task lock check reads v2 task_aging, skips plugin with active task matching source_check', async () => {
-    const { runAdvance } = await import('../../runtime/engine')
-    const { _setPaths } = await import('../state-manager')
+    const { runAdvance } = await import('../../runtime/engine.js')
+    const { _setPaths } = await import('../state-manager.js')
     await createPlugin('locked-plugin')
 
     // Write a v2 state with a task in task_aging that locks the plugin
@@ -387,7 +387,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 16: handler returning reversible=true and undo_instruction appears in run log plugin_entries', async () => {
-    const { runAdvance } = await import('../../runtime/engine')
+    const { runAdvance } = await import('../../runtime/engine.js')
     const { readFile: rf } = await import('node:fs/promises')
     await createPlugin('reversible-plugin', 'autonomous', true)
 
@@ -407,7 +407,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 17: handler returning no reversible field results in undefined reversible in log entry', async () => {
-    const { runAdvance } = await import('../../runtime/engine')
+    const { runAdvance } = await import('../../runtime/engine.js')
     const { readFile: rf } = await import('node:fs/promises')
     await createPlugin('non-reversible-plugin', 'autonomous', false)
 

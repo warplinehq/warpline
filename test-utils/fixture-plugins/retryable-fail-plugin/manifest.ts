@@ -1,4 +1,4 @@
-import { PluginManifestSchema } from '../../../src/schemas/plugin-manifest'
+import { PluginManifestSchema } from '../../../src/schemas/plugin-manifest.js'
 
 export const manifest = PluginManifestSchema.parse({
   name: 'retryable-fail-plugin',

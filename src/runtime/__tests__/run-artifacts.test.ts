@@ -7,11 +7,11 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdtemp, rm, readdir, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { warplineHome } from '../../lib/paths'
+import { warplineHome } from '../../lib/paths.js'
 import {
   writeRunArtifact, appendRunLog, writeRunLog, trimPluginHistory,
   getRunsDir, type RunArtifact,
-} from '../run-artifacts'
+} from '../run-artifacts.js'
 
 describe('run-artifacts', () => {
   let runsDir: string

@@ -11,7 +11,7 @@ import { z } from 'zod'
 import { copyFile, readFile, rename, writeFile } from 'node:fs/promises'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
-import { SkillResultSchema } from './skill-result'
+import { SkillResultSchema } from './skill-result.js'
 
 // ── Task-board records ────────────────────────────────────────────────────
 

@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 // an absolute path at scaffold time. (When warpline ships as a published
 // package with an exports map, this becomes `from 'warpline/schemas/...'`.)
 const SCHEMAS_DIR = fileURLToPath(new URL('../schemas', import.meta.url))
-import { pluginsDir } from '../lib/paths'
+import { pluginsDir } from '../lib/paths.js'
 
 export interface ScaffoldResult {
   created: boolean
@@ -71,7 +71,7 @@ export const manifest = PluginManifestSchema.parse({
   // handler.ts — stub returning SkillResult shape
   const handlerContent = `import type { PluginManifest } from '${SCHEMAS_DIR}/plugin-manifest'
 import type { SkillResult } from '${SCHEMAS_DIR}/skill-result'
-import { manifest } from './manifest'
+import { manifest } from './manifest.js'
 
 export async function handler(
   _manifest: PluginManifest,

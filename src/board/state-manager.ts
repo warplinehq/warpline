@@ -27,10 +27,10 @@ import {
   type Deferral,
   type TaskDisplay,
   type TaskState,
-} from '../schemas/engine-state'
-import { BoardEventSchema, AcknowledgementsSchema } from '../schemas/board'
-import type { BoardEvent, Acknowledgements } from '../schemas/board'
-import { stateDir, warplineHome } from '../lib/paths'
+} from '../schemas/engine-state.js'
+import { BoardEventSchema, AcknowledgementsSchema } from '../schemas/board.js'
+import type { BoardEvent, Acknowledgements } from '../schemas/board.js'
+import { stateDir, warplineHome } from '../lib/paths.js'
 
 // ── Path configuration (injectable for tests) ────────────────────
 
@@ -63,7 +63,7 @@ export function pathsForStateFile(
 
 // eventsPath is passed explicitly rather than derived: events.jsonl is
 // resolved independently in paths.ts and the two must not silently diverge.
-import { eventsJsonlPath } from '../lib/paths'
+import { eventsJsonlPath } from '../lib/paths.js'
 
 function defaultPaths(): StatePaths {
   return pathsForStateFile(join(stateDir(), 'engine-state.json'), {

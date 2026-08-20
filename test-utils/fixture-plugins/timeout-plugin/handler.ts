@@ -1,4 +1,4 @@
-import type { HandlerFn } from '../../../src/runtime/invoke-plugin'
+import type { HandlerFn } from '../../../src/runtime/invoke-plugin.js'
 
 export const handler: HandlerFn = async () => {
   await new Promise<void>(r => setTimeout(r, 10_000))
