@@ -2,9 +2,10 @@
  * Graceful degradation tier system for Warpline.
  *
  * Design decisions:
- *   D-02: Tier computed from last_interaction_at (idle duration)
- *   D-22: min_tier semantics — 'suspended' = always runs, 'normal' = most restrictive
- *   D-07: Soft-archive in suspended tier (archived_at on TaskAging)
+ *   Tier is computed from `last_interaction_at` — how long the system has sat idle.
+ *   `min_tier` reads as a floor: 'suspended' always runs, 'normal' is the most
+ *   restrictive setting. Suspended tier soft-archives (sets `archived_at` on
+ *   TaskAging) rather than deleting.
  *
  * Tiers (from healthiest to most degraded):
  *   normal    — 0–2 days idle, all plugins run
@@ -12,7 +13,7 @@
  *   extended  — 7–14 days idle, minimal plugins
  *   suspended — 14+ days idle, only health checks
  *
- * T-109-02 mitigation: invalid date strings produce NaN idle time;
+ * Invalid date strings produce NaN idle time;
  * guard returns 'normal' (same as null — no penalty for bad data).
  */
 
@@ -52,7 +53,7 @@ export const TIER_ORDER: Record<TierName, number> = {
  * Pitfall 1: null/undefined last_interaction_at returns 'normal' — fresh
  * installs should not be penalised.
  *
- * T-109-02: Invalid date strings (NaN idle time) also return 'normal'.
+ * Invalid date strings (NaN idle time) also return 'normal'.
  *
  * @param lastInteractionAt - ISO 8601 timestamp of last warpline invocation
  * @param now - Current time in ms (default: Date.now()). Exposed for testing.
@@ -65,7 +66,7 @@ export function computeTier(
 
   const idleMs = now - new Date(lastInteractionAt).getTime()
 
-  // T-109-02: guard against NaN from invalid date strings
+  // Guard against NaN from invalid date strings
   if (Number.isNaN(idleMs)) return 'normal'
 
   if (idleMs >= TIER_THRESHOLDS_MS.suspended) return 'suspended'
@@ -81,7 +82,7 @@ export function computeTier(
 /**
  * Determine whether a plugin is eligible to run in the current tier.
  *
- * CRITICAL SEMANTIC (D-22, Pitfall 2):
+ * CRITICAL SEMANTIC — read before changing the comparison:
  *   min_tier: 'suspended' = "always runs" (health checks) — least restrictive
  *   min_tier: 'normal'    = "only runs in normal tier"     — most restrictive
  *
