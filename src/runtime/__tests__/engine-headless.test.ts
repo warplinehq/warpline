@@ -2,9 +2,9 @@
  * Engine headless + profile filter tests
  *
  * Covers decisions:
- *   D-04: daily profile runs on_run + daily plugins only
- *   D-05: weekly profile runs on_run + daily + weekly plugins; skips manual
- *   D-13: onRunFailure notification hook fires exactly once on non-complete status
+ *   daily profile runs on_run + daily plugins only
+ *   weekly profile runs on_run + daily + weekly plugins; skips manual
+ *   onRunFailure fires exactly once on a non-complete status
  *   A2:   supervised plugins are skipped (not gated) in headless/profile mode
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
@@ -131,8 +131,8 @@ afterEach(async () => {
   await fixture.cleanup()
 })
 
-describe('Engine profile filter — D-04/D-05', () => {
-  test('D-04: daily profile runs on_run + daily; skips weekly + manual', async () => {
+describe('Engine profile filter', () => {
+  test('daily profile runs on_run + daily; skips weekly + manual', async () => {
     const result = await runAdvance({
       pluginsDir: fixture.pluginsDir,
       stateDir: fixture.statePath,
@@ -147,7 +147,7 @@ describe('Engine profile filter — D-04/D-05', () => {
     expect(result.plugin_states.get('fx-manual')).toBe('skipped')
   })
 
-  test('D-05: weekly profile runs on_run + daily + weekly; skips manual', async () => {
+  test('weekly profile runs on_run + daily + weekly; skips manual', async () => {
     const result = await runAdvance({
       pluginsDir: fixture.pluginsDir,
       stateDir: fixture.statePath,
@@ -198,8 +198,8 @@ describe('Engine headless — supervised plugin handling (assumption A2)', () =>
   })
 })
 
-describe('Engine headless — onRunFailure notification hook (D-13)', () => {
-  test('D-13: onRunFailure spy is called exactly once when overall run status is non-complete', async () => {
+describe('Engine headless — onRunFailure notification hook', () => {
+  test('onRunFailure spy is called exactly once when overall run status is non-complete', async () => {
     let failureCallCount = 0
     let capturedReason: string | undefined
 
@@ -222,7 +222,7 @@ describe('Engine headless — onRunFailure notification hook (D-13)', () => {
     await writeFile(join(throwingDir, 'manifest.ts'), `export const manifest = ${JSON.stringify(throwingManifest)}`)
     await writeFile(join(throwingDir, 'handler.ts'), `
       export async function handler(_manifest, _args) {
-        throw new Error('intentional failure for D-13 test')
+        throw new Error('intentional failure for the onRunFailure test')
       }
     `)
 
