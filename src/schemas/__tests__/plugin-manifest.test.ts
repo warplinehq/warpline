@@ -67,7 +67,7 @@ describe('PluginManifestSchema', () => {
     ).toThrow(z.ZodError)
   })
 
-  test('Test 7: .parse() is used (not .safeParse()) — hard-stop behavior per D-09', () => {
+  test('Test 7: .parse() is used (not .safeParse()) — invalid manifests hard-stop', () => {
     // Validate that the schema itself throws (doesn't silently return {success: false})
     const bad = { ...validManifest, name: '' }
     let threw = false
