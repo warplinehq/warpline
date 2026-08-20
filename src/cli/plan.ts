@@ -195,9 +195,26 @@ export async function run(argv: string[]): Promise<number> {
 
   const now = Date.now()
   const model = await buildPlanModel(now, profile)
-  process.stdout.write(renderPlan(model, now))
+  const rendered = renderPlan(model, now)
 
-  // Plan 02-06 adds the non-zero exits for the load-failure and cycle states;
-  // the model already carries their data, so only the codes are missing.
-  return 0
+  // A cycle produced no plan at all, so the report is a diagnostic rather than
+  // output: it goes to stderr and stdout stays empty. A caller piping stdout
+  // gets nothing, instead of a plan-shaped document that describes no plan.
+  // The rendered message is the whole report — `cycleMembers` already refused
+  // to render any throw it did not recognise, so no stack trace can reach here
+  // and none is printed: a cycle is an operator-fixable manifest state, not an
+  // internal fault, and a trace would tell them to file a bug instead.
+  if (model.cycle && model.cycle.length > 0) {
+    process.stderr.write(rendered)
+    return 1
+  }
+
+  process.stdout.write(rendered)
+
+  // Any load failure means the due-set below is a subset of the real one, and
+  // exit 0 is the only signal a script reads (T-02-18). The partial-vs-total
+  // distinction is the renderer's — both are equally untrustworthy as an
+  // answer, so both exit 1. `failures` arrives sorted from the loader (D-22)
+  // and is deliberately not re-sorted here: one producer owns that ordering.
+  return model.failures.length > 0 ? 1 : 0
 }
