@@ -44,7 +44,7 @@ export interface FreshnessResult {
 /**
  * Determine whether a plugin should be skipped due to freshness.
  *
- * Order (see the D-14 gate-2 reversal in the module docstring):
+ * Order (see the gate-ordering note in the module docstring):
  *   1. force            → run
  *   2. never run        → run
  *   3. dependency newer → run (fires inside the TTL window too)
@@ -65,7 +65,7 @@ export function isPluginFresh(
   state: EngineState,
   options: { force?: boolean } = {},
 ): FreshnessResult {
-  // -- Force override (D-16) --
+  // -- Force override ---------
   if (options.force) {
     return { fresh: false, reason: 'forced' }
   }
