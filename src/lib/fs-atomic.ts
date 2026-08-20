@@ -1,10 +1,9 @@
 /**
  * fs-atomic — centralised atomic filesystem writes for `.warpline/` state files.
  *
- * Replaces the inlined `atomicWriteJson` / `readJsonOrNull` helpers previously
- * copy-pasted in `plugins/content-kanban/handler.ts` and
- * `plugins/today-aggregator/handler.ts` (Phase 119 Plan 01 Task 1 —
- * CLAUDE.md §Engineering Principles #3 structural-over-incremental).
+ * One implementation, not a helper copy-pasted into each plugin that needs it:
+ * a half-written state file is the failure this guards against, and a variant
+ * that skips a step is indistinguishable from the real thing until it does.
  *
  * Atomic semantics:
  *   1. `mkdir(dirname(path), { recursive: true })` — ensure parent dir exists.

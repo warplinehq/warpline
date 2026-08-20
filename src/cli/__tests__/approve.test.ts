@@ -46,7 +46,7 @@ function makeManifest(name: string, sideEffects: string[]): PluginManifest {
  */
 const FIXTURES = [
   makeManifest('render-issue', ['creates_issue']),
-  makeManifest('outreach-generator', ['sends_email', 'external_api']),
+  makeManifest('digest-sender', ['sends_email', 'external_api']),
   makeManifest('quiet-plugin', []),
   makeManifest('db-writer', ['writes_db']),
 ]
@@ -106,7 +106,7 @@ describe('warpline approve', () => {
     expect(stderr).toBe('')
     expect((await readGrant()).scopes).toEqual(['render-issue'])
     expect(await checkApproval('render-issue', approvalPath)).toBe(true)
-    expect(await checkApproval('outreach-generator', approvalPath)).toBe(false)
+    expect(await checkApproval('digest-sender', approvalPath)).toBe(false)
   })
 
   test('2: one unknown name aborts the whole command and writes nothing', async () => {

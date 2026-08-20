@@ -1,11 +1,10 @@
 /**
  * Engine state — the single JSON document the engine persists between runs.
  *
- * Slimmed at extraction from the source system's fat state schema: domain
- * fields (mode telemetry, outreach bookkeeping, legacy migrations, calendar
- * mirrors) were cut. Hosts that need to hang extra data off the state or off
- * individual tasks use the explicit `extensions` records — schemas here stay
- * strict, so a typo'd core field still fails validation loudly.
+ * Deliberately narrow: only fields the engine itself reads or writes. Anything
+ * application-specific belongs to the host, which hangs it off the explicit
+ * `extensions` records rather than widening this schema. Core fields stay
+ * strict, so a typo'd one still fails validation loudly.
  */
 import { z } from 'zod'
 import { copyFile, readFile, rename, writeFile } from 'node:fs/promises'

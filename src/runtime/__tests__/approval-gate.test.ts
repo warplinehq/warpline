@@ -28,13 +28,13 @@ afterEach(async () => {
 
 describe('checkApproval', () => {
   test('returns false when no approval file exists', async () => {
-    const result = await checkApproval('enrich.render-issue', approvalPath)
+    const result = await checkApproval('enrich.issue-render', approvalPath)
     expect(result).toBe(false)
   })
 
   test('returns true when valid approval file exists with matching scope', async () => {
-    await grantApproval('enrich.render-issue', 4 * 60 * 60 * 1000, approvalPath)
-    const result = await checkApproval('enrich.render-issue', approvalPath)
+    await grantApproval('enrich.issue-render', 4 * 60 * 60 * 1000, approvalPath)
+    const result = await checkApproval('enrich.issue-render', approvalPath)
     expect(result).toBe(true)
   })
 
@@ -42,22 +42,22 @@ describe('checkApproval', () => {
     const expired = {
       granted_at: new Date(Date.now() - 5 * 60 * 60 * 1000).toISOString(),
       expires_at: new Date(Date.now() - 1 * 60 * 60 * 1000).toISOString(), // 1 hour ago
-      scopes: ['enrich.render-issue'],
+      scopes: ['enrich.issue-render'],
     }
     await writeFile(approvalPath, JSON.stringify(expired))
-    const result = await checkApproval('enrich.render-issue', approvalPath)
+    const result = await checkApproval('enrich.issue-render', approvalPath)
     expect(result).toBe(false)
   })
 
   test('returns false when scope does not match', async () => {
-    await grantApproval('ops.outreach-generator', 4 * 60 * 60 * 1000, approvalPath)
-    const result = await checkApproval('enrich.render-issue', approvalPath)
+    await grantApproval('ops.digest-sender', 4 * 60 * 60 * 1000, approvalPath)
+    const result = await checkApproval('enrich.issue-render', approvalPath)
     expect(result).toBe(false)
   })
 
   test('returns true when scopes is wildcard "*"', async () => {
     await grantApproval('*', 4 * 60 * 60 * 1000, approvalPath)
-    const result = await checkApproval('enrich.render-issue', approvalPath)
+    const result = await checkApproval('enrich.issue-render', approvalPath)
     expect(result).toBe(true)
   })
 })
@@ -65,7 +65,7 @@ describe('checkApproval', () => {
 describe('grantApproval', () => {
   test('creates file with granted_at, expires_at, scopes fields', async () => {
     const before = Date.now()
-    await grantApproval('enrich.render-issue', 4 * 60 * 60 * 1000, approvalPath)
+    await grantApproval('enrich.issue-render', 4 * 60 * 60 * 1000, approvalPath)
     const after = Date.now()
 
     expect(existsSync(approvalPath)).toBe(true)
@@ -80,11 +80,11 @@ describe('grantApproval', () => {
   })
 
   test('stores array of scopes when given array', async () => {
-    await grantApproval(['enrich.render-issue', 'ops.outreach-generator'], 4 * 60 * 60 * 1000, approvalPath)
+    await grantApproval(['enrich.issue-render', 'ops.digest-sender'], 4 * 60 * 60 * 1000, approvalPath)
     const raw = JSON.parse(await Bun.file(approvalPath).text())
     expect(Array.isArray(raw.scopes)).toBe(true)
-    expect(raw.scopes).toContain('enrich.render-issue')
-    expect(raw.scopes).toContain('ops.outreach-generator')
+    expect(raw.scopes).toContain('enrich.issue-render')
+    expect(raw.scopes).toContain('ops.digest-sender')
   })
 })
 
@@ -102,7 +102,7 @@ describe('revokeApproval', () => {
 
   test('custom TTL overrides default 4 hours', async () => {
     const shortTtl = 60 * 1000 // 1 minute
-    await grantApproval('enrich.render-issue', shortTtl, approvalPath)
+    await grantApproval('enrich.issue-render', shortTtl, approvalPath)
     const raw = JSON.parse(await Bun.file(approvalPath).text())
     const grantedAt = new Date(raw.granted_at).getTime()
     const expiresAt = new Date(raw.expires_at).getTime()
@@ -220,13 +220,13 @@ describe('mergeGrant', () => {
   })
 
   test('7: the existing three-argument grantApproval call shape is unchanged', async () => {
-    await grantApproval('enrich.render-issue', 60_000, approvalPath)
+    await grantApproval('enrich.issue-render', 60_000, approvalPath)
 
     const raw = await readGrant()
-    expect(raw.scopes).toEqual(['enrich.render-issue'])
+    expect(raw.scopes).toEqual(['enrich.issue-render'])
     expect(raw.first_granted_at).toBe(raw.granted_at)
     expect(new Date(raw.expires_at).getTime() - new Date(raw.granted_at).getTime()).toBe(60_000)
-    expect(await checkApproval('enrich.render-issue', approvalPath)).toBe(true)
+    expect(await checkApproval('enrich.issue-render', approvalPath)).toBe(true)
   })
 })
 

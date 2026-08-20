@@ -1,32 +1,27 @@
 /**
  * Two-gate staleness check for warpline plugin execution.
  *
- * Design decisions:
- *   D-14: TTL-based freshness — if plugin ran within ttl_hours, skip (TTL gate)
- *   D-16: Force flag overrides everything
+ * Two gates decide whether a plugin is due:
+ *   1. Dependency invalidation — an upstream plugin re-ran since this one did.
+ *   2. TTL expiry — the last successful run is older than `ttl_hours`.
+ * `--force` overrides both.
  *
- * SUPERSEDES Phase 83 D-14 gate 2 (reversed 2026-07-28).
+ * READ THIS BEFORE CHANGING THE GATE ORDER. An earlier design ANDed the two:
+ * "if TTL expired but no upstream dependency has re-run since the plugin's last
+ * run, also skip". That makes a newer dependency a PRECONDITION for running
+ * rather than an additional trigger — and a plugin declaring `dependencies: []`
+ * can never satisfy it, so `anyDepNewer` is permanently false and TTL becomes a
+ * one-way latch: the plugin runs once and then never again. Dependency-free
+ * plugins are the common case, and a short `ttl_hours` meant to say "poll every
+ * run" is exactly the declaration the latch silences. The failure is silent by
+ * construction — every skip is logged as a correct decision — so it survives
+ * until someone asks why a scheduled plugin stopped producing output.
  *
- * D-14 originally read: "if TTL expired but no upstream dependency has re-run
- * since the plugin's last run, ALSO SKIP". That made a newer dependency a
- * PRECONDITION for running rather than an extra trigger, and since 20 of the 25
- * plugins declare `dependencies: []`, `anyDepNewer` was permanently false for
- * them — so TTL became a one-way latch: run once, then never again. `github-poll`
- * declares `ttl_hours: 0.001` with the comment "always polls on every run", which
- * was unreachable. Measured effect: the pipeline ran nothing from 2026-04-14 to
- * 2026-07-28 except two manual `--force` runs; `intel-scan` alone logged 126
- * consecutive "TTL expired but no dependency re-ran" skips.
+ * Hence: invalidation is ADDITIVE and checked FIRST, so it can also fire inside
+ * the TTL window; and past TTL means stale, as `ttl_hours` implies on its face.
  *
- * The reversal restores what 83-DISCUSSION-LOG actually described — "TTL as
- * primary gate + dependency invalidation as secondary gate ... adds chain
- * awareness" — by making invalidation additive and checking it FIRST, so it can
- * also fire inside the TTL window. Past TTL now means stale, as ttl_hours implies.
- *
- * (Analysis of the incident that motivated the two gates lives in the source repo.)
- *
- * Security (T-83-09):
- *   plugin_runs timestamps are written by writeStateV2Atomically (Zod-validated);
- *   manual file edits caught by safeParse on next read.
+ * `plugin_runs` timestamps are written by writeStateV2Atomically and so are
+ * Zod-validated; a hand-edited state file is caught by safeParse on next read.
  */
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import type { EngineState } from '../schemas/engine-state.js'

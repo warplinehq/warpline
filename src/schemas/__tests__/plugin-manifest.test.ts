@@ -11,12 +11,12 @@ const validManifest = {
   version: '1.0.0',
   description: 'Fetches keyword data from GSC and aggregates search metrics',
   inputs: {
-    gsc_property: { type: 'string', required: true, description: 'GSC property URL' },
+    site_url: { type: 'string', required: true, description: 'Site URL to inspect' },
   },
   outputs: {
     keywords_json: { type: 'string', description: 'Path to output JSON' },
   },
-  capabilities: ['gsc_read', 'file_write'],
+  capabilities: ['network_read', 'file_write'],
   schedule: 'weekly' as const,
   autonomy_level: 'autonomous' as const,
   side_effects: ['modifies_file'] as const,

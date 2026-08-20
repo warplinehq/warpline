@@ -156,39 +156,39 @@ describe('emitRunCompleted', () => {
 
 describe('emitPluginStarted', () => {
   test('Test 7: emitPluginStarted writes event with type=plugin_result, summary containing plugin name', async () => {
-    await emitPluginStarted('intel-scan', eventsPath)
+    await emitPluginStarted('source-scan', eventsPath)
     const events = await readEvents(eventsPath)
     expect(events[0]['type']).toBe('plugin_result')
-    expect((events[0]['summary'] as string)).toContain('intel-scan')
+    expect((events[0]['summary'] as string)).toContain('source-scan')
   })
 })
 
 describe('emitPluginCompleted', () => {
   test('Test 8: emitPluginCompleted writes event with type=plugin_result', async () => {
-    await emitPluginCompleted('intel-scan', 'scan done', eventsPath)
+    await emitPluginCompleted('source-scan', 'scan done', eventsPath)
     const events = await readEvents(eventsPath)
     expect(events[0]['type']).toBe('plugin_result')
-    expect((events[0]['summary'] as string)).toContain('intel-scan')
+    expect((events[0]['summary'] as string)).toContain('source-scan')
   })
 })
 
 describe('emitPluginFailed', () => {
   test('Test 9: emitPluginFailed writes event with type=error, severity=warning', async () => {
-    await emitPluginFailed('intel-scan', 'timed out', eventsPath)
+    await emitPluginFailed('source-scan', 'timed out', eventsPath)
     const events = await readEvents(eventsPath)
     expect(events[0]['type']).toBe('error')
     expect(events[0]['severity']).toBe('warning')
-    expect((events[0]['summary'] as string)).toContain('intel-scan')
+    expect((events[0]['summary'] as string)).toContain('source-scan')
   })
 })
 
 describe('emitPluginSkipped', () => {
   test('Test 10: emitPluginSkipped writes event with type=plugin_result, severity=info', async () => {
-    await emitPluginSkipped('intel-scan', 'already fresh', eventsPath)
+    await emitPluginSkipped('source-scan', 'already fresh', eventsPath)
     const events = await readEvents(eventsPath)
     expect(events[0]['type']).toBe('plugin_result')
     expect(events[0]['severity']).toBe('info')
-    expect((events[0]['summary'] as string)).toContain('intel-scan')
+    expect((events[0]['summary'] as string)).toContain('source-scan')
     expect((events[0]['summary'] as string)).toContain('skipped')
   })
 })

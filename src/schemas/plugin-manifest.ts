@@ -4,9 +4,10 @@ import { z } from 'zod'
  * Side effect types that a plugin may produce.
  *
  * A non-empty `side_effects` array gates execution behind session approval for
- * EVERY autonomy level, `autonomous` included — see Phase 88 D-01/D-02, which
- * chose that deliberately: "autonomous plugins with side effects (e.g.
- * github-poll, experiment-checker) are the highest-risk gap". Grant approval via
+ * EVERY autonomy level, `autonomous` included. That is deliberate: a plugin
+ * marked `autonomous` that also sends mail or writes to a database is the
+ * highest-risk combination in the system, not the lowest — autonomy describes
+ * how it is scheduled, never what it is permitted to touch. Grant approval via
  * `warpline approve`.
  *
  * (This comment previously read "used to gate plugin execution in
@@ -70,7 +71,7 @@ export const PluginManifestSchema = z.object({
     }),
   ).default({}),
 
-  /** Capability tags (e.g. 'gsc_read', 'file_write') — informational */
+  /** Capability tags (e.g. 'network_read', 'file_write') — informational */
   capabilities: z.array(z.string()).default([]),
 
   /** When to run this plugin */

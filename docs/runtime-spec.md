@@ -43,8 +43,8 @@ PluginManifestSchema = z.object({
 })
 ```
 
-Defaults preserve pre-121 behaviour for all 22 existing plugins (zero drift
-required to land the phase).
+Every added field carries a default, so an existing manifest stays valid
+without edits.
 
 ## 2. Retry Policy
 
@@ -107,9 +107,10 @@ Handlers with real I/O should forward `signal` to their I/O primitives:
 
 - `fetch(url, { signal })`
 - `Bun.spawn({ signal })` / `child_process.spawn({ signal })` equivalents
-- Shared helpers that accept signals: `posthogFetch`, `hogqlQuery`,
-  `createExperiment` (all added in ).
-- Graphify bridge: signal listener calls `child.kill('SIGTERM')` on abort.
+- Any shared I/O helper of your own that accepts an `AbortSignal` — thread it
+  through rather than re-deriving a deadline.
+- Subprocess bridges: register a signal listener that calls
+  `child.kill('SIGTERM')` on abort.
 
 Handlers without real I/O (pure compute, LLM stubs) may ignore the signal.
 The runtime wraps each handler call in a `Promise.race` against a
@@ -119,7 +120,7 @@ cancel clock. This is documented as residual DoS (D-31) and accepted.
 External abort sources:
 
 1. An external `controller.abort()` from a host (e.g. a dashboard cancel button).
-2. `SIGINT` to the CLI entry (`scripts/run-plugin.ts`) - propagated as an
+2. `SIGINT` to the CLI entry (`src/cli/run-plugin.ts`) - propagated as an
    `AbortError` via the same controller.
 3. Per-attempt timeout - internal, handled inside `invokePlugin`.
 
@@ -276,7 +277,7 @@ directory containing a `.warpline/`, else `<cwd>/.warpline`.
   "granted_at": "2026-08-20T12:00:00.000Z",
   "first_granted_at": "2026-08-20T09:30:00.000Z",
   "expires_at": "2026-08-20T13:30:00.000Z",
-  "scopes": ["render-issue", "outreach-generator"]
+  "scopes": ["issue-render", "digest-sender"]
 }
 ```
 

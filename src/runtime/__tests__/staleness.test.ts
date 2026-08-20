@@ -167,9 +167,9 @@ describe('isPluginFresh', () => {
 
   test('Test 6c: TTL expired, dep ran but is OLDER than us → fresh: false (a stale upstream must not block us)', () => {
     // Pins the design choice called out in the D-14 reversal. Real case:
-    // `experiment-checker` depends on `hypothesis-gen`, which is schedule:'weekly'
+    // `result-watch` depends on `trend-watch`, which is schedule:'weekly'
     // and therefore filtered out of every daily profile run. Under "past TTL AND a
-    // dependency is newer", experiment-checker could never run on a daily profile —
+    // dependency is newer", result-watch could never run on a daily profile —
     // the old bug wearing a better justification. TTL is the primary gate.
     const manifest = makeManifest({
       name: 'test-plugin',

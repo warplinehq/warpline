@@ -85,28 +85,28 @@ describe('topoSort', () => {
     expect(() => topoSort(plugins)).toThrow(/cycle/i)
   })
 
-  test('Test 5: live 9-plugin graph → 2 levels', () => {
-    // Level 0 (no deps): intel-scan, seo-audit, collateral-discover, content-writer
-    // Level 1 (depend on level 0): collateral-import, intel-report, outreach-drafts, collateral, intel-brief
+  test('Test 5: 9-plugin graph → 2 levels', () => {
+    // Level 0 (no deps): source-scan, health-check, asset-discover, report-writer
+    // Level 1 (depend on level 0): asset-import, source-report, digest-drafts, asset-bundle, source-brief
     const plugins = makeManifestMap([
-      makeManifest('intel-scan'),
-      makeManifest('seo-audit'),
-      makeManifest('collateral-discover'),
-      makeManifest('content-writer'),
-      makeManifest('collateral-import', { dependencies: ['collateral-discover'] }),
-      makeManifest('intel-report', { dependencies: ['intel-scan'] }),
-      makeManifest('outreach-drafts', { dependencies: ['collateral-discover'] }),
-      makeManifest('collateral', { dependencies: ['collateral-import'] }),
-      makeManifest('intel-brief', { dependencies: ['intel-scan', 'intel-report'] }),
+      makeManifest('source-scan'),
+      makeManifest('health-check'),
+      makeManifest('asset-discover'),
+      makeManifest('report-writer'),
+      makeManifest('asset-import', { dependencies: ['asset-discover'] }),
+      makeManifest('source-report', { dependencies: ['source-scan'] }),
+      makeManifest('digest-drafts', { dependencies: ['asset-discover'] }),
+      makeManifest('asset-bundle', { dependencies: ['asset-import'] }),
+      makeManifest('source-brief', { dependencies: ['source-scan', 'source-report'] }),
     ])
     const levels = topoSort(plugins)
     expect(levels.length).toBeGreaterThanOrEqual(2)
     // Level 0 should be the 4 independent plugins
     const level0 = levels[0].sort()
-    expect(level0).toContain('intel-scan')
-    expect(level0).toContain('seo-audit')
-    expect(level0).toContain('collateral-discover')
-    expect(level0).toContain('content-writer')
+    expect(level0).toContain('source-scan')
+    expect(level0).toContain('health-check')
+    expect(level0).toContain('asset-discover')
+    expect(level0).toContain('report-writer')
   })
 
   test('Test 6: single plugin with no deps → [[name]]', () => {
@@ -139,7 +139,7 @@ describe('RunLogSchema plugin_entries', () => {
       summary: 'test run',
       plugin_entries: [
         {
-          plugin: 'intel-scan',
+          plugin: 'source-scan',
           status: 'completed',
           started_at: new Date().toISOString(),
           elapsed_ms: 1234,
