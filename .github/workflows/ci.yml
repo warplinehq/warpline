@@ -43,3 +43,63 @@ jobs:
           bun test ./examples --timeout 20000 || rc=1
           exit $rc
       - run: bunx tsc --noEmit
+      # The publishable artifact, produced on every run rather than only before
+      # a release. The `prepack` script rebuilds dist/ as part of packing, so
+      # what gets measured and handed on is always built from this commit
+      # (T-02-04), and the whitelist check catches a `files` regression on the
+      # push that introduces it rather than at publish time (T-02-01).
+      - name: produce the publishable artifact
+        run: npm pack
+      - name: check the artifact against the whitelist
+        run: bash scripts/assert-pack-whitelist.sh
+      # Handed to the next job as an artifact rather than rebuilt there: this
+      # repo carries bun.lock and no package-lock.json, so a Node-only
+      # container has nothing to install from (D-25). The side benefit is the
+      # better property — the next job exercises the exact bytes a publish
+      # would upload, not an equivalent rebuild.
+      - name: hand the artifact to the next job
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: npm-tarball
+          path: warpline-*.tgz
+          if-no-files-found: error
+
+  # The "runs on Node alone" claim, tested rather than asserted. No checkout
+  # step on purpose: the absence of a source tree is half of what is under
+  # test. Running this as a container invocation from inside the bun job is
+  # rejected — a lookup on the host is meaningless when the absence is the
+  # whole requirement (D-25).
+  smoke:
+    needs: test
+    runs-on: ubuntu-latest
+    container: node:22
+    steps:
+      # First, and fatal. A green result from a job that quietly ran with bun
+      # available would be a false green, which is worse than no job at all
+      # (T-02-28).
+      - name: assert the runtime under test is absent
+        run: |
+          if command -v bun; then
+            echo "bun is present — this job's entire premise is its absence" >&2
+            exit 1
+          fi
+          echo "no bun on PATH"
+      # Printed, not inferred: a floor regression should be visible in the log.
+      # The image tag sits inside the supported range's first half; the range's
+      # negative half rests on the official version-history table rather than
+      # on execution, and this job is where a matrix leg would belong if a
+      # stronger guarantee were ever wanted.
+      - name: report the node the container provides
+        run: node --version
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6.0.0
+        with:
+          name: npm-tarball
+      - name: install the packed tarball globally
+        run: npm i -g ./warpline-*.tgz
+      - name: the usage banner
+        run: warpline --help
+      # With no plugins installed, this prints its no-plugins-installed message
+      # naming the resolved directory and exits 0 — the documented behaviour,
+      # so a non-zero exit here is a real failure and not an empty-state quirk.
+      - name: the read-only preview
+        run: warpline plan
