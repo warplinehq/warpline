@@ -15,6 +15,7 @@
 import { readFile, writeFile, rename, open, unlink, appendFile } from 'node:fs/promises'
 import { appendFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
 import {
   readEngineState,
@@ -115,8 +116,7 @@ async function acquireLock(): Promise<() => Promise<void>> {
         }
       } catch {}
       if (Date.now() > deadline) throw new Error('Could not acquire state lock after 10s')
-      // @ts-ignore — Bun global, not available in root tsc
-      await Bun.sleep(50)
+      await sleep(50)
     }
   }
 }

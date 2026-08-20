@@ -13,6 +13,7 @@
  */
 import { mkdir } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { checkApproval } from './approval-gate.js'
 import {
@@ -708,7 +709,8 @@ export async function loadPluginManifests(pluginsDir: string): Promise<Map<strin
     entries.map(async (entry) => {
       const manifestPath = join(pluginsDir, entry, 'manifest.ts')
       try {
-        const mod = await import(manifestPath)
+        // D-13: import() needs a file:// URL, not a bare absolute path.
+        const mod = await import(pathToFileURL(manifestPath).href)
         if (mod.manifest) {
           plugins.set(entry, mod.manifest as PluginManifest)
         }

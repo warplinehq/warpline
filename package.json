@@ -1,16 +1,44 @@
 {
   "name": "warpline",
   "version": "0.1.0",
-  "private": true,
   "description": "Deterministic plugin runtime with LLM-judgment dispatch and side-effect approval gates",
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
+    "node": "^22.18.0 || >=23.6.0",
     "bun": ">=1.3"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "examples",
+    "docs"
+  ],
+  "bin": {
+    "warpline": "./dist/bin/warpline.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./schemas/*": {
+      "types": "./dist/schemas/*.d.ts",
+      "default": "./dist/schemas/*.js"
+    },
+    "./lib/paths": {
+      "types": "./dist/lib/paths-public.d.ts",
+      "default": "./dist/lib/paths-public.js"
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
     "test": "bun test --timeout 20000",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "zod": "^4.3.6"
@@ -23,5 +51,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/warplinehq/warpline"
+  },
+  "bugs": {
+    "url": "https://github.com/warplinehq/warpline/issues"
   }
 }
