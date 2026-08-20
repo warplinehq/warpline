@@ -33,7 +33,7 @@ let stateDir: string
 
 // Snapshot/restore the module-global StatePaths file-globally so this file's
 // per-test `_setPaths` temp injection never leaks a deleted lock path to a
-// sibling test file (D-01 — the actual Phase-2 leaker).
+// sibling test file — which is where the leak actually came from.
 installStatePathIsolation()
 
 beforeEach(async () => {
