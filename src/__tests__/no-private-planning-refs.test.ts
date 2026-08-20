@@ -58,7 +58,6 @@ const PRIVATE_NAME = new RegExp(
  * REMOVE a path here when you clean that file. Never add one.
  */
 const SWEEP_BACKLOG = new Set<string>([
-    'src/cli/warpline.ts',
     'src/lib/__tests__/fs-atomic.test.ts',
     'src/lib/__tests__/jsonl-logger.test.ts',
     'src/lib/__tests__/lock-healing.test.ts',

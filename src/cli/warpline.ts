@@ -7,10 +7,10 @@
  *
  * Two rules that look like oversights and are not:
  *
- *   1. This module NEVER terminates the process (D-14). Every subcommand
+ *   1. This module NEVER terminates the process. Every subcommand
  *      exports `run(argv): Promise<number>` and this function returns a code;
  *      only `src/bin/warpline.ts` turns a code into an exit. That is what makes
- *      `main()` callable in-process from a test (D-27) instead of needing a
+ *      `main()` callable in-process from a test instead of needing a
  *      spawned process per assertion.
  *   2. Each arm uses `await import()`, not a static import. A static import
  *      graph would load every subcommand's dependencies (zod, the engine,
@@ -64,7 +64,7 @@ export async function main(argv: string[]): Promise<number> {
 
     case 'run': {
       // run-plugin.ts is still a process-entry script that reads
-      // process.argv and exits on its own; D-17 (plan 02-05) extracts a
+      // process.argv and exits on its own; this extracts a
       // `runPlugin(argv)` from it. Until then, splice our own token out of
       // argv so the script sees the arguments it expects. It exits before
       // control returns here — the `return 1` below is unreachable in
