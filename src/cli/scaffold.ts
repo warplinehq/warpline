@@ -29,15 +29,72 @@
  * __tests__/scaffold.test.ts and the real Node import in
  * scripts/verify-tarball.sh.
  */
-import { mkdir, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
-import { pluginsDir } from '../lib/paths.js'
+import { mkdir, writeFile, symlink, unlink } from 'node:fs/promises'
+import { existsSync, lstatSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { pluginsDir, warplineHome } from '../lib/paths.js'
 
 export interface ScaffoldResult {
   created: boolean
   path: string
   message: string
+}
+
+/**
+ * Warpline's own installed package root — the nearest ancestor of THIS module
+ * holding a package.json.
+ *
+ * Derived from the running module's location, never from a configured path:
+ * from dist/cli/scaffold.js in a global install that is the installed package
+ * root; from src/cli/scaffold.ts in a checkout it is the repo root. Both are
+ * correct link targets.
+ */
+function packageRoot(): string | null {
+  let dir = import.meta.dirname
+  for (;;) {
+    if (existsSync(join(dir, 'package.json'))) return dir
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+}
+
+/**
+ * Create or refresh <warplineHome>/node_modules/warpline -> the package root.
+ *
+ * Without this link a generated plugin's `warpline/...` import resolves to
+ * nothing: ESM bare-specifier resolution walks node_modules upward from the
+ * importing file, and a global install prefix is not on that chain (D-08).
+ * NODE_PATH is no help — it is CJS-only. A symlink works under both Node and
+ * Bun and carries warpline's transitive zod, because Node realpaths it.
+ *
+ * Self-healing but never destructive: an existing SYMLINK is replaced
+ * unconditionally (that heals a link left dangling by reinstalling warpline at
+ * a different prefix), while a real file or directory is left exactly as it is.
+ *
+ * @returns a warning to surface in the scaffold result, or null on success.
+ */
+async function linkWarplineIntoHome(): Promise<string | null> {
+  const target = packageRoot()
+  if (!target) return 'could not locate the warpline package root; skipped the node_modules link'
+
+  const link = join(warplineHome(), 'node_modules', 'warpline')
+  await mkdir(dirname(link), { recursive: true })
+
+  let existing: ReturnType<typeof lstatSync> | null = null
+  try {
+    existing = lstatSync(link)
+  } catch {
+    existing = null // nothing there yet — the common path
+  }
+
+  if (existing && !existing.isSymbolicLink()) {
+    return `${link} already exists and is not a symlink — not replaced. Plugin imports of 'warpline/...' will resolve through it, not through this install.`
+  }
+  if (existing) await unlink(link)
+
+  await symlink(target, link, 'dir')
+  return null
 }
 
 export async function scaffoldPlugin(name: string): Promise<ScaffoldResult> {
@@ -109,10 +166,22 @@ export async function handler(
   await writeFile(join(pluginDir, 'manifest.ts'), manifestContent)
   await writeFile(join(pluginDir, 'handler.ts'), handlerContent)
 
+  // A failed link must not fail the scaffold: the files are already written and
+  // correct, and a missing or dangling link surfaces later through the engine's
+  // plugin load-failures reporting, which is the right place to see it.
+  let warning: string | null
+  try {
+    warning = await linkWarplineIntoHome()
+  } catch (err) {
+    warning = `could not link warpline into ${warplineHome()}: ${err instanceof Error ? err.message : String(err)}`
+  }
+
   return {
     created: true,
     path: pluginDir,
-    message: `Plugin '${name}' scaffolded at ${pluginDir}`,
+    message: warning
+      ? `Plugin '${name}' scaffolded at ${pluginDir}\n⚠ ${warning}`
+      : `Plugin '${name}' scaffolded at ${pluginDir}`,
   }
 }
 
