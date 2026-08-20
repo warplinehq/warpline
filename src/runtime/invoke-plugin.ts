@@ -1,28 +1,28 @@
 /**
  * In-process plugin invocation for warpline.
  *
- * invokePlugin is a NEW function separate from invokeByKey (per Research A4).
- * invokeByKey remains untouched — it handles subprocess invocation of registry scripts.
- * invokePlugin handles direct in-process import of plugin handlers.
+ * Handlers are imported and called in-process rather than spawned: they are
+ * deterministic TypeScript, and a subprocess would buy isolation warpline does
+ * not need while costing the AbortSignal thread it does. Every call is wrapped
+ * in try/catch, so a handler that throws becomes a failed SkillResult instead
+ * of taking the run down.
  *
- * Design decisions:
- *   D-05: Deterministic handlers imported directly (no subprocess)
- *   D-06: Wrapped in try/catch — handler exceptions become failed SkillResults
- *   Phase 121 D-01: Retry only when first error is `retryable: true`
- *   Phase 121 D-02/D-03: Defaults `max_retries=1`, `retry_delay_ms=2000` preserve pre-121 behaviour
- *   Phase 121 D-04/D-05/D-06: Exponential backoff × ±25% jitter, capped at 30s
- *   Phase 121 D-09: Each retried attempt emits an `attempt_failed` notice BoardEvent
- *   Phase 121 D-12/D-13: Per-attempt `timeout_ms` via AbortController; timeout is always fatal
- *   Phase 121 D-31/D-32: External AbortSignal threads to the handler; cancellation is always fatal
+ * The retry / timeout / cancel rules, which are easy to get subtly wrong:
+ *   - Retry only when the FIRST error was `retryable: true`.
+ *   - Delay is exponential backoff × ±25% jitter, capped at 30s. Jitter matters
+ *     because the engine runs a level in parallel — unjittered retries would
+ *     re-collide on exactly the beat that just failed.
+ *   - Each retried attempt emits an `attempt_failed` notice BoardEvent, so a
+ *     run that eventually succeeds still shows what it cost.
+ *   - `timeout_ms` is PER ATTEMPT, via AbortController, and a timeout is always
+ *     fatal — never retried. A retry would double the budget the manifest
+ *     declared, which is the one thing a timeout exists to bound.
+ *   - An external AbortSignal threads through to the handler, and cancellation
+ *     is likewise always fatal.
  *
- * Security (T-83-07):
- *   - Plugin path is constructed from pluginsDir() + validated plugin name
- *   - Handler output validated by Zod (SkillResultSchema.safeParse)
- *
- * Shared ownership with Phase 121 Plan 03:
- *   - Plan 01 lands the retry/timeout/abort core + exports HandlerFn and InvokePluginOptions.
- *   - Plan 03 replaces the no-op `persistArtifact` branch below with real
- *     writeRunArtifact + trimPluginHistory wiring.
+ * Security:
+ *   - Plugin path is constructed from pluginsDir() + a validated plugin name.
+ *   - Handler output is validated by Zod (SkillResultSchema.safeParse).
  */
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -45,7 +45,7 @@ function getDefaultPluginsDir(): string {
 // -------------------------------------------------------------------------
 
 /**
- * Per-attempt record captured during invokePlugin's retry loop (Phase 121 D-26).
+ * Per-attempt record captured during invokePlugin's retry loop.
  */
 export interface AttemptRecord {
   /** 1-indexed attempt number */
@@ -70,7 +70,7 @@ export interface PluginInvocationResult {
   duration_ms: number
   /** Number of attempts made (1 = no retry; N = 1 initial + N-1 retries) */
   attempt_count: number
-  /** Per-attempt detail (Phase 121 D-26). attempts.length === attempt_count. */
+  /** Per-attempt detail. attempts.length === attempt_count. */
   attempts: AttemptRecord[]
   /** Last error message after retries exhausted, or null on success */
   final_error: string | null
@@ -83,7 +83,7 @@ export interface PluginInvocationResult {
 }
 
 /**
- * Plugin handler signature. Phase 121 D-32: the `signal` parameter is new.
+ * Plugin handler signature.
  * Handlers SHOULD forward it to abortable IO (fetch / child_process); handlers that
  * ignore it still run to natural completion or manifest.timeout_ms.
  */
@@ -104,13 +104,13 @@ export interface InvokePluginOptions {
   pluginsDir?: string
   /** External AbortSignal — when aborted, the in-flight attempt is cancelled */
   signal?: AbortSignal
-  /** D-10: per-invocation override of manifest.max_retries (e.g. ?retries=N) */
+  /** Per-invocation override of manifest.max_retries (e.g. `--retries=N`) */
   maxRetriesOverride?: number
-  /** D-26: when true, Plan 03 wires the run artifact write into the end-of-loop hook */
+  /** When true, the end-of-loop hook writes a run artifact for this invocation */
   persistArtifact?: boolean
-  /** Run id (Plan 03 passes this for SSE + artifact filename) */
+  /** Run id — used for the artifact filename and any event stream */
   runId?: string
-  /** D-38: true for manual / dashboard-triggered runs */
+  /** True for manual / host-triggered runs, as opposed to scheduled ones */
   userInitiated?: boolean
   /** Override runs dir for artifact persistence. Without it, persistArtifact
    *  writes to the REAL `.warpline/runs/` whatever the caller's own runsDir is —
@@ -169,7 +169,7 @@ export async function invokePlugin(
   const startedAt = new Date(start).toISOString()
 
   // -- Load handler and manifest modules --
-  // D-13: import() needs file:// URLs, not bare absolute paths.
+  // import() needs file:// URLs, not bare absolute paths.
   const handlerPath = pathToFileURL(join(dir, pluginName, 'handler.ts')).href
   const manifestPath = pathToFileURL(join(dir, pluginName, 'manifest.ts')).href
 
@@ -219,10 +219,10 @@ export async function invokePlugin(
   }
 
   // -------------------------------------------------------------------
-  // Retry loop — Phase 121 D-01/D-04/D-05/D-06/D-08
+  // Retry loop
   // -------------------------------------------------------------------
   // Manifest fields may be absent when the caller bypassed zod parse (legacy
-  // test fixtures). Fall back to the schema defaults (D-02/D-03).
+  // test fixtures). Fall back to the schema defaults.
   const maxRetries = options.maxRetriesOverride ?? manifest.max_retries ?? 1
   const baseDelay = manifest.retry_delay_ms ?? 2000
   const timeoutMs = manifest.timeout_ms ?? 60_000
@@ -351,17 +351,17 @@ export async function invokePlugin(
     // -- LLM stub pass-through: skipped + [needs-llm] prefix is never retried --
     if (thisResult.status === 'skipped') break
 
-    // -- D-12 / D-31: timeout and external-cancel are fatal — no retry --
+    // -- Timeout and external cancel are fatal — never retried --
     if (timedOut || cancelled) break
 
-    // -- D-01: retry only on retryable:true and only while attempts remain --
+    // -- Retry only on retryable:true, and only while attempts remain --
     const shouldRetry =
       thisResult.status === 'failed' &&
       thisResult.errors?.[0]?.retryable === true &&
       attempt < maxRetries
     if (!shouldRetry) break
 
-    // -- D-09: emit attempt_failed notice before sleeping again --
+    // -- Emit an attempt_failed notice before sleeping again --
     await emitAttemptFailed(
       pluginName,
       attempt + 1,
@@ -373,11 +373,11 @@ export async function invokePlugin(
   const attemptCount = attempts.length
 
   // -------------------------------------------------------------------
-  // Phase 121 D-26/D-27 — Run artifact persistence (Plan 03 Task 3.2).
+  // Run artifact persistence.
   //
-  // Fire on every invocation that opts in via `persistArtifact: true`. The
-  // manual-run path (Plan 03 Task 3.3) always opts in; the pipeline path
-  // still writes its own combined artifact via engine.ts so we intentionally
+  // Fires on every invocation that opts in via `persistArtifact: true`. The
+  // manual-run path always opts in; the pipeline path still writes its own
+  // combined artifact via engine.ts, so we intentionally
   // skip there by leaving `persistArtifact` undefined.
   // -------------------------------------------------------------------
   if (options.persistArtifact) {
