@@ -10,11 +10,13 @@
  */
 import { describe, test, expect, beforeEach, afterEach, afterAll, setSystemTime } from 'bun:test'
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createTestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
-import { _getPaths, _setPaths } from '../../board/state-manager.js'
+import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
+import { runAdvance } from '../../runtime/engine.js'
 import { buildPlanModel, run } from '../plan.js'
 import { main } from '../warpline.js'
 
@@ -81,7 +83,11 @@ async function writePlugin(
   )
 }
 
-async function writeState(home: TestHome, pluginRuns: Record<string, unknown>): Promise<void> {
+async function writeState(
+  home: TestHome,
+  pluginRuns: Record<string, unknown>,
+  extra: Record<string, unknown> = {},
+): Promise<void> {
   await writeFile(
     join(home.stateDir, 'engine-state.json'),
     JSON.stringify({
@@ -95,8 +101,37 @@ async function writeState(home: TestHome, pluginRuns: Record<string, unknown>): 
       completed_tasks: [],
       pending_gates: [],
       extensions: {},
+      ...extra,
     }),
   )
+}
+
+/**
+ * A handler that returns a valid `SkillResult`.
+ *
+ * `plan` never reads this file — that is the point of the prohibition tests in
+ * `plan-prohibition.test.ts`. It exists because the equivalence proof below
+ * runs a REAL `runAdvance`, which invokes every plugin it attempts; a plugin
+ * with no `handler.ts` would still be "attempted" but the failure noise buys
+ * nothing.
+ */
+const SUCCESS_HANDLER = `
+export async function handler(_manifest, _args) {
+  return {
+    status: 'success',
+    phases_completed: [],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'fixture ok',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`
+
+async function writeHandler(home: TestHome, name: string): Promise<void> {
+  await writeFile(join(home.pluginsDir, name, 'handler.ts'), SUCCESS_HANDLER)
 }
 
 /** Every file under `dir`, recursively, as paths relative to it. */
@@ -366,5 +401,238 @@ describe('main([plan]) end to end', () => {
     expect(code).toBe(1)
     expect(stdout).toBe('')
     expect(stderr).not.toBe('')
+  })
+})
+
+/**
+ * The equivalence proof: `plan`'s due-set is exactly what a run would attempt.
+ *
+ * This is the assertion that makes `plan` worth printing. `buildPlanModel` and
+ * `runAdvance` share `evaluatePlugin`, so the two agree *by construction* — but
+ * "by construction" is a claim about today's code, and the whole reason the
+ * evaluator was extracted (D-18) is that the two used to be separate guard
+ * chains that drifted by one comparison operator. This test is what makes a
+ * future re-divergence a red test instead of a support ticket.
+ *
+ * ── Two fixture constraints that are load-bearing ──
+ *
+ * 1. **No plugin may have both a non-empty `side_effects` array and an approval
+ *    covering it** (D-20.1). `runAdvance`'s dry-run block sits OUTSIDE
+ *    `evaluatePlugin` and skips every side-effecting plugin before the approval
+ *    check, so under `dryRun: true` an approved side-effecting plugin is "not
+ *    attempted" while `plan` correctly renders it as due-and-approved. That is
+ *    not a defect in either — `plan` models a real run, not a dry run. Adding an
+ *    approved side-effecting plugin here would encode that contradiction into
+ *    the assertion and force someone to "fix" it by weakening the proof. The
+ *    fixture below has exactly one side-effecting plugin and deliberately grants
+ *    it nothing, so it is not-due in `plan` and dry-run-blocked in the run —
+ *    absent from both sets, for two different reasons that agree.
+ *
+ * 2. **`buildPlanModel` runs BEFORE `runAdvance`, always.** A real run writes
+ *    `plugin_runs`, `last_run_at` and (in a degraded tier) auto-deferrals. Plan
+ *    it second and it reads state the run just mutated, and the freshness and
+ *    task-lock fixtures evaporate.
+ *
+ * The whole test routes through `state-manager`'s `_setPaths` seam because
+ * `checkTaskLock` reads `activePaths().v2StatePath` — a module global with no
+ * override parameter (D-20.2). Without the seam the task-lock guard consults
+ * live state and the fixture proves nothing. The global is restored in this
+ * file's existing `afterAll`.
+ *
+ * Clock: `now` is injected into `buildPlanModel`, but `isPluginFresh` and
+ * `checkApproval` read the wall clock directly (02-04's documented seam limit),
+ * so every fixture boundary below is hours away from its threshold rather than
+ * milliseconds. This proof is about set membership, not about edge timing —
+ * the exactly-at-TTL edges are pinned in the runtime's own tests.
+ */
+describe('plan ≡ what a run would attempt', () => {
+  const DAY_MS = 86_400_000
+
+  /** Point the state-manager global at this fixture home and return the paths. */
+  function routeStateManager(): { statePath: string; eventsPath: string } {
+    const statePath = join(home.stateDir, 'engine-state.json')
+    const eventsPath = join(home.stateDir, 'events.jsonl')
+    _setPaths(pathsForStateFile(statePath, { eventsPath }))
+    return { statePath, eventsPath }
+  }
+
+  /**
+   * The set of plugins the run actually reached, taken from `onPluginStart` —
+   * the callback `runAdvance` fires immediately after setting a plugin's FSM to
+   * 'running'. That is the definition of "attempted": it fires after every skip
+   * arm AND after the dry-run block, so it cannot be confused with a plugin that
+   * was merely considered.
+   */
+  async function attemptedByRun(
+    statePath: string,
+    eventsPath: string,
+    profile?: 'daily' | 'weekly' | 'manual',
+  ): Promise<Set<string>> {
+    const attempted = new Set<string>()
+    await runAdvance({
+      dryRun: true,
+      profile,
+      pluginsDir: home.pluginsDir,
+      stateDir: statePath,
+      runsDir: home.runsDir,
+      eventsPath,
+      preferencesPath: join(home.stateDir, 'preferences.json'),
+      approvalPath: join(home.root, '.session-approval'),
+      onPluginStart: (plugin) => {
+        attempted.add(plugin)
+      },
+    })
+    return attempted
+  }
+
+  /**
+   * One fixture spanning every guard in the chain, so the set equality below is
+   * meaningful rather than vacuous: an eight-plugin home where seven are
+   * excluded for seven DIFFERENT reasons and one is due.
+   *
+   * `min_tier: 'suspended'` on everything except `tier-blocked` reads backwards
+   * and is correct — 'suspended' means "runs at any degradation level" and
+   * 'normal' means "only in normal tier" (tier.ts D-22). The state's
+   * `last_interaction_at` is 3 days stale, so the tier is 'degraded' and only
+   * `tier-blocked` is caught by it.
+   */
+  async function writeSpanningFixture(): Promise<void> {
+    const tolerant = { min_tier: 'suspended' }
+    await writePlugin(home, 'due-one', tolerant)
+    await writePlugin(home, 'weekly-one', { ...tolerant, schedule: 'weekly' })
+    await writePlugin(home, 'tier-blocked', { min_tier: 'normal' })
+    await writePlugin(home, 'supervised-one', { ...tolerant, autonomy_level: 'supervised' })
+    await writePlugin(home, 'manual-one', { ...tolerant, autonomy_level: 'manual' })
+    await writePlugin(home, 'fresh-one', tolerant)
+    await writePlugin(home, 'locked-one', tolerant)
+    // The ONLY side-effecting plugin, and no .session-approval file exists —
+    // see fixture constraint 1 above. Do not grant this.
+    await writePlugin(home, 'gated-one', { ...tolerant, side_effects: ['sends_email'] })
+
+    for (const name of [
+      'due-one',
+      'weekly-one',
+      'tier-blocked',
+      'supervised-one',
+      'manual-one',
+      'fresh-one',
+      'locked-one',
+      'gated-one',
+    ]) {
+      await writeHandler(home, name)
+    }
+
+    await writeState(
+      home,
+      // 1 hour into a 24h TTL — hours from the boundary in both directions.
+      { 'fresh-one': { last_run_at: new Date(Date.now() - 3_600_000).toISOString(), status: 'success' } },
+      {
+        last_interaction_at: new Date(Date.now() - 3 * DAY_MS).toISOString(),
+        task_aging: [
+          {
+            task_id: 'locked-task',
+            first_flagged: new Date(Date.now() - DAY_MS).toISOString(),
+            description: 'an open task locking its source plugin',
+            // 'critical', deliberately: a degraded tier auto-defers
+            // info-severity tasks, which would release the lock mid-fixture.
+            severity: 'critical',
+            source_check: 'locked-one',
+          },
+        ],
+      },
+    )
+  }
+
+  test('Test 1: the due-set and the attempted-set are the same set', async () => {
+    await writeSpanningFixture()
+    const { statePath, eventsPath } = routeStateManager()
+
+    // Plan first — a real run mutates the state this fixture depends on.
+    const model = await buildPlanModel(Date.now(), 'daily')
+    const attempted = await attemptedByRun(statePath, eventsPath, 'daily')
+
+    const planned = new Set(model.due.map((e) => e.plugin))
+
+    // Asserted as sorted arrays so a mismatch names the offending plugin
+    // instead of printing "Set(1) !== Set(2)".
+    expect([...planned].sort()).toEqual([...attempted].sort())
+    expect([...planned].sort()).toEqual(['due-one'])
+  })
+
+  test('Test 2: the fixture spans every guard, so the equality is not vacuous', async () => {
+    await writeSpanningFixture()
+    const { statePath, eventsPath } = routeStateManager()
+
+    const model = await buildPlanModel(Date.now(), 'daily')
+    const attempted = await attemptedByRun(statePath, eventsPath, 'daily')
+
+    const reason = (n: string) => model.notDue.find((e) => e.plugin === n)?.reason
+
+    // Seven plugins, seven distinct not-due reason codes — every arm of
+    // evaluatePlugin's chain, in chain order.
+    expect(reason('weekly-one')).toBe('profile_schedule')
+    expect(reason('tier-blocked')).toBe('min_tier')
+    expect(reason('supervised-one')).toBe('headless_supervised')
+    expect(reason('manual-one')).toBe('manual')
+    expect(reason('fresh-one')).toBe('fresh')
+    expect(reason('locked-one')).toBe('task_locked')
+    expect(reason('gated-one')).toBe('unapproved')
+    expect(new Set(model.notDue.map((e) => e.reason)).size).toBe(7)
+
+    // …and exactly one plugin survived all seven, in both surfaces.
+    expect(model.due).toHaveLength(1)
+    expect([...attempted]).toEqual(['due-one'])
+
+    // The side-effecting plugin is absent from both sets for two reasons that
+    // agree: the gate blocks it in `plan`, the dry-run block skips it in the
+    // run. This is fixture constraint 1 holding, asserted.
+    expect(attempted.has('gated-one')).toBe(false)
+  })
+
+  test('Test 3: with no engine-state.json at all, every plugin is never-run, due, and attempted', async () => {
+    // createTestHome writes no state file — this is the fresh-install shape an
+    // operator hits on their first `warpline plan`, and the case where every
+    // read defaults. It is also the shape that used to write a `.corrupt`
+    // backup on the way through (02-05 Deviation 3).
+    for (const name of ['alpha', 'bravo', 'charlie']) {
+      await writePlugin(home, name)
+      await writeHandler(home, name)
+    }
+    const { statePath, eventsPath } = routeStateManager()
+    expect(existsSync(statePath)).toBe(false)
+
+    const model = await buildPlanModel(Date.now())
+    const attempted = await attemptedByRun(statePath, eventsPath)
+
+    expect(model.due.map((e) => e.plugin).sort()).toEqual(['alpha', 'bravo', 'charlie'])
+    expect(model.notDue).toEqual([])
+    expect([...attempted].sort()).toEqual([...model.due.map((e) => e.plugin)].sort())
+  })
+
+  test('Test 4: a task-locked plugin is not-due in both, through the _setPaths seam', async () => {
+    await writePlugin(home, 'locked-one')
+    await writePlugin(home, 'free-one')
+    await writeHandler(home, 'locked-one')
+    await writeHandler(home, 'free-one')
+    await writeState(home, {}, {
+      task_aging: [
+        {
+          task_id: 'locked-task',
+          first_flagged: new Date(Date.now() - DAY_MS).toISOString(),
+          description: 'an open task locking its source plugin',
+          severity: 'critical',
+          source_check: 'locked-one',
+        },
+      ],
+    })
+    const { statePath, eventsPath } = routeStateManager()
+
+    const model = await buildPlanModel(Date.now())
+    const attempted = await attemptedByRun(statePath, eventsPath)
+
+    expect(model.notDue.find((e) => e.plugin === 'locked-one')?.reason).toBe('task_locked')
+    expect(model.due.map((e) => e.plugin)).toEqual(['free-one'])
+    expect([...attempted]).toEqual(['free-one'])
+    expect(attempted.has('locked-one')).toBe(false)
   })
 })
