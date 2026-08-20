@@ -37,8 +37,10 @@ Three rules, all enforced or honoured by the runtime:
 A **companion skill** — a Claude Code skill (see `skills/needs-llm-template/`)
 that an orchestrating Claude session runs. The loop:
 
-1. Deterministic pass: the engine runs due plugins (`warpline advance` or the
-   engine API). Some results come back `delegated`.
+1. Deterministic pass: the engine runs due plugins. The v0.1 entry point is
+   programmatic — a host calls `runAdvance()`, exported from the package root.
+   To see what a run *would* do without running it, `warpline plan` prints the
+   same due-set read-only. Some results come back `delegated`.
 2. The orchestrating session (a human-invoked Claude Code session, a scheduled
    agent, or a skill that wraps the engine) scans run artifacts / board events
    for `[needs-llm]` summaries.

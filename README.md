@@ -41,10 +41,11 @@ Read the full doctrine: [docs/doctrine.md](docs/doctrine.md).
 ## Quickstart
 
 Requires [bun](https://bun.sh) ≥ 1.3.
+v0.1 supports POSIX systems (macOS, Linux); Windows is untested and unclaimed.
 
 ```bash
 bun install
-bun test                      # 262 tests
+bun run test                  # build, then the full suite
 
 # Create a home for your installation (or set WARPLINE_HOME)
 mkdir -p .warpline/plugins
