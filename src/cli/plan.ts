@@ -2,12 +2,12 @@
  * `warpline plan` — preview the next engine advance without executing it.
  *
  * The whole command is `loadPluginManifests` → `topoSort` → `evaluatePlugin`
- * per plugin → `renderPlan`. Not one guard comparison is restated here (D-18):
+ * per plugin → `renderPlan`. Not one guard comparison is restated here:
  * a preview that disagrees with the run by a single `<` versus `<=` is worse
  * than no preview at all, so this module builds the evaluation context and
  * calls the same functions `runAdvance` calls.
  *
- * Three read-path landmines this file exists to respect (D-20):
+ * Three read-path landmines this file exists to respect:
  *
  *   1. The dry-run side-effect block is NOT part of the evaluator. `plan`
  *      models a real run, so an approved side-effecting plugin renders as due,
@@ -22,7 +22,7 @@
  *      `withoutStateBackups`.
  *
  * `now` is captured exactly once, at entry, and threaded through both the
- * evaluator and the renderer (D-19), so two consecutive previews are
+ * evaluator and the renderer, so two consecutive previews are
  * byte-identical even across a minute boundary.
  */
 import * as nodeUtil from 'node:util'
@@ -212,9 +212,9 @@ export async function run(argv: string[]): Promise<number> {
   process.stdout.write(rendered)
 
   // Any load failure means the due-set below is a subset of the real one, and
-  // exit 0 is the only signal a script reads (T-02-18). The partial-vs-total
+  // exit 0 is the only signal a script reads. The partial-vs-total
   // distinction is the renderer's — both are equally untrustworthy as an
-  // answer, so both exit 1. `failures` arrives sorted from the loader (D-22)
+  // answer, so both exit 1. `failures` arrives sorted from the loader
   // and is deliberately not re-sorted here: one producer owns that ordering.
   return model.failures.length > 0 ? 1 : 0
 }
