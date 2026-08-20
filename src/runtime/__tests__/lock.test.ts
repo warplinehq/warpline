@@ -9,8 +9,8 @@ import {
   releaseLock,
   generateRunId,
   updateLockMode,
-} from '../lock'
-import type { WarplineLock } from '../lock'
+} from '../lock.js'
+import type { WarplineLock } from '../lock.js'
 
 const NOW = new Date('2026-04-03T12:00:00Z')
 

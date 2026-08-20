@@ -20,7 +20,7 @@
  * is the one failure mode a gate must not have.
  */
 import { readFile, writeFile, unlink } from 'node:fs/promises'
-import { sessionApprovalPath } from '../lib/paths'
+import { sessionApprovalPath } from '../lib/paths.js'
 
 /** Default TTL: 4 hours in milliseconds */
 const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000

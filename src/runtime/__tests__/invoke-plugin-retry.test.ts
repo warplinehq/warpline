@@ -17,9 +17,9 @@ import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { testFixturesDir } from '../../../test-utils/fixtures'
-import { invokePlugin } from '../invoke-plugin'
-import * as engineEvents from '../../board/engine-events'
+import { testFixturesDir } from '../../../test-utils/fixtures.js'
+import { invokePlugin } from '../invoke-plugin.js'
+import * as engineEvents from '../../board/engine-events.js'
 
 const FIXTURES_DIR = testFixturesDir(import.meta.url, '..', '..', '..', 'test-utils', 'fixture-plugins')
 

@@ -25,12 +25,13 @@
  *     writeRunArtifact + trimPluginHistory wiring.
  */
 import { join } from 'node:path'
-import { pluginsDir } from '../lib/paths'
-import { SkillResultSchema, makeSkillError } from '../schemas/skill-result'
-import type { SkillResult } from '../schemas/skill-result'
-import type { PluginManifest } from '../schemas/plugin-manifest'
-import { emitAttemptFailed } from '../board/engine-events'
-import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts'
+import { pathToFileURL } from 'node:url'
+import { pluginsDir } from '../lib/paths.js'
+import { SkillResultSchema, makeSkillError } from '../schemas/skill-result.js'
+import type { SkillResult } from '../schemas/skill-result.js'
+import type { PluginManifest } from '../schemas/plugin-manifest.js'
+import { emitAttemptFailed } from '../board/engine-events.js'
+import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
 
 /**
  * Resolve the default plugins directory via canonical paths.ts.
@@ -83,7 +84,7 @@ export interface PluginInvocationResult {
 
 /**
  * Plugin handler signature. Phase 121 D-32: the `signal` parameter is new.
- * Handlers SHOULD forward it to abortable IO (fetch / Bun.spawn); handlers that
+ * Handlers SHOULD forward it to abortable IO (fetch / child_process); handlers that
  * ignore it still run to natural completion or manifest.timeout_ms.
  */
 export type HandlerFn = (
@@ -168,8 +169,9 @@ export async function invokePlugin(
   const startedAt = new Date(start).toISOString()
 
   // -- Load handler and manifest modules --
-  const handlerPath = join(dir, pluginName, 'handler.ts')
-  const manifestPath = join(dir, pluginName, 'manifest.ts')
+  // D-13: import() needs file:// URLs, not bare absolute paths.
+  const handlerPath = pathToFileURL(join(dir, pluginName, 'handler.ts')).href
+  const manifestPath = pathToFileURL(join(dir, pluginName, 'manifest.ts')).href
 
   let handlerFn: HandlerFn
   let manifest: PluginManifest

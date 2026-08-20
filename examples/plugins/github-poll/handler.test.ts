@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { summariseByLabel } from './handler'
+import { summariseByLabel } from './handler.js'
 
 describe('github-poll summariseByLabel', () => {
   test('counts by label, multi-label issues count once per label', () => {

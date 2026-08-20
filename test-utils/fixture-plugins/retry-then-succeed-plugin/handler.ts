@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync } from 'node:fs'
-import type { HandlerFn } from '../../../src/runtime/invoke-plugin'
+import type { HandlerFn } from '../../../src/runtime/invoke-plugin.js'
 
 /**
  * Reads/writes a counter file passed via `args.counterPath`. Each test gets its

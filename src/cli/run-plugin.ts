@@ -18,7 +18,7 @@
  *   1   — usage error or plugin execution threw
  *   130 — SIGINT received (conventional bash exit code)
  */
-import { invokePlugin } from '../runtime/invoke-plugin'
+import { invokePlugin } from '../runtime/invoke-plugin.js'
 
 const argv = process.argv.slice(2)
 const retriesFlagIdx = argv.findIndex((a) => a.startsWith('--retries='))

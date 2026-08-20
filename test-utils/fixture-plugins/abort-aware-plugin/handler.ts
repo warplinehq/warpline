@@ -1,4 +1,4 @@
-import type { HandlerFn } from '../../../src/runtime/invoke-plugin'
+import type { HandlerFn } from '../../../src/runtime/invoke-plugin.js'
 
 /**
  * Loops on `signal.aborted` and resolves with a non-retryable cancelled

@@ -27,7 +27,7 @@
  *   })
  */
 import { beforeAll, afterAll } from 'bun:test'
-import { _getPaths, _setPaths } from '../src/board/state-manager'
+import { _getPaths, _setPaths } from '../src/board/state-manager.js'
 
 /**
  * Describe-level: snapshot StatePaths before the block, restore it after.

@@ -25,8 +25,8 @@ import {
   writeAcks,
   toTaskDisplay,
   _setPaths, // test-only path injection
-} from '../state-manager'
-import { installStatePathIsolation } from '../../../test-utils/state-path-isolation'
+} from '../state-manager.js'
+import { installStatePathIsolation } from '../../../test-utils/state-path-isolation.js'
 
 let tmpDir: string
 let stateDir: string

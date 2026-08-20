@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'bun:test'
-import { SkillResultSchema, SkillErrorSchema } from '../skill-result'
+import { SkillResultSchema, SkillErrorSchema } from '../skill-result.js'
 
 describe('SkillResultSchema', () => {
   const validResult = {

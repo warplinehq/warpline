@@ -13,28 +13,29 @@
  */
 import { mkdir } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
-import { checkApproval } from './approval-gate'
+import { checkApproval } from './approval-gate.js'
 import {
   sessionApprovalPath,
   preferencesPath as defaultPreferencesPath,
   pluginsDir as pluginsDirDefault,
   stateDir as stateDirDefault,
   runsDir as runsDirDefault,
-} from '../lib/paths'
-import type { PluginManifest } from '../schemas/plugin-manifest'
-import { invokePlugin } from './invoke-plugin'
-import { computeTier, isEligibleForTier } from './tier'
-import type { TierName } from './tier'
-import { isPluginFresh } from './staleness'
+} from '../lib/paths.js'
+import type { PluginManifest } from '../schemas/plugin-manifest.js'
+import { invokePlugin } from './invoke-plugin.js'
+import { computeTier, isEligibleForTier } from './tier.js'
+import type { TierName } from './tier.js'
+import { isPluginFresh } from './staleness.js'
 import {
   readEngineState,
   writeEngineState,
-} from '../schemas/engine-state'
-import type { EngineState } from '../schemas/engine-state'
-import { writeRunLog, pruneRunLogs } from '../schemas/run-log'
-import type { RunLog } from '../schemas/run-log'
-import type { SkillResult } from '../schemas/skill-result'
+} from '../schemas/engine-state.js'
+import type { EngineState } from '../schemas/engine-state.js'
+import { writeRunLog, pruneRunLogs } from '../schemas/run-log.js'
+import type { RunLog } from '../schemas/run-log.js'
+import type { SkillResult } from '../schemas/skill-result.js'
 import {
   emitBoardEvent,
   makeEvent,
@@ -45,9 +46,9 @@ import {
   emitPluginFailed,
   emitPluginSkipped,
   emitPluginGated,
-} from '../board/engine-events'
-import { readPreferences, isQuietHours } from '../lib/preferences'
-import { checkTaskLock as smCheckTaskLock } from '../board/state-manager'
+} from '../board/engine-events.js'
+import { readPreferences, isQuietHours } from '../lib/preferences.js'
+import { checkTaskLock as smCheckTaskLock } from '../board/state-manager.js'
 
 // -----------------------------------------------------------------------
 // Types
@@ -708,7 +709,8 @@ export async function loadPluginManifests(pluginsDir: string): Promise<Map<strin
     entries.map(async (entry) => {
       const manifestPath = join(pluginsDir, entry, 'manifest.ts')
       try {
-        const mod = await import(manifestPath)
+        // D-13: import() needs a file:// URL, not a bare absolute path.
+        const mod = await import(pathToFileURL(manifestPath).href)
         if (mod.manifest) {
           plugins.set(entry, mod.manifest as PluginManifest)
         }

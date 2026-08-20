@@ -12,7 +12,7 @@
  */
 import { readdir, writeFile, unlink, readFile, appendFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
-import { runsDir } from '../lib/paths'
+import { runsDir } from '../lib/paths.js'
 
 export interface RunArtifact {
   run_id: string

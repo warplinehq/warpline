@@ -2,8 +2,8 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { invokePlugin, deriveRunStatus } from '../invoke-plugin'
-import type { PluginManifest } from '../../schemas/plugin-manifest'
+import { invokePlugin, deriveRunStatus } from '../invoke-plugin.js'
+import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 // Fixture plugin directories live in a tmp dir to avoid polluting .warpline/plugins/
 

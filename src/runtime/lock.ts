@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { writeFile, unlink, readFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 
-import { lockPath } from '../lib/paths'
+import { lockPath } from '../lib/paths.js'
 export const WarplineLockSchema = z.object({
   acquired_at: z.string(),
   run_id: z.string(),

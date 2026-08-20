@@ -16,12 +16,12 @@
  */
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { stateDir } from '../lib/paths'
-import { readTasks, readEvents, readAcks, writeAcks, completeTask, deferTask } from '../board/state-manager'
-import type { BoardEvent, Acknowledgements } from '../schemas/board'
-import type { TaskDisplay } from '../schemas/engine-state'
-import { ApiBudgetTracker } from '../lib/api-budget'
-import type { BudgetSnapshot } from '../lib/api-budget'
+import { stateDir } from '../lib/paths.js'
+import { readTasks, readEvents, readAcks, writeAcks, completeTask, deferTask } from '../board/state-manager.js'
+import type { BoardEvent, Acknowledgements } from '../schemas/board.js'
+import type { TaskDisplay } from '../schemas/engine-state.js'
+import { ApiBudgetTracker } from '../lib/api-budget.js'
+import type { BudgetSnapshot } from '../lib/api-budget.js'
 
 const VISIBLE_TYPES = new Set([
   'task_created', 'task_updated', 'task_completed', 'task_deferred',

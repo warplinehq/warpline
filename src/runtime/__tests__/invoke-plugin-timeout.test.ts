@@ -11,8 +11,8 @@
 import { describe, it, expect } from 'bun:test'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { testFixturesDir } from '../../../test-utils/fixtures'
-import { invokePlugin } from '../invoke-plugin'
+import { testFixturesDir } from '../../../test-utils/fixtures.js'
+import { invokePlugin } from '../invoke-plugin.js'
 
 const FIXTURES_DIR = testFixturesDir(import.meta.url, '..', '..', '..', 'test-utils', 'fixture-plugins')
 // Retry notices default to the REAL .warpline/state/events.jsonl — redirect them

@@ -9,7 +9,7 @@ import { mkdir, rm, readFile, readdir, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import { atomicWriteJson, atomicWriteText, readJsonOrNull } from '../fs-atomic'
+import { atomicWriteJson, atomicWriteText, readJsonOrNull } from '../fs-atomic.js'
 
 let tmpDir: string
 

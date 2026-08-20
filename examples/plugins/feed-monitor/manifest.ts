@@ -1,4 +1,4 @@
-import { PluginManifestSchema } from '../../../src/schemas/plugin-manifest'
+import { PluginManifestSchema } from '../../../src/schemas/plugin-manifest.js'
 
 /**
  * feed-monitor — example plugin.

@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { findAnomalies } from './handler'
+import { findAnomalies } from './handler.js'
 
 describe('anomaly-watch findAnomalies', () => {
   test('flags above-direction breaches only when latest exceeds threshold', () => {

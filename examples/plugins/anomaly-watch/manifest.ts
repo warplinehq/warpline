@@ -1,4 +1,4 @@
-import { PluginManifestSchema } from '../../../src/schemas/plugin-manifest'
+import { PluginManifestSchema } from '../../../src/schemas/plugin-manifest.js'
 
 /**
  * anomaly-watch — example plugin.
