@@ -26,11 +26,16 @@ const FIXTURES = testFixturesDir(
 
 /**
  * Retryable failures emit one `attempt_failed` notice each, so the event log
- * doubles as a progress marker. Waiting for the seventh puts the child inside
- * the ~1280 ms backoff before attempt 8 — far longer than the 50 ms the SIGINT
- * handler waits before exiting, so the 130 is not racing the invocation's own
- * completion. Signalling earlier than the first notice would hit the default
- * signal disposition, before the handler is installed.
+ * doubles as a progress marker: it tells us the child has fully evaluated and
+ * installed its SIGINT handler. That is the only thing this wait is for —
+ * signalling before the handler exists would hit the default signal
+ * disposition, which reports a signal and a null code instead of 130.
+ *
+ * It is deliberately NOT a timing margin. The tail derives 130 from
+ * `controller.signal.aborted`, not from winning a race against the
+ * invocation's own completion, so the exit code is the same whether the
+ * signal lands mid-backoff or mid-attempt. An abort-aware handler returning
+ * inside the handler's 50 ms grace period used to yield 0; see the SUMMARY.
  */
 const NOTICES_BEFORE_SIGNAL = 7
 

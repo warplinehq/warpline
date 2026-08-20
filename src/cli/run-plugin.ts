@@ -213,5 +213,11 @@ if (import.meta.main || process.env.NODE_ENV !== 'test') {
   // Terminate here rather than returning an exit code: the dispatcher's `run`
   // arm cannot forward one (it is closed for modification), so falling through
   // would make every `warpline run` exit 1.
-  process.exit(outcome.code)
+  //
+  // A cancelled invocation exits 130 regardless of which finishes first. The
+  // timer above cannot be relied on: an abort-aware handler returns the moment
+  // it sees the signal, so the invocation can resolve, render and flush inside
+  // the 50 ms — and `outcome.code` for a completed invocation is 0. Reading the
+  // signal makes the interrupt contract independent of that race.
+  process.exit(controller.signal.aborted ? 130 : outcome.code)
 }
