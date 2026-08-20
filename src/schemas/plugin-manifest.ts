@@ -10,11 +10,11 @@ import { z } from 'zod'
  * how it is scheduled, never what it is permitted to touch. Grant approval via
  * `warpline approve`.
  *
- * (This comment previously read "used to gate plugin execution in
- * supervised/manual autonomy modes", which predates D-02 and contradicts it. It
- * is a convincing enough misdirection that it sent a debugging pass toward
- * "re-honour autonomy_level in the gate" — which would have reverted the whole
- * point of Phase 88. Per D-07, D-08.)
+ * (An earlier version of this comment read "used to gate plugin execution in
+ * supervised/manual autonomy modes". That is wrong, and wrong in a plausible
+ * enough way to have sent one debugging pass toward "re-honour autonomy_level
+ * in the gate" — which would have undone the rule above. Left recorded here so
+ * the next reader does not rediscover it the same way.)
  */
 export const SideEffectType = z.enum([
   'sends_email',
@@ -27,7 +27,6 @@ export type SideEffectType = z.infer<typeof SideEffectType>
 
 /**
  * Autonomy levels for plugin execution.
- * Per D-08:
  *   autonomous  — runs without human approval
  *   supervised  — runs but requires approval before side effects are applied
  *   manual      — never auto-runs; requires explicit user invocation
@@ -40,7 +39,7 @@ export type AutonomyLevel = z.infer<typeof AutonomyLevel>
  * must export a value validated against this schema.
  *
  * Use .parse() (not .safeParse()) at plugin import time — invalid manifests
- * are a hard-stop per D-09. A misconfigured plugin must not silently run.
+ * are a hard stop. A misconfigured plugin must not silently run.
  */
 export const PluginManifestSchema = z.object({
   /** Plugin key — must be unique across all plugins */
@@ -98,22 +97,21 @@ export const PluginManifestSchema = z.object({
 
   /**
    * Maximum number of retries on `retryable: true` failures.
-   * Bounded per Phase 121 D-07. Default 1 preserves the pre-121 "one retry" behavior.
+   * Bounded so a retry storm cannot run unattended.
    * Total attempts = 1 initial + max_retries retries.
    */
   max_retries: z.number().int().min(0).max(10).default(1),
 
   /**
    * Base delay in milliseconds between retry attempts.
-   * Actual delay uses exponential backoff + ±25% jitter, capped at 30s (Phase 121 D-04/D-05/D-06).
-   * Default 2000 matches the pre-121 hardcoded backoff.
+   * Actual delay uses exponential backoff + ±25% jitter, capped at 30s.
    */
   retry_delay_ms: z.number().int().min(0).max(60_000).default(2000),
 
   /**
-   * Optional action registry (Phase 121 D-30).
+   * Optional action registry.
    * Keys are action names; values describe each action and optionally flag the default.
-   * Only surfaces in dashboard UI when non-empty — zero existing plugins declare it today.
+   * Only surfaces in a host UI when non-empty; the bundled examples do not declare it.
    */
   actions: z.record(z.string(), z.object({
     description: z.string(),
@@ -127,7 +125,6 @@ export const PluginManifestSchema = z.object({
    * Minimum degradation tier in which this plugin is eligible to run.
    * 'normal'    = only runs when system is healthy (default -- most restrictive).
    * 'suspended' = always runs regardless of tier (health checks, manual plugins).
-   * Phase 109, D-22.
    */
   min_tier: z.enum(['normal', 'degraded', 'extended', 'suspended']).default('normal'),
 })
