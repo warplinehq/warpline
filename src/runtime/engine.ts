@@ -80,8 +80,15 @@ export interface LoadFailure {
  */
 export type RunProfile = 'daily' | 'weekly' | 'manual'
 
-/** Profile tier → set of schedules that run under that profile. */
-const PROFILE_ALLOWED_SCHEDULES: Record<RunProfile, ReadonlySet<string>> = {
+/**
+ * Profile tier → set of schedules that run under that profile.
+ *
+ * Exported so `warpline plan` can build the same `EvalContext.allowedSchedules`
+ * a run builds instead of restating the tier map — a second copy is exactly the
+ * one-comparison disagreement between preview and run that D-18 exists to
+ * prevent.
+ */
+export const PROFILE_ALLOWED_SCHEDULES: Record<RunProfile, ReadonlySet<string>> = {
   daily: new Set(['on_run', 'daily']),
   weekly: new Set(['on_run', 'daily', 'weekly']),
   manual: new Set(['manual']),

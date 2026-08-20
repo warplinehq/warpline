@@ -124,21 +124,23 @@ export function defaultEngineState(): EngineState {
 // ── Persistence ───────────────────────────────────────────────────────────
 
 /**
- * Read engine state, falling back to defaults on missing or corrupt files.
- * Corrupt files are backed up to `{path}.corrupt` before defaults are
- * returned — prevents crash loops without silently destroying evidence.
+ * The one read implementation. `backup` decides whether a corrupt or
+ * unreadable file is copied aside before defaults are returned; both public
+ * entry points route through here so the two cannot drift by a comparison.
  */
-export async function readEngineState(statePath: string): Promise<EngineState> {
+async function readStateFile(statePath: string, backup: boolean): Promise<EngineState> {
   try {
     const raw = JSON.parse(await readFile(statePath, 'utf-8'))
     const result = EngineStateSchema.safeParse(raw)
     if (result.success) return result.data
-    await copyFile(statePath, `${statePath}.corrupt`)
-    console.warn(`engine state failed validation, backed up to ${statePath}.corrupt. Using defaults.`)
+    if (backup) {
+      await copyFile(statePath, `${statePath}.corrupt`)
+      console.warn(`engine state failed validation, backed up to ${statePath}.corrupt. Using defaults.`)
+    }
     return defaultEngineState()
   } catch (err: unknown) {
     const isNotFound = err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT'
-    if (!isNotFound) {
+    if (backup && !isNotFound) {
       try {
         await copyFile(statePath, `${statePath}.corrupt`)
         console.warn(`engine state unreadable, backed up to ${statePath}.corrupt. Using defaults.`)
@@ -147,6 +149,55 @@ export async function readEngineState(statePath: string): Promise<EngineState> {
       }
     }
     return defaultEngineState()
+  }
+}
+
+let backupsSuppressed = false
+
+/**
+ * Read engine state, falling back to defaults on missing or corrupt files.
+ * Corrupt files are backed up to `{path}.corrupt` before defaults are
+ * returned — prevents crash loops without silently destroying evidence.
+ */
+export async function readEngineState(statePath: string): Promise<EngineState> {
+  return readStateFile(statePath, !backupsSuppressed)
+}
+
+/**
+ * Read engine state with the corrupt-file backup suppressed (D-20.3).
+ *
+ * The backup is a WRITE on a read path, which `warpline plan` cannot afford:
+ * `plan` is a preview, and an operator whose state file is corrupt must not
+ * discover that a read-only command wrote a `.corrupt` copy into their home.
+ * This is a product decision, not a test convenience — guaranteeing a valid
+ * fixture state file would make the prohibition test pass and leave the
+ * shipped claim false.
+ */
+export async function readEngineStateReadOnly(statePath: string): Promise<EngineState> {
+  return readStateFile(statePath, false)
+}
+
+/**
+ * Suppress corrupt-state backups for the duration of `fn`.
+ *
+ * `readEngineStateReadOnly` covers the reads a caller makes directly. This
+ * covers the ones it cannot see: `state-manager.checkTaskLock` reads state
+ * through `readEngineState` off a module global and takes no options, so a
+ * read-only command reaching the task-lock guard would still write a backup.
+ * One guard in the shared read is a smaller and safer change than a variant
+ * threaded through every intermediate caller.
+ *
+ * ponytail: process-global, restored in a `finally`. Fine for a one-shot CLI
+ * command; if two concurrent callers ever need different answers, make it an
+ * AsyncLocalStorage context.
+ */
+export async function withoutStateBackups<T>(fn: () => Promise<T>): Promise<T> {
+  const previous = backupsSuppressed
+  backupsSuppressed = true
+  try {
+    return await fn()
+  } finally {
+    backupsSuppressed = previous
   }
 }
 

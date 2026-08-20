@@ -65,18 +65,4 @@ describe('warpline dispatcher', () => {
       expect(stderr).toContain(cmd)
     }
   })
-
-  // Shrinks as the stubs are filled in. Plan 02-07 implemented `approve` and
-  // `revoke`, so only `plan` is left; plan 02-05 fills that and this test goes
-  // away entirely. The point it makes — a stub is reachable through the
-  // dispatcher behind its final signature — is covered per-subcommand once a
-  // real body exists.
-  test('stub subcommands exit 1 on stderr behind the final signature', async () => {
-    for (const cmd of ['plan']) {
-      const { code, stdout, stderr } = await capture([cmd])
-      expect(code).toBe(1)
-      expect(stdout).toBe('')
-      expect(stderr).toContain('not implemented in this build')
-    }
-  })
 })
