@@ -20,18 +20,26 @@ jobs:
         with:
           bun-version: 1.3.11
       - run: bun install --frozen-lockfile
+      # dist/ must exist before the tests and the typecheck: examples/plugins/*
+      # import `warpline/schemas/*` and `warpline/lib/paths`, which resolve by
+      # package self-reference through the exports map into dist/.
+      - run: bun run build
       # Sharded per top-level src dir with --timeout 20000, inherited from the
       # source repo's hard-won pattern: mock.module is process-global (sharding
       # isolates cross-dir leaks) and bun's 5s default timeout flakes ~3% under
       # CPU contention (bunfig [test] timeout is silently ignored; the CLI flag
       # is the only suite-wide control). Overkill at this size; correct at the
       # size this repo is headed for.
-      - name: bun test (sharded)
+      # examples/ is a shard of its own: its tests live outside src/, so the
+      # find-derived loop never reached them and 9 tests ran nowhere.
+      - name: test (sharded)
         run: |
           rc=0
           for shard in $(cd src && find . -name '*.test.ts' | sed -E 's|^\./||; s|/.*||' | sort -u); do
             echo "== shard: $shard"
             bun test "./src/$shard" --timeout 20000 || rc=1
           done
+          echo "== shard: examples"
+          bun test ./examples --timeout 20000 || rc=1
           exit $rc
       - run: bunx tsc --noEmit
