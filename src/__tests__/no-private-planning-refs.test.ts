@@ -22,6 +22,7 @@
  * forgetting a second command. See .planning/notes/docs-automation-and-diataxis.md.
  */
 import { describe, expect, test } from 'bun:test'
+import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -30,8 +31,17 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 /** This file necessarily contains the patterns it searches for. */
 const SELF = 'src/__tests__/no-private-planning-refs.test.ts'
 
-const SCAN_GLOBS = ['docs/**/*.md', 'src/**/*.ts', 'examples/**/*.ts', 'skills/**/*.md']
-const SCAN_FILES = ['README.md', 'CONTRIBUTING.md', 'SECURITY.md']
+/**
+ * Scan EVERY tracked text file, from `git ls-files` rather than a glob list.
+ *
+ * This was a hand-maintained list of globs, and it silently under-covered:
+ * .github/, scripts/ and test-utils/ were never scanned, so the test reported
+ * green over 26 references it had simply not looked at. A check whose coverage
+ * is a list someone has to remember to extend reads as "clean" when it means
+ * "did not look" — the two are indistinguishable from the outside, which is the
+ * one property a guard must not have. Asking git removes the choice.
+ */
+const BINARY = /\.(png|jpe?g|gif|ico|webp|woff2?|ttf|pdf|zip|lock)$/i
 
 /** Class 1 — opaque identifiers from the private planning system. */
 const PLANNING_REF = /\b(?:D|T|INTG|OBS|EVD)-\d+(?:-\d+)*\b|\bPhase \d+\b/
@@ -63,12 +73,10 @@ const SWEEP_BACKLOG = new Set<string>([
 ])
 
 function scan(): Map<string, string[]> {
-  const files = new Set(SCAN_FILES)
-  for (const pattern of SCAN_GLOBS) {
-    for (const f of new Bun.Glob(pattern).scanSync({ cwd: REPO_ROOT })) {
-      files.add(f.split('\\').join('/'))
-    }
-  }
+  const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, encoding: 'utf8' })
+    .split('\0')
+    .filter(Boolean)
+  const files = new Set(tracked.filter((f) => !BINARY.test(f)))
   files.delete(SELF)
 
   const hits = new Map<string, string[]>()

@@ -46,15 +46,15 @@ jobs:
       # The publishable artifact, produced on every run rather than only before
       # a release. The `prepack` script rebuilds dist/ as part of packing, so
       # what gets measured and handed on is always built from this commit
-      # (T-02-04), and the whitelist check catches a `files` regression on the
-      # push that introduces it rather than at publish time (T-02-01).
+      # and the whitelist check catches a `files` regression on the push that
+      # introduces it rather than at publish time.
       - name: produce the publishable artifact
         run: npm pack
       - name: check the artifact against the whitelist
         run: bash scripts/assert-pack-whitelist.sh
       # Handed to the next job as an artifact rather than rebuilt there: this
       # repo carries bun.lock and no package-lock.json, so a Node-only
-      # container has nothing to install from (D-25). The side benefit is the
+      # container has nothing to install from. The side benefit is the
       # better property — the next job exercises the exact bytes a publish
       # would upload, not an equivalent rebuild.
       - name: hand the artifact to the next job
@@ -68,7 +68,7 @@ jobs:
   # step on purpose: the absence of a source tree is half of what is under
   # test. Running this as a container invocation from inside the bun job is
   # rejected — a lookup on the host is meaningless when the absence is the
-  # whole requirement (D-25).
+  # whole requirement.
   smoke:
     needs: test
     runs-on: ubuntu-latest
@@ -76,7 +76,6 @@ jobs:
     steps:
       # First, and fatal. A green result from a job that quietly ran with bun
       # available would be a false green, which is worse than no job at all
-      # (T-02-28).
       - name: assert the runtime under test is absent
         run: |
           if command -v bun; then

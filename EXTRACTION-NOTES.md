@@ -52,9 +52,10 @@ runs on every `bun test` and fails on either class —
 
   - private deployment names (its API feeds, plugin and skill names), blocked
     outright, no exceptions;
-  - unresolvable planning identifiers (`D-14`, `T-02-15`, `Phase 121`), which
-    covers this repo's own `.planning/` ids too, since that directory is
-    gitignored and never ships.
+  - unresolvable planning identifiers — decision, threat, phase and plan ids
+    of the form the guard's own regex spells out. This covers ids from this
+    repo's `.planning/` as well, since that directory is gitignored and never
+    ships, so its ids are exactly as unreachable to a reader.
 
 The sweep that cleared them is `4a6aca3..7351b2e` (2026-08-20): 271 hits across
 51 files. `SWEEP_BACKLOG` in that test is empty and must stay empty — it is a

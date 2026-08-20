@@ -20,8 +20,8 @@
 # Checks 5 and 6 are the whole reason this script exists rather than a test:
 # the scaffold defects do not reproduce from a checkout, where warpline's own
 # source is always reachable. Check 4 lives here in bash rather than in a
-# *.test.ts because plan 02-08 budgets the repository to exactly one spawning
-# test file and a Node-version test must spawn (D-27).
+# *.test.ts because the repository budgets itself to exactly one spawning
+# test file, and a Node-version test must spawn.
 #
 # Plans 02-10 and 02-12 reuse this script rather than re-deriving the checks;
 # 02-12's publish gate reads its exit status as evidence, so every assertion
@@ -59,7 +59,7 @@ npm rm -g warpline >/dev/null 2>&1 || true
 # ── 1. Pack, and assert the whitelist held ───────────────────────────────
 
 echo "== npm pack"
-# `prepack` rebuilds dist/, so a stale build cannot be packed (T-02-04).
+# `prepack` rebuilds dist/, so a stale build cannot be packed.
 TARBALL="$(npm pack --silent | tail -1)"
 [ -f "$TARBALL" ] || fail "npm pack produced no tarball"
 
@@ -88,12 +88,12 @@ grep -q 'Unknown command' "$CONSUMER/bogus.err" \
 # ── 3. The exports map, from a consumer that only sees the install ───────
 #
 # Every published specifier must resolve to ONE target, from the packed bytes,
-# under both runtimes — the invariant that replaced D-11's `bun` export
+# under both runtimes — the invariant that replaced the earlier `bun` export
 # condition (which Bun resolves to a path the tarball does not contain, and
 # then errors instead of falling through to `default`).
 #
 # The consumer is a scratch directory rather than the install itself because
-# Node refuses type stripping under a `node_modules` directory (D-05), so the
+# Node refuses type stripping under a `node_modules` directory, so the
 # shipped example `.ts` files cannot be imported from inside the install at all.
 
 echo "== exports map"
@@ -112,7 +112,7 @@ if (!PluginManifestSchema) { console.error('PluginManifestSchema missing'); proc
 const { SkillResultSchema } = await import('warpline/schemas/skill-result')
 if (!SkillResultSchema) { console.error('SkillResultSchema missing'); process.exit(1) }
 
-// D-31: exactly one path accessor is public contract at 0.1.0. A wider export
+// Exactly one path accessor is public contract at 0.1.0. A wider export
 // list here means something internal acquired a semver obligation by accident.
 const paths = await import('warpline/lib/paths')
 const exported = Object.keys(paths).filter((k) => k !== 'default').sort().join(',')
@@ -147,7 +147,7 @@ fi
   }
 " ) || fail "the exports map is not an allowlist"
 
-# ── 4. The Node floor gate (D-15) ────────────────────────────────────────
+# ── 4. The Node floor gate ───────────────────────────────────────────────
 
 echo "== node floor gate"
 SHIM="$PREFIX/lib/node_modules/warpline/dist/bin/warpline.js"
@@ -192,7 +192,7 @@ ABSOLUTE="$(grep -hoE "from '[^']+'" "$GEN/manifest.ts" "$GEN/handler.ts" | grep
 
 # `.ts`, never `.js`: Node's type stripping resolves the literal specifier with
 # no extension remapping, so `./manifest.js` at a `.ts` file is
-# ERR_MODULE_NOT_FOUND (D-10). Bun remaps it, hiding the bug from the suite.
+# ERR_MODULE_NOT_FOUND. Bun remaps it, hiding the bug from the suite.
 grep -q "from '\./manifest\.ts'" "$GEN/handler.ts" \
   || fail "handler.ts does not import its sibling manifest with the .ts extension"
 
@@ -210,7 +210,7 @@ esac
 # ── 6. Node imports both generated files for real ────────────────────────
 #
 # Both, not just the manifest: invoke-plugin.ts imports the pair, so a
-# manifest-only check would miss a broken sibling specifier (D-10). Without the
+# manifest-only check would miss a broken sibling specifier. Without the
 # section-5 symlink these fail with ERR_MODULE_NOT_FOUND.
 
 echo "== node imports the generated plugin"

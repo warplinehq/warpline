@@ -3,7 +3,7 @@ import { PluginManifestSchema } from '../../../src/schemas/plugin-manifest.js'
 export const manifest = PluginManifestSchema.parse({
   name: 'success-plugin',
   version: '1.0.0',
-  description: 'Fixture: always succeeds on the first attempt (Phase 121 Plan 01 tests).',
+  description: 'Fixture: always succeeds on the first attempt.',
   autonomy_level: 'autonomous',
   ttl_hours: 1,
   timeout_ms: 5_000,

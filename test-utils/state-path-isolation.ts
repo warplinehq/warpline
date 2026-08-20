@@ -7,7 +7,7 @@
  * calls `_setPaths(tmpDir)` and does not restore the global leaves it pointed at
  * a deleted temp dir; any sibling test in the same `bun test` process that then
  * acquires the state lock ENOENTs on `open(paths.lockPath, 'wx')` — the
- * order-dependent failure Phase 2 caught.
+ * order-dependent failure this was written to catch.
  *
  * `installStatePathIsolation()` is a describe-level hook-installer: call it once
  * at the top of a describe (or top-level in a file with no enclosing describe).
@@ -16,7 +16,7 @@
  * automatic, so the global is never leaked to sibling files.
  *
  * StatePaths seam ONLY — do NOT generalize to the intel paths/skill-result
- * snapshot seams (per D-01, only StatePaths is load-bearing for the lock-ENOENT
+ * snapshot seams (only StatePaths is load-bearing for the lock-ENOENT
  * class; the others never `open('wx')` off the global).
  *
  * Usage:

@@ -3,7 +3,7 @@
 # Assert the tarball npm would publish contains ONLY whitelisted paths.
 #
 # `npm pack --dry-run` decides the exact bytes that leave this repository
-# forever (T-02-01). This script machine-checks that listing against the
+# forever. This script machine-checks that listing against the
 # whitelist in BOTH directions, so a `files` regression is caught on the push
 # that introduces it rather than on publish day:
 #
@@ -27,7 +27,7 @@
 #
 # Runnable standalone from a developer machine as well as from CI: the
 # ROADMAP's publish pre-flight names this review as a condition of the gate
-# that plan 02-12 reads, and a script beats a human reading a file listing.
+# that the publish step reads, and a script beats a human reading a file listing.
 # Every assertion is a hard failure, never a warning. `--dry-run` writes no
 # tarball, so this leaves the working tree clean.
 
@@ -46,7 +46,7 @@ fail() {
 
 # `--json` on stdout, `prepack` chatter on stderr. Parsed with node rather than
 # scraped out of the human `npm notice` block, whose format is not contract.
-# `prepack` rebuilds dist/, so a stale build cannot be measured (T-02-04).
+# `prepack` rebuilds dist/, so a stale build cannot be measured.
 PACKED="$(
   npm pack --dry-run --json 2>/dev/null \
     | node -e 'for (const f of JSON.parse(require("fs").readFileSync(0, "utf8"))[0].files) console.log(f.path)'
