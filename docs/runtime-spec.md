@@ -258,3 +258,86 @@ Fixture plugins live under `<home>/test-utils/fixture-plugins/`:
 (The source system's HTTP-layer test patterns — Hono `app.request()` instead
 of a real server, per-test registry resets — travel with the dashboard if it
 is ever extracted.)
+
+## 9. Session Approval File
+
+A plugin whose manifest declares a non-empty `side_effects` array may not run
+until an operator has approved it for this session. The approval is a single
+JSON file; there is no daemon, no keyring and no server.
+
+**Path:** `<warplineHome>/.session-approval`, where `<warplineHome>` resolves
+per `src/lib/paths.ts` — `WARPLINE_HOME` if set, else the nearest ancestor
+directory containing a `.warpline/`, else `<cwd>/.warpline`.
+
+### Shape
+
+```json
+{
+  "granted_at": "2026-08-20T12:00:00.000Z",
+  "first_granted_at": "2026-08-20T09:30:00.000Z",
+  "expires_at": "2026-08-20T13:30:00.000Z",
+  "scopes": ["render-issue", "outreach-generator"]
+}
+```
+
+| Field              | Type               | Meaning |
+|--------------------|--------------------|---------|
+| `granted_at`       | ISO 8601 string    | When the most recent grant was written. |
+| `first_granted_at` | ISO 8601 string    | When the FIRST grant in this window was written — the anchor for the 24-hour ceiling below. Optional on read, always written. |
+| `expires_at`       | ISO 8601 string    | When the grant stops being honoured. |
+| `scopes`           | `"*"` or `string[]` | `"*"` approves every plugin. An array approves exactly the plugin **directory** names it lists — the same key the engine passes to the gate, not `manifest.name`. Always written sorted, so both the file and its diff are stable. |
+
+The file is written with `JSON.stringify(payload, null, 2)`. It is a plain
+TypeScript `interface`, not a Zod schema, and carries no `schema_version`: the
+only compatibility rule it needs is the one below.
+
+**Compatibility.** `first_granted_at` was added in 0.1.0. Every read is
+`first_granted_at ?? granted_at`, so a file written without the field still
+loads and its single grant time serves as its own anchor. An older build
+reading a newer file ignores the field. Removing the field later would silently
+reset every ceiling anchor to the latest grant, which is the failure the field
+exists to prevent — treat it as permanent.
+
+### Read semantics
+
+Reads are **fail-closed and never throw.** A missing, expired, corrupt,
+truncated or unreadable file is treated as *unapproved*; an exception here
+would surface as an error a caller could catch and mistake for a recoverable
+condition, which is the one failure mode a gate must not have.
+
+A grant whose `expires_at` **equals** the current instant is still valid — the
+comparison is `now > expires_at`, not `>=`.
+
+An unapproved side-effecting plugin is recorded `skipped` and the run
+continues. The gate withholds execution from one plugin; it does not abort the
+run.
+
+### Merge semantics (`warpline approve`)
+
+Grants are **additive by default.** An operator typing `approve b` after
+`approve a` means "and b", not "instead of a" — losing an earlier grant to a
+later one is the failure this behaviour exists to prevent.
+
+| Rule | Behaviour |
+|------|-----------|
+| Scopes | Unioned with the live grant and written sorted. A `"*"` on either side absorbs the other. |
+| `expires_at` | **Preserved** from the live grant. An explicit `--ttl` may extend it, never shorten it. |
+| Ceiling | `expires_at` is capped at `first_granted_at + 24h`. A capped grant reports the cap on stdout. |
+| `--long` | Permits an expiry past the ceiling, and prints that it did. |
+| `--replace` | Overwrites the scope list and resets `expires_at`; `first_granted_at` is preserved. |
+| Expired grant | Not merged onto. The window has closed; the next grant restarts it, with a new `first_granted_at`. |
+| Default TTL | 4 hours. |
+| `--all` | The only path to `"*"`. No positional name is ever treated as a wildcard. It prints the number of side-effecting plugins and the total number of declared side effects it covers before granting. |
+
+An unknown plugin name aborts the whole command, writes nothing, and exits 1 —
+partial application is not a state the file is ever left in.
+
+`warpline revoke` deletes the file and exits 0, including when no grant exists.
+After a revoke, every side-effecting plugin reads as unapproved.
+
+**Nothing reachable from a run writes this file.** `checkApproval` — the only
+function the engine calls — opens it read-only, and the write path
+(`grantApproval` / `mergeGrant` / `revokeApproval`) has no caller inside
+`runAdvance`. That is a property of the call graph, verifiable by inspection,
+and a test pins it: a full advance over side-effecting plugins leaves the file
+byte- and mtime-identical.

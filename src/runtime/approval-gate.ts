@@ -10,7 +10,9 @@
  *      (<warplineHome>/.session-approval) carrying an expiry and a `scopes`
  *      value of either '*' or a list of plugin names
  *   3. grantApproval() writes that file — 4-hour TTL by default, overridable
- *      per call; revokeApproval() deletes it
+ *      per call; mergeGrant() is the additive variant behind
+ *      `warpline approve`; revokeApproval() deletes it. The file format is
+ *      specified in docs/runtime-spec.md § 9
  *   4. With no live approval the engine records the plugin `skipped` and the
  *      run continues; the gate withholds execution, it does not abort the run
  *
@@ -25,9 +27,29 @@ import { sessionApprovalPath } from '../lib/paths.js'
 /** Default TTL: 4 hours in milliseconds */
 const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000
 
+/**
+ * Absolute ceiling on a grant's lifetime, measured from `first_granted_at`.
+ *
+ * Anchored at FIRST issue, not at the latest grant. Anchored at the latter,
+ * repeated `approve --ttl 4h` calls would walk the window forward indefinitely
+ * and a "4-hour" grant would in practice never expire. Every system that
+ * permits renewal pairs it with a second absolute clock fixed at first issue
+ * (Kerberos `renew_till`, Vault `max_ttl`); this is that clock.
+ */
+export const MAX_GRANT_WINDOW_MS = 24 * 60 * 60 * 1000
+
 interface ApprovalFile {
   /** ISO 8601 timestamp when approval was granted */
   granted_at: string
+  /**
+   * ISO 8601 timestamp of the FIRST grant in this window — the anchor for
+   * `MAX_GRANT_WINDOW_MS`.
+   *
+   * Optional on read, always written. A grant file written before this field
+   * existed still loads: every read is `first_granted_at ?? granted_at`, which
+   * for a single-grant file is the same instant anyway.
+   */
+  first_granted_at?: string
   /** ISO 8601 timestamp when approval expires */
   expires_at: string
   /** '*' = every plugin, or an array of specific plugin names */
@@ -77,10 +99,128 @@ export async function grantApproval(
   const now = Date.now()
   const payload: ApprovalFile = {
     granted_at: new Date(now).toISOString(),
+    first_granted_at: new Date(now).toISOString(),
     expires_at: new Date(now + ttlMs).toISOString(),
     scopes: scopes === '*' ? '*' : Array.isArray(scopes) ? scopes : [scopes],
   }
   await writeFile(approvalPath, JSON.stringify(payload, null, 2))
+}
+
+/** Options for {@link mergeGrant}. Every field is optional. */
+export interface MergeGrantOptions {
+  /** Requested lifetime from `now`. Omitted on a merge = keep the live expiry. */
+  ttlMs?: number
+  /** Overwrite the scope list instead of unioning it, and reset the expiry. */
+  replace?: boolean
+  /** Permit `expires_at` past `first_granted_at + MAX_GRANT_WINDOW_MS`. */
+  long?: boolean
+  /** Injected clock, so a caller can print exactly what it wrote. */
+  now?: number
+}
+
+/** What {@link mergeGrant} actually wrote, so the caller can print it. */
+export interface MergeGrantResult {
+  /** ISO 8601 — the effective expiry after any cap or extension. */
+  expires_at: string
+  /** ISO 8601 — the ceiling anchor, carried over from the live grant. */
+  first_granted_at: string
+  /** The scopes now on disk, sorted. */
+  scopes: '*' | string[]
+  /** True when the ceiling pulled the requested expiry back. */
+  capped: boolean
+  /** True when `long` carried the expiry past the ceiling. */
+  extended: boolean
+}
+
+/** Read the live grant, or null if it is missing, corrupt or already expired. */
+async function readLiveGrant(approvalPath: string, now: number): Promise<ApprovalFile | null> {
+  try {
+    const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
+    // An expired grant is not merged onto: the operator's window has closed and
+    // a new grant restarts it. Merging would silently resurrect scopes the
+    // expiry was supposed to have retired.
+    if (now > new Date(raw.expires_at).getTime()) return null
+    return raw
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Grant approval additively: union the requested scopes with any live grant,
+ * preserve that grant's expiry, and cap any extension at the first-grant
+ * ceiling.
+ *
+ * This is the write path behind `warpline approve`. `grantApproval` above is
+ * the unconditional overwrite it always was — programmatic pre-grants want that
+ * — while an operator typing `approve b` after `approve a` means "and b", not
+ * "instead of a". Losing an earlier grant to a later one is the failure this
+ * function exists to prevent.
+ *
+ * `checkApproval` is deliberately untouched by any of this: the run path reads
+ * the grant and never writes it, and keeping that provable by inspection rather
+ * than by test is worth more than any sharing between the two.
+ */
+export async function mergeGrant(
+  scopes: '*' | string | string[],
+  opts: MergeGrantOptions = {},
+  approvalPath: string = sessionApprovalPath(),
+): Promise<MergeGrantResult> {
+  const now = opts.now ?? Date.now()
+  const live = await readLiveGrant(approvalPath, now)
+
+  const firstGrantedAt = live
+    ? new Date(live.first_granted_at ?? live.granted_at).getTime()
+    : now
+  const ceiling = firstGrantedAt + MAX_GRANT_WINDOW_MS
+  const liveExpiry = live ? new Date(live.expires_at).getTime() : null
+
+  const requested: '*' | string[] = scopes === '*' ? '*' : Array.isArray(scopes) ? scopes : [scopes]
+  const merged: '*' | string[] =
+    opts.replace || !live
+      ? requested
+      : requested === '*' || live.scopes === '*'
+        ? '*'
+        : [...new Set([...live.scopes, ...requested])]
+  const finalScopes: '*' | string[] = merged === '*' ? '*' : [...merged].sort()
+
+  // Expiry: replace (or a fresh window) restarts the clock; a merge keeps the
+  // live expiry unless an explicit --ttl asks for more, and never for less.
+  let expiry: number
+  if (opts.replace || liveExpiry === null) {
+    expiry = now + (opts.ttlMs ?? DEFAULT_TTL_MS)
+  } else if (opts.ttlMs !== undefined) {
+    expiry = Math.max(liveExpiry, now + opts.ttlMs)
+  } else {
+    expiry = liveExpiry
+  }
+
+  // The ceiling never shortens time the operator already holds — an earlier
+  // --long grant stays honoured — it only refuses to hand out more.
+  let capped = false
+  if (!opts.long) {
+    const bound = Math.max(ceiling, liveExpiry ?? ceiling)
+    if (expiry > bound) {
+      expiry = bound
+      capped = true
+    }
+  }
+
+  const payload: ApprovalFile = {
+    granted_at: new Date(now).toISOString(),
+    first_granted_at: new Date(firstGrantedAt).toISOString(),
+    expires_at: new Date(expiry).toISOString(),
+    scopes: finalScopes,
+  }
+  await writeFile(approvalPath, JSON.stringify(payload, null, 2))
+
+  return {
+    expires_at: payload.expires_at,
+    first_granted_at: payload.first_granted_at as string,
+    scopes: finalScopes,
+    capped,
+    extended: !capped && expiry > ceiling,
+  }
 }
 
 /**

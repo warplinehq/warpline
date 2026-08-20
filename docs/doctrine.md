@@ -60,3 +60,26 @@ These are common mistakes that violate this boundary:
 2. **Using LLM to filter a list** — write the filter predicate in code
 3. **LLM for threshold decisions** — use config values and comparison operators
 4. **Non-deterministic scheduling** — all timing decisions must be in code, not prompted
+
+## Side-Effect Approval
+
+The boundary above says which decisions a machine may make. This says which
+ones it may *act* on. A plugin declaring side effects does not run until a human
+has approved it for this session, at any autonomy level, `autonomous` included.
+
+Grants are additive and bounded. A human typing `approve b` after `approve a`
+is re-authorizing: they are present, they know what they asked for, and losing
+the earlier grant to the later one would be the surprise. The hazard is the
+other case — a background process extending a window nobody is watching. So the
+24-hour ceiling is anchored at **first issue**, not at the latest grant.
+Anchored at the latest, a loop calling `approve --ttl 4h` every hour would walk
+the window forward forever and a "4-hour" approval would never expire. A second
+absolute clock fixed at first issue is what every renewable-credential system
+pairs with renewal (Kerberos `renew_till`, Vault `max_ttl`), and it is the only
+part of the grant a renewal cannot move.
+
+The corollary is a prohibition: nothing reachable from a run may write the
+grant file. The run path reads it and only reads it — so a plugin cannot extend
+its own permission, and neither can the engine on its behalf.
+
+Format and exact merge rules: `docs/runtime-spec.md` § 9.
