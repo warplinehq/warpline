@@ -57,7 +57,7 @@ describe('SkillResultSchema', () => {
     }
   })
 
-  it('does not have a duration_ms field (D-05)', () => {
+  it('does not have a duration_ms field', () => {
     const withDuration = { ...validResult, duration_ms: 45000 }
     const result = SkillResultSchema.safeParse(withDuration)
     // Schema should parse (strict mode not used) but data should not contain duration_ms
