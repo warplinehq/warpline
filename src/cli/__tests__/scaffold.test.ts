@@ -168,3 +168,58 @@ describe('scaffoldPlugin — the home-level warpline symlink', () => {
     expect(result.message).toContain('not replaced')
   })
 })
+
+// ── The home-level ESM marker ────────────────────────────────────────────
+//
+// A scaffolded plugin is ESM. Node decides CJS-vs-ESM for a stripped .ts file
+// from the nearest package.json, so without `"type": "module"` at the home it
+// loads the manifest as CommonJS and dies on `Cannot use import statement
+// outside a module` — at import, which the engine reports as a load failure,
+// so `warpline plan` computes no plan at all.
+//
+// Bun assumes ESM and never reproduces this, so the assertions below check the
+// marker rather than the symptom; the real Node import lives in
+// scripts/verify-tarball.sh, which is the only place the symptom is visible.
+describe('scaffoldPlugin — the home-level ESM marker', () => {
+  test('writes package.json with type: module when the home has none', async () => {
+    const home = freshHome()
+    await scaffoldPlugin('my-plugin')
+
+    const parsed = JSON.parse(await readFile(join(home, 'package.json'), 'utf8'))
+    expect(parsed.type).toBe('module')
+  })
+
+  test('leaves an existing correct package.json alone and warns about nothing', async () => {
+    const home = freshHome()
+    const existing = JSON.stringify({ name: 'my-project', type: 'module' }, null, 2)
+    await writeFile(join(home, 'package.json'), existing)
+
+    const result = await scaffoldPlugin('my-plugin')
+
+    expect(await readFile(join(home, 'package.json'), 'utf8')).toBe(existing)
+    expect(result.message).not.toContain('⚠')
+  })
+
+  test('warns instead of overwriting when an existing package.json is not ESM', async () => {
+    const home = freshHome()
+    const existing = JSON.stringify({ name: 'my-project' }, null, 2)
+    await writeFile(join(home, 'package.json'), existing)
+
+    const result = await scaffoldPlugin('my-plugin')
+
+    // Never clobber a real project manifest that happens to sit at the home.
+    expect(await readFile(join(home, 'package.json'), 'utf8')).toBe(existing)
+    expect(result.message).toContain('"type": "module"')
+    expect(result.created).toBe(true)
+  })
+
+  test('a malformed package.json warns rather than throwing', async () => {
+    const home = freshHome()
+    await writeFile(join(home, 'package.json'), '{ not json')
+
+    const result = await scaffoldPlugin('my-plugin')
+
+    expect(result.created).toBe(true)
+    expect(result.message).toContain('not valid JSON')
+  })
+})

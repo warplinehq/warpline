@@ -29,7 +29,7 @@
  * __tests__/scaffold.test.ts and the real Node import in
  * scripts/verify-tarball.sh.
  */
-import { mkdir, writeFile, symlink, unlink } from 'node:fs/promises'
+import { mkdir, writeFile, symlink, unlink, readFile } from 'node:fs/promises'
 import { existsSync, lstatSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { pluginsDir, warplineHome } from '../lib/paths.js'
@@ -94,6 +94,39 @@ async function linkWarplineIntoHome(): Promise<string | null> {
   if (existing) await unlink(link)
 
   await symlink(target, link, 'dir')
+  return null
+}
+
+/**
+ * Ensure <warplineHome>/package.json marks the tree as ESM.
+ *
+ * Without it, Node's type stripping loads a generated `manifest.ts` as CJS and
+ * the plugin dies on `Cannot use import statement outside a module` — at load,
+ * so `warpline plan` reports every plugin as a load failure and can compute no
+ * plan at all. Bun assumes ESM and never sees it, which is why a Bun-only
+ * suite cannot catch this; it is the same blind spot the `.ts` specifier
+ * comment above describes, one directory higher.
+ *
+ * Same discipline as the symlink: create what is missing, never overwrite what
+ * the user put there. An existing package.json is left alone and only warned
+ * about, since it may be a real project manifest that happens to sit here.
+ */
+async function ensureHomeIsEsm(): Promise<string | null> {
+  const home = warplineHome()
+  const manifestPath = join(home, 'package.json')
+  await mkdir(home, { recursive: true })
+
+  if (existsSync(manifestPath)) {
+    try {
+      const parsed = JSON.parse(await readFile(manifestPath, 'utf8')) as { type?: string }
+      if (parsed.type === 'module') return null
+      return `${manifestPath} exists without "type": "module" — Node will load generated plugins as CommonJS and they will fail at import. Add it, or run under Bun.`
+    } catch {
+      return `${manifestPath} exists but is not valid JSON — left untouched. Generated plugins may fail to load under Node.`
+    }
+  }
+
+  await writeFile(manifestPath, `${JSON.stringify({ type: 'module' }, null, 2)}\n`)
   return null
 }
 
@@ -169,19 +202,20 @@ export async function handler(
   // A failed link must not fail the scaffold: the files are already written and
   // correct, and a missing or dangling link surfaces later through the engine's
   // plugin load-failures reporting, which is the right place to see it.
-  let warning: string | null
-  try {
-    warning = await linkWarplineIntoHome()
-  } catch (err) {
-    warning = `could not link warpline into ${warplineHome()}: ${err instanceof Error ? err.message : String(err)}`
+  const warnings: string[] = []
+  for (const step of [linkWarplineIntoHome, ensureHomeIsEsm]) {
+    try {
+      const w = await step()
+      if (w) warnings.push(w)
+    } catch (err) {
+      warnings.push(`${step.name} failed for ${warplineHome()}: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   return {
     created: true,
     path: pluginDir,
-    message: warning
-      ? `Plugin '${name}' scaffolded at ${pluginDir}\n⚠ ${warning}`
-      : `Plugin '${name}' scaffolded at ${pluginDir}`,
+    message: [`Plugin '${name}' scaffolded at ${pluginDir}`, ...warnings.map((w) => `⚠ ${w}`)].join('\n'),
   }
 }
 
@@ -189,7 +223,7 @@ export async function handler(
 if (import.meta.main) {
   const name = process.argv[2]
   if (!name) {
-    console.error('Usage: bun run scripts/scaffold-plugin.ts <plugin-name>')
+    console.error('Usage: warpline scaffold <plugin-name>')
     process.exit(1)
   }
   const result = await scaffoldPlugin(name)
