@@ -3,21 +3,29 @@
 # Verify the packaged artifact end to end, from a checkout, before publish.
 #
 # Packs the tarball, installs it into a throwaway --prefix (never the real
-# global root), and asserts the four things a checkout cannot prove:
+# global root), and asserts the six things a checkout cannot prove:
 #
 #   1. the `files` whitelist shipped no source, tests or planning artifacts
 #   2. `warpline --help` runs under Node with the tarball's bytes
-#   3. the `exports` map resolves the published specifiers and REFUSES an
-#      unmapped one (ERR_PACKAGE_PATH_NOT_EXPORTED)
+#   3. the `exports` map resolves every published specifier — under Node AND
+#      Bun — exposes exactly one path accessor, and REFUSES an unmapped
+#      subpath (ERR_PACKAGE_PATH_NOT_EXPORTED)
 #   4. the bin's Node floor gate prints required-vs-found and exits 1 without
 #      an ERR_UNKNOWN_FILE_EXTENSION trace
+#   5. `warpline scaffold` writes a plugin carrying no absolute path, and a
+#      `<warplineHome>/node_modules/warpline` symlink into the install
+#   6. Node can import BOTH generated files for real — the assertion that
+#      fails with ERR_MODULE_NOT_FOUND without that symlink
 #
-# Check 4 lives here in bash rather than in a *.test.ts on purpose: plan 02-08
-# budgets the repository to exactly one spawning test file, and a Node-version
-# test must spawn (D-27).
+# Checks 5 and 6 are the whole reason this script exists rather than a test:
+# the scaffold defects do not reproduce from a checkout, where warpline's own
+# source is always reachable. Check 4 lives here in bash rather than in a
+# *.test.ts because plan 02-08 budgets the repository to exactly one spawning
+# test file and a Node-version test must spawn (D-27).
 #
-# Plans 02-03, 02-10 and 02-12 reuse this script rather than re-deriving the
-# checks. Exits non-zero on the first failure.
+# Plans 02-10 and 02-12 reuse this script rather than re-deriving the checks;
+# 02-12's publish gate reads its exit status as evidence, so every assertion
+# here is a hard failure and never a warning. Exits non-zero on the first one.
 
 set -euo pipefail
 
@@ -26,10 +34,11 @@ cd "$REPO_ROOT"
 
 PREFIX="$(mktemp -d)"
 CONSUMER="$(mktemp -d)"
+WL_HOME="$(mktemp -d)"
 TARBALL=""
 
 cleanup() {
-  rm -rf "$PREFIX" "$CONSUMER"
+  rm -rf "$PREFIX" "$CONSUMER" "$WL_HOME"
   [ -n "$TARBALL" ] && rm -f "$REPO_ROOT/$TARBALL"
   return 0
 }
@@ -39,6 +48,13 @@ fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
+
+# ── 0. Make sure nothing shadows the prefix under test ───────────────────
+#
+# A stale global install from an earlier tarball is the documented way this
+# script silently passes against the wrong bytes. Removing it is a no-op (exit
+# 0) when absent.
+npm rm -g warpline >/dev/null 2>&1 || true
 
 # ── 1. Pack, and assert the whitelist held ───────────────────────────────
 
@@ -70,18 +86,55 @@ grep -q 'Unknown command' "$CONSUMER/bogus.err" \
   || fail "warpline bogus wrote no error to stderr"
 
 # ── 3. The exports map, from a consumer that only sees the install ───────
+#
+# Every published specifier must resolve to ONE target, from the packed bytes,
+# under both runtimes — the invariant that replaced D-11's `bun` export
+# condition (which Bun resolves to a path the tarball does not contain, and
+# then errors instead of falling through to `default`).
+#
+# The consumer is a scratch directory rather than the install itself because
+# Node refuses type stripping under a `node_modules` directory (D-05), so the
+# shipped example `.ts` files cannot be imported from inside the install at all.
 
 echo "== exports map"
 mkdir -p "$CONSUMER/node_modules"
 ln -sfn "$PREFIX/lib/node_modules/warpline" "$CONSUMER/node_modules/warpline"
 
+# `.mjs`, and no package.json in the consumer: the module type must not depend
+# on anything the consumer happens to have.
+cat > "$CONSUMER/specifiers.mjs" <<'SPECIFIERS'
+const { runAdvance } = await import('warpline')
+if (typeof runAdvance !== 'function') { console.error('runAdvance missing'); process.exit(1) }
+
+const { PluginManifestSchema } = await import('warpline/schemas/plugin-manifest')
+if (!PluginManifestSchema) { console.error('PluginManifestSchema missing'); process.exit(1) }
+
+const { SkillResultSchema } = await import('warpline/schemas/skill-result')
+if (!SkillResultSchema) { console.error('SkillResultSchema missing'); process.exit(1) }
+
+// D-31: exactly one path accessor is public contract at 0.1.0. A wider export
+// list here means something internal acquired a semver obligation by accident.
+const paths = await import('warpline/lib/paths')
+const exported = Object.keys(paths).filter((k) => k !== 'default').sort().join(',')
+console.log('   warpline/lib/paths exports: ' + exported)
+if (exported !== 'warplineHome') {
+  console.error('expected exactly warplineHome, got ' + exported)
+  process.exit(1)
+}
+if (typeof paths.warplineHome !== 'function') { console.error('warplineHome is not callable'); process.exit(1) }
+SPECIFIERS
+
+( cd "$CONSUMER" && node specifiers.mjs ) || fail "published specifiers did not resolve under node"
+
+if command -v bun >/dev/null 2>&1; then
+  ( cd "$CONSUMER" && bun specifiers.mjs ) || fail "published specifiers did not resolve under bun"
+else
+  echo "   SKIP: bun is not on PATH — the bun leg of the specifier check did not run"
+fi
+
+# The allowlist refusal is Node-specific (the error code is Node's), so it stays
+# out of the shared script above.
 ( cd "$CONSUMER" && node --input-type=module -e "
-  const { runAdvance } = await import('warpline')
-  if (typeof runAdvance !== 'function') { console.error('runAdvance missing'); process.exit(1) }
-  const { PluginManifestSchema } = await import('warpline/schemas/plugin-manifest')
-  if (!PluginManifestSchema) { console.error('PluginManifestSchema missing'); process.exit(1) }
-  const { warplineHome } = await import('warpline/lib/paths')
-  if (typeof warplineHome !== 'function') { console.error('warplineHome missing'); process.exit(1) }
   try {
     await import('warpline/src/runtime/engine')
     console.error('warpline/src/runtime/engine resolved; the exports map is not an allowlist')
@@ -92,7 +145,7 @@ ln -sfn "$PREFIX/lib/node_modules/warpline" "$CONSUMER/node_modules/warpline"
       process.exit(1)
     }
   }
-" ) || fail "exports map did not behave as specified"
+" ) || fail "the exports map is not an allowlist"
 
 # ── 4. The Node floor gate (D-15) ────────────────────────────────────────
 
@@ -120,4 +173,53 @@ if echo "$GATE_OUT" | grep -q 'ERR_UNKNOWN_FILE_EXTENSION'; then
   fail "gate leaked a resolver trace: $GATE_OUT"
 fi
 
-echo "OK: $TARBALL installs and runs under Node alone"
+# ── 5. Scaffold from the install, into a throwaway warpline home ─────────
+#
+# This is the check that cannot exist as a *.test.ts: from a checkout, every
+# specifier scaffold could possibly emit resolves, so both of the defects here
+# are invisible. Run against the installed bin with WARPLINE_HOME outside the
+# install, they are the first thing that breaks.
+
+echo "== scaffold from the install"
+WARPLINE_HOME="$WL_HOME" "$BIN" scaffold demo || fail "warpline scaffold demo exited non-zero"
+
+GEN="$WL_HOME/plugins/demo"
+[ -f "$GEN/manifest.ts" ] || fail "$GEN/manifest.ts was not written"
+[ -f "$GEN/handler.ts" ] || fail "$GEN/handler.ts was not written"
+
+ABSOLUTE="$(grep -hoE "from '[^']+'" "$GEN/manifest.ts" "$GEN/handler.ts" | grep -F "from '/" || true)"
+[ -z "$ABSOLUTE" ] || fail "generated files carry an absolute import specifier:"$'\n'"$ABSOLUTE"
+
+# `.ts`, never `.js`: Node's type stripping resolves the literal specifier with
+# no extension remapping, so `./manifest.js` at a `.ts` file is
+# ERR_MODULE_NOT_FOUND (D-10). Bun remaps it, hiding the bug from the suite.
+grep -q "from '\./manifest\.ts'" "$GEN/handler.ts" \
+  || fail "handler.ts does not import its sibling manifest with the .ts extension"
+
+LINK="$WL_HOME/node_modules/warpline"
+[ -L "$LINK" ] || fail "$LINK is not a symlink"
+LINK_TARGET="$(cd "$LINK" && pwd -P)"
+PREFIX_REAL="$(cd "$PREFIX" && pwd -P)"
+echo "   symlink target: $LINK_TARGET"
+case "$LINK_TARGET/" in
+  "$PREFIX_REAL"/*) ;;
+  *) fail "symlink resolves to $LINK_TARGET, outside the throwaway prefix $PREFIX_REAL" ;;
+esac
+[ -f "$LINK_TARGET/package.json" ] || fail "$LINK_TARGET holds no package.json"
+
+# ── 6. Node imports both generated files for real ────────────────────────
+#
+# Both, not just the manifest: invoke-plugin.ts imports the pair, so a
+# manifest-only check would miss a broken sibling specifier (D-10). Without the
+# section-5 symlink these fail with ERR_MODULE_NOT_FOUND.
+
+echo "== node imports the generated plugin"
+for f in manifest handler; do
+  node -e "
+    import('$GEN/$f.ts')
+      .then(() => console.log('   imported $f.ts'))
+      .catch((err) => { console.error('   ' + (err.code || '') + ' ' + err.message); process.exit(1) })
+  " || fail "node could not import the generated $f.ts"
+done
+
+echo "OK: $TARBALL installs, runs and scaffolds a working plugin under Node alone"
