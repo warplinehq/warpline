@@ -6,7 +6,7 @@
  * There is nothing to validate — revoking only ever narrows what may run, so
  * the failure direction is safe and no confirmation is warranted.
  *
- * Never terminates the process (D-14) — it returns a code to the dispatcher.
+ * Never terminates the process — it returns a code to the dispatcher.
  */
 import { revokeApproval } from '../runtime/approval-gate.js'
 import { sessionApprovalPath } from '../lib/paths.js'
