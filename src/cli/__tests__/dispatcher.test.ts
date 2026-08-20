@@ -66,8 +66,13 @@ describe('warpline dispatcher', () => {
     }
   })
 
+  // `plan` was removed from this list when plan 02-05 replaced its stub body.
+  // Plan 02-07 removes `approve` and `revoke` for the same reason, at which
+  // point this test has nothing left to assert and should be deleted outright —
+  // its real subject (each arm reaches its module) is covered by plan.test.ts
+  // and approve.test.ts going through `main(argv)`.
   test('stub subcommands exit 1 on stderr behind the final signature', async () => {
-    for (const cmd of ['plan', 'approve', 'revoke']) {
+    for (const cmd of ['approve', 'revoke']) {
       const { code, stdout, stderr } = await capture([cmd])
       expect(code).toBe(1)
       expect(stdout).toBe('')
