@@ -9,7 +9,7 @@
   `emitBoardEvent` trims the file to its newest 20,000 lines once it drifts past
   cap + 2,000 slack — atomic tmp+rename; 2026-08-19)
 - **Board process**: Reads `events.jsonl`, renders Ink UI, writes `acknowledgements.json`
-- **IPC**: File-based only. Zero shared stdout between engine and board. (D-22)
+- **IPC**: File-based only. Zero shared stdout between engine and board.
 - **Persistence**: `acknowledgements.json` survives across sessions
 
 ## Data Files
@@ -100,7 +100,7 @@ The board is the primary consumer of these schemas from `<home>/schemas/`:
 
 ## Ink-Specific Constraints
 
-These apply to all Phase 85 component implementations:
+These apply to all board component implementations:
 
 1. **No nested object props** — Ink's reconciler has known issues with nested objects causing stale renders. All component props must be flat scalars (strings, numbers, booleans).
 2. **Single-line summaries** — `summary` fields are max 200 chars, enforced at schema level. Never render multi-line text in list items.

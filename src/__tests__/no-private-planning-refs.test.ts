@@ -58,7 +58,6 @@ const PRIVATE_NAME = new RegExp(
  * REMOVE a path here when you clean that file. Never add one.
  */
 const SWEEP_BACKLOG = new Set<string>([
-    'docs/board-spec.md',
     'docs/runtime-spec.md',
     'src/bin/warpline.ts',
     'src/board/__tests__/engine-events.test.ts',
