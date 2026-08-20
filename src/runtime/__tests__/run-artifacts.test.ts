@@ -1,5 +1,5 @@
 /**
- * Phase 121 Plan 03 Task 3.2 — run-artifacts tests.
+ * run-artifacts tests.
  *
  * Uses mkdtemp for isolation. No mock.module (CLAUDE.md gotchas).
  */
