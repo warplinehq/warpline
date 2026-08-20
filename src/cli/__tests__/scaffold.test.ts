@@ -84,7 +84,7 @@ describe('scaffoldPlugin — generated specifiers', () => {
     expect(specs).toContain('warpline/schemas/plugin-manifest')
     expect(specs).toContain('warpline/schemas/skill-result')
     // `.ts`, never `.js`: Node's type stripping resolves the literal
-    // specifier with no extension remapping (RESEARCH P-1 / D-10).
+    // specifier with no extension remapping.
     expect(specs).toContain('./manifest.ts')
     expect(specs).not.toContain('./manifest.js')
     expect(specs).not.toContain('./manifest')
@@ -120,7 +120,7 @@ describe('scaffoldPlugin — generated specifiers', () => {
   })
 })
 
-describe('scaffoldPlugin — the home-level warpline symlink (D-09)', () => {
+describe('scaffoldPlugin — the home-level warpline symlink', () => {
   const linkPath = (home: string) => join(home, 'node_modules', 'warpline')
 
   test('creates a symlink at <home>/node_modules/warpline', async () => {
