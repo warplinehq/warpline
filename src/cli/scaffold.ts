@@ -4,7 +4,7 @@
  *
  * Usage: warpline scaffold <plugin-name>
  *
- * Per D-10: Plugin names must be lowercase, hyphenated identifiers.
+ * Plugin names must be lowercase, hyphenated identifiers.
  * Name is validated against [a-z][a-z0-9-]* — no path traversal possible.
  *
  * ## Why the generated imports look the way they do
@@ -12,11 +12,11 @@
  * Generated plugins live under <warplineHome>/plugins/, outside both this repo
  * and any node_modules — so nothing relative reaches warpline, and a bare
  * `warpline/...` specifier does not resolve on its own from a global install
- * either (D-08). Two mechanisms make it work, and BOTH are load-bearing:
+ * either. Two mechanisms make it work, and BOTH are load-bearing:
  *
  *   1. the package's `exports` map, which publishes the schema subpaths
  *   2. the `<warplineHome>/node_modules/warpline` symlink this file creates
- *      (D-09) — ESM bare-specifier resolution walks node_modules upward from
+ * — ESM bare-specifier resolution walks node_modules upward from
  *      the *importing* file, and the install prefix is not on that chain
  *
  * The generated sibling import carries a .ts extension and must never be
@@ -64,7 +64,7 @@ function packageRoot(): string | null {
  *
  * Without this link a generated plugin's `warpline/...` import resolves to
  * nothing: ESM bare-specifier resolution walks node_modules upward from the
- * importing file, and a global install prefix is not on that chain (D-08).
+ * importing file, and a global install prefix is not on that chain.
  * NODE_PATH is no help — it is CJS-only. A symlink works under both Node and
  * Bun and carries warpline's transitive zod, because Node realpaths it.
  *
@@ -120,7 +120,7 @@ export async function scaffoldPlugin(name: string): Promise<ScaffoldResult> {
 
   await mkdir(pluginDir, { recursive: true })
 
-  // manifest.ts — validated against PluginManifestSchema at import time (D-09 hard-stop)
+  // manifest.ts — validated against PluginManifestSchema at import time
   const manifestContent = `import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
 
 export const manifest = PluginManifestSchema.parse({
