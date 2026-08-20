@@ -18,7 +18,7 @@ export const SkillErrorSchema = z.object({
   message: z.string(),
   impact: z.enum(['HIGH', 'MEDIUM', 'LOW']),
   source: z.string().optional(),
-  /** Whether the operation can be safely retried. Defaults to false. Per D-08, D-09. */
+  /** Whether the operation can be safely retried. Defaults to false. */
   retryable: z.boolean().default(false),
 })
 
