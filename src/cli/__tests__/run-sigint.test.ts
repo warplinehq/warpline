@@ -1,5 +1,5 @@
 /**
- * The ONE process-launching test file in the repository (D-27).
+ * The ONE process-launching test file in the repository.
  *
  * `warpline run`'s SIGINT->130 contract cannot be observed in-process: it is a
  * signal disposition plus a `process.exit`, and there is no in-process seam for
