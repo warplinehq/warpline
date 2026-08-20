@@ -136,6 +136,128 @@ export interface AdvanceResult {
   run_log_path: string
 }
 
+// -----------------------------------------------------------------------
+// evaluatePlugin — the guard chain, without the writes
+// -----------------------------------------------------------------------
+
+/**
+ * Why a plugin is not due. Structured codes, not display copy (D-18): the
+ * run-log prose these guards used to inline is a run-log concern, and a
+ * renderer that switched on prose would break the first time the wording
+ * changed.
+ */
+export type NotDueReason =
+  | 'profile_schedule'
+  | 'min_tier'
+  | 'headless_supervised'
+  | 'manual'
+  | 'fresh'
+  | 'task_locked'
+  | 'unapproved'
+
+export type EvalResult =
+  | { due: true }
+  | { due: false; reason: NotDueReason; detail: string }
+
+/** Everything `evaluatePlugin` needs that is not the plugin itself. */
+export interface EvalContext {
+  /** Schedules allowed by the headless profile tier; undefined = unfiltered. */
+  allowedSchedules?: ReadonlySet<string>
+  /** The requested profile, for the profile-filter detail string. */
+  profile?: RunProfile
+  currentTier: TierName
+  headless: boolean
+  force: boolean
+  state: EngineState
+  /** Already-resolved session approval path — the evaluator does no path defaulting. */
+  approvalPath: string
+}
+
+/**
+ * Decide whether a plugin is due, with no writes of any kind (D-18).
+ *
+ * This is the guard chain lifted out of `runAdvance`'s per-plugin body. Every
+ * FSM mutation, run-log entry, skip event and progress callback stayed behind
+ * in `runAdvance`, keyed off the returned reason — that separation is what
+ * makes `warpline plan` read-only by construction rather than by audit, and it
+ * is why `plan` cannot disagree with a run by one comparison operator.
+ *
+ * Deliberately NOT here: the dry-run side-effect block (D-20.1). The evaluator
+ * models a *real* run; `runAdvance` applies the dry-run block on its own side,
+ * in the same position in the chain it always occupied.
+ *
+ * `now` is injected, never read (D-19): `plan` captures one timestamp and
+ * threads it through the evaluator and the renderer so two consecutive
+ * previews are byte-identical.
+ *
+ * ponytail: `now` is currently a contract parameter only. The two clock reads
+ * that actually matter live inside `isPluginFresh` (`staleness.ts`) and
+ * `checkApproval` (`approval-gate.ts`), which take no clock seam, and copying
+ * their comparisons here to use `now` is exactly the restatement this
+ * extraction exists to prevent. Thread `now` into those two when either grows
+ * an options bag; until then tests pin the edges with `setSystemTime`.
+ */
+export async function evaluatePlugin(
+  pluginName: string,
+  manifest: PluginManifest,
+  ctx: EvalContext,
+  now: number,
+): Promise<EvalResult> {
+  // -- Profile tier filter (D-04, D-05) --
+  if (ctx.allowedSchedules && !ctx.allowedSchedules.has(manifest.schedule)) {
+    return {
+      due: false,
+      reason: 'profile_schedule',
+      detail: `profile '${ctx.profile}' filter: schedule '${manifest.schedule}' not in tier`,
+    }
+  }
+
+  // -- Tier filter (D-21, D-22): coarser gate than staleness --
+  if (!isEligibleForTier(manifest.min_tier ?? 'normal', ctx.currentTier)) {
+    return {
+      due: false,
+      reason: 'min_tier',
+      detail: `tier filter: current '${ctx.currentTier}' exceeds plugin min_tier '${manifest.min_tier ?? 'normal'}'`,
+    }
+  }
+
+  // -- Headless supervised bypass (A2) --
+  if (ctx.headless && manifest.autonomy_level === 'supervised') {
+    return {
+      due: false,
+      reason: 'headless_supervised',
+      detail: 'headless mode: supervised plugin bypassed (no interactive gate)',
+    }
+  }
+
+  // -- Manual: always skip --
+  if (manifest.autonomy_level === 'manual') {
+    return { due: false, reason: 'manual', detail: 'manual — requires explicit invocation' }
+  }
+
+  // -- Staleness check: skip if fresh --
+  const freshness = isPluginFresh(pluginName, manifest, ctx.state, { force: ctx.force })
+  if (freshness.fresh) {
+    return { due: false, reason: 'fresh', detail: freshness.reason ?? 'fresh' }
+  }
+
+  // -- Task lock check: active task for this plugin on the board --
+  if (await smCheckTaskLock(pluginName)) {
+    return { due: false, reason: 'task_locked', detail: 'task locked — active on board' }
+  }
+
+  // -- Side-effect approval gate (D-01, D-02, INTG-02, INTG-03) --
+  if (manifest.side_effects.length > 0 && !(await checkApproval(pluginName, ctx.approvalPath))) {
+    return {
+      due: false,
+      reason: 'unapproved',
+      detail: 'skipped (unapproved): side effects require session approval',
+    }
+  }
+
+  return { due: true }
+}
+
 // (Extraction note: the source engine attached a domain metrics_summary to
 // each run. Cut from core — hosts that want run telemetry derive it from the
 // run log's plugin_entries.)
@@ -327,6 +449,18 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   let engineStatus: AdvanceResult['status'] = 'complete'
   let stopped = false
 
+  // 6b. Evaluation context shared by every plugin in this run (D-18). The
+  // approval path is resolved once here so the evaluator does no defaulting.
+  const evalCtx: EvalContext = {
+    allowedSchedules,
+    profile,
+    currentTier,
+    headless,
+    force,
+    state,
+    approvalPath: approvalPath ?? sessionApprovalPath(),
+  }
+
   // 7. Execute each level
   for (const level of levels) {
     if (stopped) break
@@ -338,107 +472,18 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         const entryStartedAt = new Date().toISOString()
         const entryStart = Date.now()
 
-        // -- Profile tier filter (D-04, D-05) --
-        // When a headless profile is set, only plugins whose schedule is
-        // allowed under that profile tier may run. All others are skipped.
-        if (allowedSchedules && !allowedSchedules.has(manifest.schedule)) {
-          plugin_states.set(pluginName, 'skipped')
-          const reason = `profile '${profile}' filter: schedule '${manifest.schedule}' not in tier`
-          plugin_entries.push({
-            plugin: pluginName,
-            status: 'skipped',
-            started_at: entryStartedAt,
-            elapsed_ms: Date.now() - entryStart,
-            result_summary: reason,
-            retried: false,
-          })
-          await emitPluginSkipped(pluginName, reason, eventsPath)
-          return
-        }
-
-        // -- Tier filter (D-21, D-22): coarser gate than staleness --
-        if (!isEligibleForTier(manifest.min_tier ?? 'normal', currentTier)) {
-          plugin_states.set(pluginName, 'skipped')
-          const reason = `tier filter: current '${currentTier}' exceeds plugin min_tier '${manifest.min_tier ?? 'normal'}'`
-          plugin_entries.push({
-            plugin: pluginName,
-            status: 'skipped',
-            started_at: entryStartedAt,
-            elapsed_ms: Date.now() - entryStart,
-            result_summary: reason,
-            retried: false,
-          })
-          await emitPluginSkipped(pluginName, reason, eventsPath)
-          return
-        }
-
-        // -- Headless supervised bypass (A2) --
-        // In headless mode, supervised plugins cannot be gated (no human in
-        // the loop to approve). Mark them 'skipped' before we invoke anything.
-        if (headless && manifest.autonomy_level === 'supervised') {
-          plugin_states.set(pluginName, 'skipped')
-          const reason = 'headless mode: supervised plugin bypassed (no interactive gate)'
-          plugin_entries.push({
-            plugin: pluginName,
-            status: 'skipped',
-            started_at: entryStartedAt,
-            elapsed_ms: Date.now() - entryStart,
-            result_summary: reason,
-            retried: false,
-          })
-          await emitPluginSkipped(pluginName, reason, eventsPath)
-          return
-        }
-
-        // -- Manual: always skip --
-        if (manifest.autonomy_level === 'manual') {
-          plugin_states.set(pluginName, 'skipped')
-          plugin_entries.push({
-            plugin: pluginName,
-            status: 'skipped',
-            started_at: entryStartedAt,
-            elapsed_ms: Date.now() - entryStart,
-            result_summary: 'manual — requires explicit invocation',
-            retried: false,
-          })
-          await emitPluginSkipped(pluginName, 'manual — requires explicit invocation', eventsPath)
-          return
-        }
-
-        // -- Staleness check: skip if fresh --
-        const freshness = isPluginFresh(pluginName, manifest, state, { force })
-        if (freshness.fresh) {
-          plugin_states.set(pluginName, 'skipped')
-          plugin_entries.push({
-            plugin: pluginName,
-            status: 'skipped',
-            started_at: entryStartedAt,
-            elapsed_ms: Date.now() - entryStart,
-            result_summary: `skipped: ${freshness.reason}`,
-            retried: false,
-          })
-          await emitPluginSkipped(pluginName, freshness.reason ?? 'fresh', eventsPath)
-          return
-        }
-
-        // -- Task lock check: read v2 task_aging, skip if active task for this plugin --
-        const isLocked = await smCheckTaskLock(pluginName)
-        if (isLocked) {
-          plugin_states.set(pluginName, 'skipped')
-          plugin_entries.push({
-            plugin: pluginName,
-            status: 'skipped',
-            started_at: entryStartedAt,
-            elapsed_ms: Date.now() - entryStart,
-            result_summary: 'task locked — active on board',
-            retried: false,
-          })
-          await emitPluginSkipped(pluginName, 'task locked — active on board', eventsPath)
-          return
-        }
+        // -- Due-ness evaluation (D-18) --
+        // Every guard predicate now lives in evaluatePlugin; every write below
+        // stays on this side of the seam, keyed off the returned reason.
+        // `entryStart` is the single clock read threaded in as `now` (D-19).
+        const ev = await evaluatePlugin(pluginName, manifest, evalCtx, entryStart)
 
         // -- Dry-run side-effect block (D-03, D-04, OBS-02) --
-        if (dryRun && manifest.side_effects.length > 0) {
+        // Run-only, so it is deliberately outside the evaluator (D-20.1). In
+        // the original chain it sat between the task-lock guard and the
+        // approval guard, so it applies exactly to the outcomes reached after
+        // those guards passed: due, or not-due-because-unapproved.
+        if (dryRun && manifest.side_effects.length > 0 && (ev.due || ev.reason === 'unapproved')) {
           plugin_states.set(pluginName, 'skipped')
           const dryBlockElapsed = Date.now() - entryStart
           plugin_entries.push({
@@ -454,25 +499,111 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           return
         }
 
-        // -- Side-effect approval gate (D-01, D-02, INTG-02, INTG-03) --
-        if (manifest.side_effects.length > 0) {
-          const resolvedApprovalPath = approvalPath ?? sessionApprovalPath()
-          const approved = await checkApproval(pluginName, resolvedApprovalPath)
-          if (!approved) {
-            plugin_states.set(pluginName, 'skipped')
-            const unapprovedElapsed = Date.now() - entryStart
+        // -- Not-due: record the skip the evaluator decided on --
+        // One arm per reason code. The arms differ only in their run-log prose,
+        // which is a run-log concern and stays here rather than travelling in
+        // the evaluator's structured reason.
+        if (!ev.due) {
+          plugin_states.set(pluginName, 'skipped')
+
+          // -- Profile tier filter (D-04, D-05) --
+          if (ev.reason === 'profile_schedule') {
             plugin_entries.push({
               plugin: pluginName,
               status: 'skipped',
               started_at: entryStartedAt,
-              elapsed_ms: unapprovedElapsed,
-              result_summary: `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
+              elapsed_ms: Date.now() - entryStart,
+              result_summary: ev.detail,
               retried: false,
             })
-            await emitPluginSkipped(pluginName, `skipped (unapproved): side effects require session approval`, eventsPath)
-            onPluginEnd?.(pluginName, 'skipped', unapprovedElapsed, 'unapproved side effects')
+            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
             return
           }
+
+          // -- Tier filter (D-21, D-22): coarser gate than staleness --
+          if (ev.reason === 'min_tier') {
+            plugin_entries.push({
+              plugin: pluginName,
+              status: 'skipped',
+              started_at: entryStartedAt,
+              elapsed_ms: Date.now() - entryStart,
+              result_summary: ev.detail,
+              retried: false,
+            })
+            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            return
+          }
+
+          // -- Headless supervised bypass (A2) --
+          if (ev.reason === 'headless_supervised') {
+            plugin_entries.push({
+              plugin: pluginName,
+              status: 'skipped',
+              started_at: entryStartedAt,
+              elapsed_ms: Date.now() - entryStart,
+              result_summary: ev.detail,
+              retried: false,
+            })
+            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            return
+          }
+
+          // -- Manual: always skip --
+          if (ev.reason === 'manual') {
+            plugin_entries.push({
+              plugin: pluginName,
+              status: 'skipped',
+              started_at: entryStartedAt,
+              elapsed_ms: Date.now() - entryStart,
+              result_summary: ev.detail,
+              retried: false,
+            })
+            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            return
+          }
+
+          // -- Fresh within TTL: the run log prefixes the freshness prose --
+          if (ev.reason === 'fresh') {
+            plugin_entries.push({
+              plugin: pluginName,
+              status: 'skipped',
+              started_at: entryStartedAt,
+              elapsed_ms: Date.now() - entryStart,
+              result_summary: `skipped: ${ev.detail}`,
+              retried: false,
+            })
+            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            return
+          }
+
+          // -- Task locked: active task for this plugin on the board --
+          if (ev.reason === 'task_locked') {
+            plugin_entries.push({
+              plugin: pluginName,
+              status: 'skipped',
+              started_at: entryStartedAt,
+              elapsed_ms: Date.now() - entryStart,
+              result_summary: ev.detail,
+              retried: false,
+            })
+            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            return
+          }
+
+          // -- Side-effect approval gate (D-01, D-02, INTG-02, INTG-03) --
+          // The run log names the specific effects; the board event does not.
+          const unapprovedElapsed = Date.now() - entryStart
+          plugin_entries.push({
+            plugin: pluginName,
+            status: 'skipped',
+            started_at: entryStartedAt,
+            elapsed_ms: unapprovedElapsed,
+            result_summary: `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
+            retried: false,
+          })
+          await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+          onPluginEnd?.(pluginName, 'skipped', unapprovedElapsed, 'unapproved side effects')
+          return
         }
 
         // -- Set FSM to running --
