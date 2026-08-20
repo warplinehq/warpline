@@ -1,10 +1,10 @@
 /**
- * invokePlugin timeout + abort — Phase 121 Plan 01 Task 1.2.
+ * invokePlugin timeout + abort.
  *
  * Verifies:
- *   - handler running past manifest.timeout_ms → timed_out=true, no retry (D-12)
+ *   - handler running past manifest.timeout_ms → timed_out=true, no retry
  *   - handler completing inside timeout → clean success
- *   - external AbortSignal cancels an in-flight handler and marks cancelled=true (D-31)
+ *   - external AbortSignal cancels an in-flight handler and marks cancelled=true
  *
  * Uses fixture plugins from .warpline/test-utils/fixture-plugins/.
  */
@@ -19,7 +19,7 @@ const FIXTURES_DIR = testFixturesDir(import.meta.url, '..', '..', '..', 'test-ut
 // so fixture attempt_failed events stop leaking into live state (2026-08-18).
 const EVENTS_PATH = join(tmpdir(), `invoke-plugin-timeout-events-${Date.now()}.jsonl`)
 
-describe('invokePlugin — per-attempt timeout (Phase 121 D-12/D-13)', () => {
+describe('invokePlugin — per-attempt timeout', () => {
   it('times out when handler sleeps past manifest.timeout_ms; no retry afterwards', async () => {
     // abort-unaware-plugin: manifest timeout_ms=200, handler sleeps 5s, max_retries=0
     const res = await invokePlugin('abort-unaware-plugin', {}, { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH })
@@ -50,7 +50,7 @@ describe('invokePlugin — per-attempt timeout (Phase 121 D-12/D-13)', () => {
   })
 })
 
-describe('invokePlugin — external AbortSignal (Phase 121 D-31)', () => {
+describe('invokePlugin — external AbortSignal', () => {
   it('abort-aware handler exits early when caller aborts', async () => {
     const controller = new AbortController()
     // Fire abort on next tick so handler starts before abort arrives.
