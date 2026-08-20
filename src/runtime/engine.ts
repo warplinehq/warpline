@@ -6,10 +6,13 @@
  *   runAdvance()  — full engine loop: resolve order, check staleness, execute, gate supervised, log
  *
  * Design decisions:
- *   D-14: Per-plugin FSM tracks 6 states + skipped
- *   D-15: Kahn's algorithm for topological sort (cycle detection included)
- *   D-16: Level-parallel execution via Promise.all with individual try/catch per plugin
- *   D-17: Supervised plugins pause the engine (non-dry-run) and store payloads in pending_gates
+ *   A per-plugin FSM tracks six states plus `skipped`.
+ *   Kahn's algorithm for the topological sort, which detects cycles as a
+ *   by-product rather than needing a separate pass.
+ *   Each level runs in parallel via Promise.all, with try/catch around each
+ *   plugin individually — one failing plugin must not cancel its siblings.
+ *   Supervised plugins pause the engine outside dry-run and park their payloads
+ *   in `pending_gates`.
  */
 import { mkdir } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
@@ -57,7 +60,7 @@ import { checkTaskLock as smCheckTaskLock } from '../board/state-manager.js'
 export type PluginFsmState = 'pending' | 'running' | 'gated' | 'approved' | 'completed' | 'failed'
 
 /**
- * A plugin directory whose `manifest.ts` could not be imported (D-22).
+ * A plugin directory whose `manifest.ts` could not be imported.
  * `plugin` is the directory name — a broken manifest has no trustworthy `name`
  * field to key off. `error` is the thrown `Error.message`, no stack trace.
  */
@@ -67,7 +70,7 @@ export interface LoadFailure {
 }
 
 /**
- * Headless run profile (D-04/D-05).
+ * Headless run profile.
  * Controls which plugin schedules are eligible to run in non-interactive mode.
  *
  *   'daily'  → runs on_run + daily plugins; skips weekly + manual
@@ -85,7 +88,7 @@ export type RunProfile = 'daily' | 'weekly' | 'manual'
  *
  * Exported so `warpline plan` can build the same `EvalContext.allowedSchedules`
  * a run builds instead of restating the tier map — a second copy is exactly the
- * one-comparison disagreement between preview and run that D-18 exists to
+ * one-comparison disagreement between preview and run that this exists to
  * prevent.
  */
 export const PROFILE_ALLOWED_SCHEDULES: Record<RunProfile, ReadonlySet<string>> = {
@@ -105,7 +108,7 @@ export interface AdvanceOptions {
   dryRun?: boolean
   force?: boolean
   /**
-   * Headless run profile (D-04/D-05). When set, the engine filters plugins by
+   * Headless run profile. When set, the engine filters plugins by
    * schedule tier and treats the run as non-interactive (see RunProfile).
    * When undefined, all plugins are eligible and supervised plugins gate
    * normally — this preserves pre-profile interactive behavior.
@@ -128,7 +131,7 @@ export interface AdvanceOptions {
   /** Called after each plugin resolves with final FSM state and elapsed_ms (for streaming CLI output) */
   onPluginEnd?: (plugin: string, status: string, elapsed: number, reason?: string) => void
   /**
-   * D-13: Called exactly once with a human-readable reason when the overall
+   * Called exactly once with a human-readable reason when the overall
    * run status is non-complete (i.e. 'partial' or 'interrupted'). Fires after
    * state persistence and run-log write, before runAdvance returns.
    */
@@ -148,7 +151,7 @@ export interface AdvanceResult {
 // -----------------------------------------------------------------------
 
 /**
- * Why a plugin is not due. Structured codes, not display copy (D-18): the
+ * Why a plugin is not due. Structured codes, not display copy: the
  * run-log prose these guards used to inline is a run-log concern, and a
  * renderer that switched on prose would break the first time the wording
  * changed.
@@ -181,7 +184,7 @@ export interface EvalContext {
 }
 
 /**
- * Decide whether a plugin is due, with no writes of any kind (D-18).
+ * Decide whether a plugin is due, with no writes of any kind.
  *
  * This is the guard chain lifted out of `runAdvance`'s per-plugin body. Every
  * FSM mutation, run-log entry, skip event and progress callback stayed behind
@@ -189,11 +192,11 @@ export interface EvalContext {
  * makes `warpline plan` read-only by construction rather than by audit, and it
  * is why `plan` cannot disagree with a run by one comparison operator.
  *
- * Deliberately NOT here: the dry-run side-effect block (D-20.1). The evaluator
+ * Deliberately NOT here: the dry-run side-effect block. The evaluator
  * models a *real* run; `runAdvance` applies the dry-run block on its own side,
  * in the same position in the chain it always occupied.
  *
- * `now` is injected, never read (D-19): `plan` captures one timestamp and
+ * `now` is injected, never read: `plan` captures one timestamp and
  * threads it through the evaluator and the renderer so two consecutive
  * previews are byte-identical.
  *
@@ -210,7 +213,7 @@ export async function evaluatePlugin(
   ctx: EvalContext,
   now: number,
 ): Promise<EvalResult> {
-  // -- Profile tier filter (D-04, D-05) --
+  // -- Profile tier filter ---------------
   if (ctx.allowedSchedules && !ctx.allowedSchedules.has(manifest.schedule)) {
     return {
       due: false,
@@ -219,7 +222,7 @@ export async function evaluatePlugin(
     }
   }
 
-  // -- Tier filter (D-21, D-22): coarser gate than staleness --
+  // -- Tier filter: coarser gate than staleness ---------------
   if (!isEligibleForTier(manifest.min_tier ?? 'normal', ctx.currentTier)) {
     return {
       due: false,
@@ -253,7 +256,7 @@ export async function evaluatePlugin(
     return { due: false, reason: 'task_locked', detail: 'task locked — active on board' }
   }
 
-  // -- Side-effect approval gate (D-01, D-02, INTG-02, INTG-03) --
+  // -- Side-effect approval gate ---------------------------------
   if (manifest.side_effects.length > 0 && !(await checkApproval(pluginName, ctx.approvalPath))) {
     return {
       due: false,
@@ -384,14 +387,14 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // 2. Read v2 state
   const state = await readEngineState(stateDir)
 
-  // 2a. Compute degradation tier (D-04) — from PREVIOUS last_interaction_at (before we update it)
+  // 2a. Compute degradation tier — from PREVIOUS last_interaction_at (before we update it)
   const previousLastInteraction = state.last_interaction_at
   const currentTier: TierName = computeTier(previousLastInteraction)
 
-  // 2b. Update last_interaction_at (D-02) — persisted in final writeEngineState
+  // 2b. Update last_interaction_at — persisted in final writeEngineState
   state.last_interaction_at = new Date().toISOString()
 
-  // 2c. Tier transition BoardEvent (D-10) — emit when tier is not normal
+  // 2c. Tier transition BoardEvent — emit when tier is not normal
   if (currentTier !== 'normal') {
     const previousMs = previousLastInteraction
       ? new Date(previousLastInteraction).getTime()
@@ -437,7 +440,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   await emitRunStarted(run_id, eventsPath)
 
   // 4. Load all plugin manifests from pluginsDir. The loader also returns
-  // per-plugin `failures` (D-22); a run does not surface them yet, so only
+  // per-plugin `failures`; a run does not surface them yet, so only
   // `manifests` is taken here and run behaviour is unchanged.
   const { manifests: plugins } = await loadPluginManifests(pluginsDir)
 
@@ -456,7 +459,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   let engineStatus: AdvanceResult['status'] = 'complete'
   let stopped = false
 
-  // 6b. Evaluation context shared by every plugin in this run (D-18). The
+  // 6b. Evaluation context shared by every plugin in this run. The
   // approval path is resolved once here so the evaluator does no defaulting.
   const evalCtx: EvalContext = {
     allowedSchedules,
@@ -479,14 +482,14 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         const entryStartedAt = new Date().toISOString()
         const entryStart = Date.now()
 
-        // -- Due-ness evaluation (D-18) --
+        // -- Due-ness evaluation ---------
         // Every guard predicate now lives in evaluatePlugin; every write below
         // stays on this side of the seam, keyed off the returned reason.
-        // `entryStart` is the single clock read threaded in as `now` (D-19).
+        // `entryStart` is the single clock read threaded in as `now`.
         const ev = await evaluatePlugin(pluginName, manifest, evalCtx, entryStart)
 
-        // -- Dry-run side-effect block (D-03, D-04, OBS-02) --
-        // Run-only, so it is deliberately outside the evaluator (D-20.1). In
+        // -- Dry-run side-effect block -----------------------
+        // Run-only, so it is deliberately outside the evaluator. In
         // the original chain it sat between the task-lock guard and the
         // approval guard, so it applies exactly to the outcomes reached after
         // those guards passed: due, or not-due-because-unapproved.
@@ -513,7 +516,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         if (!ev.due) {
           plugin_states.set(pluginName, 'skipped')
 
-          // -- Profile tier filter (D-04, D-05) --
+          // -- Profile tier filter ---------------
           if (ev.reason === 'profile_schedule') {
             plugin_entries.push({
               plugin: pluginName,
@@ -527,7 +530,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             return
           }
 
-          // -- Tier filter (D-21, D-22): coarser gate than staleness --
+          // -- Tier filter: coarser gate than staleness ---------------
           if (ev.reason === 'min_tier') {
             plugin_entries.push({
               plugin: pluginName,
@@ -597,7 +600,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             return
           }
 
-          // -- Side-effect approval gate (D-01, D-02, INTG-02, INTG-03) --
+          // -- Side-effect approval gate ---------------------------------
           // The run log names the specific effects; the board event does not.
           const unapprovedElapsed = Date.now() - entryStart
           plugin_entries.push({
@@ -730,7 +733,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     engineStatus = 'partial'
   }
 
-  // -- Tier-based task mutations (D-05, D-07) --
+  // -- Tier-based task mutations ---------------
   if (currentTier === 'suspended') {
     // Soft-archive info-severity tasks that aren't already archived
     for (const task of state.task_aging) {
@@ -739,14 +742,14 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       }
     }
   } else if (currentTier === 'degraded' || currentTier === 'extended') {
-    // Auto-defer info-severity tasks (D-05): critical + warning stay active
+    // Auto-defer info-severity tasks: critical + warning stay active
     const now = new Date().toISOString()
     const existingDeferralIds = new Set(state.deferrals.map(d => d.task_id))
     for (const task of state.task_aging) {
       if (task.severity === 'info' && !existingDeferralIds.has(task.task_id) && !task.archived_at) {
         state.deferrals.push({
           task_id: task.task_id,
-          reason: `Auto-deferred: ${currentTier} tier (D-05)`,
+          reason: `Auto-deferred: ${currentTier} tier`,
           deferred_at: now,
           expires_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
         })
@@ -812,7 +815,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // 10. Emit run_completed event
   await emitRunCompleted(run_id, engineStatus, eventsPath)
 
-  // 11. D-13: fire onRunFailure hook exactly once if the run did not complete
+  // 11. Fire onRunFailure exactly once if the run did not complete
   // cleanly. 'partial' covers any failed/gated plugin; 'interrupted' covers
   // non-terminating stops. Success path does not invoke the hook.
   if (onRunFailure && engineStatus !== 'complete') {
@@ -845,7 +848,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 // -----------------------------------------------------------------------
 
 /**
- * D-22: `loadPluginManifests` reports what it could not load instead of
+ * `loadPluginManifests` reports what it could not load instead of
  * discarding it. A broken plugin used to vanish inside a bare `catch {}`,
  * which made an incomplete due-set indistinguishable from a complete one.
  */
@@ -868,7 +871,7 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
     entries.map(async (entry) => {
       const manifestPath = join(pluginsDir, entry, 'manifest.ts')
       try {
-        // D-13: import() needs a file:// URL, not a bare absolute path.
+        // import() needs a file:// URL, not a bare absolute path.
         const mod = await import(pathToFileURL(manifestPath).href)
         if (mod.manifest) {
           plugins.set(entry, mod.manifest as PluginManifest)
@@ -885,7 +888,7 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
   // leak into the byte-identity guarantee `warpline plan` has to make.
   failures.sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0))
 
-  // Phase 112-08: warn on unresolved dependencies (hygiene — topoSort silently ignores these today).
+  // Warn on unresolved dependencies — topoSort silently ignores them today.
   // Loaded keys are directory names (what `entries` returned). Manifests also declare their own
   // `name` field; in practice directory and manifest name match, but match against both sets so the
   // warning only fires on genuinely dangling references.
