@@ -44,3 +44,21 @@ carry the reasoning.
    `gh auth refresh -h github.com -s delete_repo`).
 6. First real npm release replaces the 0.0.0 name-stub: flip package.json
    `private`, add files whitelist + repository/bugs fields, delete npm-stub/.
+
+## Predecessor references
+
+No manual grep needed at flip time: `src/__tests__/no-private-planning-refs.test.ts`
+runs on every `bun test` and fails on either class —
+
+  - private deployment names (its API feeds, plugin and skill names), blocked
+    outright, no exceptions;
+  - unresolvable planning identifiers (`D-14`, `T-02-15`, `Phase 121`), which
+    covers this repo's own `.planning/` ids too, since that directory is
+    gitignored and never ships.
+
+The sweep that cleared them is `4a6aca3..7351b2e` (2026-08-20): 271 hits across
+51 files. `SWEEP_BACKLOG` in that test is empty and must stay empty — it is a
+ratchet for a sweep in progress, not a place to admit a new reference.
+
+Note the scope boundary: this cleaned the working tree. The history scrub is
+still tip-only.
