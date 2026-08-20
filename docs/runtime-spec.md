@@ -73,7 +73,7 @@ true` on the result). Enforcement is an `AbortController.signal.addEventListener
 'abort', ...)` plus a `setTimeout`-armed abort that races the handler
 promise.
 
-Timeout vs. retry interaction (D-12 / D-13):
+Timeout vs. retry interaction:
 
 | Outcome                              | `status`    | `retried`                 | `timed_out` |
 |--------------------------------------|-------------|---------------------------|-------------|
@@ -115,7 +115,7 @@ Handlers with real I/O should forward `signal` to their I/O primitives:
 Handlers without real I/O (pure compute, LLM stubs) may ignore the signal.
 The runtime wraps each handler call in a `Promise.race` against a
 signal-aborted fallback so ignorant handlers still honour the timeout /
-cancel clock. This is documented as residual DoS (D-31) and accepted.
+cancel clock. This is documented as residual DoS and accepted.
 
 External abort sources:
 
@@ -190,7 +190,7 @@ per-run (the JSON and log are unlinked together) so no orphaned `.log` files
 accumulate.
 
 Applies to NEW runs only. The 51 pre-existing artifacts from pre-121 engine
-runs are left alone (D-27); a one-shot cleanup is tracked as deferred work.
+runs are left alone; a one-shot cleanup is tracked as deferred work.
 
 ## 7. HTTP / SSE surface (not in this repo)
 
@@ -203,8 +203,7 @@ another process) gets identical semantics.
 
 ## 8. Test Patterns
 
-Per `CLAUDE.md` "bun:test gotchas", fixtures and mocks for plugin runtime
-tests follow two rules:
+Fixtures and mocks for plugin runtime tests follow two rules:
 
 1. NEVER use `mock.module` for plugin registry / engine / invokePlugin
    overrides. It is process-global and leaks across test files. A mock
@@ -212,8 +211,7 @@ tests follow two rules:
    D in the same `bun test` run.
 2. Use `spyOn(obj, 'method')` with describe-level `beforeEach` / `afterEach`
    to set up / tear down mocks. Per-test `spyOn` + `mockRestore()` has
-   leaked between tests in the same describe block (see Phase 116
-   LEARNINGS).
+   leaked between tests in the same describe block.
 
 Pattern:
 
