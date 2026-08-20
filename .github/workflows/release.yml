@@ -35,24 +35,14 @@ jobs:
       # correction path is `npm deprecate` plus a new version number — never an
       # unpublish, and a version number is never reused.
       #
-      # Both conditions are checked before either can exit, so a run that is
-      # wrong in both ways reports both rather than only the first.
-      - name: assert the tag matches the version and the name-holding stub is gone
-        run: |
-          stub=npm-stub
-          version="$(node -p "require('./package.json').version")"
-          tag="${GITHUB_REF_NAME#v}"
-          rc=0
-          if [ "$tag" != "$version" ]; then
-            echo "FAIL: release tag '${GITHUB_REF_NAME}' (version part '${tag}') does not equal package.json version '${version}'" >&2
-            rc=1
-          fi
-          if [ -d "$stub" ]; then
-            echo "FAIL: '${stub}/' is still present at this commit; the directory reserving the bare registry name must be deleted before a real release (see CLAUDE.md)" >&2
-            rc=1
-          fi
-          [ "$rc" -eq 0 ] || exit 1
-          echo "OK: tag '${GITHUB_REF_NAME}' matches version '${version}', and '${stub}/' is absent"
+      # The logic lives in a script rather than inline here so it can be run
+      # without cutting a release. That is the only way to observe the guard
+      # failing, and a guard nobody has watched fail is not a guard.
+      #
+      # The tag is read from the environment, never interpolated into the shell
+      # by the workflow expression syntax.
+      - name: assert the tag matches the version and npm-stub is gone
+        run: bash scripts/assert-release-tag.sh "$GITHUB_REF_NAME"
 
       # Node 24 clears both floors the registry's OIDC publishing requires: it
       # bundles npm 11.x (the npm floor of 11.5.1) and it is above the
