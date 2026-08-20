@@ -2,9 +2,9 @@
  * Wave 0 — JSONL run logger tests (append + 30-day prune)
  *
  * Covers decisions:
- *   D-11: JsonlRunLogger appends structured JSON lines to {logsDir}/runs/{YYYY-MM-DD}.jsonl
- *   D-12: Each line is a valid RunJsonlEvent with ts, run_id, level, event fields
- *   D-13: prune(days) removes JSONL files older than N days; retains newer files
+ *   JsonlRunLogger appends structured JSON lines to {logsDir}/runs/{YYYY-MM-DD}.jsonl
+ *   Each line is a valid RunJsonlEvent with ts, run_id, level, event fields
+ *   prune(days) removes JSONL files older than N days; retains newer files
  *
  * STATUS: RED — `.warpline/shared/jsonl-logger.ts` does not yet exist.
  * Wave 2 Plan 02 Task 3 will create it and turn these green.
@@ -40,7 +40,7 @@ beforeEach(async () => {
   logsDir = join(tmpDir, 'logs')
   await mkdir(logsDir, { recursive: true })
 
-  // Instantiate logger pointing at isolated tmpDir (D-11)
+  // Instantiate logger pointing at isolated tmpDir
   logger = new JsonlRunLogger({ logsDir, runId: TEST_RUN_ID })
 })
 
@@ -52,7 +52,7 @@ afterEach(async () => {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe('JsonlRunLogger — appendEvent (D-11/D-12)', () => {
+describe('JsonlRunLogger — appendEvent', () => {
   test('Test 1: Single appendEvent creates {date}.jsonl with one newline-terminated line', async () => {
     await logger.appendEvent({ level: 'info', event: 'run_started' })
 
@@ -61,7 +61,7 @@ describe('JsonlRunLogger — appendEvent (D-11/D-12)', () => {
 
     const content = await readFile(expectedFile, 'utf8')
 
-    // Must be exactly one line, terminated with \n (D-11)
+    // Must be exactly one line, terminated with \n
     const lines = content.split('\n').filter(l => l.length > 0)
     expect(lines).toHaveLength(1)
 
@@ -88,7 +88,7 @@ describe('JsonlRunLogger — appendEvent (D-11/D-12)', () => {
   })
 
   test('Test 4 (schema): Each event line contains required fields ts, run_id, level, event', async () => {
-    // D-12: RunJsonlEvent schema requires ts, run_id, level, event
+    // RunJsonlEvent schema requires ts, run_id, level, event
     await logger.appendEvent({ level: 'warn', event: 'plugin_skipped', plugin: 'fx-test' })
 
     const expectedFile = join(logsDir, 'runs', `${todayDateString()}.jsonl`)
@@ -97,7 +97,7 @@ describe('JsonlRunLogger — appendEvent (D-11/D-12)', () => {
 
     const event = JSON.parse(lines[0])
 
-    // Required fields per D-12 RunJsonlEvent schema
+    // Required fields per the RunJsonlEvent schema
     expect(typeof event.ts).toBe('string')
     expect(event.ts.length).toBeGreaterThan(0)
     expect(event.run_id).toBe(TEST_RUN_ID)
@@ -106,7 +106,7 @@ describe('JsonlRunLogger — appendEvent (D-11/D-12)', () => {
   })
 })
 
-describe('JsonlRunLogger — prune (D-13)', () => {
+describe('JsonlRunLogger — prune', () => {
   test('Test 3: prune(30) removes files older than 30 days, retains newer files', async () => {
     const runsSubdir = join(logsDir, 'runs')
     await mkdir(runsSubdir, { recursive: true })
