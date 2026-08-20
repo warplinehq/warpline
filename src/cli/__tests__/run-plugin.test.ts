@@ -1,5 +1,5 @@
 /**
- * `warpline run` tests — in-process (D-27), no subprocess.
+ * `warpline run` tests — in-process, no subprocess.
  *
  * `runPlugin(argv, signal)` returns a payload and an exit code instead of
  * printing and exiting, so the whole contract is assertable by calling it.
@@ -18,7 +18,7 @@ import { _setHome } from '../../lib/paths.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
 import { runPlugin } from '../run-plugin.js'
 
-/** The stdout contract the board parses. Order is part of it (T-02-23). */
+/** The stdout contract the board parses. Order is part of it. */
 const PAYLOAD_KEYS = 'ok,error,duration_ms,attempt_count,cancelled,timed_out'
 
 /**
@@ -64,7 +64,7 @@ describe('runPlugin — payload and exit code', () => {
 
     // invokePlugin converts handler throws AND handler failures into failed
     // SkillResults, so exit 0 means "the invocation ran" — `ok` carries the
-    // logical outcome. The file header has documented this since Phase 121 and
+    // logical outcome. The file header has documented this from the start and
     // the board relies on it; see SUMMARY deviation 1.
     const bad = await runPlugin(['nonretryable-fail-plugin', 'run'])
     expect(bad.code).toBe(0)
