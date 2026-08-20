@@ -1,5 +1,5 @@
 /**
- * `warpline plan` builder + entry-point tests — fixture homes, in process (D-27).
+ * `warpline plan` builder + entry-point tests — fixture homes, in process.
  *
  * `createTestHome` is imported across directories rather than re-implemented:
  * one helper means one definition of "a warpline home with every required
@@ -410,14 +410,14 @@ describe('main([plan]) end to end', () => {
  * This is the assertion that makes `plan` worth printing. `buildPlanModel` and
  * `runAdvance` share `evaluatePlugin`, so the two agree *by construction* — but
  * "by construction" is a claim about today's code, and the whole reason the
- * evaluator was extracted (D-18) is that the two used to be separate guard
+ * evaluator was extracted is that the two used to be separate guard
  * chains that drifted by one comparison operator. This test is what makes a
  * future re-divergence a red test instead of a support ticket.
  *
  * ── Two fixture constraints that are load-bearing ──
  *
  * 1. **No plugin may have both a non-empty `side_effects` array and an approval
- *    covering it** (D-20.1). `runAdvance`'s dry-run block sits OUTSIDE
+ *    covering it**. `runAdvance`'s dry-run block sits OUTSIDE
  *    `evaluatePlugin` and skips every side-effecting plugin before the approval
  *    check, so under `dryRun: true` an approved side-effecting plugin is "not
  *    attempted" while `plan` correctly renders it as due-and-approved. That is
@@ -435,7 +435,7 @@ describe('main([plan]) end to end', () => {
  *
  * The whole test routes through `state-manager`'s `_setPaths` seam because
  * `checkTaskLock` reads `activePaths().v2StatePath` — a module global with no
- * override parameter (D-20.2). Without the seam the task-lock guard consults
+ * override parameter. Without the seam the task-lock guard consults
  * live state and the fixture proves nothing. The global is restored in this
  * file's existing `afterAll`.
  *
@@ -492,7 +492,7 @@ describe('plan ≡ what a run would attempt', () => {
    *
    * `min_tier: 'suspended'` on everything except `tier-blocked` reads backwards
    * and is correct — 'suspended' means "runs at any degradation level" and
-   * 'normal' means "only in normal tier" (tier.ts D-22). The state's
+   * 'normal' means "only in normal tier" (see tier.ts). The state's
    * `last_interaction_at` is 3 days stale, so the tier is 'degraded' and only
    * `tier-blocked` is caught by it.
    */
