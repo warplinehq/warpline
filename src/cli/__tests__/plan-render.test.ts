@@ -34,6 +34,8 @@ function notDue(overrides: Partial<NotDueEntry> = {}): NotDueEntry {
     level: 0,
     reason: 'fresh',
     detail: 'within TTL (24h) — last run 12m ago',
+    sideEffects: [],
+    approved: false,
     ...overrides,
   }
 }
@@ -52,17 +54,26 @@ describe('renderPlan', () => {
           due({
             plugin: 'digest-mailer',
             level: 1,
+            sideEffects: ['creates_issue'],
+            approved: false,
+          }),
+        ],
+        notDue: [
+          notDue(),
+          notDue({
+            plugin: 'digest-mailer-blocked',
+            reason: 'unapproved',
+            detail: 'skipped (unapproved): side effects require session approval',
             sideEffects: ['sends_email'],
             approved: false,
           }),
         ],
-        notDue: [notDue()],
       }),
       NOW,
     )
 
     expect(out).toContain('Due (2):')
-    expect(out).toContain('Not due (1):')
+    expect(out).toContain('Not due (2):')
 
     // Declaration order preserved, NOT alphabetical: external_api before writes_db.
     expect(out.indexOf('external_api')).toBeLessThan(out.indexOf('writes_db'))
@@ -73,10 +84,21 @@ describe('renderPlan', () => {
     expect(out).toContain('    external_api: ✓ approved')
     expect(out).toContain('    writes_db: ✓ approved')
     expect(out).toContain('  digest-mailer (level 1)')
-    expect(out).toContain('    sends_email: ⚠ unapproved — would be SKIPPED this run')
+    expect(out).toContain('    creates_issue: ⚠ unapproved — would be SKIPPED this run')
 
     // The not-due section carries the exclusion reason.
     expect(out).toContain('  github-poll — within TTL (24h) — last run 12m ago')
+
+    // The gate-blocked skip lists the effects that blocked it, with the ⚠
+    // marker — that is the only place the marker is reachable from a real
+    // fixture home, since checkApproval is the last guard in the chain.
+    expect(out).toContain(
+      '  digest-mailer-blocked — skipped (unapproved): side effects require session approval',
+    )
+    expect(out).toContain('    sends_email: ⚠ unapproved — would be SKIPPED this run')
+
+    // A fresh skip does NOT list effects — that section is a summary.
+    expect(out).not.toContain('    external_api: ⚠')
   })
 
   test('Test 2: byte identity — two renders of one model are strictly equal and carry no ESC', () => {

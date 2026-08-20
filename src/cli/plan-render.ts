@@ -37,12 +37,22 @@ export interface PlanEntry {
   approved: boolean
 }
 
-/** A plugin the next run would skip, with the reason the evaluator returned. */
+/**
+ * A plugin the next run would skip, with the reason the evaluator returned.
+ *
+ * Carries side effects and approval state for the same reason `PlanEntry`
+ * does: `checkApproval` is the LAST guard in the chain, so a plugin blocked by
+ * the gate is *not due*, and the `⚠ unapproved` marker would be unreachable if
+ * only the due section rendered side effects. The effects are exactly the point
+ * of that skip, so they render beneath it.
+ */
 export interface NotDueEntry {
   plugin: string
   level: number
   reason: NotDueReason
   detail: string
+  sideEffects: string[]
+  approved: boolean
 }
 
 /** The live session grant, as read (never written) from the approval file. */
@@ -106,6 +116,15 @@ function grantLine(grant: GrantState | undefined, now: number): string {
 
 function pluralDirectories(n: number): string {
   return n === 1 ? '1 plugin directory' : `${n} plugin directories`
+}
+
+/**
+ * One line per declared side effect, one indent level under its plugin, in
+ * manifest declaration order. Glyph plus words, never colour (T-02-14).
+ */
+function sideEffectLines(entry: { sideEffects: string[]; approved: boolean }): string[] {
+  const marker = entry.approved ? '✓ approved' : '⚠ unapproved — would be SKIPPED this run'
+  return entry.sideEffects.map((effect) => `${SUB_INDENT}${effect}: ${marker}`)
 }
 
 // ── Renderer ──
@@ -172,12 +191,7 @@ export function renderPlan(model: PlanModel, now: number): string {
         lines.push(`${SUB_INDENT}(no declared side effects)`)
         continue
       }
-      const marker = entry.approved
-        ? '✓ approved'
-        : '⚠ unapproved — would be SKIPPED this run'
-      for (const effect of entry.sideEffects) {
-        lines.push(`${SUB_INDENT}${effect}: ${marker}`)
-      }
+      lines.push(...sideEffectLines(entry))
     }
     lines.push('')
   }
@@ -187,6 +201,9 @@ export function renderPlan(model: PlanModel, now: number): string {
     lines.push('')
     for (const entry of [...model.notDue].sort(byLevelThenName)) {
       lines.push(`${INDENT}${entry.plugin} — ${entry.detail}`)
+      // Only the gate-blocked skip lists its effects: for every other reason
+      // the effects are irrelevant noise, and this section is a summary.
+      if (entry.reason === 'unapproved') lines.push(...sideEffectLines(entry))
     }
     lines.push('')
   }
