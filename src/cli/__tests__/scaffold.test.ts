@@ -16,7 +16,7 @@
  * fails honestly.
  */
 import { describe, test, expect, afterEach } from 'bun:test'
-import { mkdtempSync, existsSync } from 'node:fs'
+import { mkdtempSync, existsSync, lstatSync, readlinkSync, mkdirSync, symlinkSync } from 'node:fs'
 import { readFile, writeFile, mkdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -117,5 +117,54 @@ describe('scaffoldPlugin — generated specifiers', () => {
     expect(result.path).toBe('')
     expect(result.message).toContain('Invalid plugin name')
     expect(existsSync(join(home, 'plugins'))).toBe(false)
+  })
+})
+
+describe('scaffoldPlugin — the home-level warpline symlink (D-09)', () => {
+  const linkPath = (home: string) => join(home, 'node_modules', 'warpline')
+
+  test('creates a symlink at <home>/node_modules/warpline', async () => {
+    const home = freshHome()
+    await scaffoldPlugin('demo')
+    const link = linkPath(home)
+    expect(lstatSync(link).isSymbolicLink()).toBe(true)
+    // It must point at a real directory holding warpline's package.json —
+    // that is what makes `warpline/schemas/*` resolvable from the plugin.
+    expect(existsSync(join(link, 'package.json'))).toBe(true)
+  })
+
+  test('is idempotent — a second scaffold leaves the same target', async () => {
+    const home = freshHome()
+    await scaffoldPlugin('one')
+    const first = readlinkSync(linkPath(home))
+    const second = await scaffoldPlugin('two')
+    expect(second.created).toBe(true)
+    expect(readlinkSync(linkPath(home))).toBe(first)
+  })
+
+  test('heals a dangling symlink instead of throwing', async () => {
+    const home = freshHome()
+    mkdirSync(join(home, 'node_modules'), { recursive: true })
+    symlinkSync(join(home, 'nowhere-at-all'), linkPath(home))
+    expect(existsSync(linkPath(home))).toBe(false) // dangling: existsSync follows
+
+    const result = await scaffoldPlugin('demo')
+    expect(result.created).toBe(true)
+    expect(lstatSync(linkPath(home)).isSymbolicLink()).toBe(true)
+    expect(existsSync(join(linkPath(home), 'package.json'))).toBe(true)
+  })
+
+  test('never replaces a real directory at that path, and says so', async () => {
+    const home = freshHome()
+    const link = linkPath(home)
+    mkdirSync(link, { recursive: true })
+    await writeFile(join(link, 'marker.txt'), 'operator content')
+
+    const result = await scaffoldPlugin('demo')
+    expect(result.created).toBe(true)
+    expect(lstatSync(link).isSymbolicLink()).toBe(false)
+    expect(lstatSync(link).isDirectory()).toBe(true)
+    expect(await readFile(join(link, 'marker.txt'), 'utf8')).toBe('operator content')
+    expect(result.message).toContain('not replaced')
   })
 })
