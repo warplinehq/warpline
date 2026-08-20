@@ -38,7 +38,8 @@
     "test": "bun run build && bun test --timeout 20000",
     "typecheck": "bun run build && tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
-    "prepack": "tsc -p tsconfig.build.json"
+    "prepack": "tsc -p tsconfig.build.json",
+    "docs:generate": "bun run scripts/gen-manifest-table.ts --write"
   },
   "dependencies": {
     "zod": "^4.3.6"

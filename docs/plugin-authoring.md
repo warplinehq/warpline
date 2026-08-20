@@ -1,3 +1,8 @@
+---
+title: Writing a warpline plugin
+diataxis: how-to
+---
+
 # Writing a warpline plugin
 
 ## Before you write anything

@@ -1,3 +1,8 @@
+---
+title: The deterministic / LLM boundary
+diataxis: explanation
+---
+
 # Warpline: the deterministic / LLM boundary
 
 > This document defines which operations are deterministic code and which require LLM judgment.

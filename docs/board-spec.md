@@ -1,4 +1,15 @@
+---
+title: Board spec
+diataxis: reference
+---
+
 # Warpline Board: UI Design Specification
+
+> **Scope.** The board is a repo-only surface at 0.1: `src/cli/board-cli.ts`
+> runs from a clone, but it is not wired into the published `warpline` binary,
+> so `npm i warpline` does not get you these commands. This document specifies
+> the design; treat it as a contract for the implementation in this repo, not
+> as a description of the shipped CLI.
 
 > Design spec for the interactive Ink terminal board (board consumer).
 > Defines interaction patterns, rendering constraints, and state persistence.
@@ -78,13 +89,17 @@ After engine completes background work:
 3. Board re-reads events, merges with acknowledgements
 4. UI re-renders with new items highlighted
 
-## Guardrails 
+## Guardrails
 
-User-configurable via `warpline config`:
-- `max_sends_per_day`: Cap on outreach emails per day
-- `review_gate`: Require approval before any side-effect execution
-- `quiet_hours`: Time window when no notifications/execution
-- Stored in `<home>/preferences.json`
+Stored in `<home>/preferences.json`, validated by `PreferencesSchema`. There is
+no `config` subcommand at 0.1 — edit the file directly; an invalid one fails
+validation on read rather than being silently ignored.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_sends_per_day` | `20` | Cap on side-effecting sends per day |
+| `review_gate` | `true` | Require approval before any side-effect execution |
+| `quiet_hours` | `22:00`–`07:00` | Window in which nothing notifies or executes |
 
 ## Schema References
 

@@ -1,3 +1,8 @@
+---
+title: The [needs-llm] contract
+diataxis: reference
+---
+
 # The `[needs-llm]` contract
 
 Warpline's boundary doctrine (docs/doctrine.md) splits work into deterministic

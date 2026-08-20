@@ -1,3 +1,8 @@
+---
+title: Plugin runtime spec
+diataxis: reference
+---
+
 # Plugin Runtime Spec
 
 > Runtime contract for warpline plugins. Covers the manifest schema
@@ -14,37 +19,43 @@
 ## 1. Manifest Fields
 
 Every plugin under `<home>/plugins/<name>/manifest.ts` exports a value
-validated against `PluginManifestSchema` in `<home>/schemas/plugin-manifest.ts`.
-adds three fields; everything else is pre-121.
+validated against `PluginManifestSchema`, imported from
+`warpline/schemas/plugin-manifest`.
 
-```typescript
-PluginManifestSchema = z.object({
-  // ...existing fields (name, version, description, inputs, outputs,
-  //   capabilities, schedule, autonomy_level, side_effects, ttl_hours,
-  //   dependencies, max_parallelism, min_tier)...
+The table below is generated from that schema by
+`scripts/gen-manifest-table.ts`; CI regenerates it and fails on a diff, so it
+cannot drift from the code. Edit the schema, not the table.
 
-  /** Per-attempt time budget in ms. */
-  timeout_ms: z.number().int().positive().default(60_000),
+<!-- generated: manifest-fields -->
 
-  /** Maximum retry count on retryable failures. Bounded to prevent
-   *  runaway retry loops. Total attempts = 1 + max_retries. */
-  max_retries: z.number().int().min(0).max(10).default(1),
+| Field | Type | Required | Default |
+|---|---|---|---|
+| `name` | string | yes | — |
+| `version` | string | yes | — |
+| `description` | string | yes | — |
+| `inputs` | object | no | `{}` |
+| `outputs` | object | no | `{}` |
+| `capabilities` | string[] | no | `[]` |
+| `schedule` | `on_run` \| `daily` \| `weekly` \| `manual` | no | `"on_run"` |
+| `autonomy_level` | `autonomous` \| `supervised` \| `manual` | yes | — |
+| `side_effects` | (`sends_email` \| `creates_issue` \| `writes_db` \| `external_api` \| `modifies_file`)[] | no | `[]` |
+| `ttl_hours` | number | yes | — |
+| `dependencies` | string[] | no | `[]` |
+| `timeout_ms` | integer | no | `60000` |
+| `max_retries` | integer | no | `1` |
+| `retry_delay_ms` | integer | no | `2000` |
+| `actions` | object | no | — |
+| `max_parallelism` | integer | no | `1` |
+| `min_tier` | `normal` \| `degraded` \| `extended` \| `suspended` | no | `"normal"` |
 
-  /** Base delay in ms between retries. Actual delay uses exponential
-   *  backoff with +/- 25% jitter, capped at 30s. */
-  retry_delay_ms: z.number().int().min(0).max(60_000).default(2000),
+<!-- /generated -->
 
-  /** Optional action registry. Only surfaces in UI hosts when
-   *  non-empty. Zero existing plugins declare it. */
-  actions: z.record(z.string(), z.object({
-    description: z.string(),
-    is_default: z.boolean().optional(),
-  })).optional(),
-})
-```
-
-Every added field carries a default, so an existing manifest stays valid
-without edits.
+Every field with a default is optional in a manifest file, so adding one never
+invalidates an existing plugin. `ttl_hours` must be positive — zero or negative
+would disable caching rather than mean "always fresh". `max_retries` is capped
+at 10 and `retry_delay_ms` at 60s; the backoff that uses them is described in
+§2. `actions` is an optional registry that only surfaces in a host UI when
+non-empty.
 
 ## 2. Retry Policy
 

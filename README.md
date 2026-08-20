@@ -40,33 +40,64 @@ Read the full doctrine: [docs/doctrine.md](docs/doctrine.md).
 
 ## Quickstart
 
-Requires [bun](https://bun.sh) ≥ 1.3.
-v0.1 supports POSIX systems (macOS, Linux); Windows is untested and unclaimed.
-
 ```bash
-bun install
-bun run test                  # build, then the full suite
-
-# Create a home for your installation (or set WARPLINE_HOME)
-mkdir -p .warpline/plugins
-
-# Scaffold a plugin
-bun run src/cli/scaffold.ts my-plugin
-
-# Run one plugin
-bun run src/cli/run-plugin.ts my-plugin default
-
-# Run everything that is due (TTL + schedule + tier aware)
-# → engine API: runAdvance() in src/runtime/engine.ts
-
-# Board
-bun run src/cli/board-cli.ts status
-bun run src/cli/board-cli.ts tasks
+npm i warpline          # or: bun add warpline
+npx warpline --help
 ```
+
+Runs on Node ≥ 22.18 or Bun ≥ 1.3 — Node alone is enough, Bun is not required
+to use warpline. v0.1 supports POSIX systems (macOS, Linux); Windows is
+untested and unclaimed.
 
 Every file warpline reads or writes lives under one home directory: the
 `WARPLINE_HOME` env var, else the nearest ancestor `.warpline/` directory,
 else `<cwd>/.warpline`.
+
+```bash
+# Scaffold a plugin — also prepares the home directory
+npx warpline scaffold my-plugin
+
+# Preview what the next engine advance would do. Executes nothing.
+npx warpline plan
+
+# Invoke one plugin handler directly
+npx warpline run my-plugin default
+
+# Grant / clear a side-effect approval for this session
+npx warpline approve my-plugin
+npx warpline revoke
+```
+
+Those five subcommands are the whole CLI surface at 0.1. Running everything
+that is due on a schedule is a library call, not a command — `runAdvance()`
+from the package root:
+
+```typescript
+import { runAdvance } from 'warpline'
+
+const result = await runAdvance()
+```
+
+## From source
+
+Cloning gets you the test suite and the board, neither of which ships in the
+package:
+
+```bash
+git clone https://github.com/warplinehq/warpline
+cd warpline
+bun install
+bun run test                  # builds, then runs the full suite
+```
+
+Requires [bun](https://bun.sh) ≥ 1.3 — this is the one place it is genuinely
+required, because the suite is written against `bun:test`.
+
+```bash
+# The board — a repo-only surface at 0.1, not wired into the published bin
+bun run src/cli/board-cli.ts status
+bun run src/cli/board-cli.ts tasks
+```
 
 ## Writing a plugin
 
@@ -99,7 +130,10 @@ Nowhere in this repo — that is the point. Plugins that reach a judgment step
 return a `[needs-llm]` handoff (mapped to the `delegated` run status, never
 retried). An orchestrating Claude Code session consumes those handoffs via
 companion skills; a template lives in
-[skills/needs-llm-template/](skills/needs-llm-template/). Side effects that
+[skills/needs-llm-template/](https://github.com/warplinehq/warpline/tree/main/skills/needs-llm-template).
+That directory is deliberately not shipped in the package, so the link is
+absolute — it resolves the same from npm, from GitHub, and from node_modules.
+Side effects that
 follow from judgment work still go through the approval gate.
 
 ## Docs
