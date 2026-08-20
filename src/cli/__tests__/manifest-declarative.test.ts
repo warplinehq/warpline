@@ -55,9 +55,88 @@ async function fixture(name: string, source: string): Promise<string> {
 // The lint
 // ---------------------------------------------------------------------------
 
+/** Remove comments without being fooled by `//` inside a string literal. */
+function stripComments(source: string): string {
+  let out = ''
+  let i = 0
+  while (i < source.length) {
+    const c = source[i] as string
+    if (c === '/' && source[i + 1] === '/') {
+      while (i < source.length && source[i] !== '\n') i++
+      continue
+    }
+    if (c === '/' && source[i + 1] === '*') {
+      const end = source.indexOf('*/', i + 2)
+      // Keep the newlines a block comment spanned so line numbers stay honest.
+      const skipped = source.slice(i, end < 0 ? source.length : end + 2)
+      out += skipped.replace(/[^\n]/g, '')
+      i = end < 0 ? source.length : end + 2
+      continue
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      out += c
+      i++
+      while (i < source.length) {
+        const d = source[i] as string
+        out += d
+        i++
+        if (d === '\\') {
+          if (i < source.length) out += source[i++] as string
+          continue
+        }
+        if (d === c) break
+      }
+      continue
+    }
+    out += c
+    i++
+  }
+  return out
+}
+
+const DEPTH: Record<string, number> = { '(': 1, '[': 1, '{': 1, ')': -1, ']': -1, '}': -1 }
+
+/**
+ * The first line of every top-level statement, in source order.
+ *
+ * ponytail: line-oriented, not an AST parse — four real subjects and three
+ * fixtures do not justify a parser, and this phase adds no dependency. It is
+ * string- and bracket-aware, so parens and braces inside description strings
+ * are safe. Known ceiling: a MULTI-LINE template literal at depth 0 would
+ * confuse the per-line string reset. No manifest has one, and one appearing is
+ * itself a violation this lint should flag. Reach for ts.createSourceFile if
+ * that ever stops being true.
+ */
+function topLevelStatements(source: string): string[] {
+  const heads: string[] = []
+  let depth = 0
+  for (const raw of stripComments(source).split('\n')) {
+    const line = raw.trim()
+    if (line !== '' && depth === 0) heads.push(line)
+
+    let quote: string | null = null
+    for (let i = 0; i < raw.length; i++) {
+      const c = raw[i] as string
+      if (quote !== null) {
+        if (c === '\\') i++
+        else if (c === quote) quote = null
+        continue
+      }
+      if (c === '"' || c === "'" || c === '`') {
+        quote = c
+        continue
+      }
+      depth += DEPTH[c] ?? 0
+    }
+  }
+  return heads
+}
+
 /** Lines that are neither an import nor the manifest export. */
-function declarativeViolations(_source: string): string[] {
-  throw new Error('declarativeViolations: unimplemented')
+function declarativeViolations(source: string): string[] {
+  return topLevelStatements(source).filter(
+    (line) => !/^import\b/.test(line) && !/^export const manifest\b/.test(line),
+  )
 }
 
 // ---------------------------------------------------------------------------
