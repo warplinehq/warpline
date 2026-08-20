@@ -56,26 +56,9 @@ export function makeSkillError(
 }
 
 /**
- * Brief action schema for intel-brief skill output.
- * Each action represents a strategic recommendation that flows into the task board
- * as a human-gated item with stable `intel/strategy/{slug}` IDs.
- */
-export const BriefActionSchema = z.object({
-  task_id: z.string(),
-  description: z.string(),
-  tier: z.enum(['immediate', 'medium', 'long']),
-  detail: z.string(),
-  severity: z.enum(['critical', 'warning', 'info']),
-  source_references: z.array(z.string()),
-})
-export type BriefAction = z.infer<typeof BriefActionSchema>
-
-/**
  * Skill result contract.
  * Every sub-skill must emit this structure in a ```skill-result fenced block.
  * Warpline validates on ingestion via SkillResultSchema.safeParse().
- *
- * See: .warpline/intel/references/skill-contracts.md
  */
 export const SkillResultSchema = z.object({
   status: z.enum(['success', 'partial', 'failed', 'skipped']),
@@ -86,12 +69,10 @@ export const SkillResultSchema = z.object({
   summary: z.string(),
   artifacts_produced: z.array(z.string()).default([]),
   schema_version: z.number().default(1),
-  /** Whether the side effects of this result can be undone (D-14). */
+  /** Whether the side effects of this result can be undone. */
   reversible: z.boolean().optional(),
   /** Human-readable instruction for undoing the side effects, if reversible. */
   undo_instruction: z.string().optional(),
-  /** Strategic actions emitted by intel-brief skill. Capped at 15 per D-03. */
-  actions: z.array(BriefActionSchema).max(15).optional(),
 })
 
 export type SkillResult = z.infer<typeof SkillResultSchema>

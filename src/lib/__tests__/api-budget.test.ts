@@ -5,16 +5,22 @@ import type { BudgetSnapshot } from '../api-budget.js'
 describe('ApiBudgetTracker', () => {
   let tracker: ApiBudgetTracker
 
+  // Explicit config rather than DEFAULT_BUDGETS: these tests exercise tracking
+  // behaviour, not the shipped default roster (which has its own describe below
+  // and is deliberately near-empty).
   beforeEach(() => {
-    tracker = new ApiBudgetTracker()
+    tracker = new ApiBudgetTracker([
+      { domain: 'metrics-api', max_per_window: 600, window_seconds: 3600 },
+      { domain: 'github', max_per_window: 5000, window_seconds: 3600 },
+    ])
   })
 
   describe('recordCalls', () => {
-    test('recordCalls("posthog", 5) adds 5 to posthog domain count', () => {
-      tracker.recordCalls('posthog', 5)
+    test('recordCalls("metrics-api", 5) adds 5 to the metrics-api domain count', () => {
+      tracker.recordCalls('metrics-api', 5)
       const snap = tracker.snapshot()
-      const posthog = snap.domains.find(d => d.domain === 'posthog')
-      expect(posthog?.calls_this_window).toBe(5)
+      const metricsApi = snap.domains.find(d => d.domain === 'metrics-api')
+      expect(metricsApi?.calls_this_window).toBe(5)
     })
 
     test('recordCalls("github", 3) adds 3 to github domain count', () => {
@@ -25,29 +31,29 @@ describe('ApiBudgetTracker', () => {
     })
 
     test('multiple recordCalls accumulate for same domain', () => {
-      tracker.recordCalls('posthog', 5)
-      tracker.recordCalls('posthog', 10)
+      tracker.recordCalls('metrics-api', 5)
+      tracker.recordCalls('metrics-api', 10)
       const snap = tracker.snapshot()
-      const posthog = snap.domains.find(d => d.domain === 'posthog')
-      expect(posthog?.calls_this_window).toBe(15)
+      const metricsApi = snap.domains.find(d => d.domain === 'metrics-api')
+      expect(metricsApi?.calls_this_window).toBe(15)
     })
   })
 
   describe('snapshot', () => {
     test('snapshot() returns all domain counts + remaining headroom', () => {
-      tracker.recordCalls('posthog', 12)
+      tracker.recordCalls('metrics-api', 12)
       tracker.recordCalls('github', 45)
       const snap = tracker.snapshot()
       expect(snap.domains.length).toBeGreaterThan(0)
-      const posthog = snap.domains.find(d => d.domain === 'posthog')
-      expect(posthog?.calls_this_window).toBe(12)
-      expect(posthog?.remaining).toBe(600 - 12)
+      const metricsApi = snap.domains.find(d => d.domain === 'metrics-api')
+      expect(metricsApi?.calls_this_window).toBe(12)
+      expect(metricsApi?.remaining).toBe(600 - 12)
     })
 
-    test('snapshot() for posthog shows max_per_window of 600', () => {
+    test('snapshot() for metrics-api shows max_per_window of 600', () => {
       const snap = tracker.snapshot()
-      const posthog = snap.domains.find(d => d.domain === 'posthog')
-      expect(posthog?.max_per_window).toBe(600)
+      const metricsApi = snap.domains.find(d => d.domain === 'metrics-api')
+      expect(metricsApi?.max_per_window).toBe(600)
     })
 
     test('snapshot() for github shows max_per_window of 5000', () => {
@@ -64,28 +70,28 @@ describe('ApiBudgetTracker', () => {
 
   describe('recordPluginCalls', () => {
     test('recordPluginCalls attributes calls to plugin and increments domain total', () => {
-      tracker.recordPluginCalls('hypothesis-gen', 'posthog', 2)
+      tracker.recordPluginCalls('trend-watch', 'metrics-api', 2)
       const snap = tracker.snapshot()
-      const posthog = snap.domains.find(d => d.domain === 'posthog')
-      expect(posthog?.calls_this_window).toBe(2)
-      expect(posthog?.by_plugin['hypothesis-gen']).toBe(2)
+      const metricsApi = snap.domains.find(d => d.domain === 'metrics-api')
+      expect(metricsApi?.calls_this_window).toBe(2)
+      expect(metricsApi?.by_plugin['trend-watch']).toBe(2)
     })
 
     test('recordPluginCalls accumulates per-plugin across multiple calls', () => {
-      tracker.recordPluginCalls('hypothesis-gen', 'posthog', 2)
-      tracker.recordPluginCalls('result-checker', 'posthog', 3)
-      tracker.recordPluginCalls('hypothesis-gen', 'posthog', 1)
+      tracker.recordPluginCalls('trend-watch', 'metrics-api', 2)
+      tracker.recordPluginCalls('digest-build', 'metrics-api', 3)
+      tracker.recordPluginCalls('trend-watch', 'metrics-api', 1)
       const snap = tracker.snapshot()
-      const posthog = snap.domains.find(d => d.domain === 'posthog')
-      expect(posthog?.calls_this_window).toBe(6)
-      expect(posthog?.by_plugin['hypothesis-gen']).toBe(3)
-      expect(posthog?.by_plugin['result-checker']).toBe(3)
+      const metricsApi = snap.domains.find(d => d.domain === 'metrics-api')
+      expect(metricsApi?.calls_this_window).toBe(6)
+      expect(metricsApi?.by_plugin['trend-watch']).toBe(3)
+      expect(metricsApi?.by_plugin['digest-build']).toBe(3)
     })
   })
 
   describe('reset', () => {
     test('reset() zeros all counters', () => {
-      tracker.recordCalls('posthog', 100)
+      tracker.recordCalls('metrics-api', 100)
       tracker.recordCalls('github', 200)
       tracker.reset()
       const snap = tracker.snapshot()
@@ -99,8 +105,8 @@ describe('ApiBudgetTracker', () => {
 
   describe('serialisation', () => {
     test('BudgetSnapshot serialises to/from JSON for state persistence', () => {
-      tracker.recordCalls('posthog', 12)
-      tracker.recordPluginCalls('hypothesis-gen', 'github', 5)
+      tracker.recordCalls('metrics-api', 12)
+      tracker.recordPluginCalls('trend-watch', 'github', 5)
       const snap = tracker.snapshot()
 
       // Serialise to JSON and back
@@ -111,14 +117,14 @@ describe('ApiBudgetTracker', () => {
       const restored = ApiBudgetTracker.fromSnapshot(parsed)
       const restoredSnap = restored.snapshot()
 
-      const posthog = restoredSnap.domains.find(d => d.domain === 'posthog')
-      expect(posthog?.calls_this_window).toBe(12)
+      const metricsApi = restoredSnap.domains.find(d => d.domain === 'metrics-api')
+      expect(metricsApi?.calls_this_window).toBe(12)
       const github = restoredSnap.domains.find(d => d.domain === 'github')
-      expect(github?.by_plugin['hypothesis-gen']).toBe(5)
+      expect(github?.by_plugin['trend-watch']).toBe(5)
     })
 
     test('toJSON() is alias for snapshot()', () => {
-      tracker.recordCalls('posthog', 7)
+      tracker.recordCalls('metrics-api', 7)
       const snap = tracker.snapshot()
       const json = tracker.toJSON()
       expect(json).toEqual(snap)
@@ -126,14 +132,13 @@ describe('ApiBudgetTracker', () => {
   })
 
   describe('DEFAULT_BUDGETS', () => {
-    test('DEFAULT_BUDGETS contains posthog with max 600', () => {
-      const posthog = DEFAULT_BUDGETS.find(b => b.domain === 'posthog')
-      expect(posthog?.max_per_window).toBe(600)
-    })
-
-    test('DEFAULT_BUDGETS contains github with max 5000', () => {
+    test('contains github with max 5000', () => {
       const github = DEFAULT_BUDGETS.find(b => b.domain === 'github')
       expect(github?.max_per_window).toBe(5000)
+    })
+
+    test('stays minimal — warpline does not guess which APIs a plugin calls', () => {
+      expect(DEFAULT_BUDGETS.map(b => b.domain)).toEqual(['github'])
     })
   })
 })

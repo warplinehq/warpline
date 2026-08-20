@@ -4,9 +4,11 @@
  * Tracks call counts per API domain and per plugin, persists state to
  * .warpline/state/api-budget.json, and exposes headroom for `warpline status --budget`.
  *
- * Security (T-87-02): Logs warning when domain approaches max_per_window.
- * No automatic blocking — manual CLI visibility only.
- * Security (T-87-03): fromSnapshot falls back to defaults on corrupt input.
+ * Warn-only by design: the tracker logs when a domain approaches
+ * max_per_window but never blocks a call. Enforcement belongs to whichever
+ * client actually talks to the API — a tracker that blocks would fail closed
+ * on its own bookkeeping error. `fromSnapshot` falls back to defaults rather
+ * than throwing, for the same reason.
  */
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -15,12 +17,14 @@ export interface DomainBudgetConfig {
   domain: string
   max_per_window: number
   /**
-   * Length of the budget window in seconds — the authoritative field (D-13).
-   * Replaces the old hours-only `window_hours`, which could not express the
-   * Companies House 600-per-5-MINUTES limit (the prior encoding was 60× wrong).
+   * Length of the budget window in seconds — the authoritative field.
+   * Seconds rather than hours because sub-hour windows are common (a
+   * 600-per-5-minutes limit is not expressible in whole hours, and rounding
+   * it to one overstates headroom by 12×).
    */
   window_seconds: number
-  /** @deprecated legacy hours field; retained only to read pre-D-13 snapshots. */
+  /** @deprecated legacy hours field; read-only, for snapshots written before
+   *  `window_seconds` existed. Never written. */
   window_hours?: number
 }
 
@@ -28,9 +32,9 @@ export interface DomainSnapshot {
   domain: string
   calls_this_window: number
   max_per_window: number
-  /** Authoritative window length in seconds (D-13). */
+  /** Authoritative window length in seconds. */
   window_seconds: number
-  /** @deprecated legacy hours field; retained only to read pre-D-13 snapshots. */
+  /** @deprecated legacy hours field; read-only. See DomainBudgetConfig. */
   window_hours?: number
   remaining: number
   by_plugin: Record<string, number>
@@ -43,15 +47,17 @@ export interface BudgetSnapshot {
 
 // ── Default domain budgets ─────────────────────────────────────────────────
 
+/**
+ * Seed budgets. Deliberately minimal: warpline knows nothing about which APIs
+ * your plugins call, so shipping a roster of guesses would encode someone
+ * else's deployment as everyone's default. `github` is here because the
+ * bundled example plugin calls it and its published limit is stable.
+ *
+ * Pass your own list to the constructor for anything else — unknown domains
+ * are also auto-created on first use with conservative defaults.
+ */
 export const DEFAULT_BUDGETS: DomainBudgetConfig[] = [
-  { domain: 'posthog', max_per_window: 600, window_seconds: 3600 },
   { domain: 'github', max_per_window: 5000, window_seconds: 3600 },
-  // D-13: real Companies House limit is 600 requests per 5 MINUTES. The prior
-  // encoding `window_hours: 5` expressed 600 / 5 HOURS — a 60× overstatement of
-  // headroom. Enforcement lives in ch-client.ts; this tracker is warn-only.
-  { domain: 'companies-house', max_per_window: 600, window_seconds: 300 },
-  { domain: 'epc', max_per_window: 500, window_seconds: 3600 },
-  { domain: 'supabase', max_per_window: 1000, window_seconds: 3600 },
 ]
 
 // ── Internal state ─────────────────────────────────────────────────────────
@@ -130,7 +136,7 @@ export class ApiBudgetTracker {
 
   /**
    * Restore a tracker from a persisted BudgetSnapshot.
-   * Falls back to defaults if snapshot is malformed (T-87-03).
+   * Falls back to defaults if the snapshot is malformed.
    */
   static fromSnapshot(snap: BudgetSnapshot): ApiBudgetTracker {
     try {
@@ -138,9 +144,9 @@ export class ApiBudgetTracker {
       const defaultMap = new Map(DEFAULT_BUDGETS.map(b => [b.domain, b]))
       const configs: DomainBudgetConfig[] = snap.domains.map(d => {
         const def = defaultMap.get(d.domain)
-        // D-13 back-compat: prefer window_seconds; fall back to a legacy
-        // window_hours snapshot (×3600) so pre-D-13 persisted state still loads
-        // without a silent semantic flip; finally the default.
+        // Prefer window_seconds; fall back to a legacy window_hours snapshot
+        // (×3600) so older persisted state still loads without a silent
+        // semantic flip; finally the default.
         const window_seconds =
           d.window_seconds ??
           (d.window_hours != null ? d.window_hours * 3600 : undefined) ??
@@ -174,7 +180,7 @@ export class ApiBudgetTracker {
 
       return tracker
     } catch {
-      // Fallback: return fresh tracker with defaults (T-87-03)
+      // Fallback: return a fresh tracker with defaults.
       return new ApiBudgetTracker()
     }
   }
