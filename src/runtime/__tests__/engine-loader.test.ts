@@ -10,11 +10,13 @@
  * Fixtures use the zero-import `export const manifest = {…}` form so a fixture
  * never depends on module resolution from a temp directory.
  */
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { describe, test, expect, beforeEach, afterEach, setSystemTime } from 'bun:test'
+import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { loadPluginManifests } from '../engine.js'
+import { loadPluginManifests, evaluatePlugin } from '../engine.js'
+import type { EvalContext } from '../engine.js'
+import { defaultEngineState } from '../../schemas/engine-state.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 function makeManifest(name: string, overrides: Partial<PluginManifest> = {}): PluginManifest {
@@ -65,6 +67,9 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  // setSystemTime is process-global — reset unconditionally, or a frozen clock
+  // leaks into sibling files in the same bun process.
+  setSystemTime()
   await rm(root, { recursive: true, force: true })
 })
 
@@ -117,5 +122,129 @@ describe('loadPluginManifests — per-plugin load failures (D-22)', () => {
 
     expect(manifests.size).toBe(0)
     expect(failures).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// evaluatePlugin (D-18/D-19/D-20)
+// ---------------------------------------------------------------------------
+
+function makeCtx(overrides: Partial<EvalContext> = {}): EvalContext {
+  return {
+    currentTier: 'normal',
+    headless: false,
+    force: false,
+    state: defaultEngineState(),
+    approvalPath: join(root, 'no-such-approval'),
+    ...overrides,
+  }
+}
+
+/** Every file under `dir`, sorted — the purity snapshot. */
+async function listTree(dir: string): Promise<string[]> {
+  const entries = await readdir(dir, { recursive: true, withFileTypes: true })
+  return entries
+    .filter((e) => e.isFile())
+    .map((e) => join(e.parentPath, e.name))
+    .sort()
+}
+
+describe('evaluatePlugin — pure, clock-injected due-ness (D-18)', () => {
+  test('Test 1: a schedule outside the profile tier is not due', async () => {
+    const manifest = makeManifest('fx-weekly', { schedule: 'weekly' })
+    const ctx = makeCtx({
+      profile: 'daily',
+      allowedSchedules: new Set(['on_run', 'daily']),
+    })
+
+    const result = await evaluatePlugin('fx-weekly', manifest, ctx, Date.now())
+
+    expect(result.due).toBe(false)
+    expect(result.due === false && result.reason).toBe('profile_schedule')
+    expect(result.due === false && result.detail).toContain('weekly')
+  })
+
+  test('Test 2: a plugin below the current tier is not due', async () => {
+    const manifest = makeManifest('fx-normal', { min_tier: 'normal' })
+    const ctx = makeCtx({ currentTier: 'degraded' })
+
+    const result = await evaluatePlugin('fx-normal', manifest, ctx, Date.now())
+
+    expect(result.due === false && result.reason).toBe('min_tier')
+  })
+
+  test('Test 3: headless bypasses supervised; manual is never due', async () => {
+    const supervised = await evaluatePlugin(
+      'fx-supervised',
+      makeManifest('fx-supervised', { autonomy_level: 'supervised' }),
+      makeCtx({ headless: true }),
+      Date.now(),
+    )
+    expect(supervised.due === false && supervised.reason).toBe('headless_supervised')
+
+    const manual = await evaluatePlugin(
+      'fx-manual',
+      makeManifest('fx-manual', { autonomy_level: 'manual' }),
+      makeCtx(),
+      Date.now(),
+    )
+    expect(manual.due === false && manual.reason).toBe('manual')
+  })
+
+  test('Test 4 (adjacency): a last run exactly ttl_hours ago is stale, so the plugin is due', async () => {
+    // The freshness comparison is `now - lastRunMs < ttlMs` — strict, so
+    // exactly-at-TTL is NOT fresh. Asserted through evaluatePlugin rather than
+    // by restating the operator: a divergence here would make `plan` a lie.
+    const now = Date.parse('2026-08-20T12:00:00.000Z')
+    setSystemTime(new Date(now))
+
+    const manifest = makeManifest('fx-ttl', { ttl_hours: 24 })
+    const state = defaultEngineState()
+    state.plugin_runs['fx-ttl'] = {
+      last_run_at: new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+      status: 'success',
+    }
+
+    const result = await evaluatePlugin('fx-ttl', manifest, makeCtx({ state }), now)
+
+    expect(result.due).toBe(true)
+  })
+
+  test('Test 5 (adjacency): a grant expiring exactly at now is still approved, so the plugin is due', async () => {
+    // checkApproval's comparison is `Date.now() > expires_at` — strict, so
+    // exactly-at-expiry is still approved. The frozen clock is what makes this
+    // pin the operator direction rather than merely "expires in the future".
+    const now = Date.parse('2026-08-20T12:00:00.000Z')
+    setSystemTime(new Date(now))
+
+    const approvalPath = join(root, '.session-approval')
+    await writeFile(
+      approvalPath,
+      JSON.stringify({
+        granted_at: new Date(now - 1000).toISOString(),
+        expires_at: new Date(now).toISOString(),
+        scopes: ['fx-writer'],
+      }),
+    )
+
+    const manifest = makeManifest('fx-writer', { side_effects: ['writes_db'] })
+
+    const result = await evaluatePlugin('fx-writer', manifest, makeCtx({ approvalPath }), now)
+
+    expect(result.due).toBe(true)
+  })
+
+  test('Test 6 (purity): the same inputs and the same now give deeply equal results and write nothing', async () => {
+    const manifest = makeManifest('fx-pure')
+    const ctx = makeCtx()
+    const now = Date.parse('2026-08-20T12:00:00.000Z')
+
+    const before = await listTree(root)
+    const first = await evaluatePlugin('fx-pure', manifest, ctx, now)
+    const second = await evaluatePlugin('fx-pure', manifest, ctx, now)
+    const after = await listTree(root)
+
+    expect(first).toEqual(second)
+    expect(after).toEqual(before)
   })
 })
