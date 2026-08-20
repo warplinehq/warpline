@@ -1,11 +1,19 @@
 /**
  * `warpline revoke` — clear the current session approval.
  *
- * STUB. The signature below is the final one; plan 02-07 replaces the body
- * with the `revokeApproval` call behind an unchanged
- * `run(argv): Promise<number>`.
+ * Deliberately the whole command: `revokeApproval` already swallows a missing
+ * file, and a revoke that is a no-op is still the state the operator asked for.
+ * There is nothing to validate — revoking only ever narrows what may run, so
+ * the failure direction is safe and no confirmation is warranted.
+ *
+ * Never terminates the process (D-14) — it returns a code to the dispatcher.
  */
+import { revokeApproval } from '../runtime/approval-gate.js'
+import { sessionApprovalPath } from '../lib/paths.js'
+
 export async function run(_argv: string[]): Promise<number> {
-  process.stderr.write('warpline revoke: not implemented in this build\n')
-  return 1
+  const approvalPath = sessionApprovalPath()
+  await revokeApproval(approvalPath)
+  process.stdout.write(`Session approval cleared (${approvalPath}).\n`)
+  return 0
 }
