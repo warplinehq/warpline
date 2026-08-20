@@ -1,6 +1,6 @@
 /**
- * The engine's read-only seam: loader failure reporting (D-22), the extracted
- * evaluatePlugin (D-18/D-19/D-20), and the assertion that the extraction did
+ * The engine's read-only seam: loader failure reporting, the extracted
+ * evaluatePlugin, and the assertion that the extraction did
  * not change what a run skips.
  *
  * The loader used to swallow every manifest import error in a bare `catch {}`,
@@ -76,7 +76,7 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
-describe('loadPluginManifests — per-plugin load failures (D-22)', () => {
+describe('loadPluginManifests — per-plugin load failures', () => {
   test('Test 1: a broken manifest is reported in failures with a non-empty error', async () => {
     await writeValidPlugin('fx-good')
     await writeBrokenPlugin('fx-broken')
@@ -129,7 +129,7 @@ describe('loadPluginManifests — per-plugin load failures (D-22)', () => {
 })
 
 // ---------------------------------------------------------------------------
-// evaluatePlugin (D-18/D-19/D-20)
+// evaluatePlugin
 // ---------------------------------------------------------------------------
 
 function makeCtx(overrides: Partial<EvalContext> = {}): EvalContext {
@@ -152,7 +152,7 @@ async function listTree(dir: string): Promise<string[]> {
     .sort()
 }
 
-describe('evaluatePlugin — pure, clock-injected due-ness (D-18)', () => {
+describe('evaluatePlugin — pure, clock-injected due-ness', () => {
   test('Test 1: a schedule outside the profile tier is not due', async () => {
     const manifest = makeManifest('fx-weekly', { schedule: 'weekly' })
     const ctx = makeCtx({
@@ -281,7 +281,7 @@ async function writeRunnablePlugin(manifest: PluginManifest): Promise<void> {
 describe('evaluatePlugin agrees with the run it was extracted from', () => {
   test('the set runAdvance records as skipped equals the set evaluatePlugin calls not-due', async () => {
     // No plugin here declares side effects: the dry-run block is deliberately
-    // outside the evaluator (D-20.1), so an approved side-effecting plugin
+    // outside the evaluator, so an approved side-effecting plugin
     // would make the two disagree by design rather than by defect.
     const manifests = [
       makeManifest('fx-due', { schedule: 'on_run' }),
