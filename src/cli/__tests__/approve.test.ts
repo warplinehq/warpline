@@ -1,5 +1,5 @@
 /**
- * `warpline approve` / `warpline revoke` — in-process CLI tests (D-27).
+ * `warpline approve` / `warpline revoke` — in-process CLI tests.
  *
  * Both subcommands resolve their paths through `src/lib/paths.ts` accessors,
  * so `_setHome()` is the whole injection story: no argument plumbing, no
