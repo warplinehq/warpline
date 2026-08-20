@@ -163,7 +163,7 @@ export async function readEngineState(statePath: string): Promise<EngineState> {
 }
 
 /**
- * Read engine state with the corrupt-file backup suppressed (D-20.3).
+ * Read engine state with the corrupt-file backup suppressed.
  *
  * The backup is a WRITE on a read path, which `warpline plan` cannot afford:
  * `plan` is a preview, and an operator whose state file is corrupt must not
