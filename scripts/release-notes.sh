@@ -63,6 +63,25 @@ fi
 # appear as noise.
 subjects() { git log --no-merges --reverse --pretty=%s "$RANGE"; }
 
+# Subjects already printed under Breaking changes, so a type section can drop
+# them. The `!` form needs no help — its `!` sits where `section`'s regex wants
+# a colon, so `feat!:` never matches `^feat(\([^)]*\))?: ` in the first place.
+# A footer-only breaking change is the case that does: its subject is an
+# ordinary `refactor:`/`fix:` with nothing to exclude it, so it was printed
+# under BREAKING and then again under its own type.
+BREAKING_SUBJECTS=$(git log --no-merges --reverse --pretty=%s --grep='^BREAKING CHANGE:' "$RANGE")
+
+# `grep -vFx` with a multi-line pattern treats each line as one fixed
+# whole-line string. `|| true` because grep exits 1 when it filters everything
+# out, which is a legitimate empty section and not an error.
+drop_breaking() {
+  if [ -n "$BREAKING_SUBJECTS" ]; then
+    grep -vFx "$BREAKING_SUBJECTS" || true
+  else
+    cat
+  fi
+}
+
 # A section per conventional type. `$1` is the type, `$2` the heading. Breaking
 # subjects are excluded here because they are printed on their own above; a
 # `feat!:` belongs under BREAKING, not under Features as well.
@@ -70,6 +89,7 @@ section() {
   local type="$1" heading="$2" body
   body=$(subjects \
     | grep -E "^${type}(\([^)]*\))?: " \
+    | drop_breaking \
     | sed -E "s/^${type}(\([^)]*\))?: */- /" \
     | awk '!seen[$0]++')
   [ -n "$body" ] || return 0
