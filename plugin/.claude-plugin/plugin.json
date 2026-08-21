@@ -1,7 +1,7 @@
 {
   "name": "warpline",
   "description": "Companion skills for warpline's [needs-llm] handoffs: needs-llm finds delegated runs, feed-triage does the judgment. This plugin installs skills only — it does not install or provide the warpline runtime.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "Adnan",
     "email": "adnan@kernel.associates"
