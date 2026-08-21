@@ -1,0 +1,68 @@
+name: Scorecard
+
+# Publishes to the OpenSSF public dataset so the result is visible at
+# scorecard.dev without a README badge — badge selection belongs to the
+# positioning work, and this leaves it a live data source to draw on.
+#
+# The layout below is not stylistic. scorecard-webapp parses this file at the
+# scanned commit and refuses to publish if it deviates: no workflow-level env
+# or defaults, no workflow-level write, id-token: write on this job only, no
+# job env/defaults/container/services, exactly one GitHub-hosted Ubuntu label,
+# and every step a `uses:` drawn from a fixed allowlist. A `run:` step here
+# fails publication while the workflow still goes green. Change it against
+# https://github.com/ossf/scorecard/blob/main/.github/workflows/scorecard-analysis.yml
+# or not at all.
+#
+# The published number understates the project until roughly 2026-11-17: the
+# Maintained check short-circuits to 0 for repositories created inside a 90-day
+# window, and this repository was created 2026-08-19. Nothing can move it and
+# it self-corrects. Do not chase the aggregate before then.
+#
+# Advisory. Nothing on main requires a status check.
+on:
+  push:
+    # Only the default branch is supported.
+    branches: [main]
+  schedule:
+    - cron: '30 1 * * 6' # Saturdays 01:30 UTC, matching the OSSF reference
+
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Needed for the GitHub OIDC token, which is what proves to the OpenSSF
+      # API that these results came from this repository. Load-bearing here in
+      # a way it is not in release.yml.
+      id-token: write
+
+    steps:
+      - name: "Checkout code"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Run analysis"
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      # Optional in the reference, kept: a five-day debugging artifact is the
+      # only local view of what was published, since the code-scanning upload
+      # is declined below.
+      - name: "Upload artifact"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      # The reference's final step — github/codeql-action/upload-sarif — is
+      # deliberately omitted. Every check scoring below threshold would become
+      # an open code-scanning alert recurring on each scheduled run, and
+      # several here score low for reasons this project chose deliberately.
+      # That is standing noise, not signal.
