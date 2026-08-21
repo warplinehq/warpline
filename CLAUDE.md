@@ -8,18 +8,26 @@ NOT in any other repo's planning system.
 ## Commands
 
 ```bash
-bun run build               # tsc -p tsconfig.build.json → dist/. MUST run
-                            # before the full suite and before the typecheck:
+bun run build               # tsc -p tsconfig.build.json → dist/. Required
+                            # before the suite and the typecheck:
                             # examples/plugins/* import `warpline/schemas/*`
                             # and `warpline/lib/paths`, which resolve by
                             # package self-reference through the exports map
-                            # into dist/. A bare `bun test` on a clean
-                            # checkout fails on those 9 tests.
-bun run test                # build, then bun test --timeout 20000
-bun test --timeout 20000    # ALWAYS pass the flag: bun's 5s default flakes
-                            # ~3% under CPU contention; bunfig [test] timeout
-                            # is silently ignored. CI shards per src/ subdir
-                            # plus an explicit examples/ shard.
+                            # into dist/ — deliberately, since that is the
+                            # path a real consumer hits (`files` ships dist/
+                            # and examples/, never src/). Forgetting it now
+                            # fails fast with one actionable error from
+                            # __test_preload.ts, not 9 module-resolution ones.
+bun run test                # build, then bun test
+bun test                    # fine bare — no --timeout needed. The 20s default
+                            # is set by `setDefaultTimeout` in
+                            # __test_preload.ts, because bunfig's [test]
+                            # timeout key is SILENTLY IGNORED (bun 1.3.11) and
+                            # bun's own 5s default flakes ~3% under CPU
+                            # contention. Do not re-add the flag to
+                            # invocations; an explicit --timeout still wins if
+                            # a single case needs longer. CI shards per src/
+                            # subdir plus an explicit examples/ shard.
 bun run typecheck           # build, then tsc --noEmit (strict; no
                             # noUncheckedIndexedAccess yet — raising
                             # strictness is a deliberate change)

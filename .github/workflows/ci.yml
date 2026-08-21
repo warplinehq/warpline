@@ -153,7 +153,7 @@ jobs:
   # that would otherwise have stopped guarding the plugin manifest.
   manifests:
     runs-on: ubuntu-latest
-    # Advisory by decision D-20 (supersedes D-18): see the reasoning above.
+    # Advisory on purpose: see the reasoning above.
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
