@@ -1,0 +1,69 @@
+name: CodeQL
+
+# What this is honestly for. There is no network *input* surface in src/: no
+# fetch, no createServer, no eval, no child_process, and one runtime dependency.
+# The two fetch sites in examples/ regex-validate their argument first, and the
+# nearest taint sink — dynamic plugin import — takes its path from a local
+# readdir, which is not a remote source. This scan is expected to find
+# approximately nothing.
+#
+# It exists anyway because a security-positioned repository that runs no code
+# scanning invites the question, and the answer should be a link rather than a
+# paragraph. If it does surface a real alert, that is a strictly good outcome
+# costing one triage pass.
+#
+# Advisory. Nothing on main requires a status check, so this reports rather
+# than gates.
+on:
+  push:
+    branches: [main]
+  # Not required today — this repo has zero pull requests. It goes marginally
+  # beyond "weekly cron plus push to main", was approved for that reason, and
+  # is here because Scorecard's second SAST detection path iterates merged PRs
+  # and expects a SAST check run on each; free now, and it stops a silent score
+  # regression the first time a PR is merged.
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 2' # Tuesdays 04:17 UTC — staggered against scorecard.yml
+
+# Top level as well as job level, deliberately. GitHub's starter template
+# declares job-level permissions only, which Scorecard scores as an undeclared
+# top-level block for -0.5. One line prevents it.
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Free: Scorecard's token-permissions check allowlists any workflow
+      # containing github/codeql-action/analyze as a SARIF-upload workflow.
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # No build step and no setup-bun. The tempting move is to mirror ci.yml,
+      # which builds before it tests — but that build exists so bun test and
+      # tsc --noEmit can resolve `warpline/schemas/*` through the exports map,
+      # which is a type-resolution need, not an extraction one. The
+      # javascript-typescript extractor runs in no-build mode over the
+      # checked-out tree, and dist/ is gitignored so a checkout has no compiled
+      # output to trip over.
+      - uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          languages: javascript-typescript
+          build-mode: none
+
+      # Whole tracked tree, no filters. Narrowing to src/ reads as the obvious
+      # economy and is rejected: examples/ ships inside the published tarball
+      # and holds the only network calls in the repo, and scripts/ gates an
+      # irreversible publish. The tree is ~13.6k lines, so there is no runtime
+      # argument for filtering either.
+      - uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
+        with:
+          category: "/language:javascript-typescript"
