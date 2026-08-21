@@ -27,8 +27,8 @@ Three rules, all enforced or honoured by the runtime:
 
 1. **`status: 'skipped'` + a summary starting with `[needs-llm]`** marks the
    result as a successful *handoff*, not a failure. The runtime maps it to the
-   `delegated` run status (`deriveRunStatus` in `src/runtime/invoke-plugin.ts`)
-   so dashboards and anomaly checks do not paint it red.
+   `delegated` run status, so dashboards and anomaly checks do not paint it
+   red.
 2. **Never retried.** Retry logic acts on `retryable: true` failures; a
    delegated handoff is terminal for the plugin. Re-running the plugin later
    (TTL) re-derives the handoff if the work is still outstanding.

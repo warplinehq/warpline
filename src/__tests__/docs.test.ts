@@ -23,6 +23,34 @@ import { PluginManifestSchema } from '../schemas/plugin-manifest.js'
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf8')
 
+/**
+ * What `npm publish` would actually ship, straight from npm.
+ *
+ * Asking npm beats reimplementing its `files` semantics — that array supports
+ * globs and `!` negation (this package excludes docs/board-spec.md that way),
+ * and a check that models the rules itself gets the answer wrong precisely
+ * when the rules are being used for something interesting. `--ignore-scripts`
+ * skips prepack: this needs the file list, not a fresh build.
+ */
+let packedCache: Set<string> | null = null
+function packed(): Set<string> {
+  if (!packedCache) {
+    const out = execFileSync('npm', ['pack', '--dry-run', '--ignore-scripts', '--json'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const entries = JSON.parse(out)[0].files as { path: string }[]
+    packedCache = new Set(entries.map((f) => f.path))
+  }
+  return packedCache
+}
+
+/** Markdown files that ship to consumers. */
+function packedDocs(): string[] {
+  return [...packed()].filter((f) => f.endsWith('.md'))
+}
+
 /** Every tracked markdown file. */
 function markdownFiles(): string[] {
   return execFileSync('git', ['ls-files', '-z', '*.md'], { cwd: REPO_ROOT, encoding: 'utf8' })
@@ -127,23 +155,21 @@ describe('internal links', () => {
   })
 
   test('docs shipped in the tarball only link to things the tarball contains', () => {
-    // `files` puts docs/ and examples/ in the package but not src/ or scripts/.
-    // A docs link to src/foo.ts resolves on GitHub and 404s for anyone reading
-    // the same file inside node_modules.
-    const shipped = new Set(
-      JSON.parse(read('package.json')).files.map((f: string) => f.replace(/\/$/, '')),
-    )
     const escaping: string[] = []
-    for (const file of markdownFiles().filter((f) => f.startsWith('docs/') || f === 'README.md')) {
+    for (const file of packedDocs()) {
       const dir = join(REPO_ROOT, file, '..')
       for (const m of read(file).matchAll(/\[[^\]]*\]\(([^)]+)\)/g)) {
         const href = (m[1] as string).split('#')[0] as string
         if (!href || /^([a-z]+:)?\/\//.test(href)) continue
-        const resolved = join(dir, href).slice(REPO_ROOT.length + 1)
-        const top = resolved.split('/')[0] as string
-        if (!shipped.has(top)) {
+        // join() preserves a trailing slash; the packed list has none.
+        const resolved = join(dir, href).slice(REPO_ROOT.length + 1).replace(/\/+$/, '')
+        // npm lists files, not directories, so a link to `examples/plugins/`
+        // is satisfied by anything shipping beneath it.
+        const shipped =
+          packed().has(resolved) || [...packed()].some((f) => f.startsWith(`${resolved}/`))
+        if (!shipped) {
           escaping.push(
-            `${file} -> ${href}: ${top}/ is not in package.json files, so this 404s inside node_modules. Use an absolute GitHub URL.`,
+            `${file} -> ${href}: ${resolved} is not in the tarball, so this 404s inside node_modules. Use an absolute GitHub URL.`,
           )
         }
       }
@@ -193,5 +219,49 @@ describe('diataxis', () => {
       else if (!DIATAXIS_TYPES.has(declared)) bad.push(`${file}: unknown diataxis type '${declared}'`)
     }
     expect(bad).toEqual([])
+  })
+})
+
+// ── Shipped docs must not point at code the tarball excludes ─────────────
+//
+// The link check above only sees markdown links. Seven references slipped
+// through as prose — `src/lib/paths.ts`, `scripts/gen-manifest-table.ts` and
+// friends — telling a reader inside node_modules to go look at files that are
+// not there. This catches that class.
+//
+// Scoped to inline code spans, for the same reason the command check is: a
+// sentence mentioning src/ in passing is not a defect, and a check that fires
+// on prose gets an ignore-comment bolted to it rather than being obeyed.
+//
+// Opt-out is by SECTION, not by line: a `##` heading marked "repository-only"
+// or "not in this repo" exempts everything under it until the next `##`. That
+// keeps the exemption visible to the reader of the doc, not just to the test —
+// the same marker that tells a human "this part isn't about your install" is
+// the one that tells the check to stand down.
+
+describe('shipped docs stay package-facing', () => {
+  const REPO_ONLY_HEADING = /^##\s.*(repository-only|not in this repo)/i
+  // A specific path INSIDE a non-shipped tree — `src/lib/paths.ts` sends the
+  // reader somewhere that does not exist. A bare `src/` naming the tree in a
+  // contrast ("warpline's own src/ is correct there and wrong here") points
+  // nowhere and is not a defect.
+  const NON_SHIPPED = /^(src|scripts|test-utils|npm-stub|\.github|\.planning)\/.+/
+
+  test('no shipped doc references a path the tarball excludes', () => {
+    const offenders: string[] = []
+    for (const file of packedDocs()) {
+      let exempt = false
+      read(file)
+        .split('\n')
+        .forEach((line, i) => {
+          if (line.startsWith('## ')) exempt = REPO_ONLY_HEADING.test(line)
+          if (exempt) return
+          for (const m of line.matchAll(/`([^`\n]+)`/g)) {
+            const ref = m[1] as string
+            if (NON_SHIPPED.test(ref)) offenders.push(`${file}:${i + 1}: \`${ref}\``)
+          }
+        })
+    }
+    expect(offenders).toEqual([])
   })
 })

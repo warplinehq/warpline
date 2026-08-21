@@ -141,7 +141,9 @@ follow from judgment work still go through the approval gate.
 - [docs/first-plugin.md](docs/first-plugin.md) — **start here**: build, run and gate a plugin in ten minutes
 - [docs/doctrine.md](docs/doctrine.md) — the deterministic/LLM boundary
 - [docs/runtime-spec.md](docs/runtime-spec.md) — manifest fields, retry/timeout/abort semantics, run artifacts
-- [docs/board-spec.md](docs/board-spec.md) — event board, task states, file formats
+- [docs/board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)
+  — event board, task states, file formats. The board is a repo-only surface
+  at 0.1, so this spec is not shipped in the package and the link is absolute.
 - [docs/needs-llm-contract.md](docs/needs-llm-contract.md) — the LLM handoff protocol
 - [docs/plugin-authoring.md](docs/plugin-authoring.md) — writing and testing plugins
 

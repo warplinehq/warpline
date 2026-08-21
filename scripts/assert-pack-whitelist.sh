@@ -59,7 +59,11 @@ PACKED="$(
 # so the two gates speak one vocabulary, widened by the tooling directories and
 # build config that live at the repo root.
 
-DENIED_RE='(^|/)(src|test-utils|npm-stub|scripts|skills|\.planning|\.github|\.claude|\.claude-plugin)/|(^|/)(bunfig\.toml|bun\.lock|__test_preload\.ts|tsconfig\.json|tsconfig\.build\.json)$'
+# docs/board-spec.md is excluded by a `!` negation in `files`, not by living
+# outside a whitelisted root — it specifies the board, which is a repo-only
+# surface at 0.1. Named here so the negation cannot be dropped silently: without
+# this line, deleting it from `files` would still pass every other gate.
+DENIED_RE='(^|/)(src|test-utils|npm-stub|scripts|skills|\.planning|\.github|\.claude|\.claude-plugin)/|(^|/)(bunfig\.toml|bun\.lock|__test_preload\.ts|tsconfig\.json|tsconfig\.build\.json)$|^docs/board-spec\.md$'
 DENIED="$(echo "$PACKED" | grep -E "$DENIED_RE" || true)"
 [ -z "$DENIED" ] || fail "tarball would ship excluded paths:"$'\n'"$(echo "$DENIED" | sed 's/^/  /')"
 

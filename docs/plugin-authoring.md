@@ -168,8 +168,9 @@ writes a file or calls an API at import time breaks that guarantee on your
 behalf, unapproved. Every side effect belongs in the handler, where the gate
 can see it.
 
-`src/cli/__tests__/manifest-declarative.test.ts` enforces this mechanically for
-every shipped example manifest and for the text `warpline scaffold` generates.
+Warpline's own suite enforces this mechanically for every shipped example
+manifest and for the text `warpline scaffold` generates — a manifest that does
+work at module scope fails the build, it is not merely discouraged.
 
 ## Testing
 

@@ -22,9 +22,9 @@ Every plugin under `<home>/plugins/<name>/manifest.ts` exports a value
 validated against `PluginManifestSchema`, imported from
 `warpline/schemas/plugin-manifest`.
 
-The table below is generated from that schema by
-`scripts/gen-manifest-table.ts`; CI regenerates it and fails on a diff, so it
-cannot drift from the code. Edit the schema, not the table.
+The table below is generated from that schema — `bun run docs:generate` in a
+clone refreshes it, and CI regenerates and fails on a stale diff, so it cannot
+drift from the code. Edit the schema, not the table.
 
 <!-- generated: manifest-fields -->
 
@@ -131,8 +131,8 @@ cancel clock. This is documented as residual DoS and accepted.
 External abort sources:
 
 1. An external `controller.abort()` from a host (e.g. a dashboard cancel button).
-2. `SIGINT` to the CLI entry (`src/cli/run-plugin.ts`) - propagated as an
-   `AbortError` via the same controller.
+2. `SIGINT` to the `warpline run` CLI entry - propagated as an `AbortError`
+   via the same controller.
 3. Per-attempt timeout - internal, handled inside `invokePlugin`.
 
 ## 5. Run Artifact Shape
@@ -212,7 +212,12 @@ contract is API-first regardless: `invokePlugin()` accepts an external
 `AbortController` and emits attempt events, so any host (CLI, dashboard,
 another process) gets identical semantics.
 
-## 8. Test Patterns
+## 8. Test Patterns (repository-only)
+
+> These patterns govern warpline's own suite, which is written against
+> `bun:test` and does not ship in the package. They are recorded here because
+> they are runtime behaviour, not test trivia — but if you installed warpline
+> rather than cloned it, nothing in this section applies to you.
 
 Fixtures and mocks for plugin runtime tests follow two rules:
 
@@ -253,7 +258,7 @@ whichever surface renders it, and it is always an array: an all-valid directory
 and a missing directory both yield `[]`. A mock that returns a bare `Map` no
 longer satisfies the signature.
 
-Fixture plugins live under `<home>/test-utils/fixture-plugins/`:
+Fixture plugins live under `test-utils/fixture-plugins/` in a clone:
 
 | Fixture                    | Purpose                                                 |
 |----------------------------|---------------------------------------------------------|
@@ -275,9 +280,9 @@ A plugin whose manifest declares a non-empty `side_effects` array may not run
 until an operator has approved it for this session. The approval is a single
 JSON file; there is no daemon, no keyring and no server.
 
-**Path:** `<warplineHome>/.session-approval`, where `<warplineHome>` resolves
-per `src/lib/paths.ts` — `WARPLINE_HOME` if set, else the nearest ancestor
-directory containing a `.warpline/`, else `<cwd>/.warpline`.
+**Path:** `<warplineHome>/.session-approval`, where `<warplineHome>` is
+`WARPLINE_HOME` if set, else the nearest ancestor directory containing a
+`.warpline/`, else `<cwd>/.warpline`.
 
 ### Shape
 

@@ -14,7 +14,8 @@
     "LICENSE",
     "NOTICE",
     "examples",
-    "docs"
+    "docs",
+    "!docs/board-spec.md"
   ],
   "bin": {
     "warpline": "./dist/bin/warpline.js"
