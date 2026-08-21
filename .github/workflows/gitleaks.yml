@@ -1,0 +1,68 @@
+name: Secret scan
+
+# The standing half of the credential check. The pre-flight scan before the
+# repository went public was a one-time pass over the whole history; this is
+# the part that runs afterwards, on the working tree, on every branch.
+#
+# Working tree, not history, on purpose: the history was cleared once against
+# the current single-root history and does not change, so re-walking 131
+# unchanging commits on every push buys nothing. The default shallow checkout
+# is what makes that true — do not add fetch-depth: 0.
+#
+# Every branch, not just main, also on purpose: a scan that has never been
+# observed catching anything is a claim, not a capability, and the proof runs
+# on a scratch branch.
+#
+# The gitleaks CLI rather than the GitHub Marketplace action: the action
+# requires a licence key for organization-owned repositories, which would mean
+# a long-lived secret in this repository's settings — the thing release.yml
+# went to OIDC to avoid. The CLI is MIT-licensed and needs nothing.
+#
+# NOT advisory, unlike link-check.yml. That job is advisory because third-party
+# websites are nondeterministic and red there does not mean "you broke
+# something". This is offline and deterministic: red means a secret is in the
+# tree — which is link-check.yml's own stated criterion for a required check.
+# Nothing on main requires a status check, so this still gates no merge.
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '41 5 * * 3' # Wednesdays 05:41 UTC — staggered against the others
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gitleaks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Version and checksum both in the diff, for the same reason every action
+      # here carries a SHA: a release asset can be replaced, a checksum cannot
+      # be replaced quietly. Both values reach the shell through the step
+      # environment, never through workflow expression interpolation.
+      - name: install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          curl -sSfL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+
+      # Redaction is on because this log is public. The config path is passed
+      # explicitly rather than relying on path auto-detection, so a future move
+      # of the config file fails loudly instead of silently falling back to the
+      # built-in rules. The leak exit code is set to 2 so "found a secret" and
+      # "gitleaks itself broke" are distinguishable: gitleaks returns 1 for
+      # both by default, and this repository's pre-flight gate already uses 2
+      # for the same reason.
+      - name: scan the working tree
+        run: ./gitleaks dir . --config .gitleaks.toml --redact --exit-code 2 --no-banner --verbose
