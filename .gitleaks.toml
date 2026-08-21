@@ -1,0 +1,14 @@
+# Extends the built-in ruleset rather than replacing it. Without this line a
+# custom config silently becomes the *whole* config, and the standing scan
+# reduces to whatever is written below — which is nothing.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "paths that are not source"
+paths = [
+  '''^\.git/''',
+  '''^node_modules/''',
+  '''^dist/''',
+  '''^bun\.lock$''',
+]
