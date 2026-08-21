@@ -66,8 +66,16 @@ function loadJson(root: string, rel: string): Loaded {
 
 /** Assertion 1 — the hand-maintained plugin version must match package.json. */
 export function versionOffenders(root: string): string[] {
-  void root
-  return []
+  const plugin = loadJson(root, PLUGIN_MANIFEST)
+  const pkg = loadJson(root, 'package.json')
+  const unreadable = [plugin.offender, pkg.offender].filter((o): o is string => Boolean(o))
+  if (unreadable.length > 0) return unreadable
+
+  const declared = plugin.value?.version
+  const shipped = pkg.value?.version
+  return declared === shipped
+    ? []
+    : [`${PLUGIN_MANIFEST} declares version ${String(declared)}, package.json declares ${String(shipped)}`]
 }
 
 /**
@@ -75,8 +83,29 @@ export function versionOffenders(root: string): string[] {
  * validator accepts a `source` that points nowhere, so this is the only check.
  */
 export function sourceOffenders(root: string): string[] {
-  void root
-  return []
+  const manifest = loadJson(root, MARKETPLACE_MANIFEST)
+  if (manifest.offender) return [manifest.offender]
+
+  const offenders: string[] = []
+  const entries = Array.isArray(manifest.value?.plugins) ? (manifest.value.plugins as unknown[]) : []
+  for (const raw of entries) {
+    const entry = raw as { name?: unknown; source?: unknown; skills?: unknown }
+    const label = typeof entry.name === 'string' ? entry.name : '(unnamed entry)'
+    if (typeof entry.source === 'string' && !existsSync(join(root, entry.source))) {
+      offenders.push(`${label}: source '${entry.source}' does not exist`)
+    }
+    // The `skills` array is absent today (it is inert under a subdirectory
+    // source, so declaring it would only mislead). Checked anyway, so that
+    // adding one later cannot reintroduce an unresolvable declared path.
+    if (Array.isArray(entry.skills)) {
+      for (const path of entry.skills) {
+        if (typeof path === 'string' && !existsSync(join(root, path))) {
+          offenders.push(`${label}: skills path '${path}' does not exist`)
+        }
+      }
+    }
+  }
+  return offenders
 }
 
 /**
@@ -85,20 +114,48 @@ export function sourceOffenders(root: string): string[] {
  * source, so what is on disk here is what a stranger's session loads.
  */
 export function skillDirOffenders(root: string): string[] {
-  void root
-  return []
+  const dir = join(root, SKILLS_DIR)
+  if (!existsSync(dir)) return [`${SKILLS_DIR}/: missing`]
+
+  const found = readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()
+
+  return found.join(', ') === SHIPPED_SKILLS.join(', ')
+    ? []
+    : [`${SKILLS_DIR}/ holds [${found.join(', ')}], expected exactly [${SHIPPED_SKILLS.join(', ')}]`]
 }
 
 /** Assertion 4 — both shipped skills must carry their prohibition section. */
 export function prohibitionOffenders(root: string): string[] {
-  void root
-  return []
+  const dir = join(root, SKILLS_DIR)
+  if (!existsSync(dir)) return [`${SKILLS_DIR}/: missing`]
+
+  const offenders: string[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory())) {
+    const rel = join(SKILLS_DIR, entry.name, 'SKILL.md')
+    if (!existsSync(join(root, rel))) {
+      offenders.push(`${rel}: missing`)
+      continue
+    }
+    const body = readFileSync(join(root, rel), 'utf8')
+    if (!body.includes(PROHIBITION_HEADING)) offenders.push(`${rel}: no '${PROHIBITION_HEADING}' section`)
+    else if (!body.slice(body.indexOf(PROHIBITION_HEADING)).includes(SIDE_EFFECTS)) {
+      offenders.push(`${rel}: '${PROHIBITION_HEADING}' does not name side effects`)
+    }
+    if (!body.includes(DATA_NOT_DIRECTION)) {
+      offenders.push(`${rel}: does not establish that fetched content is data, not direction`)
+    }
+  }
+  return offenders
 }
 
 /** Assertion 5 — a manifest that is absent or unparseable is an offender. */
 export function manifestParseOffenders(root: string): string[] {
-  void root
-  return []
+  return [MARKETPLACE_MANIFEST, PLUGIN_MANIFEST, 'package.json']
+    .map((rel) => loadJson(root, rel).offender)
+    .filter((offender): offender is string => Boolean(offender))
 }
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
