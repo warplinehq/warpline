@@ -15,6 +15,7 @@
  *   in `pending_gates`.
  */
 import { mkdir } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -848,6 +849,52 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 // -----------------------------------------------------------------------
 
 /**
+ * Turn one load failure into something a reader can act on.
+ *
+ * `Cannot use import statement outside a module` is Node saying the manifest
+ * was loaded as CommonJS. For a warpline plugin that has exactly one cause: no
+ * `package.json` marking the home as ESM. Warpline 0.1.0 shipped without
+ * writing one, so any home scaffolded by that version still fails this way
+ * after upgrading — `scaffold` heals the home, but a user who only runs `plan`
+ * never triggers it and sees a message that names neither the cause nor the
+ * cure.
+ *
+ * Diagnosis only. `plan` writes nothing under the home by design, and healing
+ * from here would break that guarantee to fix an error message. The point is
+ * to say what to do, not to do it.
+ *
+ * Exported for tests because the condition it detects CANNOT be reproduced
+ * under Bun: Bun loads .ts as ESM unconditionally, so a real import here never
+ * yields the CommonJS message. That is the same blind spot that let 0.1.0 ship
+ * broken, so the unit is tested against the message and the end-to-end path is
+ * proven under real Node in scripts/verify-tarball.sh.
+ */
+export function explainLoadFailure(message: string, pluginsDir: string): string {
+  if (!message.includes('Cannot use import statement outside a module')) return message
+
+  const home = dirname(pluginsDir)
+  const marker = join(home, 'package.json')
+  let declaresEsm = false
+  try {
+    declaresEsm = JSON.parse(readFileSync(marker, 'utf8')).type === 'module'
+  } catch {
+    declaresEsm = false // absent, unreadable, or not JSON — all mean "not marked"
+  }
+  if (declaresEsm) return message
+
+  // Name the exact file and give a command that works, because the bare Node
+  // message does neither. `warpline scaffold` prepares the home before it
+  // looks at the plugin name, so it heals whether or not that plugin exists.
+  return (
+    `${message}\n` +
+    `      Cause: no "type": "module" in ${marker}, so Node loads the\n` +
+    `      plugin as CommonJS. Homes created by warpline 0.1.0 lack this file.\n` +
+    `      Fix:   run \`warpline scaffold <any-name>\`, which writes it,\n` +
+    `             or: echo '{"type":"module"}' > ${marker}`
+  )
+}
+
+/**
  * `loadPluginManifests` reports what it could not load instead of
  * discarding it. A broken plugin used to vanish inside a bare `catch {}`,
  * which made an incomplete due-set indistinguishable from a complete one.
@@ -877,7 +924,8 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
           plugins.set(entry, mod.manifest as PluginManifest)
         }
       } catch (err) {
-        failures.push({ plugin: entry, error: err instanceof Error ? err.message : String(err) })
+        const message = err instanceof Error ? err.message : String(err)
+        failures.push({ plugin: entry, error: explainLoadFailure(message, pluginsDir) })
       }
     }),
   )

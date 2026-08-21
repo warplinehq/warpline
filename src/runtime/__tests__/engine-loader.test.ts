@@ -14,9 +14,10 @@
  */
 import { describe, test, expect, beforeEach, afterEach, setSystemTime } from 'bun:test'
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { loadPluginManifests, evaluatePlugin, runAdvance } from '../engine.js'
+import { loadPluginManifests, evaluatePlugin, runAdvance, explainLoadFailure } from '../engine.js'
 import type { EvalContext } from '../engine.js'
 import { computeTier } from '../tier.js'
 import { defaultEngineState, readEngineState, writeEngineState } from '../../schemas/engine-state.js'
@@ -348,5 +349,60 @@ describe('evaluatePlugin agrees with the run it was extracted from', () => {
     // Guard against the assertion passing vacuously on two empty sets.
     expect(runSkipped).toEqual(['fx-fresh', 'fx-manual', 'fx-supervised', 'fx-weekly'])
     expect(result.plugin_states.get('fx-due')).toBe('completed')
+  })
+})
+
+// ── Load-failure diagnosis for the 0.1.0 ESM-marker gap ──────────────────
+//
+// warpline 0.1.0 scaffolded homes without a package.json, so Node loads their
+// plugins as CommonJS and every manifest dies on `Cannot use import statement
+// outside a module`. Upgrading does not heal an already-broken home by itself
+// — `plan` writes nothing under the home by design — so the runtime's job is
+// to say precisely what went wrong and what to type.
+//
+// Tested against the message rather than through a real import, because Bun
+// loads .ts as ESM unconditionally and so cannot produce the CommonJS failure
+// at all. The end-to-end path is proven under real Node instead. That blind
+// spot is not incidental: it is what let 0.1.0 ship with a broken quickstart
+// under a green suite.
+describe('explainLoadFailure', () => {
+  const CJS = 'Cannot use import statement outside a module'
+
+  async function home(marker: string | null): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), 'warpline-esm-'))
+    await mkdir(join(dir, 'plugins'), { recursive: true })
+    if (marker !== null) await writeFile(join(dir, 'package.json'), marker)
+    return dir
+  }
+
+  test('an unmarked home gets the cause and a command that works', async () => {
+    const dir = await home(null)
+    const out = explainLoadFailure(CJS, join(dir, 'plugins'))
+
+    expect(out).toContain(CJS)
+    expect(out).toContain('no "type": "module"')
+    expect(out).toContain(join(dir, 'package.json'))
+    // `scaffold` prepares the home before it looks at the plugin name, so this
+    // advice holds whether or not the plugin already exists. If that ordering
+    // is ever reverted, this promise becomes a lie and this test is the alarm.
+    expect(out).toContain('warpline scaffold <any-name>')
+  })
+
+  test('a home already marked ESM gets the bare error, unembellished', async () => {
+    // Same symptom, different cause — the ESM advice would send the reader to
+    // fix something that is already correct.
+    const dir = await home(JSON.stringify({ type: 'module' }))
+    expect(explainLoadFailure(CJS, join(dir, 'plugins'))).toBe(CJS)
+  })
+
+  test('a malformed package.json counts as unmarked rather than throwing', async () => {
+    const dir = await home('{ not json')
+    expect(explainLoadFailure(CJS, join(dir, 'plugins'))).toContain('no "type": "module"')
+  })
+
+  test('an unrelated load failure is passed through untouched', async () => {
+    const dir = await home(null)
+    const unrelated = "Cannot find module './nope.ts'"
+    expect(explainLoadFailure(unrelated, join(dir, 'plugins'))).toBe(unrelated)
   })
 })

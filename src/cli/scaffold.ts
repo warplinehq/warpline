@@ -130,6 +130,25 @@ async function ensureHomeIsEsm(): Promise<string | null> {
   return null
 }
 
+/**
+ * Run every home-level preparation step, collecting warnings rather than
+ * throwing. A failed step must not fail the scaffold: the plugin files are
+ * still correct, and a missing link or marker surfaces later through the
+ * engine's load-failure reporting, which is where it is actionable.
+ */
+async function prepareHome(): Promise<string[]> {
+  const warnings: string[] = []
+  for (const step of [linkWarplineIntoHome, ensureHomeIsEsm]) {
+    try {
+      const w = await step()
+      if (w) warnings.push(w)
+    } catch (err) {
+      warnings.push(`${step.name} failed for ${warplineHome()}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  return warnings
+}
+
 export async function scaffoldPlugin(name: string): Promise<ScaffoldResult> {
   // Validate name: lowercase letters, numbers, hyphens. Must start with a letter.
   // No path traversal possible with this regex — forward slashes, dots, spaces all rejected.
@@ -143,11 +162,20 @@ export async function scaffoldPlugin(name: string): Promise<ScaffoldResult> {
 
   const pluginDir = join(pluginsDir(), name)
 
+  // Prepare the HOME before deciding anything about this plugin. Both steps
+  // are properties of the home, not of the plugin being created: the symlink
+  // is what makes any plugin's `warpline/...` import resolve, and the ESM
+  // marker is what makes Node load any plugin as a module. Running them only
+  // on the create path meant a home left unmarked by warpline 0.1.0 could not
+  // be healed by scaffolding at all — the obvious remedy, re-running scaffold
+  // for the plugin you already have, returned here and did nothing.
+  const warnings = await prepareHome()
+
   if (existsSync(pluginDir)) {
     return {
       created: false,
       path: pluginDir,
-      message: `Plugin '${name}' already exists at ${pluginDir}`,
+      message: [`Plugin '${name}' already exists at ${pluginDir}`, ...warnings.map((w) => `⚠ ${w}`)].join('\n'),
     }
   }
 
@@ -198,19 +226,6 @@ export async function handler(
 
   await writeFile(join(pluginDir, 'manifest.ts'), manifestContent)
   await writeFile(join(pluginDir, 'handler.ts'), handlerContent)
-
-  // A failed link must not fail the scaffold: the files are already written and
-  // correct, and a missing or dangling link surfaces later through the engine's
-  // plugin load-failures reporting, which is the right place to see it.
-  const warnings: string[] = []
-  for (const step of [linkWarplineIntoHome, ensureHomeIsEsm]) {
-    try {
-      const w = await step()
-      if (w) warnings.push(w)
-    } catch (err) {
-      warnings.push(`${step.name} failed for ${warplineHome()}: ${err instanceof Error ? err.message : String(err)}`)
-    }
-  }
 
   return {
     created: true,
