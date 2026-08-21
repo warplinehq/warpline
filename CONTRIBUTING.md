@@ -5,12 +5,19 @@
 Bun ≥ 1.3. `bun install`, then:
 
 ```bash
-bun test --timeout 20000   # always pass the flag — bun's 5s default flakes
-                           # under CPU contention and bunfig [test] timeout
-                           # is silently ignored
+bun run test               # builds, then runs the suite
+bun test                   # fine bare — do NOT add --timeout. The 20s default
+                           # is set by setDefaultTimeout in __test_preload.ts,
+                           # because bunfig's [test] timeout key is silently
+                           # ignored and bun's own 5s flakes under contention
 bun run typecheck          # bun green ≠ tsc green: bun transpiles WITHOUT
                            # typechecking, so run both before calling done
 ```
+
+`bun test` needs `dist/` to exist — the example plugins import `warpline/*`
+through the package exports map, which is the path a real consumer hits. The
+preload fails with one actionable error if you forget; `bun run test` builds
+for you.
 
 ## Testing rules (hard-won upstream; do not relearn them)
 

@@ -16,7 +16,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { PluginManifestSchema } from '../schemas/plugin-manifest.js'
 
@@ -263,5 +263,31 @@ describe('shipped docs stay package-facing', () => {
         })
     }
     expect(offenders).toEqual([])
+  })
+})
+
+// ── The agent-instruction files must stay one document ───────────────────
+
+describe('agent instructions', () => {
+  test('CLAUDE.md is a symlink to AGENTS.md, not a copy of it', () => {
+    // Claude Code reads CLAUDE.md and does not look for AGENTS.md; every other
+    // harness reads AGENTS.md. A copy would satisfy both readers on the day it
+    // was made and diverge quietly afterwards, which is the failure this repo
+    // keeps finding in its own docs. git stores the link, so this holds on a
+    // fresh clone too.
+    const stat = lstatSync(join(REPO_ROOT, 'CLAUDE.md'))
+    expect(stat.isSymbolicLink()).toBe(true)
+    expect(readlinkSync(join(REPO_ROOT, 'CLAUDE.md'))).toBe('AGENTS.md')
+  })
+
+  test('context7.json parses and excludes the trees that do not ship', () => {
+    const cfg = JSON.parse(read('context7.json'))
+    expect(cfg.folders).toContain('docs')
+    // Context7 indexes the public repo, so it can reach src/ — but warpline's
+    // docs are the answer to "how do I use this", and indexing implementation
+    // alongside them buries it.
+    for (const tree of ['src', 'scripts', 'test-utils']) {
+      expect(cfg.excludeFolders).toContain(tree)
+    }
   })
 })

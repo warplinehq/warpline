@@ -1,0 +1,17 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "projectTitle": "Warpline",
+  "description": "Deterministic plugin runtime with LLM-judgment dispatch and side-effect approval gates. Plugins declare their side effects; declared effects require human session approval at every autonomy level. Judgment work is handed off via the [needs-llm] contract rather than the plugin calling a model.",
+  "folders": ["docs", "examples"],
+  "excludeFolders": ["dist", "node_modules", "src", "scripts", "test-utils"],
+  "excludeFiles": ["EXTRACTION-NOTES.md"],
+  "rules": [
+    "A plugin is a manifest plus a handler. The manifest is a declaration of capability that the runtime enforces, not documentation.",
+    "A non-empty side_effects array gates execution behind session approval at EVERY autonomy level, autonomous included. autonomy_level describes how a plugin is scheduled, never what it is permitted to touch.",
+    "An unapproved side-effecting plugin is recorded as skipped and the run continues. It is not an error and it does not halt the pipeline.",
+    "Plugins never call an LLM. Judgment work is emitted as a [needs-llm] handoff, which maps to the delegated run status and is never retried.",
+    "Generated plugin code imports siblings with an explicit .ts extension. Node's type stripping resolves the literal specifier; a .js specifier at a .ts file is ERR_MODULE_NOT_FOUND under Node, and Bun hides this by remapping.",
+    "Manifests are validated with .parse(), not .safeParse(). An invalid manifest is a hard stop at load — a misconfigured plugin never silently runs.",
+    "Manifest top level must stay declarative: no I/O, no side effects. Importing a manifest executes its module top level, and that happens during warpline plan, before any approval gate."
+  ]
+}
