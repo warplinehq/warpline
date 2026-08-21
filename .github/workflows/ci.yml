@@ -122,3 +122,46 @@ jobs:
       # so a non-zero exit here is a real failure and not an empty-state quirk.
       - name: the read-only preview
         run: warpline plan
+
+  # Do the two manifests still conform to the schema Claude Code actually
+  # enforces? That is a question about someone else's software, asked against a
+  # moving target, so this job is deliberately shaped differently from the rest
+  # of the file.
+  #
+  # `@latest`, not a pin. Every action here is SHA-pinned, and the analogy is
+  # tempting, but it inverts this job's purpose: a real user installs latest, so
+  # a frozen version would test a historical schema and stay green while a
+  # tightened schema broke real installs — the exact false green the job exists
+  # to prevent. The CLI is a conformance oracle, not build tooling; the oracle
+  # has to be today's. A pin would also never move: dependabot watches
+  # github-actions and npm manifests, neither of which sees a version string
+  # inside a `run:` line.
+  #
+  # Advisory, for the same reason. This workflow gates `main` and every pull
+  # request, and Claude Code publishes several times a day; a blocking job on a
+  # moving external schema couples this repo's merge queue to Anthropic's
+  # release train, freezing unrelated PRs over a 3am publish. It would not even
+  # help — if the schema tightens, the published plugin is already broken in the
+  # wild, which calls for an alert, not a merge freeze. The required manifest
+  # gate is `src/__tests__/manifests.test.ts` in the `test` job: offline,
+  # deterministic, and covering what the validator provably does not see (a
+  # `source` pointing nowhere, the skills that actually ship).
+  #
+  # Two invocations, both mandatory. Once marketplace.json exists at the
+  # repository root, directory mode there validates only the marketplace
+  # manifest — so the very commit that made this repo a marketplace is the one
+  # that would otherwise have stopped guarding the plugin manifest.
+  manifests:
+    runs-on: ubuntu-latest
+    # Advisory by decision D-20 (supersedes D-18): see the reasoning above.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: install the claude cli
+        run: npm i -g @anthropic-ai/claude-code@latest
+      # No auth step: the validator needs no credentials and works against an
+      # empty CLAUDE_CONFIG_DIR, so `permissions: contents: read` stays enough.
+      - name: validate the marketplace manifest
+        run: claude plugin validate --strict .
+      - name: validate the plugin manifest
+        run: claude plugin validate --strict ./plugin
