@@ -21,7 +21,7 @@
  * an error a caller could catch and mistake for a recoverable condition, which
  * is the one failure mode a gate must not have.
  */
-import { readFile, writeFile, unlink } from 'node:fs/promises'
+import { readFile, writeFile, unlink, chmod } from 'node:fs/promises'
 import { sessionApprovalPath } from '../lib/paths.js'
 
 /** Default TTL: 4 hours in milliseconds */
@@ -84,6 +84,31 @@ export async function checkApproval(
 }
 
 /**
+ * Owner-only. The grant file is a capability: anything that can read it learns
+ * exactly which side effects are currently permitted, and on a shared or
+ * multi-user host that is a map of what to abuse before the TTL runs out.
+ * `writeFile`'s default is 0o666 masked by the umask — 0o644 on a typical box,
+ * i.e. world-readable.
+ */
+const GRANT_FILE_MODE = 0o600
+
+/**
+ * The single writer for the grant file. Both `grantApproval` and `mergeGrant`
+ * go through it so a third writer cannot quietly reintroduce a world-readable
+ * grant — the mode belongs to the file, not to one call site.
+ *
+ * `mode` on `writeFile` only applies when the file is CREATED, so it does
+ * nothing for a grant file that already exists from an older version. The
+ * explicit `chmod` is what heals those; the `mode` option is what stops the
+ * new-file case from being briefly 0o644 between creation and chmod. Both are
+ * needed, for different cases.
+ */
+async function writeGrantFile(approvalPath: string, payload: ApprovalFile): Promise<void> {
+  await writeFile(approvalPath, JSON.stringify(payload, null, 2), { mode: GRANT_FILE_MODE })
+  await chmod(approvalPath, GRANT_FILE_MODE)
+}
+
+/**
  * Grant approval by writing the session approval file.
  *
  * Can be called:
@@ -103,7 +128,7 @@ export async function grantApproval(
     expires_at: new Date(now + ttlMs).toISOString(),
     scopes: scopes === '*' ? '*' : Array.isArray(scopes) ? scopes : [scopes],
   }
-  await writeFile(approvalPath, JSON.stringify(payload, null, 2))
+  await writeGrantFile(approvalPath, payload)
 }
 
 /** Options for {@link mergeGrant}. Every field is optional. */
@@ -212,7 +237,7 @@ export async function mergeGrant(
     expires_at: new Date(expiry).toISOString(),
     scopes: finalScopes,
   }
-  await writeFile(approvalPath, JSON.stringify(payload, null, 2))
+  await writeGrantFile(approvalPath, payload)
 
   return {
     expires_at: payload.expires_at,

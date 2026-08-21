@@ -101,7 +101,8 @@ export const PROFILE_ALLOWED_SCHEDULES: Record<RunProfile, ReadonlySet<string>> 
 /**
  * Runtime source of truth for the valid `--profile` values, derived from the tier
  * map above rather than restated — a new tier cannot be added to one and
- * forgotten in the other. `advance.ts` validates the CLI flag against this.
+ * forgotten in the other. `src/cli/plan.ts` validates `warpline plan --profile`
+ * against this.
  */
 export const RUN_PROFILES = Object.keys(PROFILE_ALLOWED_SCHEDULES) as RunProfile[]
 

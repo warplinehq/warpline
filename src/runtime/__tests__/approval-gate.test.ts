@@ -313,3 +313,33 @@ describe('run-path prohibition', () => {
     expect(afterStat.mtimeMs).toBe(beforeStat.mtimeMs)
   })
 })
+
+describe('grant file permissions', () => {
+  // The grant file is a capability: reading it tells you exactly which side
+  // effects are live right now. `writeFile`'s default is 0o666 & ~umask, i.e.
+  // world-readable on a typical box. These assert the mode is owner-only, and
+  // that BOTH writers enforce it — a mode enforced at one call site is one
+  // refactor away from not being enforced at all.
+  const mode = async (p: string) => (await stat(p)).mode & 0o777
+
+  test('grantApproval writes an owner-only file', async () => {
+    await grantApproval('*', 60_000, approvalPath)
+    expect(await mode(approvalPath)).toBe(0o600)
+  })
+
+  test('mergeGrant writes an owner-only file', async () => {
+    await mergeGrant(['alpha'], { ttlMs: 60_000 }, approvalPath)
+    expect(await mode(approvalPath)).toBe(0o600)
+  })
+
+  // The upgrade case, and the reason `chmod` is there as well as `mode`:
+  // writeFile's `mode` applies only when it CREATES the file, so a grant file
+  // left world-readable by an older version would keep those bits forever.
+  test('an existing world-readable grant file is healed, not left as found', async () => {
+    await writeFile(approvalPath, '{}', { mode: 0o644 })
+    expect(await mode(approvalPath)).toBe(0o644) // precondition: really is loose
+
+    await grantApproval('*', 60_000, approvalPath)
+    expect(await mode(approvalPath)).toBe(0o600)
+  })
+})
