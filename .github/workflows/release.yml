@@ -49,6 +49,13 @@ jobs:
       # separately stated Node floor of 22.14.0. Do not "simplify" this to Node
       # 22 — that clears the Node floor but ships npm 10.x, below the npm
       # floor, and actions/setup-node does not upgrade the bundled npm.
+      #
+      # Scorecard's Packaging check reads this job as a whole:
+      # IsPackagingWorkflow requires setup-node carrying a registry-url AND an
+      # `npm publish` in the SAME job before it will score. Splitting them
+      # across jobs, or "simplifying" this to a bun-only publish, silently
+      # drops Packaging from 10/10 to inconclusive with no error anywhere.
+      # That is a reason to leave the shape alone, not a reason to change it.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 24
