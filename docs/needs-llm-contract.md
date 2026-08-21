@@ -48,7 +48,10 @@ that an orchestrating Claude session runs. The loop:
    same due-set read-only. Some results come back `delegated`.
 2. The orchestrating session (a human-invoked Claude Code session, a scheduled
    agent, or a skill that wraps the engine) scans run artifacts / board events
-   for `[needs-llm]` summaries.
+   for `[needs-llm]` summaries. That scanner ships as the `needs-llm` skill in
+   the `warpline` Claude Code plugin: it globs the run artifacts under the
+   warpline home, keeps the ones whose status is `delegated`, and reads the
+   payload named after `Context:` in the summary.
 3. For each, it dispatches the matching companion skill with the payload. The
    skill does the judgment work (drafting, triage, synthesis) and writes its
    output through whatever gate the host requires.
@@ -66,3 +69,24 @@ That is a doctrine question, not a contract detail: see
 Convention: the skill is named after the plugin (`content-atomiser` plugin →
 `content-atomiser` skill) and documents which `[needs-llm]` payload shape it
 accepts. The template in `skills/needs-llm-template/` is the starting point.
+
+## Two roles: scanner and consumer
+
+The convention above names the **consumer** — the skill that does the judgment
+for one plugin's handoffs. It sits under a **scanner**, and the two are not the
+same thing:
+
+- **`needs-llm`** is the generic scanner. One skill, plugin-agnostic: it finds
+  every `delegated` run regardless of which plugin emitted it, and routes each
+  handoff to the consumer named after the emitting plugin. It reads only paths
+  resolving inside the warpline home.
+- **`feed-triage`** is the shipped example of a consumer. It takes the payload
+  the scanner resolved and writes its judgment to one declared path,
+  `<warpline home>/state/feed-triage.judgment.md` — a file, not a side effect
+  (rule 4 above still applies to anything that leaves the machine).
+
+Both ship in the `warpline` Claude Code plugin, under `plugin/skills/` in the
+repository:
+[plugin/skills/](https://github.com/warplinehq/warpline/tree/main/plugin/skills).
+The authoring template stays at `skills/needs-llm-template/`, outside the
+plugin, so it is never installed into anyone's session.

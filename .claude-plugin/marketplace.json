@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "warpline",
+  "description": "The Claude Code on-ramp to warpline: companion skills that pick up [needs-llm] handoffs.",
+  "owner": { "name": "Adnan", "email": "adnan@kernel.associates" },
+  "plugins": [
+    {
+      "name": "warpline",
+      "description": "Companion skills for warpline's [needs-llm] handoffs — needs-llm scans delegated runs, feed-triage does the judgment. Installs the skills only; the warpline runtime itself is a separate npm package.",
+      "source": "./plugin",
+      "category": "productivity"
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 {
   "name": "warpline",
-  "description": "Deterministic plugin runtime with LLM-judgment dispatch and side-effect approval gates. Skills for authoring plugins and consuming [needs-llm] handoffs.",
+  "description": "Companion skills for warpline's [needs-llm] handoffs: needs-llm finds delegated runs, feed-triage does the judgment. This plugin installs skills only — it does not install or provide the warpline runtime.",
   "version": "0.1.0",
   "author": {
     "name": "Adnan",
