@@ -148,10 +148,13 @@ Expires ... (240m remaining).
 
 Approval is a *session* grant, not a per-action prompt: one decision, scoped to
 the plugins you name, expiring in four hours by default. You can grant once and
-leave a long run unattended. Nothing the run itself can do will extend that
-window: the run path reads the grant file and only reads it, so a plugin cannot
-renew its own permission and neither can the engine on its behalf. You can renew
-it yourself by approving again, but a renewed expiry is capped at the
+leave a long run unattended. Warpline's own run path never extends that window:
+it reads the grant file and only reads it, so neither the engine nor the
+scheduler can renew a permission on a plugin's behalf. That is a property of the
+runtime, not a sandbox — handlers are imported in-process and run with your full
+user rights, so the gate bounds the effects a plugin *declares*, not what
+untrusted code could do. Run plugins you have read. You can renew the grant
+yourself by approving again, but a renewed expiry is capped at the
 24-hour ceiling measured from your *first* grant — unless you ask for more with
 `--long`. The merge rules are in [runtime-spec.md](runtime-spec.md) § 9.
 
