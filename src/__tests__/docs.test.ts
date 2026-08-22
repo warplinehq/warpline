@@ -481,3 +481,93 @@ describe('approval numbers stay true across the docs', () => {
     expect(offenders).toEqual([])
   })
 })
+
+// ── The statements a reader relies on must stay where they were put ───────
+//
+// Three documents and one contributor file now carry claims somebody acts on:
+// what response an outside contributor can expect, how much of the plugin
+// contract can move underneath them, and four approval behaviours that were
+// previously only discoverable by reading the runtime. Nothing else in this
+// repository checks that any of them is still there. Prose is deleted in
+// reflows and rewrites without anyone intending to drop a promise, and the
+// rendered page looks fine afterwards — which is exactly why the removal is
+// invisible in review.
+//
+// Two shapes of failure, and this block covers both. A statement can vanish;
+// the stability promise can also *multiply*, which is worse, because a second
+// copy is the one that goes stale and nothing says which of the two a reader
+// should have believed. So the promise is asserted to have exactly one home,
+// enumerated from git rather than from a hard-coded list — a duplicate that
+// appears in a file nobody thought to list is the specific drift a
+// single-canonical-location rule exists to prevent.
+//
+// Every regex here is line-anchored. An unanchored substring search on a
+// common word matches passing commentary and then passes forever whatever the
+// document says, which is the vacuous green this whole block exists to avoid.
+// The claim literals are matched as exact substrings for the same reason: each
+// is a string the plan that wrote the document fixed in its own acceptance
+// criteria, so both sides are pinned to the same characters and neither can be
+// loosened into agreement with the other.
+
+describe('contributor expectations', () => {
+  test('CONTRIBUTING still states the response window and the pre-1.0 warning', () => {
+    const text = read('CONTRIBUTING.md')
+    const offenders: string[] = []
+    const PROMISES: [RegExp, string][] = [
+      [
+        /^- \*\*Response\*\* — you get an acknowledgement within a few days,/m,
+        'the acknowledgement window — the only response commitment this project makes anywhere, and the one SECURITY.md mirrors',
+      ],
+      [
+        /^- \*\*The plugin contract is pre-1\.0\*\* — it is best-effort/m,
+        'the inline pre-1.0 warning — the tarball ships docs/ but not this file, so a link alone reaches neither audience',
+      ],
+    ]
+    for (const [pattern, what] of PROMISES) {
+      if (!pattern.test(text)) {
+        offenders.push(
+          `CONTRIBUTING.md: '## What to expect' no longer matches ${pattern} — restore ${what}. If the wording was reflowed rather than removed, the sentence must still begin the line.`,
+        )
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  test('the manifest contract stability promise has exactly one home', () => {
+    const CANONICAL = 'docs/runtime-spec.md'
+    const HEADING = /^### Contract stability$/m
+    const homes = markdownFiles().filter((f) => HEADING.test(read(f)))
+    const offenders: string[] = []
+    if (!homes.includes(CANONICAL)) {
+      offenders.push(
+        `${CANONICAL}: the '### Contract stability' section is gone. It is the canonical statement of what the manifest contract promises, and CONTRIBUTING.md links its anchor.`,
+      )
+    }
+    for (const other of homes.filter((f) => f !== CANONICAL)) {
+      offenders.push(
+        `${other}: a second '### Contract stability' section. Two copies means one of them goes stale and a reader cannot tell which they should have believed — keep the promise in ${CANONICAL} and link it from here.`,
+      )
+    }
+    expect(offenders).toEqual([])
+  })
+
+  test('every approval claim still lives in the document that owns it', () => {
+    // file, exact literal, where it belongs and why it is load-bearing
+    const CLAIMS: [string, string, string][] = [
+      ['docs/runtime-spec.md', 'never gated', '§ 9 read semantics — an empty `side_effects` array skips the gate entirely, the one approval fact a reader most easily gets backwards'],
+      ['docs/runtime-spec.md', '| Concurrent approve |', '§ 9 merge table — two overlapping invocations are a race, not an atomic merge'],
+      ['docs/runtime-spec.md', 'last-write-wins', '§ 9 merge table — the outcome of that race, stated so nobody infers a lock that does not exist'],
+      ['docs/runtime-spec.md', '| Zero duration |', '§ 9 merge table — rejected before anything is written'],
+      ['docs/runtime-spec.md', '| Empty scope list |', '§ 9 merge table — approves nothing; an empty list is not a synonym for "*"'],
+      ['docs/doctrine.md', 'session-scoped, not per-action', '## Side-Effect Approval — the shape of the decision an operator is making'],
+      ['docs/doctrine.md', 'granted up front and left unattended', '## Side-Effect Approval — the operator conclusion that follows from it, stated on no other page'],
+      ['docs/doctrine.md', '--long', '## Side-Effect Approval — the flag that lifts the ceiling; without it the ceiling reads as an absolute the code contradicts'],
+      ['docs/first-plugin.md', '--long', '## 6. Approve it — same bound, same escape hatch, for the reader who has just run `approve` themselves'],
+    ]
+    const offenders = CLAIMS.filter(([file, literal]) => !read(file).includes(literal)).map(
+      ([file, literal, where]) =>
+        `${file}: missing \`${literal}\` — belongs in ${where}. A hard wrap through the middle of it counts as missing: keep it unbroken on one line.`,
+    )
+    expect(offenders).toEqual([])
+  })
+})
