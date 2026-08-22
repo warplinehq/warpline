@@ -12,16 +12,16 @@ body:
         - [Your first plugin](https://github.com/warplinehq/warpline/blob/main/docs/first-plugin.md) — ten minutes, end to end, including the gate refusing to run
         - [Runtime spec](https://github.com/warplinehq/warpline/blob/main/docs/runtime-spec.md) — the manifest field reference
 
+  # One required attestation, not three. Asking "which of these have you read?"
+  # and then refusing every answer but "all of them" is not a question, and the
+  # first thing it teaches a new contributor is to tick a box that is not true.
+  # The gate this form wants is a single honest statement.
   - type: checkboxes
     id: already-read
     attributes:
-      label: Which of these have you already read?
+      label: Before you ask
       options:
-        - label: Plugin authoring
-          required: true
-        - label: Your first plugin
-          required: true
-        - label: Runtime spec
+        - label: I read the three documents above before filing this.
           required: true
 
   - type: textarea

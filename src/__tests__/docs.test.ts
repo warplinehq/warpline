@@ -525,8 +525,8 @@ describe('issue forms', () => {
    * `.yml` is ever scanned — and these URLs are absolute rather than relative
    * precisely because they render inside an issue on github.com. Rename any of
    * the three authoring docs and the first thing an outside contributor sees is
-   * three 404s, with the form's mandatory "which of these have you already
-   * read?" checkboxes still demanding all three be ticked.
+   * three 404s, with the form's mandatory "I read the three documents above"
+   * checkbox still demanding they attest to having read them.
    *
    * A repo-relative path is already sitting inside each URL, so the check is
    * the same `existsSync` the markdown link test does, on a different capture.
