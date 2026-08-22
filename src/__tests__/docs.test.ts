@@ -245,6 +245,44 @@ describe('docs index', () => {
     // other candidate rather than leaving two files competing for one URL.
     expect(sources).toEqual(['docs/index.md'])
   })
+
+  // Two hand-maintained copies of one set, with nothing asserting either is
+  // complete: a seventh doc lands unlisted on the published landing page and
+  // in the README, and the suite stays green — the same vacuity the
+  // `### Contract stability` check refuses elsewhere in this file. Derived
+  // from `git ls-files`, so adding a doc is what updates the expectation.
+  //
+  // `docs/index.md` links by bare filename and README.md by repo-relative
+  // path; board-spec.md is linked absolutely from both, and the absolute URL
+  // still contains the repo-relative path, so one `includes` covers all three
+  // link shapes without teaching this check about any of them.
+  test('docs/index.md and the README list every published doc', () => {
+    const missing: string[] = []
+    const published = markdownFiles().filter((f) => f.startsWith('docs/') && f !== 'docs/index.md')
+
+    // index.md is nothing but the list, so the whole file is its nav. README
+    // is not — it names several docs in prose further up, and scanning the
+    // whole file would let a doc dropped from the nav be "found" by a passing
+    // mention, leaving this check green while guarding nothing.
+    const lists: [string, string, string][] = [['docs/index.md', read('docs/index.md'), 'docs/']]
+    const readmeNav = read('README.md')
+      .split(/^## /m)
+      .find((s) => s.startsWith('Docs\n'))
+    if (readmeNav === undefined) {
+      missing.push('README.md has no `## Docs` section — the nav this check guards is gone, or its heading moved')
+    } else {
+      lists.push(['README.md', readmeNav, ''])
+    }
+
+    for (const [name, text, prefix] of lists) {
+      for (const doc of published) {
+        if (!text.includes(doc.slice(prefix.length))) {
+          missing.push(`${name} does not list ${doc} — a published doc the landing page omits is a doc nobody finds`)
+        }
+      }
+    }
+    expect(missing).toEqual([])
+  })
 })
 
 // ── Issue forms must keep the shape GitHub silently requires ─────────────
