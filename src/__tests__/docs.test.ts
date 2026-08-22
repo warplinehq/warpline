@@ -422,7 +422,13 @@ describe('issue forms', () => {
         const attributes = element.split(/^ {4}validations:$/m)[0] as string
         const fencedHere = /^ {6}render: \S+$/m.test(attributes)
 
-        if (MANDATORY[file]?.includes(id) && !/^[^\S\n]*validations:\n[^\S\n]+required: true$/m.test(element)) {
+        // Depth-anchored, not `[^\S\n]*`: the whole point is which key the
+        // `validations:` block hangs off, and an indent-agnostic pattern
+        // passes the mirror mutation — the block moved one level down under
+        // `attributes:`, which is the same silent-optional outcome. Anchoring
+        // means a repo-wide reindent fails loud here rather than going quiet,
+        // the same trade the ` {6}render:` line beside it already makes.
+        if (MANDATORY[file]?.includes(id) && !/^ {4}validations:\n {6}required: true$/m.test(element)) {
           offenders.push(
             `${file}: field '${id}' is no longer mandatory — \`required: true\` must sit directly under \`validations:\`, not under \`attributes:\`, or GitHub accepts the form with it blank`,
           )
