@@ -286,8 +286,12 @@ describe('issue forms', () => {
   // and "Your credentials" — the phrasings a maintainer reaches for first —
   // walked straight through the load-bearing check. `s?` cannot rescue
   // `tokenizer`: the lookahead still sees the `i`.
+  // The optional `- ` is the other half of the same gap. A checkbox option is
+  // written `        - label: …`, so demanding `id`/`label` immediately after
+  // the indent missed every option label in both forms — and "I pasted my API
+  // token below" is exactly the invitation this check exists to refuse.
   const CREDENTIAL_FIELD = new RegExp(
-    `^\\s*(?:id|label):\\s.*(?<![a-z])(?:${CREDENTIAL_TERMS.join('|')})s?(?![a-z])`,
+    `^\\s*(?:- )?(?:id|label):\\s.*(?<![a-z])(?:${CREDENTIAL_TERMS.join('|')})s?(?![a-z])`,
     'i',
   )
 
