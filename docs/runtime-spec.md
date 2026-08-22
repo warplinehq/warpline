@@ -57,6 +57,28 @@ at 10 and `retry_delay_ms` at 60s; the backoff that uses them is described in
 §2. `actions` is an optional registry that only surfaces in a host UI when
 non-empty.
 
+### Contract stability
+
+The manifest contract is best-effort and explicitly pre-1.0 — it
+may change in any 0.x release. That is the whole promise, and it is
+deliberately not a stronger one.
+
+Adding a field is already safe by construction, for the reason stated
+immediately above — every field with a default is optional in a manifest file,
+so a new one cannot invalidate a manifest that already validates. An older build
+reading a manifest written for a newer one ignores what it does not know.
+
+Removing or narrowing something is the case that can break you, and what limits
+it is a convention that already exists rather than a promise invented here:
+closed enums stay closed. Four sets are closed — the side-effect type, the
+autonomy level, the schedule and the minimum tier — and an addition to any of
+them fans out into exhaustive switches and into this document, which is why they
+are not extended casually.
+
+Pin the version you tested against, and read the release notes for the version
+you move to. The release notes are the record of what changed between two
+versions; nothing else here claims to be.
+
 ## 2. Retry Policy
 
 Retries fire only on a first failure whose `SkillResult.retryable === true`.
@@ -327,6 +349,14 @@ An unapproved side-effecting plugin is recorded `skipped` and the run
 continues. The gate withholds execution from one plugin; it does not abort the
 run.
 
+A plugin whose `side_effects` array is **empty** is never gated. The engine
+tests for a non-empty array before it consults the gate at all, so
+`checkApproval` is never called for such a plugin and it runs whether or not a
+grant exists — always, including with no grant file on disk at all. This is
+worth stating because everything above reads like a universal rule: it is not.
+The gate covers the effects a plugin *declares*. A plugin that performs an
+effect it did not declare is a plugin bug, and no approval state changes that.
+
 ### Merge semantics (`warpline approve`)
 
 Grants are **additive by default.** An operator typing `approve b` after
@@ -343,6 +373,17 @@ later one is the failure this behaviour exists to prevent.
 | Expired grant | Not merged onto. The window has closed; the next grant restarts it, with a new `first_granted_at`. |
 | Default TTL | 4 hours. |
 | `--all` | The only path to `"*"`. No positional name is ever treated as a wildcard. It prints the number of side-effecting plugins and the total number of declared side effects it covers before granting. |
+| Concurrent approve | The file is not locked, and the outcome is last-write-wins: each invocation reads the live grant, merges in memory and writes the whole result, so of two overlapping invocations the later write wins outright and the earlier one's scopes are lost. |
+| Zero duration | Rejected before anything is written. `--ttl` takes a positive integer followed by `m`, `h` or `d`; a bare `0` fails the grammar and `0h` fails the positive-value check. The command exits 1 and the file is untouched. |
+| Empty scope list | Reachable only from the library path, which writes an empty `scopes` array. It approves nothing — an empty list is not a synonym for `"*"`. The command cannot produce one: `approve` with no plugin name and no `--all` prints usage and exits 1. |
+
+The 24-hour ceiling belongs to the merge path, not to the file. `mergeGrant`,
+behind `warpline approve`, is the only code that computes it; `grantApproval`,
+the programmatic pre-grant, writes the lifetime it was handed with no ceiling
+logic in it at all. An embedder calling the library directly can therefore hold
+a grant well past 24 hours, and a grant file's expiry is not evidence that any
+ceiling was ever applied. Read "capped at 24h" as a property of the command,
+never of the format.
 
 An unknown plugin name aborts the whole command, writes nothing, and exits 1 —
 partial application is not a state the file is ever left in.

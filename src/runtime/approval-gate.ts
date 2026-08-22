@@ -25,7 +25,7 @@ import { readFile, writeFile, unlink, chmod } from 'node:fs/promises'
 import { sessionApprovalPath } from '../lib/paths.js'
 
 /** Default TTL: 4 hours in milliseconds */
-const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000
+export const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000
 
 /**
  * Absolute ceiling on a grant's lifetime, measured from `first_granted_at`.
