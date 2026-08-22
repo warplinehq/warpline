@@ -156,7 +156,10 @@ user rights, so the gate bounds the effects a plugin *declares*, not what
 untrusted code could do. Run plugins you have read. You can renew the grant
 yourself by approving again, but a renewed expiry is capped at the
 24-hour ceiling measured from your *first* grant — unless you ask for more with
-`--long`. The merge rules are in [runtime-spec.md](runtime-spec.md) § 9.
+`--long`. The ceiling only refuses to hand out more time; it never takes back
+time you already hold, so a window an earlier `--long` opened carries forward
+through every later plain approve until it expires or you `revoke`. The merge
+rules are in [runtime-spec.md](runtime-spec.md) § 9.
 
 ```bash
 npx warpline plan

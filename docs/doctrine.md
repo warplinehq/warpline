@@ -100,7 +100,10 @@ What that costs you is a clock. The default expiry is four hours, which is the
 shape of a working session — approve, watch the first cycle, get on with
 something else. Renewing does not buy an unbounded window: every
 `warpline approve` is capped at the 24-hour ceiling measured from the first
-grant. Genuinely multi-day unattended operation is therefore something you have
+grant, unless a live grant already runs past it — the ceiling refuses to hand
+out more time, it never takes back time you hold, so one earlier `--long` window
+survives every later plain approve until it expires or you revoke.
+Genuinely multi-day unattended operation is therefore something you have
 to ask for, with `warpline approve <plugin> --ttl <dur> --long`, and the command
 reports on stdout when a grant crosses the ceiling — the window you actually
 hold is never something you have to infer.

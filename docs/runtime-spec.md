@@ -369,6 +369,7 @@ later one is the failure this behaviour exists to prevent.
 | `expires_at` | **Preserved** from the live grant. An explicit `--ttl` may extend it, never shorten it. |
 | Ceiling | `expires_at` is capped at `first_granted_at + 24h`. A capped grant reports the cap on stdout. |
 | `--long` | Permits an expiry past the ceiling, and prints that it did. |
+| Prior `--long` grant | The ceiling never shortens time already held. `mergeGrant` caps at `max(first_granted_at + 24h, live expires_at)`, so a window opened by an earlier `--long` survives every later plain `approve` unchanged, and `capped` is false. Revoke to close it early. |
 | `--replace` | Overwrites the scope list and resets `expires_at`; `first_granted_at` is preserved. |
 | Expired grant | Not merged onto. The window has closed; the next grant restarts it, with a new `first_granted_at`. |
 | Default TTL | 4 hours. |
