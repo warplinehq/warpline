@@ -153,7 +153,12 @@ export interface MergeGrantResult {
   scopes: '*' | string[]
   /** True when the ceiling pulled the requested expiry back. */
   capped: boolean
-  /** True when `long` carried the expiry past the ceiling. */
+  /**
+   * True when the effective expiry sits past the ceiling — either because
+   * `long` was passed on THIS call, or because a window an earlier `--long`
+   * opened was carried forward by a later plain approve. It is a statement
+   * about the window, not a record of the flag.
+   */
   extended: boolean
 }
 

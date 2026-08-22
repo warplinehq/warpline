@@ -180,7 +180,11 @@ export async function run(argv: string[]): Promise<number> {
   const note = result.capped
     ? ` — capped at the ${ceilingHours}h ceiling from the first grant`
     : result.extended
-      ? ` — extends beyond the ${ceilingHours}h ceiling from the first grant (--long)`
+      // No `(--long)` attribution: `extended` is also true for a plain approve
+      // that carried an earlier --long window forward, and naming a flag this
+      // invocation did not pass tells the operator they asked for something
+      // they did not ask for.
+      ? ` — runs beyond the ${ceilingHours}h ceiling from the first grant`
       : ''
   process.stdout.write(`Expires ${result.expires_at} (${remaining}m remaining)${note}.\n`)
 
