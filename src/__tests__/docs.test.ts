@@ -451,6 +451,40 @@ describe('issue forms', () => {
     }
     expect(offenders).toEqual([])
   })
+
+  /**
+   * The link tests further up enumerate from `git ls-files '*.md'`, so no
+   * `.yml` is ever scanned — and these URLs are absolute rather than relative
+   * precisely because they render inside an issue on github.com. Rename any of
+   * the three authoring docs and the first thing an outside contributor sees is
+   * three 404s, with the form's mandatory "which of these have you already
+   * read?" checkboxes still demanding all three be ticked.
+   *
+   * A repo-relative path is already sitting inside each URL, so the check is
+   * the same `existsSync` the markdown link test does, on a different capture.
+   * `blob/main` only: this deliberately does not reach the advisory URL in
+   * `config.yml`, which is a GitHub feature route with no file behind it and is
+   * pinned by the chooser test instead.
+   */
+  test('the docs the issue forms hand a stranger still exist', () => {
+    const broken: string[] = []
+    let linked = 0
+    for (const file of [...FORMS, CONFIG]) {
+      for (const m of read(file).matchAll(/https:\/\/github\.com\/warplinehq\/warpline\/blob\/main\/([^\s)]+)/g)) {
+        const rel = m[1] as string
+        linked += 1
+        if (!existsSync(join(REPO_ROOT, rel))) {
+          broken.push(`${file} links ${rel}, which is not in this repository — an outside contributor's first click is a 404`)
+        }
+      }
+    }
+    // Rewriting the URLs into a shape this regex cannot see would otherwise
+    // leave the check green while guarding nothing.
+    if (linked === 0) {
+      broken.push('no issue form links a doc by blob/main URL any more — either the guidance is gone, or the URL shape changed and this check went vacuous')
+    }
+    expect(broken).toEqual([])
+  })
 })
 
 // ── Shipped docs must not point at code the tarball excludes ─────────────
