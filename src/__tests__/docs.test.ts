@@ -430,7 +430,10 @@ describe('issue forms', () => {
     const offenders: string[] = []
     for (const file of FORMS) {
       for (const element of elements(read(file))) {
-        const type = element.match(TYPE_LINE)?.[1] as string
+        // No `as string`: the assertion is what suppressed the `string |
+        // undefined` that would have surfaced the comment-line defect above at
+        // compile time. Same fallback the nesting test below already uses.
+        const type = element.match(TYPE_LINE)?.[1] ?? '(untyped element)'
         const id = element.match(/^[^\S\n]*id: (\S+)$/m)?.[1] ?? type
         for (const line of element.split('\n')) {
           if (CREDENTIAL_FIELD.test(line)) {
