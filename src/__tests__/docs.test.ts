@@ -296,7 +296,15 @@ describe('issue forms', () => {
     for (const file of FORMS) {
       const text = read(file)
       for (const key of ['name', 'description', 'body']) {
-        if (!new RegExp(`^${key}:\\s*\\S?`, 'm').test(text)) {
+        // `name:` and `description:` must carry a value on their OWN line, so
+        // the horizontal-whitespace class rather than `\s`: `\s` matches the
+        // newline, walks on to the next key and finds its first character, so
+        // a bare `name:` passes and GitHub drops the form anyway. `body:` is a
+        // block key — its value is the element list below it (possibly behind
+        // a comment), and the element count asserted next is what proves that
+        // list is non-empty.
+        const value = key === 'body' ? '$' : '[^\\S\\n]*\\S'
+        if (!new RegExp(`^${key}:${value}`, 'm').test(text)) {
           offenders.push(`${file}: no top-level \`${key}:\` — GitHub drops the whole form and the chooser just shows one fewer entry`)
         }
       }
@@ -331,7 +339,9 @@ describe('issue forms', () => {
     }
     entries.forEach((entry, i) => {
       for (const key of ['name', 'url', 'about']) {
-        if (!new RegExp(`^\\s*${key}:\\s*\\S`, 'm').test(entry)) {
+        // Same horizontal-whitespace class, same reason: `\s*` would cross the
+        // newline into the next key and report an empty value as present.
+        if (!new RegExp(`^[^\\S\\n]*${key}:[^\\S\\n]*\\S`, 'm').test(entry)) {
           offenders.push(`${CONFIG}: contact_links[${i}] has no \`${key}:\` — all three are required and GitHub drops the entry without them`)
         }
       }
