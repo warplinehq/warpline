@@ -18,6 +18,7 @@ import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, readFileSync, readlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { DEFAULT_TTL_MS, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { PluginManifestSchema } from '../schemas/plugin-manifest.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
@@ -425,5 +426,58 @@ describe('agent instructions', () => {
     for (const tree of ['src', 'scripts', 'test-utils']) {
       expect(cfg.excludeFolders).toContain(tree)
     }
+  })
+})
+
+// ── Documented approval numbers must match the constants ─────────────────
+//
+// Two numbers — the default grant lifetime and the absolute ceiling — now
+// live in three documents and in one module, and only the module is
+// authoritative. `DEFAULT_TTL_MS` and `MAX_GRANT_WINDOW_MS` are what the gate
+// enforces; the copies in doctrine, the spec and the tutorial are claims
+// about them. Change a constant and every claim goes quietly wrong, with
+// nothing in the diff saying so and no way for a reader to tell.
+//
+// So every expected string below is BUILT from the constant rather than typed
+// out. A hard-coded `4 hours` here would just be one more copy of the number,
+// which is the thing being prevented: nothing in this block may contain a
+// numeric literal for either value.
+//
+// Each document is asserted against the rendering that document actually
+// uses. The three spell the same number three different ways, and pinning one
+// canonical spelling everywhere would pass vacuously in the two files that
+// spell it otherwise — worse than not asserting at all, because it still
+// looks like coverage.
+
+describe('approval numbers stay true across the docs', () => {
+  const HOUR_MS = 60 * 60 * 1000
+  const defaultHours = DEFAULT_TTL_MS / HOUR_MS
+  const ceilingHours = MAX_GRANT_WINDOW_MS / HOUR_MS
+
+  /** Offenders for a list of file/expected-rendering pairs. */
+  function missing(constant: string, value: string, pairs: [string, string][]): string[] {
+    return pairs
+      .filter(([file, expected]) => !read(file).includes(expected))
+      .map(
+        ([file, expected]) =>
+          `${file}: expected to contain \`${expected}\`. ${constant} is ${value}, so either this document's wording is stale (fix the prose) or the constant moved deliberately (fix every document, then this list).`,
+      )
+  }
+
+  test('every document states the default grant lifetime the gate uses', () => {
+    const offenders = missing('DEFAULT_TTL_MS', `${defaultHours}h`, [
+      ['docs/runtime-spec.md', `| Default TTL | ${defaultHours} hours. |`],
+      ['docs/first-plugin.md', `${defaultHours * 60}m remaining`],
+    ])
+    expect(offenders).toEqual([])
+  })
+
+  test('every document states the ceiling the merge path enforces', () => {
+    const offenders = missing('MAX_GRANT_WINDOW_MS', `${ceilingHours}h`, [
+      ['docs/runtime-spec.md', `first_granted_at + ${ceilingHours}h`],
+      ['docs/doctrine.md', `${ceilingHours}-hour ceiling`],
+      ['docs/first-plugin.md', `${ceilingHours}-hour ceiling`],
+    ])
+    expect(offenders).toEqual([])
   })
 })
