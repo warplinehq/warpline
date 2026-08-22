@@ -225,10 +225,11 @@ describe('diataxis', () => {
 // ── Exactly one markdown index source under docs/ ─────────────────────────
 //
 // Jekyll resolves the directory root to a single source, and more than one
-// file can claim it: `index.md` and `README.md` both qualify, with README
-// winning. A second one appearing changes which page a reader lands on at the
-// published docs root, and nothing in the diff says so — "added a README" and
-// "replaced the documentation landing page" look identical in review. Scoped
+// file can claim it: `index.md` and `README.md` both compete for it. Which one
+// wins is a detail of the build we have deliberately not measured — needing to
+// know is itself the defect. A second source appearing changes which page a
+// reader lands on at the published docs root and nothing in the diff says so:
+// "added a README" and "replaced the landing page" read alike. Scoped
 // honestly to markdown index sources; a hand-written `index.html` dropped into
 // docs/ is outside what this checks.
 
