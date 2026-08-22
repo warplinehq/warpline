@@ -460,10 +460,10 @@ describe('issue forms', () => {
    *
    * Neither is visible to a line-wise scrape, which is why both are asserted
    * against the element's own slice rather than against the whole file —
-   * `elements()` already isolates one element, and splitting that at
-   * `validations:` isolates the `attributes:` block within it. No YAML parser
-   * needed, and no dependency on `.planning/` evidence scripts that CI never
-   * runs.
+   * `elements()` already isolates one element, and taking that from its own
+   * `attributes:` header to the next key at the same indent isolates the
+   * `attributes:` block within it. No YAML parser needed, and no dependency on
+   * `.planning/` evidence scripts that CI never runs.
    */
   const MANDATORY: Record<string, string[]> = {
     '.github/ISSUE_TEMPLATE/bug_report.yml': ['runtime', 'versions', 'expected-actual', 'repro'],
@@ -481,7 +481,14 @@ describe('issue forms', () => {
       for (const element of elements(read(file))) {
         const id = element.match(/^[^\S\n]*id: (\S+)$/m)?.[1] ?? '(untyped element)'
         seen.add(id)
-        const attributes = element.split(/^ {4}validations:$/m)[0] as string
+        // Sliced by its own header rather than by its sibling's: YAML mapping
+        // keys are unordered, so an element written `validations:` before
+        // `attributes:` is legal and renders identically on GitHub, and
+        // splitting at `validations:` would leave the real attributes block in
+        // slice [1] and fire a false "lost its `render:`" offender at a reader
+        // who would then go hunting for a fence that is present. The block
+        // runs to the next key back at four-space indent.
+        const attributes = element.split(/^ {4}attributes:$/m)[1]?.split(/^ {4}(?=\S)/m)[0] ?? ''
         const fencedHere = /^ {6}render: \S+$/m.test(attributes)
 
         // Depth-anchored, not `[^\S\n]*`: the whole point is which key the
