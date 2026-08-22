@@ -1,0 +1,12 @@
+# The chooser is the only route into a new issue for a non-member. A blank
+# body lets a reporter skip every question below, including the one that
+# decides whether the report belongs in public at all.
+blank_issues_enabled: false
+contact_links:
+  # SECURITY.md already asks for these privately, but nobody reads SECURITY.md
+  # on the way to "New issue". This entry is what puts the private route in
+  # front of a reporter who never opened it — a defeated approval gate filed as
+  # a public issue is a 0-day the moment it lands.
+  - name: Report a security vulnerability privately
+    url: https://github.com/warplinehq/warpline/security/advisories/new
+    about: An approval-gate bypass, a side effect that escapes declaration, or a path traversal in home/state resolution. Do not open these as public issues.

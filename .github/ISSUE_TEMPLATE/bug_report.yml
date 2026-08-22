@@ -1,0 +1,69 @@
+name: Bug report
+description: Warpline did something it should not, or failed to do something it documents.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **If it defeats the approval gate, do not file it here.** An
+        approval-gate bypass, a side effect that escapes declaration, or a path
+        traversal in home/state resolution goes to the private advisory route
+        on the previous screen — a public issue publishes the exploit before
+        the fix exists.
+
+  # A dropdown rather than free text because the answer has to be present and
+  # comparable. Warpline supports two runtimes and a report that omits which
+  # one ran is unactionable.
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      options:
+        - Bun
+        - Node
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: warpline version and runtime version
+      placeholder: warpline 0.1.1, Node 22.18.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: What happened, and what you expected
+      description: Redact machine-identifying paths and hostnames from anything you quote here.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Redact machine-identifying paths and hostnames from the commands you quote.
+    validations:
+      required: true
+
+  # `render: text` fences the paste and disables attachments and markdown for
+  # this field. The description below is the only disclosure control that
+  # exists here: issue bodies are public, and this repository's pre-receive
+  # push protection covers pushes, not issue bodies.
+  - type: textarea
+    id: command-output
+    attributes:
+      label: Output of the command that misbehaved
+      description: 'Redact before pasting: paths that identify a machine, hostnames, and anything issued to you as a secret.'
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Before you submit
+      options:
+        - label: I read back what I pasted above and removed anything private to my machine or my account.
+          required: true

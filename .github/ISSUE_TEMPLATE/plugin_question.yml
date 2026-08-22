@@ -1,0 +1,52 @@
+name: Plugin authoring question
+description: How do I express this as a plugin? Ask after reading the authoring docs.
+body:
+  # Absolute URLs, not repository-relative paths: this form renders inside an
+  # issue on github.com, where a relative path does not resolve.
+  - type: markdown
+    attributes:
+      value: |
+        Most authoring questions are already answered in these three:
+
+        - [Plugin authoring](https://github.com/warplinehq/warpline/blob/main/docs/plugin-authoring.md) — the contract, and why a manifest must stay declarative
+        - [Your first plugin](https://github.com/warplinehq/warpline/blob/main/docs/first-plugin.md) — ten minutes, end to end, including the gate refusing to run
+        - [Runtime spec](https://github.com/warplinehq/warpline/blob/main/docs/runtime-spec.md) — the manifest field reference
+
+  - type: checkboxes
+    id: already-read
+    attributes:
+      label: Which of these have you already read?
+      options:
+        - label: Plugin authoring
+          required: true
+        - label: Your first plugin
+          required: true
+        - label: Runtime spec
+          required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+      description: Redact machine-identifying paths and hostnames from anything you quote here.
+    validations:
+      required: true
+
+  # `render: json` fences the paste. Same reasoning as the bug form: the
+  # wording below is the only control, because an issue body is public.
+  - type: textarea
+    id: manifest
+    attributes:
+      label: The manifest you are working from
+      description: 'Redact before pasting: absolute paths that identify a machine, hostnames, and any value your manifest reads out of the environment.'
+      render: json
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        Shipping one rather than asking about one? The authoring guide ends
+        with a pre-submit checklist — six questions covering purity, declared
+        side effects, arg validation, cancellation, tested decision logic and
+        staleness. Walk that first.
