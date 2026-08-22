@@ -311,10 +311,13 @@ describe('issue forms', () => {
   const ELEMENT_TYPES = new Set(['markdown', 'input', 'textarea', 'dropdown', 'checkboxes', 'upload'])
 
   /**
-   * Terms that, in a field's `id:` or `label:`, mean the form is asking a
-   * stranger for a secret in public. Scoped to those two keys on purpose: the
-   * redaction instructions themselves have to name secrets, and scanning
-   * descriptions too would report the mitigation as the defect.
+   * Terms that, in a field's `id:`, `label:` or `placeholder:`, mean the form
+   * is asking a stranger for a secret in public. `description:` is the one key
+   * deliberately left out: the redaction instructions live there and have to
+   * name secrets, so scanning it would report the mitigation as the defect.
+   * That reasoning does not cover `placeholder:` — a placeholder is a worked
+   * example of what to type, so `placeholder: WARPLINE_TOKEN=…` is exactly as
+   * much of an invitation as the label above it.
    */
   const CREDENTIAL_TERMS = [
     'token', 'secret', 'credential', 'password', 'api[ _-]?key', '\\.env', 'env dump', 'environment dump',
@@ -329,7 +332,7 @@ describe('issue forms', () => {
   // the indent missed every option label in both forms — and "I pasted my API
   // token below" is exactly the invitation this check exists to refuse.
   const CREDENTIAL_FIELD = new RegExp(
-    `^\\s*(?:- )?(?:id|label):\\s.*(?<![a-z])(?:${CREDENTIAL_TERMS.join('|')})s?(?![a-z])`,
+    `^\\s*(?:- )?(?:id|label|placeholder):\\s.*(?<![a-z])(?:${CREDENTIAL_TERMS.join('|')})s?(?![a-z])`,
     'i',
   )
 
