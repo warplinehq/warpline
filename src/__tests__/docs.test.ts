@@ -291,6 +291,20 @@ describe('issue forms', () => {
     'i',
   )
 
+  /**
+   * A `- type:` line and the type it declares.
+   *
+   * Deliberately not `$`-anchored straight after the capture. `- type: textarea
+   * # the paste field` is legal YAML and both forms already comment freely, and
+   * an anchored pattern returns *undefined* for such a line while `elements()`
+   * — a lookahead, with no `$` — still splits the element out. The two
+   * disagreeing is what makes the failure invisible: the element vanishes from
+   * the `ELEMENT_TYPES` whitelist, and the textarea `Redact` requirement below
+   * never runs for it.
+   */
+  const TYPE_LINE = /^[^\S\n]*- type: (\S+)[^\S\n]*(?:#.*)?$/m
+  const TYPE_LINE_G = new RegExp(TYPE_LINE.source, 'gm')
+
   /** A form body split into elements, each keeping its own `- type:` line. */
   function elements(text: string): string[] {
     return text.split(/^(?=[^\S\n]*- type: )/m).slice(1)
@@ -313,7 +327,7 @@ describe('issue forms', () => {
           offenders.push(`${file}: no top-level \`${key}:\` — GitHub drops the whole form and the chooser just shows one fewer entry`)
         }
       }
-      const types = [...text.matchAll(/^[^\S\n]*- type: (\S+)$/gm)].map((m) => m[1] as string)
+      const types = [...text.matchAll(TYPE_LINE_G)].map((m) => m[1] as string)
       if (types.length < 2) {
         offenders.push(`${file}: ${types.length} body element(s) — a form asking less than two things is a blank issue with extra steps`)
       }
@@ -371,7 +385,7 @@ describe('issue forms', () => {
     const offenders: string[] = []
     for (const file of FORMS) {
       for (const element of elements(read(file))) {
-        const type = element.match(/^[^\S\n]*- type: (\S+)$/m)?.[1] as string
+        const type = element.match(TYPE_LINE)?.[1] as string
         const id = element.match(/^[^\S\n]*id: (\S+)$/m)?.[1] ?? type
         for (const line of element.split('\n')) {
           if (CREDENTIAL_FIELD.test(line)) {
