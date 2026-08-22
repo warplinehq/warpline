@@ -281,8 +281,13 @@ describe('issue forms', () => {
   const CREDENTIAL_TERMS = [
     'token', 'secret', 'credential', 'password', 'api[ _-]?key', '\\.env', 'env dump', 'environment dump',
   ]
+  // The optional `s` is not cosmetic: the trailing lookahead rejects any term
+  // followed by a letter, including its own plural, so "Any tokens involved"
+  // and "Your credentials" — the phrasings a maintainer reaches for first —
+  // walked straight through the load-bearing check. `s?` cannot rescue
+  // `tokenizer`: the lookahead still sees the `i`.
   const CREDENTIAL_FIELD = new RegExp(
-    `^\\s*(?:id|label):\\s.*(?<![a-z])(?:${CREDENTIAL_TERMS.join('|')})(?![a-z])`,
+    `^\\s*(?:id|label):\\s.*(?<![a-z])(?:${CREDENTIAL_TERMS.join('|')})s?(?![a-z])`,
     'i',
   )
 
