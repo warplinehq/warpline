@@ -558,10 +558,23 @@ describe('approval numbers stay true across the docs', () => {
       )
   }
 
+  /**
+   * The fourth rendering: two documents spell the default out in words, in
+   * prose, four lines from a numeric rendering of the same number. A word list
+   * is not a numeric literal for the value, so the block's own no-literal
+   * invariant survives — and without it, changing the constant leaves
+   * `first-plugin.md` carrying the corrected `300m remaining` and a stale
+   * "four hours" in the same paragraph, which is worse than either alone.
+   */
+  const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve'] as const
+  const defaultWord = WORDS[defaultHours] ?? String(defaultHours)
+
   test('every document states the default grant lifetime the gate uses', () => {
     const offenders = missing('DEFAULT_TTL_MS', `${defaultHours}h`, [
       ['docs/runtime-spec.md', `| Default TTL | ${defaultHours} hours. |`],
       ['docs/first-plugin.md', `${defaultHours * 60}m remaining`],
+      ['docs/first-plugin.md', `expiring in ${defaultWord} hours by default`],
+      ['docs/doctrine.md', `The default expiry is ${defaultWord} hours`],
     ])
     expect(offenders).toEqual([])
   })
