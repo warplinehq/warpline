@@ -42,6 +42,24 @@ for you.
   LOOK different from "checked and fine". This is the project's founding
   operational lesson; new surfaces are reviewed against it.
 
+## What to expect
+
+- **Response** — you get an acknowledgement within a few days, on issues and
+  pull requests alike. Security reports take priority over everything else;
+  [SECURITY.md](SECURITY.md) says how to send one privately. That is the only
+  window this project promises anywhere, deliberately: a stated response time
+  that gets missed reads as abandonment, which is worse than the one commitment
+  already in writing.
+- **The plugin contract is pre-1.0** — it is best-effort and may change in any
+  0.x release. Pin the version you tested against, and read the release notes
+  for the version you move to. The mechanics — what is safe to add, what can
+  break you, and why closed enums stay closed — are in
+  [docs/runtime-spec.md](docs/runtime-spec.md#contract-stability). That warning
+  is stated in both places on purpose: the published package ships `docs/` but
+  not this file, so a plugin author who installed from npm never reads
+  CONTRIBUTING, and a contributor who opens CONTRIBUTING may never open the
+  spec.
+
 ## Licensing
 
 Apache-2.0, inbound = outbound: submitting a PR certifies you may contribute

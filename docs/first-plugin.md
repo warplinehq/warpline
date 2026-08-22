@@ -148,7 +148,12 @@ Expires ... (240m remaining).
 
 Approval is a *session* grant, not a per-action prompt: one decision, scoped to
 the plugins you name, expiring in four hours by default. You can grant once and
-leave a long run unattended. There is deliberately no self-service renewal.
+leave a long run unattended. Nothing the run itself can do will extend that
+window: the run path reads the grant file and only reads it, so a plugin cannot
+renew its own permission and neither can the engine on its behalf. You can renew
+it yourself by approving again, but a renewed expiry is capped at the
+24-hour ceiling measured from your *first* grant — unless you ask for more with
+`--long`. The merge rules are in [runtime-spec.md](runtime-spec.md) § 9.
 
 ```bash
 npx warpline plan

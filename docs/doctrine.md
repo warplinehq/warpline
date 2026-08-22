@@ -87,6 +87,24 @@ The corollary is a prohibition: nothing reachable from a run may write the
 grant file. The run path reads it and only reads it — so a plugin cannot extend
 its own permission, and neither can the engine on its behalf.
 
+Approval is session-scoped, not per-action: one decision covers the plugins you
+name for a bounded window, instead of a prompt in front of every write. A
+prompt per action looks stricter and is weaker — it trains the operator to
+click through, and a gate that has trained its operator to click through is
+worse than no gate at all, because it costs attention and buys a signature
+nobody read. Deciding once, with the whole due-set in view, is the version that
+stays meaningful, and the operator conclusion follows: a run can be
+granted up front and left unattended.
+
+What that costs you is a clock. The default expiry is four hours, which is the
+shape of a working session — approve, watch the first cycle, get on with
+something else. Renewing does not buy an unbounded window: every
+`warpline approve` is capped at the 24-hour ceiling measured from the first
+grant. Genuinely multi-day unattended operation is therefore something you have
+to ask for, with `warpline approve <plugin> --ttl <dur> --long`, and the command
+reports on stdout when a grant crosses the ceiling — the window you actually
+hold is never something you have to infer.
+
 Format and exact merge rules: `docs/runtime-spec.md` § 9.
 
 ## Why the plugin hands off instead of calling a model
