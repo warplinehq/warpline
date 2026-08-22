@@ -385,6 +385,72 @@ describe('issue forms', () => {
     }
     expect(offenders).toEqual([])
   })
+
+  /**
+   * The two nesting facts no check above can see.
+   *
+   * `required: true` only makes GitHub refuse a submission when it sits under
+   * `validations:`. Moved one level up under `attributes:` it is still valid
+   * YAML, still renders, and silently makes the field optional. `render:` is
+   * the mirror image: under `attributes:` it fences the paste and turns off
+   * attachments and Markdown; under `validations:` it is inert, and a field a
+   * reporter is told to paste a log into goes back to accepting file drops.
+   *
+   * Neither is visible to a line-wise scrape, which is why both are asserted
+   * against the element's own slice rather than against the whole file —
+   * `elements()` already isolates one element, and splitting that at
+   * `validations:` isolates the `attributes:` block within it. No YAML parser
+   * needed, and no dependency on `.planning/` evidence scripts that CI never
+   * runs.
+   */
+  const MANDATORY: Record<string, string[]> = {
+    '.github/ISSUE_TEMPLATE/bug_report.yml': ['runtime', 'versions', 'expected-actual', 'repro'],
+    '.github/ISSUE_TEMPLATE/plugin_question.yml': ['question'],
+  }
+  const FENCED: Record<string, string[]> = {
+    '.github/ISSUE_TEMPLATE/bug_report.yml': ['command-output'],
+    '.github/ISSUE_TEMPLATE/plugin_question.yml': ['manifest'],
+  }
+
+  test('the fields that must be answered stay mandatory, and the paste fields stay fenced', () => {
+    const offenders: string[] = []
+    for (const file of FORMS) {
+      const seen = new Set<string>()
+      for (const element of elements(read(file))) {
+        const id = element.match(/^[^\S\n]*id: (\S+)$/m)?.[1] ?? '(untyped element)'
+        seen.add(id)
+        const attributes = element.split(/^ {4}validations:$/m)[0] as string
+        const fencedHere = /^ {6}render: \S+$/m.test(attributes)
+
+        if (MANDATORY[file]?.includes(id) && !/^[^\S\n]*validations:\n[^\S\n]+required: true$/m.test(element)) {
+          offenders.push(
+            `${file}: field '${id}' is no longer mandatory — \`required: true\` must sit directly under \`validations:\`, not under \`attributes:\`, or GitHub accepts the form with it blank`,
+          )
+        }
+        if (FENCED[file]?.includes(id) && !fencedHere) {
+          offenders.push(
+            `${file}: paste field '${id}' lost its \`render:\` under \`attributes:\` — the fence is what stops a pasted log expanding into attachments and Markdown`,
+          )
+        }
+        if (/^[^\S\n]*render: /m.test(element) && !fencedHere) {
+          offenders.push(
+            `${file}: '${id}' has a \`render:\` outside \`attributes:\`, where it is inert — the field silently stops being fenced`,
+          )
+        }
+      }
+      // Without this, deleting a field outright would leave its entry above
+      // matching nothing and the check green — the vacuous pass these blocks
+      // exist to avoid.
+      for (const id of [...(MANDATORY[file] ?? []), ...(FENCED[file] ?? [])]) {
+        if (!seen.has(id)) {
+          offenders.push(
+            `${file}: field '${id}' is gone. It is a named deliverable of this form — drop it from this list deliberately, or restore it`,
+          )
+        }
+      }
+    }
+    expect(offenders).toEqual([])
+  })
 })
 
 // ── Shipped docs must not point at code the tarball excludes ─────────────
