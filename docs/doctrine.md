@@ -83,9 +83,13 @@ absolute clock fixed at first issue is what every renewable-credential system
 pairs with renewal (Kerberos `renew_till`, Vault `max_ttl`), and it is the only
 part of the grant a renewal cannot move.
 
-The corollary is a prohibition: nothing reachable from a run may write the
-grant file. The run path reads it and only reads it — so a plugin cannot extend
-its own permission, and neither can the engine on its behalf.
+The corollary is a prohibition on warpline's own code: nothing reachable from a
+run writes the grant file. `checkApproval` — the only function the engine calls
+— opens it read-only, so neither the engine nor the scheduler renews a
+permission on a plugin's behalf. That is a property of the call graph, not a
+sandbox: handlers are imported in-process and run with the operator's full user
+rights, so the gate bounds the effects a plugin *declares*, not what untrusted
+code could do. Run plugins you have read.
 
 Approval is session-scoped, not per-action: one decision covers the plugins you
 name for a bounded window, instead of a prompt in front of every write. A
