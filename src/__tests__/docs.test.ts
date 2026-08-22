@@ -246,6 +246,118 @@ describe('docs index', () => {
   })
 })
 
+// ── Issue forms must keep the shape GitHub silently requires ─────────────
+//
+// A malformed issue form does not error: GitHub drops it, and the chooser
+// simply shows one fewer entry. That failure is indistinguishable from nobody
+// having filed under that template yet, which is the one property a guard must
+// not have.
+//
+// Text scrapes rather than a YAML parse, deliberately: zod is this package's
+// only runtime dependency and three static files do not earn a parser. The
+// unauthenticated chooser fetch is the real parse oracle; this block catches
+// the shape mistakes before a push, and catches the one thing the chooser
+// cannot see — what the form asks a stranger to type.
+//
+// That last check is the load-bearing one. Issue bodies are public, and this
+// repository's secret-scanning push protection is pre-receive: it covers
+// pushes, never an issue body. Once a field invites a paste, the wording of
+// that field is the only control that exists.
+
+describe('issue forms', () => {
+  const FORMS = ['.github/ISSUE_TEMPLATE/bug_report.yml', '.github/ISSUE_TEMPLATE/plugin_question.yml']
+  const CONFIG = '.github/ISSUE_TEMPLATE/config.yml'
+
+  /** The element types GitHub's form schema accepts; anything else is dropped. */
+  const ELEMENT_TYPES = new Set(['markdown', 'input', 'textarea', 'dropdown', 'checkboxes', 'upload'])
+
+  /**
+   * Terms that, in a field's `id:` or `label:`, mean the form is asking a
+   * stranger for a secret in public. Scoped to those two keys on purpose: the
+   * redaction instructions themselves have to name secrets, and scanning
+   * descriptions too would report the mitigation as the defect.
+   */
+  const CREDENTIAL_TERMS = [
+    'token', 'secret', 'credential', 'password', 'api[ _-]?key', '\\.env', 'env dump', 'environment dump',
+  ]
+  const CREDENTIAL_FIELD = new RegExp(
+    `^\\s*(?:id|label):\\s.*(?<![a-z])(?:${CREDENTIAL_TERMS.join('|')})(?![a-z])`,
+    'i',
+  )
+
+  /** A form body split into elements, each keeping its own `- type:` line. */
+  function elements(text: string): string[] {
+    return text.split(/^(?=[^\S\n]*- type: )/m).slice(1)
+  }
+
+  test('each form declares the keys GitHub requires, with a body of valid elements', () => {
+    const offenders: string[] = []
+    for (const file of FORMS) {
+      const text = read(file)
+      for (const key of ['name', 'description', 'body']) {
+        if (!new RegExp(`^${key}:\\s*\\S?`, 'm').test(text)) {
+          offenders.push(`${file}: no top-level \`${key}:\` — GitHub drops the whole form and the chooser just shows one fewer entry`)
+        }
+      }
+      const types = [...text.matchAll(/^[^\S\n]*- type: (\S+)$/gm)].map((m) => m[1] as string)
+      if (types.length < 2) {
+        offenders.push(`${file}: ${types.length} body element(s) — a form asking less than two things is a blank issue with extra steps`)
+      }
+      for (const type of types) {
+        if (!ELEMENT_TYPES.has(type)) {
+          offenders.push(`${file}: element type '${type}' is outside the schema — use one of ${[...ELEMENT_TYPES].join(', ')}`)
+        }
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  test('the chooser config sets the two keys it may set, and its contact entry is complete', () => {
+    const text = read(CONFIG)
+    const offenders: string[] = []
+    if (!/^blank_issues_enabled: false$/m.test(text)) {
+      offenders.push(`${CONFIG}: blank_issues_enabled is not false, so a blank body bypasses both forms and the security route with them`)
+    }
+    for (const m of text.matchAll(/^([A-Za-z_][\w-]*):/gm)) {
+      const key = m[1] as string
+      if (key !== 'blank_issues_enabled' && key !== 'contact_links') {
+        offenders.push(`${CONFIG}: unknown top-level key '${key}' — this file accepts exactly those two`)
+      }
+    }
+    const entries = text.split(/^ {2}- /m).slice(1)
+    if (entries.length === 0) {
+      offenders.push(`${CONFIG}: no contact_links entry, so the chooser offers no private route for a gate bypass`)
+    }
+    entries.forEach((entry, i) => {
+      for (const key of ['name', 'url', 'about']) {
+        if (!new RegExp(`^\\s*${key}:\\s*\\S`, 'm').test(entry)) {
+          offenders.push(`${CONFIG}: contact_links[${i}] has no \`${key}:\` — all three are required and GitHub drops the entry without them`)
+        }
+      }
+    })
+    expect(offenders).toEqual([])
+  })
+
+  test('no field invites credential material, and every paste field says what to strip', () => {
+    const offenders: string[] = []
+    for (const file of FORMS) {
+      for (const element of elements(read(file))) {
+        const type = element.match(/^[^\S\n]*- type: (\S+)$/m)?.[1] as string
+        const id = element.match(/^[^\S\n]*id: (\S+)$/m)?.[1] ?? type
+        for (const line of element.split('\n')) {
+          if (CREDENTIAL_FIELD.test(line)) {
+            offenders.push(`${file}: field '${id}' asks for credential material (${line.trim()}) — an issue body is public and push protection is pre-receive, so it never sees this`)
+          }
+        }
+        if (type === 'textarea' && !/^[^\S\n]*description:.*Redact/m.test(element)) {
+          offenders.push(`${file}: textarea '${id}' has no \`description:\` naming what to Redact before pasting`)
+        }
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+})
+
 // ── Shipped docs must not point at code the tarball excludes ─────────────
 //
 // The link check above only sees markdown links. Seven references slipped
