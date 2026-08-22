@@ -332,6 +332,19 @@ describe('issue forms', () => {
     if (!/^blank_issues_enabled: false$/m.test(text)) {
       offenders.push(`${CONFIG}: blank_issues_enabled is not false, so a blank body bypasses both forms and the security route with them`)
     }
+    // The entry checks below only prove some contact link is well-formed. This
+    // file's whole stated purpose is the private route, and a private route
+    // repointed at anywhere public is a 0-day filed in the open — so the
+    // destination is pinned exactly, the same way blank_issues_enabled is.
+    if (
+      !/^[^\S\n]*url:[^\S\n]*https:\/\/github\.com\/warplinehq\/warpline\/security\/advisories\/new[^\S\n]*$/m.test(
+        text,
+      )
+    ) {
+      offenders.push(
+        `${CONFIG}: no contact_links entry points at the private advisory form (https://github.com/warplinehq/warpline/security/advisories/new) — a gate-bypass reporter is routed into a public issue instead`,
+      )
+    }
     for (const m of text.matchAll(/^([A-Za-z_][\w-]*):/gm)) {
       const key = m[1] as string
       if (key !== 'blank_issues_enabled' && key !== 'contact_links') {
