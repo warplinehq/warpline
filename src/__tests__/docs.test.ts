@@ -222,6 +222,29 @@ describe('diataxis', () => {
   })
 })
 
+// ── Exactly one markdown index source under docs/ ─────────────────────────
+//
+// Jekyll resolves the directory root to a single source, and more than one
+// file can claim it: `index.md` and `README.md` both qualify, with README
+// winning. A second one appearing changes which page a reader lands on at the
+// published docs root, and nothing in the diff says so — "added a README" and
+// "replaced the documentation landing page" look identical in review. Scoped
+// honestly to markdown index sources; a hand-written `index.html` dropped into
+// docs/ is outside what this checks.
+
+describe('docs index', () => {
+  test('docs/ has exactly one markdown index source', () => {
+    const sources = markdownFiles().filter((f) => {
+      if (!f.startsWith('docs/')) return false
+      const base = (f.split('/').pop() as string).replace(/\.md$/, '')
+      return base === 'index' || base.toLowerCase() === 'readme'
+    })
+    // If this fails: docs/index.md is the published root. Rename or remove the
+    // other candidate rather than leaving two files competing for one URL.
+    expect(sources).toEqual(['docs/index.md'])
+  })
+})
+
 // ── Shipped docs must not point at code the tarball excludes ─────────────
 //
 // The link check above only sees markdown links. Seven references slipped
