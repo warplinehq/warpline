@@ -81,27 +81,6 @@ else `<cwd>/.warpline`.
   nothing to run; judgment work rides your existing Claude subscription. See
   [docs/needs-llm-contract.md](docs/needs-llm-contract.md).
 
-## From source
-
-Cloning gets you the test suite and the board, neither of which ships in the
-package:
-
-```bash
-git clone https://github.com/warplinehq/warpline
-cd warpline
-bun install
-bun run test                  # builds, then runs the full suite
-```
-
-Requires [bun](https://bun.sh) ≥ 1.3 — this is the one place it is genuinely
-required, because the suite is written against `bun:test`.
-
-```bash
-# The board — a repo-only surface at 0.1, not wired into the published bin
-bun run src/cli/board-cli.ts status
-bun run src/cli/board-cli.ts tasks
-```
-
 ## Writing a plugin
 
 A plugin is a directory under `<home>/plugins/<name>/` with two files:
@@ -120,10 +99,11 @@ hard-stop at load — a misconfigured plugin never silently runs.
 Worked examples in [examples/plugins/](examples/plugins/):
 
 | Example | Demonstrates |
-|---|---|
+| --- | --- |
 | `anomaly-watch` | A pure deterministic check — the baseline shape |
 | `github-poll` | `external_api` side effect gating an autonomous plugin |
-| `feed-monitor` | Deterministic fetch/parse with judgment deferred via `[needs-llm]` |
+| `feed-monitor` | Deterministic fetch/parse that emits the handoff — the producer half of the feed chain |
+| `feed-triage` | The `on_run` consumer half — per-entry judgment handed off via `[needs-llm]`, no declared side effects |
 
 Authoring guide: [docs/plugin-authoring.md](docs/plugin-authoring.md).
 
@@ -170,6 +150,37 @@ absolute — it resolves the same from npm, from GitHub, and from node_modules.
 Side effects that
 follow from judgment work still go through the approval gate.
 
+## FAQ
+
+### Can the gate be bypassed?
+
+Only deliberately, and only by a human at a keyboard. `warpline approve --all`
+is the one route to a wildcard `scopes: '*'` grant, and it refuses to run if you
+also name plugins, so no plugin name, glob or shell expansion can widen a grant
+past what you typed. It prints the coverage it is about to grant before it
+writes anything. The grant is session-scoped and it expires — see
+[the session approval file](docs/runtime-spec.md#9-session-approval-file) for
+the default lifetime and the ceiling from first grant. And nothing inside a run
+can widen its own scope: the grant helpers have no caller on the advance path,
+so a run can only ever spend approval a human already gave.
+
+### Why not just let the plugin call a model?
+
+Because a plugin that calls a model has quietly made every future rerun an
+experiment. The deterministic half stops being reproducible, the judgment half
+stops being reviewable, and you find out which was which when they disagree
+with each other. If you can write an `if/else` for it, it is code; if it needs
+understanding, it is a handoff. Keeping the boundary in the manifest means you
+can read a plugin and know which one you are looking at.
+
+### Do I need Bun / a Claude subscription?
+
+No to both, in different ways. Node ≥ 22.18 is enough to install and run
+warpline; Bun is the development runtime for this repository's own test suite,
+not a user requirement. The `[needs-llm]` half is a handoff rather than an API
+call — it rides whatever Claude Code session you already have, and if nobody
+ever picks a handoff up, the deterministic work carries on running without it.
+
 ## Docs
 
 - [docs/first-plugin.md](docs/first-plugin.md) — **start here**: build, run and gate a plugin in ten minutes
@@ -181,11 +192,33 @@ follow from judgment work still go through the approval gate.
 - [docs/needs-llm-contract.md](docs/needs-llm-contract.md) — the LLM handoff protocol
 - [docs/plugin-authoring.md](docs/plugin-authoring.md) — writing and testing plugins
 
+## From source
+
+Cloning gets you the test suite and the board, neither of which ships in the
+package:
+
+```bash
+git clone https://github.com/warplinehq/warpline
+cd warpline
+bun install
+bun run test                  # builds, then runs the full suite
+```
+
+Requires [bun](https://bun.sh) ≥ 1.3 — this is the one place it is genuinely
+required, because the suite is written against `bun:test`.
+
+```bash
+# The board — a repo-only surface at 0.1, not wired into the published bin
+bun run src/cli/board-cli.ts status
+bun run src/cli/board-cli.ts tasks
+```
+
 ## Provenance
 
-Extracted from the automation engine that has run a real company's marketing
-operations since early 2026. The domain plugins stayed behind; the runtime,
-gates, board, and doctrine are what generalised.
+Warpline was extracted in August 2026 from the private automation engine
+that has run one company's marketing operations since early 2026. The domain
+plugins stayed behind; the runtime, gates, board, and doctrine are what
+generalised.
 
 ## License
 
