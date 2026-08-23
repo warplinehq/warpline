@@ -153,11 +153,29 @@ function scan(): Map<string, string[]> {
 
   const hits = new Map<string, string[]>()
   for (const file of files) {
+    const found: string[] = []
+
+    // A filename is exactly as published as a line of content, is precisely
+    // what survives a content sweep (rename-and-forget), and is already in
+    // hand — the scan had it and never looked at it. Line 0 because there is
+    // no line: the name itself is the offender. The redacted path is repeated
+    // into the message body so the no-exceptions test below, which reads
+    // everything after the first `: `, sees the hit too rather than the whole
+    // finding resting on SWEEP_BACKLOG staying empty.
+    if (PRIVATE_NAME.test(file) || LOCAL_NAME?.test(file)) {
+      found.push(`${redact(file)}:0: private deployment name in the file path — ${redact(file)}`)
+    }
+
     const lines = readFileSync(join(REPO_ROOT, file), 'utf8').split('\n')
-    const found = lines.flatMap((line, i) =>
-      PLANNING_REF.test(line) || PRIVATE_NAME.test(line) || LOCAL_NAME?.test(line)
-        ? [`${file}:${i + 1}: ${redact(line.trim())}`]
-        : [],
+    // `redact(file)` here too: a path carrying a local term would otherwise
+    // print it verbatim into a public CI log, which is the one thing the
+    // redaction invariant above exists to prevent.
+    found.push(
+      ...lines.flatMap((line, i) =>
+        PLANNING_REF.test(line) || PRIVATE_NAME.test(line) || LOCAL_NAME?.test(line)
+          ? [`${redact(file)}:${i + 1}: ${redact(line.trim())}`]
+          : [],
+      ),
     )
     if (found.length > 0) hits.set(file, found)
   }
