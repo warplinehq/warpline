@@ -122,7 +122,14 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
   const ctx: EvalContext = {
     allowedSchedules: profile ? PROFILE_ALLOWED_SCHEDULES[profile] : undefined,
     profile,
-    currentTier: computeTier(state.last_interaction_at),
+    // `now`, not `computeTier`'s `Date.now()` default: it is the last input
+    // that would otherwise read the wall clock, and this function's whole
+    // contract is that everything time-derived comes from the injected value.
+    // Masked today only because a fixture with no engine-state has a null
+    // `last_interaction_at`, which short-circuits to 'normal' either way — but
+    // a real home carrying one lets two consecutive previews straddle a
+    // 2/7/14-day boundary and disagree with nothing in the diff to blame.
+    currentTier: computeTier(state.last_interaction_at, now),
     // Headless is defined as "a profile was requested" (A2) — the same
     // definition `runAdvance` uses, so supervised bypass matches.
     headless: profile !== undefined,
