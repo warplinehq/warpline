@@ -13,12 +13,12 @@ outbound sequencing, market research pulls, content pipelines,
 competitor monitoring, lead qualification, report generation — on a schedule.
 A plugin that declares a side effect (sending email, creating issues, writing
 to a database, calling external APIs, modifying files) does not run without
-explicit human session approval, at every autonomy level, `autonomous`
-included.
-
-Blanket approval exists and is deliberate — `warpline approve --all`. What it
-grants, what it prints before writing anything, when it expires, and why a run
-cannot widen its own scope:
+explicit human session approval — including at `autonomous`, because the
+autonomy level is *dispatch* autonomy: it decides whether the scheduler may
+start a plugin without asking, never whether that plugin may act on the world
+without asking. Blanket approval exists and is deliberate: `warpline approve --all`
+writes a wildcard grant. What it covers, what it prints before writing anything,
+when it expires, and why a run cannot widen its own scope:
 [Can the gate be bypassed?](#can-the-gate-be-bypassed).
 
 Published docs: [warplinehq.github.io/warpline](https://warplinehq.github.io/warpline/).
