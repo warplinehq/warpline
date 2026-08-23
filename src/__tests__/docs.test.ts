@@ -806,6 +806,58 @@ describe('approval numbers stay true across the docs', () => {
   })
 })
 
+// ── The README's Node range must be the one npm enforces ─────────────────
+//
+// Same shape as the block above, and the same 0.1.0 defect class the file
+// header names: the README claimed `Node ≥ 22.18` while `engines.node` reads
+// `^22.18.0 || >=23.6.0`, whose caret closes at <23.0.0 — so 23.0 through 23.5
+// are excluded and a reader on 23.3 followed the quickstart into EBADENGINE.
+// Only catchable by checking the doc against the manifest. The `smoke` CI job
+// exercises node:22 alone, so nothing else would have caught it either.
+//
+// Every literal is DERIVED from `engines.node`, never written twice: that is
+// what makes package.json the single source and stops the README drifting
+// again the next time the range moves.
+
+describe('the README states the node range package.json enforces', () => {
+  test('both floors and the excluded gap appear in README.md', () => {
+    const range = JSON.parse(read('package.json')).engines.node as string
+    const m = range.match(/^\^(\d+)\.(\d+)\.\d+ \|\| >=(\d+)\.(\d+)\.\d+$/)
+    const offenders: string[] = []
+
+    if (m === null) {
+      offenders.push(
+        `package.json: engines.node is \`${range}\`, which this check cannot read. It assumes \`^MAJOR.MINOR.PATCH || >=MAJOR.MINOR.PATCH\` — the shape whose caret creates the excluded gap. Restate the range in README.md and teach this check the new shape.`,
+      )
+    } else {
+      const [, lowMajor, lowMinor, hiMajor, hiMinor] = m as unknown as string[]
+      // The gap exists only because the caret closes at the next major. If the
+      // two clauses stop being adjacent majors the arithmetic below stops
+      // describing the range, and a silently wrong README is the whole defect.
+      if (Number(hiMajor) !== Number(lowMajor) + 1) {
+        offenders.push(
+          `package.json: engines.node \`${range}\` no longer spans adjacent majors, so "${hiMajor}.0–…" is not the excluded gap. Work out the real gap, state it in README.md, and fix this check.`,
+        )
+      }
+      const readme = read('README.md')
+      const required = [
+        `${lowMajor}.${lowMinor}`, // the supported floor on the older major
+        `${hiMajor}.${hiMinor}`, // where support resumes on the newer one
+        `${hiMajor}.0–${hiMajor}.${Number(hiMinor) - 1}`, // the excluded gap
+      ]
+      offenders.push(
+        ...required
+          .filter((literal) => !readme.includes(literal))
+          .map(
+            (literal) =>
+              `README.md: expected to contain \`${literal}\`, derived from engines.node \`${range}\`. Either the README is stale (fix the prose) or the range moved deliberately (fix the README, then this check).`,
+          ),
+      )
+    }
+    expect(offenders).toEqual([])
+  })
+})
+
 // ── The statements a reader relies on must stay where they were put ───────
 //
 // Three documents and one contributor file now carry claims somebody acts on:

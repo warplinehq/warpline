@@ -54,9 +54,9 @@ npm i warpline          # or: bun add warpline
 npx warpline --help
 ```
 
-Runs on Node ≥ 22.18 or Bun ≥ 1.3 — Node alone is enough, Bun is not required
-to use warpline. v0.1 supports POSIX systems (macOS, Linux); Windows is
-untested and unclaimed.
+Runs on Node 22.18+ or 23.6+ (`engines.node` excludes 23.0–23.5), or Bun ≥ 1.3
+— Node alone is enough, Bun is not required to use warpline. v0.1 supports
+POSIX systems (macOS, Linux); Windows is untested and unclaimed.
 
 Every file warpline reads or writes lives under one home directory: the
 `WARPLINE_HOME` env var, else the nearest ancestor `.warpline/` directory,
@@ -175,9 +175,11 @@ can read a plugin and know which one you are looking at.
 
 ### Do I need Bun / a Claude subscription?
 
-No to both, in different ways. Node ≥ 22.18 is enough to install and run
-warpline; Bun is the development runtime for this repository's own test suite,
-not a user requirement. The `[needs-llm]` half is a handoff rather than an API
+No to both, in different ways. Node 22.18+ or 23.6+ is enough to install and
+run warpline — 23.0–23.5 is excluded by `engines.node`, and npm reports
+`EBADENGINE` there (a hard failure wherever `engine-strict` is set). Bun is the
+development runtime for this repository's own test suite, not a user
+requirement. The `[needs-llm]` half is a handoff rather than an API
 call — it rides whatever Claude Code session you already have, and if nobody
 ever picks a handoff up, the deterministic work carries on running without it.
 
