@@ -229,6 +229,44 @@ describe('buildPlanModel', () => {
     expect(reason('manual-schedule')).toBe('profile_schedule')
     expect(reason('supervised-one')).toBe('headless_supervised')
   })
+
+  /**
+   * WR-02 regression witness: `currentTier` must come from the INJECTED `now`,
+   * never from `computeTier`'s `Date.now()` default.
+   *
+   * Every other test here passes `Date.now()` as `now`, so the two clocks agree
+   * and no assertion can separate them — which is how the bug survived. This
+   * fixture forces them apart: `now` is pinned to a fixed 2020 instant and
+   * `last_interaction_at` is 3 days before THAT.
+   *
+   *   injected `now`  -> idle 3 days -> 'degraded'
+   *   real Date.now() -> idle ~6 yrs -> 'suspended'
+   *
+   * `currentTier` never leaves `buildPlanModel`, so it is observed through the
+   * gate it feeds: `min_tier: 'degraded'` runs at 'degraded' and is blocked at
+   * 'suspended' (tier.ts:89 — a plugin runs when the current tier's order is <=
+   * its min_tier order). The same plugin therefore lands on opposite sides
+   * depending on which clock was read. Drop the second argument at plan.ts:132
+   * and this turns red.
+   */
+  test('Test 5: currentTier comes from the injected clock, not the wall clock', async () => {
+    const PINNED_NOW = Date.parse('2020-06-01T12:00:00.000Z')
+    const IDLE_DAYS_MS = 3 * 86_400_000
+
+    await writePlugin(home, 'tier-sensitive', { min_tier: 'degraded' })
+    await writeState(
+      home,
+      {},
+      { last_interaction_at: new Date(PINNED_NOW - IDLE_DAYS_MS).toISOString() },
+    )
+
+    const model = await buildPlanModel(PINNED_NOW)
+
+    // Due under the injected clock ('degraded'); min_tier-blocked under the
+    // wall clock ('suspended').
+    expect(model.due.map((e) => e.plugin)).toEqual(['tier-sensitive'])
+    expect(model.notDue.find((e) => e.plugin === 'tier-sensitive')).toBeUndefined()
+  })
 })
 
 describe('run', () => {
