@@ -181,9 +181,12 @@ pointing at a fixture directory — never at your live home. The repo's test
 preload re-roots `WARPLINE_HOME` to a temp dir as a backstop, but explicit
 fixture paths are the pattern.
 
-Run everything: `bun test --timeout 20000` (the timeout flag matters — bun's
-5s default flakes under CPU contention and `bunfig [test] timeout` is
-silently ignored).
+Run everything: `bun run test` (builds first, then runs the suite). A bare
+`bun test` is also correct — do NOT add `--timeout`. Bun's own 5s default does
+flake under CPU contention, and `bunfig [test] timeout` is silently ignored,
+but `__test_preload.ts` calls `setDefaultTimeout(20_000)` and bunfig preloads
+it, so every invocation already gets 20s. An explicit `--timeout` still wins if
+one case needs longer.
 
 ## Checklist before you ship one
 

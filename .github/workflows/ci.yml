@@ -44,12 +44,15 @@ jobs:
       # import `warpline/schemas/*` and `warpline/lib/paths`, which resolve by
       # package self-reference through the exports map into dist/.
       - run: bun run build
-      # Sharded per top-level src dir with --timeout 20000, inherited from the
-      # source repo's hard-won pattern: mock.module is process-global (sharding
-      # isolates cross-dir leaks) and bun's 5s default timeout flakes ~3% under
-      # CPU contention (bunfig [test] timeout is silently ignored; the CLI flag
-      # is the only suite-wide control). Overkill at this size; correct at the
-      # size this repo is headed for.
+      # Sharded per top-level src dir, inherited from the source repo's
+      # hard-won pattern: mock.module is process-global, so sharding isolates
+      # cross-dir leaks. Overkill at this size; correct at the size this repo
+      # is headed for.
+      # No --timeout here on purpose: bun's 5s default does flake ~3% under CPU
+      # contention and bunfig [test] timeout is silently ignored, but
+      # __test_preload.ts calls setDefaultTimeout(20_000) and bunfig preloads
+      # it, so every shard already gets 20s. The CLI flag was a second, silently
+      # redundant copy of that number -- see CONTRIBUTING.md.
       # examples/ is a shard of its own: its tests live outside src/, so the
       # find-derived loop never reached them and 9 tests ran nowhere.
       - name: test (sharded)
@@ -57,10 +60,10 @@ jobs:
           rc=0
           for shard in $(cd src && find . -name '*.test.ts' | sed -E 's|^\./||; s|/.*||' | sort -u); do
             echo "== shard: $shard"
-            bun test "./src/$shard" --timeout 20000 || rc=1
+            bun test "./src/$shard" || rc=1
           done
           echo "== shard: examples"
-          bun test ./examples --timeout 20000 || rc=1
+          bun test ./examples || rc=1
           exit $rc
       - run: bunx tsc --noEmit
       # The publishable artifact, produced on every run rather than only before
