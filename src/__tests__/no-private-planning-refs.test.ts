@@ -42,9 +42,15 @@ const SELF = 'src/__tests__/no-private-planning-refs.test.ts'
  * renaming the phase turns the whole check green while the draft still exists
  * and is still about to be published, and a second asset beside it — a tweet
  * thread, a launch email — was never covered and nothing said so.
+ *
+ * `DOCTRINE` is in the alternation for that reason rather than for today's
+ * coverage: the doctrine draft is already named to match `LAUNCH`, so the token
+ * buys nothing until somebody renames it. That rename is exactly the case the
+ * paragraph above describes, and this is the most publication-bound prose in
+ * the repository to lose out of every check it has.
  */
 const PLANNING_ROOT = '.planning/phases'
-const LAUNCH_DRAFT = /-(SHOW-HN|LAUNCH|ANNOUNCE)[^/]*\.md$/
+const LAUNCH_DRAFT = /-(SHOW-HN|LAUNCH|ANNOUNCE|DOCTRINE)[^/]*\.md$/
 
 /**
  * Scan EVERY tracked text file, from `git ls-files` rather than a glob list.
