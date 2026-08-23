@@ -23,7 +23,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
@@ -32,14 +32,19 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 const SELF = 'src/__tests__/no-private-planning-refs.test.ts'
 
 /**
- * The launch-copy draft and the directory that vouches for it.
- *
- * The draft is gitignored, so `scan()` — which asks `git ls-files` — can never
+ * Launch copy: gitignored, so `scan()` — which asks `git ls-files` — can never
  * see it, while every word in it is written to be published. The sentinel below
  * builds its own coverage.
+ *
+ * Enumerated by NAME under the planning root, not named one file at a time. A
+ * hard-coded phase directory made "clean" and "did not look" indistinguishable
+ * one level out from where the docstring above rejects it: archiving or
+ * renaming the phase turns the whole check green while the draft still exists
+ * and is still about to be published, and a second asset beside it — a tweet
+ * thread, a launch email — was never covered and nothing said so.
  */
-const PHASE_DIR = '.planning/phases/06-launch-assets'
-const DRAFT = `${PHASE_DIR}/06-SHOW-HN.md`
+const PLANNING_ROOT = '.planning/phases'
+const LAUNCH_DRAFT = /-(SHOW-HN|LAUNCH|ANNOUNCE)[^/]*\.md$/
 
 /**
  * Scan EVERY tracked text file, from `git ls-files` rather than a glob list.
@@ -225,39 +230,49 @@ describe('no private planning or deployment references', () => {
   })
 
   /**
-   * The launch-copy draft is gitignored, so `scan()` cannot reach it — and it is
-   * the one unpublished file written entirely for publication. A term that lands
-   * in it leaks the moment it is pasted into a submission.
+   * Launch drafts are gitignored, so `scan()` cannot reach them — and they are
+   * the files written entirely for publication. A term that lands in one leaks
+   * the moment it is pasted into a submission.
    *
-   * The skip is anchored to the phase DIRECTORY, not to the draft's own absence.
-   * Keyed on the draft, this block would read green precisely when the draft had
-   * gone missing — "clean" and "did not look" would again be indistinguishable
-   * from the outside, which is the failure the docstring above already argues
-   * against for the old glob list. The directory is present exactly when the
-   * check is meaningful: never on CI or a fresh clone (.gitignore excludes
-   * `.planning/`), always on the machine holding the draft.
+   * The skip is anchored to the planning ROOT, and an empty enumeration under
+   * it is a failure rather than a skip. That is the only arrangement in which
+   * "clean" and "did not look" stay distinguishable: the root is absent exactly
+   * when the check is meaningless (CI, a fresh clone — .gitignore excludes
+   * `.planning/`) and present exactly when it is meaningful, while a holder
+   * whose tree contains no draft at all has moved or renamed one, not cleaned
+   * up. Matching by name rather than by path also covers the second asset
+   * nobody thought to add here.
    *
    * `.private-terms` is asserted for the same reason one level down: LOCAL_TERMS
    * degrades silently to `[]` when the file is missing, so a holder with the
-   * draft and no terms file would get a green scan that checked nothing.
+   * drafts and no terms file would get a green scan that checked nothing.
    *
-   * Deliberately NOT applied: PLANNING_REF. It matches a phase number, and the
+   * Deliberately NOT applied: PLANNING_REF. It matches a phase number, and a
    * draft necessarily carries one — a guaranteed false red trains its reader to
    * ignore the guard, which is worse than no guard. Offenders report bare
-   * `file:line` with no content at all, not `redact()`ed content: the draft is
+   * `file:line` with no content at all, not `redact()`ed content: a draft is
    * unpublished prose that may contain anything, and CI logs are public.
    */
-  test('the launch-copy draft carries no private deployment name', () => {
-    if (!existsSync(join(REPO_ROOT, PHASE_DIR))) return
+  test('every gitignored launch draft carries no private deployment name', () => {
+    const root = join(REPO_ROOT, PLANNING_ROOT)
+    if (!existsSync(root)) return
 
-    expect(existsSync(join(REPO_ROOT, DRAFT))).toBe(true)
+    const drafts = readdirSync(root, { recursive: true })
+      .map(String)
+      .filter((f) => LAUNCH_DRAFT.test(f))
+
+    expect(drafts).not.toEqual([])
     expect(LOCAL_NAME).not.toBeNull()
 
-    const offenders = readFileSync(join(REPO_ROOT, DRAFT), 'utf8')
-      .split('\n')
-      .flatMap((line, i) =>
-        PRIVATE_NAME.test(line) || LOCAL_NAME?.test(line) ? [`${DRAFT}:${i + 1}`] : [],
-      )
+    const offenders = drafts.flatMap((draft) =>
+      readFileSync(join(root, draft), 'utf8')
+        .split('\n')
+        .flatMap((line, i) =>
+          PRIVATE_NAME.test(line) || LOCAL_NAME?.test(line)
+            ? [`${PLANNING_ROOT}/${draft}:${i + 1}`]
+            : [],
+        ),
+    )
     expect(offenders).toEqual([])
   })
 
