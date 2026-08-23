@@ -166,7 +166,26 @@ function scan(): Map<string, string[]> {
       found.push(`${redact(file)}:0: private deployment name in the file path — ${redact(file)}`)
     }
 
-    const lines = readFileSync(join(REPO_ROOT, file), 'utf8').split('\n')
+    // `git ls-files` reports the INDEX, not the working tree. A file removed
+    // with plain `rm`, a path not yet written during a conflicted merge or an
+    // interrupted rebase, a skip-worktree/sparse-checkout entry, or a tracked
+    // dangling symlink all give an index entry with nothing to read. This runs
+    // in the describe body, so an ENOENT here took all six tests down with it
+    // — the guard unavailable in precisely the mid-operation states where a
+    // contributor is most likely to be moving files around. Loud, but the same
+    // outcome as not looking. Any other error still throws.
+    let text: string
+    try {
+      text = readFileSync(join(REPO_ROOT, file), 'utf8')
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+      // The name is still an offender when the content is unreachable — do not
+      // drop a path hit already found just because the body cannot be read.
+      if (found.length > 0) hits.set(file, found)
+      continue
+    }
+
+    const lines = text.split('\n')
     // `redact(file)` here too: a path carrying a local term would otherwise
     // print it verbatim into a public CI log, which is the one thing the
     // redaction invariant above exists to prevent.
