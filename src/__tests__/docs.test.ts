@@ -30,7 +30,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, s
 import { join } from 'node:path'
 import { buildPlanModel } from '../cli/plan.js'
 import { renderPlan } from '../cli/plan-render.js'
-import { _setHome } from '../lib/paths.js'
+import { _setHome, sessionApprovalPath, stateDir } from '../lib/paths.js'
 import { DEFAULT_TTL_MS, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { PluginManifestSchema } from '../schemas/plugin-manifest.js'
 
@@ -221,6 +221,19 @@ describe('generated manifest table', () => {
 // unfalsifiable claim; byte-equality against `renderPlan` is what makes it a
 // falsifiable one.
 
+// The house idiom for a symlinked fixture home is `mkdtempSync` (see
+// `src/cli/__tests__/run-plugin.test.ts`). This one cannot use it: the path is
+// baked into the public README, so it has to render identically on a
+// contributor's mac and on ubuntu CI. `lib/paths.ts` resolves the home
+// lexically — `path.resolve`, never `realpath` — which is what lets this
+// literal survive macOS' /tmp → /private/tmp symlink unchanged.
+//
+// ponytail: a fixed, world-writable path races if two `bun test` runs share a
+// machine (two checkouts, two worktrees, or a suite run overlapping a hand-run
+// capture) — one run's rmSync/symlinkSync lands inside the other's render
+// window and the byte-equality goes intermittently red with nothing to blame.
+// Nothing here is exposed to that: CI runs sequentially. Suffix the path per
+// checkout, or take a lock, if it ever bites.
 const DEMO_HOME = '/tmp/warpline-demo'
 
 /** Fixed clock — the capture must never depend on when it was taken. */
@@ -239,6 +252,22 @@ describe('generated plan demo', () => {
     // for resolution while the rendered path string stays machine-neutral.
     symlinkSync(join(REPO_ROOT, 'examples', 'plugins'), join(DEMO_HOME, 'plugins'))
     _setHome(DEMO_HOME)
+
+    // `buildPlanModel` reads both `.session-approval` and `state/` out of the
+    // home. A leftover grant rewrites `Grant: none` as `Grant: … — Nm
+    // remaining`, and the block stops being byte-stable minute to minute. If
+    // the rmSync above silently failed
+    // — permissions, a foreign-owned /tmp/warpline-demo — say so here rather
+    // than letting it surface as an unreadable diff in the test below.
+    const stale = [
+      [sessionApprovalPath(), 'a session grant'],
+      [stateDir(), 'engine state'],
+    ].flatMap(([path, what]) =>
+      existsSync(path as string)
+        ? [`${path} survived setup, carrying ${what} — the fixture was not rebuilt clean`]
+        : [],
+    )
+    expect(stale).toEqual([])
   })
 
   afterAll(() => {
