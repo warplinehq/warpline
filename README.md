@@ -192,6 +192,7 @@ ever picks a handoff up, the deterministic work carries on running without it.
   at 0.1, so this spec is not shipped in the package and the link is absolute.
 - [docs/needs-llm-contract.md](docs/needs-llm-contract.md) — the LLM handoff protocol
 - [docs/plugin-authoring.md](docs/plugin-authoring.md) — writing and testing plugins
+- [docs/why-the-gate-holds.md](docs/why-the-gate-holds.md) — the long argument: why the gate holds, and the objections it has to survive
 
 ## From source
 
