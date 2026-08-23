@@ -23,13 +23,23 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
 /** This file necessarily contains the patterns it searches for. */
 const SELF = 'src/__tests__/no-private-planning-refs.test.ts'
+
+/**
+ * The launch-copy draft and the directory that vouches for it.
+ *
+ * The draft is gitignored, so `scan()` — which asks `git ls-files` — can never
+ * see it, while every word in it is written to be published. The sentinel below
+ * builds its own coverage.
+ */
+const PHASE_DIR = '.planning/phases/06-launch-assets'
+const DRAFT = `${PHASE_DIR}/06-SHOW-HN.md`
 
 /**
  * Scan EVERY tracked text file, from `git ls-files` rather than a glob list.
@@ -162,6 +172,43 @@ describe('no private planning or deployment references', () => {
       .split('\n')
       .flatMap((line, i) =>
         LOCAL_NAME.test(line) ? [`${SELF}:${i + 1}`] : [],
+      )
+    expect(offenders).toEqual([])
+  })
+
+  /**
+   * The launch-copy draft is gitignored, so `scan()` cannot reach it — and it is
+   * the one unpublished file written entirely for publication. A term that lands
+   * in it leaks the moment it is pasted into a submission.
+   *
+   * The skip is anchored to the phase DIRECTORY, not to the draft's own absence.
+   * Keyed on the draft, this block would read green precisely when the draft had
+   * gone missing — "clean" and "did not look" would again be indistinguishable
+   * from the outside, which is the failure the docstring above already argues
+   * against for the old glob list. The directory is present exactly when the
+   * check is meaningful: never on CI or a fresh clone (.gitignore excludes
+   * `.planning/`), always on the machine holding the draft.
+   *
+   * `.private-terms` is asserted for the same reason one level down: LOCAL_TERMS
+   * degrades silently to `[]` when the file is missing, so a holder with the
+   * draft and no terms file would get a green scan that checked nothing.
+   *
+   * Deliberately NOT applied: PLANNING_REF. It matches a phase number, and the
+   * draft necessarily carries one — a guaranteed false red trains its reader to
+   * ignore the guard, which is worse than no guard. Offenders report bare
+   * `file:line` with no content at all, not `redact()`ed content: the draft is
+   * unpublished prose that may contain anything, and CI logs are public.
+   */
+  test('the launch-copy draft carries no private deployment name', () => {
+    if (!existsSync(join(REPO_ROOT, PHASE_DIR))) return
+
+    expect(existsSync(join(REPO_ROOT, DRAFT))).toBe(true)
+    expect(LOCAL_NAME).not.toBeNull()
+
+    const offenders = readFileSync(join(REPO_ROOT, DRAFT), 'utf8')
+      .split('\n')
+      .flatMap((line, i) =>
+        PRIVATE_NAME.test(line) || LOCAL_NAME?.test(line) ? [`${DRAFT}:${i + 1}`] : [],
       )
     expect(offenders).toEqual([])
   })
