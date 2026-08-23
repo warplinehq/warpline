@@ -60,10 +60,36 @@ const PRIVATE_NAME = new RegExp(
     'outreach-(?:drafts|generator)', 'collateral-(?:import|discover)',
     'hypothesis-gen', 'experiment-checker', 'seo-audit',
     // its capability vocabulary, and the repos themselves
-    'gsc_\\w+', 'brocade', 'graphify',
+    'gsc_\\w+', 'graphify',
   ].map((p) => `\\b${p}\\b`).join('|'),
   'i',
 )
+
+/**
+ * Class 2b — terms too sensitive to write down here. This file is tracked and
+ * published, so a literal in the list above would itself be the thing it
+ * guards against. Such terms live one per line in gitignored `.private-terms`,
+ * read at runtime, never committed.
+ *
+ * Absent file means an empty list, so a fresh clone and CI stay green rather
+ * than failing on something a contributor cannot supply. That is a real
+ * coverage hole and it is the deliberate trade: the terms cannot be published
+ * to close it. Whoever holds the file is the one who runs the check.
+ */
+const LOCAL_TERMS: string[] = (() => {
+  try {
+    return readFileSync(join(REPO_ROOT, '.private-terms'), 'utf8')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l !== '' && !l.startsWith('#'))
+  } catch {
+    return []
+  }
+})()
+
+const LOCAL_NAME = LOCAL_TERMS.length
+  ? new RegExp(LOCAL_TERMS.map((t) => `\\b${t}\\b`).join('|'), 'i')
+  : null
 
 /**
  * Empty, and meant to stay empty. Only ever populate this to ratchet down a
@@ -71,6 +97,17 @@ const PRIVATE_NAME = new RegExp(
  */
 const SWEEP_BACKLOG = new Set<string>([
 ])
+
+/**
+ * A failing assertion prints its offenders, and CI logs are public — so a local
+ * term must never reach the message. Reporting `file:line` with the term masked
+ * still tells whoever holds `.private-terms` exactly where to look.
+ */
+const REDACTED = '<redacted>'
+
+function redact(line: string): string {
+  return LOCAL_TERMS.reduce((acc, t) => acc.replace(new RegExp(t, 'gi'), REDACTED), line)
+}
 
 function scan(): Map<string, string[]> {
   const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, encoding: 'utf8' })
@@ -83,7 +120,9 @@ function scan(): Map<string, string[]> {
   for (const file of files) {
     const lines = readFileSync(join(REPO_ROOT, file), 'utf8').split('\n')
     const found = lines.flatMap((line, i) =>
-      PLANNING_REF.test(line) || PRIVATE_NAME.test(line) ? [`${file}:${i + 1}: ${line.trim()}`] : [],
+      PLANNING_REF.test(line) || PRIVATE_NAME.test(line) || LOCAL_NAME?.test(line)
+        ? [`${file}:${i + 1}: ${redact(line.trim())}`]
+        : [],
     )
     if (found.length > 0) hits.set(file, found)
   }
@@ -101,7 +140,29 @@ describe('no private planning or deployment references', () => {
   test('no file carries a private deployment name — no backlog, no exceptions', () => {
     const offenders = [...hits.values()]
       .flat()
-      .filter((line) => PRIVATE_NAME.test(line.slice(line.indexOf(': ') + 2)))
+      .filter((line) => {
+        // The line is already redacted, so LOCAL_NAME can no longer match it —
+        // the marker redact() left behind is what stands in for that hit.
+        const text = line.slice(line.indexOf(': ') + 2)
+        return PRIVATE_NAME.test(text) || text.includes(REDACTED)
+      })
+    expect(offenders).toEqual([])
+  })
+
+  /**
+   * SELF is exempt from the scan above because it necessarily spells out every
+   * pattern it hunts for — so anything placed here is invisible to the check
+   * that lives here. LOCAL_TERMS is the one list with no business appearing in
+   * this file, so it is checked against SELF too and the exemption cannot
+   * swallow it.
+   */
+  test('this file does not itself carry a local private term', () => {
+    if (LOCAL_NAME === null) return
+    const offenders = readFileSync(join(REPO_ROOT, SELF), 'utf8')
+      .split('\n')
+      .flatMap((line, i) =>
+        LOCAL_NAME.test(line) ? [`${SELF}:${i + 1}`] : [],
+      )
     expect(offenders).toEqual([])
   })
 

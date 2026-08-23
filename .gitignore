@@ -8,3 +8,7 @@ dist/
 .gsd/
 CLAUDE.local.md
 .claude/settings.local.json
+
+# Sensitive scan terms for src/__tests__/no-private-planning-refs.test.ts.
+# Local-only by design: writing them into a tracked file IS the leak.
+.private-terms
