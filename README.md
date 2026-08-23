@@ -38,6 +38,29 @@ Read the full doctrine: [docs/doctrine.md](docs/doctrine.md).
   nothing to run; judgment work rides your existing Claude subscription. See
   [docs/needs-llm-contract.md](docs/needs-llm-contract.md).
 
+<!-- generated: plan-demo -->
+```
+warpline plan — preview only; nothing was executed.
+
+Grant: none — plugins with side effects would be SKIPPED this run
+Plugins: /tmp/warpline-demo/plugins
+
+Due (2):
+
+  anomaly-watch (level 0)
+    (no declared side effects)
+  feed-triage (level 0)
+    (no declared side effects)
+
+Not due (2):
+
+  feed-monitor — skipped (unapproved): side effects require session approval
+    external_api: ⚠ unapproved — would be SKIPPED this run
+  github-poll — skipped (unapproved): side effects require session approval
+    external_api: ⚠ unapproved — would be SKIPPED this run
+```
+<!-- /generated -->
+
 ## Quickstart
 
 ```bash

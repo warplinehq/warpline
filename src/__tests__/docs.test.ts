@@ -13,11 +13,24 @@
  * (src/ is not shipped), advertised `board` subcommands the bin does not have,
  * and claimed Bun was required when Node alone is enough. None of that was
  * catchable by reading, only by checking the docs against the code.
+ *
+ * One block here breaks the file's otherwise pure-read habit: `generated plan
+ * demo` imports the runtime through `../cli/plan.js` and builds a fixture home
+ * under `/tmp`. Still deterministic and offline — it makes no network call —
+ * but no longer read-only.
+ *
+ * It lives here anyway because this file's contract is "the docs claim X, does
+ * the code do X", and a README block that presents itself as captured `warpline
+ * plan` output is that contract's clearest case: hand-authored, it is an
+ * unfalsifiable claim about the product's central safety property.
  */
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, readlinkSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { buildPlanModel } from '../cli/plan.js'
+import { renderPlan } from '../cli/plan-render.js'
+import { _setHome } from '../lib/paths.js'
 import { DEFAULT_TTL_MS, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { PluginManifestSchema } from '../schemas/plugin-manifest.js'
 
@@ -198,6 +211,67 @@ describe('generated manifest table', () => {
     const doc = read('docs/runtime-spec.md')
     const missing = Object.keys(PluginManifestSchema.shape).filter((f) => !doc.includes(`| \`${f}\` |`))
     expect(missing).toEqual([])
+  })
+})
+
+// ── The README's gate demo must be output the code still produces ────────
+//
+// The block is presented to a stranger as a real `warpline plan` run showing
+// two `autonomous` plugins' side effects gated. Hand-authored, that is an
+// unfalsifiable claim; byte-equality against `renderPlan` is what makes it a
+// falsifiable one.
+
+const DEMO_HOME = '/tmp/warpline-demo'
+
+/** Fixed clock — the capture must never depend on when it was taken. */
+const NOW = Date.UTC(2026, 7, 20, 12, 0, 0)
+
+describe('generated plan demo', () => {
+  // Scoped to this block, not the file: every other check here is a pure read,
+  // and none of them should run under a re-rooted home.
+  beforeAll(() => {
+    rmSync(DEMO_HOME, { recursive: true, force: true })
+    mkdirSync(DEMO_HOME, { recursive: true })
+    // A copy would not do: each example manifest opens with a `warpline/...`
+    // package self-reference, resolved by walking up from the file's REAL
+    // location for node_modules. From /tmp that walk finds nothing and all four
+    // plugins land in `Load failures (4)`. The symlink keeps the real location
+    // for resolution while the rendered path string stays machine-neutral.
+    symlinkSync(join(REPO_ROOT, 'examples', 'plugins'), join(DEMO_HOME, 'plugins'))
+    _setHome(DEMO_HOME)
+  })
+
+  afterAll(() => {
+    // Removed so a later local `warpline` invocation does not silently inherit
+    // a home the suite created.
+    _setHome(null)
+    rmSync(DEMO_HOME, { recursive: true, force: true })
+  })
+
+  test('README.md shows a plan block the CLI still renders byte-for-byte', async () => {
+    const doc = read('README.md')
+    const begin = doc.indexOf('<!-- generated: plan-demo -->')
+    const end = doc.indexOf('<!-- /generated -->')
+    expect(begin).toBeGreaterThan(-1)
+
+    // Inner slice, unlike the manifest-table analog above: `renderPlan` emits
+    // the plan text alone, not the delimiters or the fence. Start after the
+    // newline closing the opening fence line; stop at the closing fence, which
+    // is the first backtick run in the region because plan output has none.
+    // `renderPlan` ends `lines.push(''); join('\n')`, so it terminates in
+    // exactly one \n — and so does this slice. No `.trim()` on either side: a
+    // trim would let real trailing-whitespace drift through.
+    const fenceOpen = doc.indexOf('```\n', begin) + '```\n'.length
+    const inReadme = doc.slice(fenceOpen, doc.indexOf('```', fenceOpen))
+
+    // Recapture with:
+    //   rm -rf /tmp/warpline-demo && mkdir -p /tmp/warpline-demo
+    //   ln -s "$PWD/examples/plugins" /tmp/warpline-demo/plugins
+    //   bun run build
+    //   WARPLINE_HOME=/tmp/warpline-demo node dist/bin/warpline.js plan
+    // Capture from dist/, never the published package — the assertion below is
+    // against this working tree's renderer, and those only happen to agree.
+    expect(inReadme).toBe(renderPlan(await buildPlanModel(NOW), NOW))
   })
 })
 
