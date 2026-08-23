@@ -97,8 +97,24 @@ const LOCAL_TERMS: string[] = (() => {
   }
 })()
 
+/**
+ * A term is a LITERAL, not a pattern, and `\b` only anchors where it can.
+ *
+ * Interpolating a term raw fails three ways, and the first is silent — the one
+ * property this guard must never have. `\b` before a non-word character needs a
+ * preceding word character, so `@handle` or a term ending in `.` or `-` never
+ * matches at a line start and the scan reports clean over a live leak. A term
+ * containing `|` binds looser than the boundaries, mis-anchoring both halves.
+ * A stray `(` or `+` throws in the RegExp constructor at module load, taking
+ * the whole file — including the tests that need no local terms — with it.
+ * Domains, handles and paths are exactly what a holder writes down.
+ */
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const bounded = (t: string) =>
+  `${/^\w/.test(t) ? '\\b' : ''}${esc(t)}${/\w$/.test(t) ? '\\b' : ''}`
+
 const LOCAL_NAME = LOCAL_TERMS.length
-  ? new RegExp(LOCAL_TERMS.map((t) => `\\b${t}\\b`).join('|'), 'i')
+  ? new RegExp(LOCAL_TERMS.map(bounded).join('|'), 'i')
   : null
 
 /**
@@ -116,7 +132,11 @@ const SWEEP_BACKLOG = new Set<string>([
 const REDACTED = '<redacted>'
 
 function redact(line: string): string {
-  return LOCAL_TERMS.reduce((acc, t) => acc.replace(new RegExp(t, 'gi'), REDACTED), line)
+  // `esc` for the same reason as above, and more urgently: a term that reads as
+  // a pattern here would redact the wrong span — or throw — on the one code
+  // path whose job is to keep the term out of a public CI log. No boundaries:
+  // redaction must cover every occurrence, including inside a longer word.
+  return LOCAL_TERMS.reduce((acc, t) => acc.replace(new RegExp(esc(t), 'gi'), REDACTED), line)
 }
 
 function scan(): Map<string, string[]> {
@@ -173,6 +193,34 @@ describe('no private planning or deployment references', () => {
       .flatMap((line, i) =>
         LOCAL_NAME.test(line) ? [`${SELF}:${i + 1}`] : [],
       )
+    expect(offenders).toEqual([])
+  })
+
+  /**
+   * The real term list is gitignored, so synthetic shapes are the only ones
+   * this repo can check — and the shapes are the whole point: a holder writes
+   * down domains, handles and paths, not tidy words. Raw `\b`-wrapping fails
+   * every case below SILENTLY, which is the one way this guard must never
+   * fail.
+   */
+  test('a term that is not a plain word is still matched, literally and whole', () => {
+    // term, a line it must match, a line it must NOT match
+    const CASES: [string, string, string][] = [
+      ['@handle', 'ping @handle now', 'ping handles now'],
+      ['acme.io', 'see acme.io for more', 'see acmexio for more'],
+      ['a|b', 'x a|b y', 'x b y'],
+      ['frob(', 'call frob( here', 'call frobs here'],
+      ['plain', 'a plain word', 'plainly not'],
+    ]
+    const offenders = CASES.flatMap(([term, hit, miss]) => {
+      // Throws here rather than asserting if `esc` stops escaping — which is
+      // the import-time failure mode, so surfacing it as a test is the point.
+      const re = new RegExp(bounded(term), 'i')
+      return [
+        ...(re.test(hit) ? [] : [`${term}: silently missed \`${hit}\``]),
+        ...(re.test(miss) ? [`${term}: over-matched \`${miss}\``] : []),
+      ]
+    })
     expect(offenders).toEqual([])
   })
 
