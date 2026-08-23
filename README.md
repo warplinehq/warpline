@@ -16,11 +16,10 @@ to a database, calling external APIs, modifying files) does not run without
 explicit human session approval, at every autonomy level, `autonomous`
 included.
 
-Blanket approval exists: `warpline approve --all` writes a `scopes: '*'` grant,
-prints the coverage it is about to grant before it writes anything, and expires
-— see [the session approval file](docs/runtime-spec.md#9-session-approval-file)
-for the default lifetime and the ceiling from first grant — and nothing inside
-a run can grant itself a scope.
+Blanket approval exists and is deliberate — `warpline approve --all`. What it
+grants, what it prints before writing anything, when it expires, and why a run
+cannot widen its own scope:
+[Can the gate be bypassed?](#can-the-gate-be-bypassed).
 
 Published docs: [warplinehq.github.io/warpline](https://warplinehq.github.io/warpline/).
 
