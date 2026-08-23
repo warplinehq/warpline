@@ -77,7 +77,7 @@ else `<cwd>/.warpline`.
   board with ack / defer / complete states and severity-FIFO ordering.
 - **The `[needs-llm]` contract** — plugins emit judgment work as a typed
   handoff; a Claude Code companion skill picks it up. Deterministic work costs
-  nothing to run; judgment work rides your existing Claude subscription. See
+  nothing to run; judgment work uses your existing Claude subscription. See
   [docs/needs-llm-contract.md](docs/needs-llm-contract.md).
 
 ## Writing a plugin
@@ -179,7 +179,7 @@ run warpline — 23.0–23.5 is excluded by `engines.node`, and npm reports
 `EBADENGINE` there (a hard failure wherever `engine-strict` is set). Bun is the
 development runtime for this repository's own test suite, not a user
 requirement. The `[needs-llm]` half is a handoff rather than an API
-call — it rides whatever Claude Code session you already have, and if nobody
+call — it uses whatever Claude Code session you already have, and if nobody
 ever picks a handoff up, the deterministic work carries on running without it.
 
 ## Docs
