@@ -16,8 +16,8 @@ into each other.
 Everything a plugin does that reaches outside its own process — sending mail,
 filing an issue, writing to a database, calling somebody else's API — it has to
 declare in its manifest. Anything it declares there waits on an approval I grant
-by hand, for this session, or the run records that plugin skipped and carries on
-without it. That is the gate. What follows is the argument for keeping it even
+by hand, for this session, or the run records that plugin gated and finishes the
+level without it. That is the gate. What follows is the argument for keeping it even
 when it is in the way, which is the only condition under which a gate is ever
 really tested.
 
@@ -215,8 +215,9 @@ runtime records it as delegated rather than failed, and it is never retried as
 if it had broken — the shape is specified in
 [needs-llm-contract.md](needs-llm-contract.md). The second is that the gate is
 not a step somebody remembers to add. It is derived from what the manifest
-declares, applies at every autonomy level, and withholds the plugin rather than
-aborting the run, which is what makes it survivable enough to leave switched on;
+declares, applies at every autonomy level, and withholds the plugin and pauses
+rather than failing the run, which is what makes it survivable enough to leave
+switched on;
 [runtime-spec.md](runtime-spec.md) has the read semantics. You can build both on
 top of any orchestrator you like. That is rather the point — you would be
 building them, per project, and they would be as good as your discipline was on
