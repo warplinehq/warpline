@@ -1,42 +1,28 @@
 # Warpline
 
-**A deterministic plugin runtime for operations automation, with LLM judgment
-as a quarantined, dispatchable step — never an ambient capability.**
+> A deterministic plugin runtime where the LLM is a step you dispatch, not a
+> capability the code carries around.
 
-Warpline runs scheduled operational jobs (monitoring, data pulls, report
-generation, lead qualification — anything) under one doctrine:
+[![npm](https://img.shields.io/npm/v/warpline)](https://www.npmjs.com/package/warpline)
+[![CI](https://github.com/warplinehq/warpline/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/warplinehq/warpline/actions/workflows/ci.yml)
+[![Secret scan](https://github.com/warplinehq/warpline/actions/workflows/gitleaks.yml/badge.svg?branch=main)](https://github.com/warplinehq/warpline/actions/workflows/gitleaks.yml)
+[![License](https://img.shields.io/github/license/warplinehq/warpline)](LICENSE)
 
-> If you can write an `if/else` for it, it is code.
-> If it needs understanding or judgment, it is an LLM task — and the plugin
-> *hands it off* instead of calling a model.
+Warpline runs the recurring work that keeps a business going —
+outbound sequencing, market research pulls, content pipelines,
+competitor monitoring, lead qualification, report generation — on a schedule.
+A plugin that declares a side effect (sending email, creating issues, writing
+to a database, calling external APIs, modifying files) does not run without
+explicit human session approval, at every autonomy level, `autonomous`
+included.
 
-And one safety rule:
+Blanket approval exists: `warpline approve --all` writes a `scopes: '*'` grant,
+prints the coverage it is about to grant before it writes anything, and expires
+— see [the session approval file](docs/runtime-spec.md#9-session-approval-file)
+for the default lifetime and the ceiling from first grant — and nothing inside
+a run can grant itself a scope.
 
-> A plugin that declares side effects — sending email, creating issues,
-> writing to a database, calling external APIs, modifying files — does not
-> run without explicit human session approval. At **every** autonomy level,
-> `autonomous` included.
-
-Read the full doctrine: [docs/doctrine.md](docs/doctrine.md).
-
-## What you get
-
-- **Plugin runtime** — Zod-validated manifests; per-attempt timeouts; bounded
-  retries with exponential backoff + jitter; `AbortSignal` threaded into your
-  I/O; per-run artifacts (`runs/<id>.json` + captured log with attempt
-  delimiters).
-- **Side-effect approval gate** — a closed enum of side-effect types declared
-  per plugin; declared effects gate execution behind `warpline approve`-style
-  session approval, regardless of autonomy level.
-- **Engine** — TTL freshness (skip work that is still fresh), dependency
-  topological ordering, quiet hours, review gate, and idle-based degradation
-  tiers (`normal → degraded → extended → suspended`).
-- **Event board** — append-only `events.jsonl` + acknowledgements; a task
-  board with ack / defer / complete states and severity-FIFO ordering.
-- **The `[needs-llm]` contract** — plugins emit judgment work as a typed
-  handoff; a Claude Code companion skill picks it up. Deterministic work costs
-  nothing to run; judgment work rides your existing Claude subscription. See
-  [docs/needs-llm-contract.md](docs/needs-llm-contract.md).
+Published docs: [warplinehq.github.io/warpline](https://warplinehq.github.io/warpline/).
 
 <!-- generated: plan-demo -->
 ```
@@ -76,30 +62,24 @@ Every file warpline reads or writes lives under one home directory: the
 `WARPLINE_HOME` env var, else the nearest ancestor `.warpline/` directory,
 else `<cwd>/.warpline`.
 
-```bash
-# Scaffold a plugin — also prepares the home directory
-npx warpline scaffold my-plugin
+## What you get
 
-# Preview what the next engine advance would do. Executes nothing.
-npx warpline plan
-
-# Invoke one plugin handler directly
-npx warpline run my-plugin default
-
-# Grant / clear a side-effect approval for this session
-npx warpline approve my-plugin
-npx warpline revoke
-```
-
-Those five subcommands are the whole CLI surface at 0.1. Running everything
-that is due on a schedule is a library call, not a command — `runAdvance()`
-from the package root:
-
-```typescript
-import { runAdvance } from 'warpline'
-
-const result = await runAdvance()
-```
+- **Plugin runtime** — Zod-validated manifests; per-attempt timeouts; bounded
+  retries with exponential backoff + jitter; `AbortSignal` threaded into your
+  I/O; per-run artifacts (`runs/<id>.json` + captured log with attempt
+  delimiters).
+- **Side-effect approval gate** — a closed enum of side-effect types declared
+  per plugin; declared effects gate execution behind `warpline approve`-style
+  session approval, regardless of autonomy level.
+- **Engine** — TTL freshness (skip work that is still fresh), dependency
+  topological ordering, quiet hours, review gate, and idle-based degradation
+  tiers (`normal → degraded → extended → suspended`).
+- **Event board** — append-only `events.jsonl` + acknowledgements; a task
+  board with ack / defer / complete states and severity-FIFO ordering.
+- **The `[needs-llm]` contract** — plugins emit judgment work as a typed
+  handoff; a Claude Code companion skill picks it up. Deterministic work costs
+  nothing to run; judgment work rides your existing Claude subscription. See
+  [docs/needs-llm-contract.md](docs/needs-llm-contract.md).
 
 ## From source
 
@@ -147,7 +127,38 @@ Worked examples in [examples/plugins/](examples/plugins/):
 
 Authoring guide: [docs/plugin-authoring.md](docs/plugin-authoring.md).
 
+```bash
+# Scaffold a plugin — also prepares the home directory
+npx warpline scaffold my-plugin
+
+# Preview what the next engine advance would do. Executes nothing.
+npx warpline plan
+
+# Invoke one plugin handler directly
+npx warpline run my-plugin default
+
+# Grant / clear a side-effect approval for this session
+npx warpline approve my-plugin
+npx warpline revoke
+```
+
+Those five subcommands are the whole CLI surface at 0.1. Running everything
+that is due on a schedule is a library call, not a command — `runAdvance()`
+from the package root:
+
+```typescript
+import { runAdvance } from 'warpline'
+
+const result = await runAdvance()
+```
+
 ## Where the LLM fits
+
+> If you can write an `if/else` for it, it is code.
+> If it needs understanding or judgment, it is an LLM task — and the plugin
+> *hands it off* instead of calling a model.
+
+Read the full doctrine: [docs/doctrine.md](docs/doctrine.md).
 
 Nowhere in this repo — that is the point. Plugins that reach a judgment step
 return a `[needs-llm]` handoff (mapped to the `delegated` run status, never
