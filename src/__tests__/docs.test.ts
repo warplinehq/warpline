@@ -282,6 +282,9 @@ describe('generated plan demo', () => {
     const begin = doc.indexOf('<!-- generated: plan-demo -->')
     const end = doc.indexOf('<!-- /generated -->')
     expect(begin).toBeGreaterThan(-1)
+    // Assert the closing delimiter too, unlike `begin` alone: a README that
+    // lost it would still slice to the next backtick run and pass silently.
+    expect(end).toBeGreaterThan(begin)
 
     // Inner slice, unlike the manifest-table analog above: `renderPlan` emits
     // the plan text alone, not the delimiters or the fence. Start after the
