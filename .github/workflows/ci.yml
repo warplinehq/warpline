@@ -81,7 +81,7 @@ jobs:
       # better property — the next job exercises the exact bytes a publish
       # would upload, not an equivalent rebuild.
       - name: hand the artifact to the next job
-        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-tarball
           path: warpline-*.tgz
