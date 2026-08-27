@@ -39,11 +39,14 @@ Due (3):
   metrics-rollup (level 0)
     (no declared side effects)
 
-Not due (2):
+Not due (3):
 
   feed-monitor — skipped (unapproved): side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
   github-poll — skipped (unapproved): side effects require session approval
+    external_api: ⚠ unapproved — would be SKIPPED this run
+  anomaly-issue — skipped (unapproved): side effects require session approval
+    creates_issue: ⚠ unapproved — would be SKIPPED this run
     external_api: ⚠ unapproved — would be SKIPPED this run
 ```
 <!-- /generated -->
@@ -106,6 +109,7 @@ Worked examples in [examples/plugins/](examples/plugins/):
 | `feed-monitor` | Deterministic fetch/parse that emits the handoff — the producer half of the feed chain |
 | `feed-triage` | The `on_run` consumer half — per-entry judgment handed off via `[needs-llm]`, no declared side effects |
 | `metrics-rollup` | `daily` schedule with retained state — append-only rows, a retention window, weekly rollups; writes only under the home |
+| `anomaly-issue` | `dependencies` ordering after `anomaly-watch`, `supervised` autonomy, and a `creates_issue` side effect through the gate — irreversible, so the result says how to undo it |
 
 Authoring guide: [docs/plugin-authoring.md](docs/plugin-authoring.md).
 

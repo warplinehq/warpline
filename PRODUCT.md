@@ -93,10 +93,11 @@ and agent frameworks treat approval as a mode; here it is the boundary.
 
 ## Evidence on Hand
 
-- Four fresh-written example plugins in `examples/plugins/` — `feed-monitor`,
-  `feed-triage`, `anomaly-watch`, `github-poll` — are the demonstration data
-  source for mocks. Runs, Outputs and Asks shown in mocks are synthetic,
-  derived from those manifests, and labelled as such.
+- Six fresh-written example plugins in `examples/plugins/` — `feed-monitor`,
+  `feed-triage`, `anomaly-watch`, `github-poll`, `metrics-rollup`,
+  `anomaly-issue` — are the demonstration data source for mocks. Runs,
+  Outputs and Asks shown in mocks are synthetic, derived from those
+  manifests, and labelled as such.
 - Real run artifacts, events and approval files are produced by the test
   suite (`src/**/__tests__`) and can be generated locally; none are checked in.
 - No customers, testimonials, benchmarks or usage numbers exist. Do not
