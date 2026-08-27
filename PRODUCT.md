@@ -59,7 +59,9 @@ and agent frameworks treat approval as a mode; here it is the boundary.
   `src/cli/board-cli.ts` (`status`, `tasks`, `ack`, `ack-all`, `defer`).
 - `[needs-llm]` handoffs are picked up by a Claude Code companion skill; the
   Board shows them as delegated Runs, it does not execute them.
-- Quiet hours (default 22:00–07:00) suppress notification and execution.
+- Quiet hours are off by default (`quiet_hours: null`); set to a
+  `{ start, end }` window — `22:00`–`07:00` for an omitted field — they
+  suppress notification and execution inside it.
 
 ## Capabilities and Constraints
 
