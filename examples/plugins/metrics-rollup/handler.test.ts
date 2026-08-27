@@ -1,5 +1,26 @@
 import { describe, test, expect } from 'bun:test'
-import { appendRows, retire, weekStart, rollupWeekly, cutoffDate } from './handler.js'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
+import { appendRows, retire, weekStart, rollupWeekly, cutoffDate, handler } from './handler.js'
+
+/**
+ * Runs `handler` against a throwaway home. `warpline/lib/paths` exports only
+ * `warplineHome`, which resolves `WARPLINE_HOME` per call — the seam a plugin
+ * author has.
+ */
+async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
+  const home = await mkdtemp(join(tmpdir(), 'metrics-rollup-'))
+  const real = process.env.WARPLINE_HOME
+  process.env.WARPLINE_HOME = home
+  try {
+    return await fn(home)
+  } finally {
+    if (real === undefined) delete process.env.WARPLINE_HOME
+    else process.env.WARPLINE_HOME = real
+  }
+}
 
 describe('metrics-rollup appendRows', () => {
   test('adds one row per series for today; a second call the same day adds nothing', () => {
@@ -54,5 +75,37 @@ describe('metrics-rollup rollupWeekly', () => {
 describe('metrics-rollup cutoffDate', () => {
   test('subtracts retention days in UTC', () => {
     expect(cutoffDate('2026-08-27', 90)).toBe('2026-05-29')
+  })
+})
+
+describe('metrics-rollup handler retained state', () => {
+  test('refuses to overwrite a retained store it could not parse', async () => {
+    await withHome(async home => {
+      const metricsPath = join(home, 'metrics.json')
+      await writeFile(metricsPath, JSON.stringify({ series: [{ name: 'errors', latest: 4 }] }))
+      const statePath = join(home, 'state', 'metrics-rollup.json')
+      await mkdir(join(home, 'state'), { recursive: true })
+      await writeFile(statePath, '{"rows": [{"date": "2026-01-0')
+
+      const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
+
+      expect(result.status).toBe('failed')
+      expect(result.errors[0]?.code).toBe('parse_error')
+      // The corrupt file is still there — untouched, recoverable by hand.
+      expect(await readFile(statePath, 'utf-8')).toBe('{"rows": [{"date": "2026-01-0')
+    })
+  })
+
+  test('starts empty when the retained store does not exist yet', async () => {
+    await withHome(async home => {
+      const metricsPath = join(home, 'metrics.json')
+      await writeFile(metricsPath, JSON.stringify({ series: [{ name: 'errors', latest: 4 }] }))
+
+      const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
+
+      expect(result.status).toBe('success')
+      const state = JSON.parse(await readFile(join(home, 'state', 'metrics-rollup.json'), 'utf-8'))
+      expect(state.rows).toHaveLength(1)
+    })
   })
 })

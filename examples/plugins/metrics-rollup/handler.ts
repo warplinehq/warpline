@@ -145,8 +145,23 @@ export async function handler(
   try {
     const raw = JSON.parse(await readFile(statePath, 'utf-8'))
     state = { rows: Array.isArray(raw.rows) ? raw.rows : [], rollups: Array.isArray(raw.rollups) ? raw.rollups : [] }
-  } catch {
-    // missing or unparseable — start empty
+  } catch (err) {
+    // ENOENT is a first run. Anything else — a transient EMFILE, a file
+    // truncated by an unrelated crash, a hand-edit typo — must not start
+    // empty: the write below would then rename that over up to
+    // retention_days of rows and every rollup ever folded.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return {
+        status: 'failed',
+        phases_completed: [],
+        phases_failed: ['metrics-rollup'],
+        errors: [makeSkillError('parse_error', `cannot read ${statePath}: ${err instanceof Error ? err.message : String(err)}`, { impact: 'HIGH', retryable: false })],
+        data_freshness: {},
+        summary: 'metrics-rollup: retained state unreadable — refusing to overwrite it',
+        artifacts_produced: [],
+        schema_version: 1,
+      }
+    }
   }
 
   const today = new Date().toISOString().slice(0, 10)
