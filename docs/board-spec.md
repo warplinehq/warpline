@@ -236,8 +236,13 @@ validation on read rather than being silently ignored.
 | Field | Default | Meaning |
 |---|---|---|
 | `max_sends_per_day` | `20` | Cap on side-effecting sends per day |
-| `review_gate` | `true` | Require approval before any side-effect execution |
+| `review_gate` | `true` | Treat every `autonomous` plugin as `supervised`: it runs, is recorded `gated`, and the run stops after its level — whether or not it declares side effects. Independent of the side-effect gate, which applies regardless |
 | `quiet_hours` | `22:00`–`07:00` | Window in which nothing notifies or executes |
+
+On a default install this means the first advance gates at level 0:
+`anomaly-watch` and `metrics-rollup` are both `autonomous` and declare no side
+effects, and both are still recorded `gated`, so `anomaly-issue` at level 1 does
+not run at all until they are reviewed.
 
 Quiet hours bind the push channel too: nothing is pushed inside the window;
 it is delivered when the window ends.
