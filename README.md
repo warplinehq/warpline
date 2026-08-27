@@ -30,11 +30,13 @@ warpline plan — preview only; nothing was executed.
 Grant: none — plugins with side effects would be SKIPPED this run
 Plugins: /tmp/warpline-demo/plugins
 
-Due (2):
+Due (3):
 
   anomaly-watch (level 0)
     (no declared side effects)
   feed-triage (level 0)
+    (no declared side effects)
+  metrics-rollup (level 0)
     (no declared side effects)
 
 Not due (2):
@@ -103,6 +105,7 @@ Worked examples in [examples/plugins/](examples/plugins/):
 | `github-poll` | `external_api` side effect gating an autonomous plugin |
 | `feed-monitor` | Deterministic fetch/parse that emits the handoff — the producer half of the feed chain |
 | `feed-triage` | The `on_run` consumer half — per-entry judgment handed off via `[needs-llm]`, no declared side effects |
+| `metrics-rollup` | `daily` schedule with retained state — append-only rows, a retention window, weekly rollups; writes only under the home |
 
 Authoring guide: [docs/plugin-authoring.md](docs/plugin-authoring.md).
 
