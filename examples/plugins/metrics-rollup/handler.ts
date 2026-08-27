@@ -125,7 +125,21 @@ export async function handler(
   try {
     const raw = JSON.parse(await readFile(metricsPath, 'utf-8'))
     series = Array.isArray(raw.series) ? raw.series : []
-  } catch {
+  } catch (err) {
+    // A file that exists but is corrupt is not "no data yet". Left green, it
+    // is an appended-nothing day that looks fine, every day.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return {
+        status: 'failed',
+        phases_completed: [],
+        phases_failed: ['metrics-rollup'],
+        errors: [makeSkillError('parse_error', `cannot read ${metricsPath}: ${err instanceof Error ? err.message : String(err)}`, { impact: 'HIGH', retryable: false })],
+        data_freshness: {},
+        summary: `metrics-rollup: ${metricsPath} is unreadable`,
+        artifacts_produced: [],
+        schema_version: 1,
+      }
+    }
     // NOT a bare `skipped`: deriveRunStatus persists a prefix-less `skipped`
     // as `failed`, and "no data yet" must not paint a red run.
     return {

@@ -109,3 +109,24 @@ describe('metrics-rollup handler retained state', () => {
     })
   })
 })
+
+describe('metrics-rollup handler input file', () => {
+  test('a corrupt metrics file fails rather than reporting "no metrics file"', async () => {
+    await withHome(async home => {
+      const metricsPath = join(home, 'metrics.json')
+      await writeFile(metricsPath, '{"series": [')
+      const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
+      expect(result.status).toBe('failed')
+      expect(result.errors[0]?.code).toBe('parse_error')
+    })
+  })
+
+  test('a missing metrics file is still a green "nothing to roll up"', async () => {
+    await withHome(async home => {
+      const metricsPath = join(home, 'absent.json')
+      const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
+      expect(result.status).toBe('success')
+      expect(result.summary).toContain('nothing to roll up')
+    })
+  })
+})

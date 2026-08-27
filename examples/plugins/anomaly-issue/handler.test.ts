@@ -160,6 +160,32 @@ describe('anomaly-issue handler ledger', () => {
     }
   })
 
+  test('a corrupt anomalies file fails rather than reporting "no anomalies file"', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'anomaly-issue-'))
+    const realToken = process.env.GITHUB_TOKEN
+    const realHome = process.env.WARPLINE_HOME
+    process.env.WARPLINE_HOME = home
+    process.env.GITHUB_TOKEN = 'tok-123'
+
+    const anomaliesPath = join(home, 'anomalies.json')
+    await writeFile(anomaliesPath, '{"anomalies": [')
+
+    try {
+      const result = await handler(
+        {} as PluginManifest,
+        { repo: 'o/r', anomalies_path: anomaliesPath },
+        new AbortController().signal,
+      )
+      expect(result.status).toBe('failed')
+      expect(result.errors[0]?.code).toBe('parse_error')
+    } finally {
+      if (realToken === undefined) delete process.env.GITHUB_TOKEN
+      else process.env.GITHUB_TOKEN = realToken
+      if (realHome === undefined) delete process.env.WARPLINE_HOME
+      else process.env.WARPLINE_HOME = realHome
+    }
+  })
+
   test('refuses to file when the ledger exists but cannot be parsed', async () => {
     const home = await mkdtemp(join(tmpdir(), 'anomaly-issue-'))
     const realFetch = globalThis.fetch

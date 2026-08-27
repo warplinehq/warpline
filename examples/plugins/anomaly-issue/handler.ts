@@ -161,7 +161,15 @@ export async function handler(
   try {
     const raw = JSON.parse(await readFile(anomaliesPath, 'utf-8'))
     anomalies = Array.isArray(raw.anomalies) ? raw.anomalies : []
-  } catch {
+  } catch (err) {
+    // A file that exists but is corrupt is not "no data yet" — reporting it
+    // green under a summary that says "no file" hides it indefinitely.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return fail(
+        makeSkillError('parse_error', `cannot read ${anomaliesPath}: ${err instanceof Error ? err.message : String(err)}`, { impact: 'HIGH', retryable: false }),
+        `anomaly-issue: ${anomaliesPath} is unreadable`,
+      )
+    }
     // NOT a bare `skipped`: deriveRunStatus persists a prefix-less `skipped`
     // as `failed`, and "no data yet" must not paint a red run.
     return {
