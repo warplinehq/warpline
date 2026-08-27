@@ -12,3 +12,6 @@ CLAUDE.local.md
 # Sensitive scan terms for src/__tests__/no-private-planning-refs.test.ts.
 # Local-only by design: writing them into a tracked file IS the leak.
 .private-terms
+
+# Impeccable throwaway mock artboards and review captures — local only
+.impeccable/
