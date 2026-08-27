@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
-import { appendRows, retire, weekStart, rollupWeekly, cutoffDate, handler } from './handler.js'
+import { appendRows, retire, weekStart, rollupWeekly, cutoffDate, handler, isRow, isSeries } from './handler.js'
 
 /**
  * Runs `handler` against a throwaway home. `warpline/lib/paths` exports only
@@ -127,6 +127,43 @@ describe('metrics-rollup handler input file', () => {
       const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
       expect(result.status).toBe('success')
       expect(result.summary).toContain('nothing to roll up')
+    })
+  })
+})
+
+describe('metrics-rollup shape guards', () => {
+  test('isSeries rejects a non-numeric or missing latest', () => {
+    expect(isSeries({ name: 'a', latest: 3 })).toBe(true)
+    expect(isSeries({ name: 'a', latest: '3' })).toBe(false)
+    expect(isSeries({ name: 'a' })).toBe(false)
+    expect(isSeries(null)).toBe(false)
+  })
+
+  test('isRow rejects a malformed date or value', () => {
+    expect(isRow({ date: '2026-08-27', name: 'a', value: 3 })).toBe(true)
+    expect(isRow({ date: 'not-a-date', name: 'a', value: 3 })).toBe(false)
+    expect(isRow({ date: '2026-08-27', name: 'a', value: null })).toBe(false)
+  })
+
+  test('malformed series and retained rows are dropped and counted, not folded in', async () => {
+    await withHome(async home => {
+      const metricsPath = join(home, 'metrics.json')
+      await writeFile(metricsPath, JSON.stringify({
+        series: [{ name: 'errors', latest: 4 }, { name: 'bad', latest: '9' }],
+      }))
+      await mkdir(join(home, 'state'), { recursive: true })
+      await writeFile(join(home, 'state', 'metrics-rollup.json'), JSON.stringify({
+        rows: [{ date: '2026-08-27', name: 'ok', value: 1 }, { date: 'nope', name: 'bad', value: 1 }],
+        rollups: [],
+      }))
+
+      const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
+
+      expect(result.status).toBe('success')
+      expect(result.summary).toContain('dropped 1 malformed series and 1 malformed retained rows')
+      const state = JSON.parse(await readFile(join(home, 'state', 'metrics-rollup.json'), 'utf-8'))
+      expect(state.rows.every((r: { value: unknown }) => Number.isFinite(r.value))).toBe(true)
+      expect(state.rows.map((r: { name: string }) => r.name)).not.toContain('bad')
     })
   })
 })

@@ -37,7 +37,7 @@ export interface Rollup {
   max: number
 }
 
-interface Series {
+export interface Series {
   name: string
   latest: number
 }
@@ -45,6 +45,26 @@ interface Series {
 interface State {
   rows: Row[]
   rollups: Rollup[]
+}
+
+/**
+ * Shape guards for the two things that arrive as JSON.
+ *
+ * Not optional politeness: `rollupWeekly` does `sum += row.value`, so one
+ * `latest: "3"` or one missing field turns a rollup into a string
+ * concatenation or `NaN` — and `retire` has already deleted the rows it was
+ * computed from, so the (week, name) entry is wrong permanently. `weekStart`
+ * throws `RangeError` on a malformed date, which fails the whole run.
+ */
+export function isRow(r: unknown): r is Row {
+  const v = r as Row
+  return !!v && typeof v.name === 'string' && Number.isFinite(v.value)
+    && typeof v.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.date)
+}
+
+export function isSeries(s: unknown): s is Series {
+  const v = s as Series
+  return !!v && typeof v.name === 'string' && Number.isFinite(v.latest)
 }
 
 /** One row per series for `today`, unless (today, name) is already present. */
@@ -122,9 +142,12 @@ export async function handler(
   }
 
   let series: Series[]
+  let droppedSeries = 0
   try {
     const raw = JSON.parse(await readFile(metricsPath, 'utf-8'))
-    series = Array.isArray(raw.series) ? raw.series : []
+    const rawSeries: unknown[] = Array.isArray(raw.series) ? raw.series : []
+    series = rawSeries.filter(isSeries)
+    droppedSeries = rawSeries.length - series.length
   } catch (err) {
     // A file that exists but is corrupt is not "no data yet". Left green, it
     // is an appended-nothing day that looks fine, every day.
@@ -156,9 +179,12 @@ export async function handler(
 
   const statePath = join(warplineHome(), 'state', 'metrics-rollup.json')
   let state: State = { rows: [], rollups: [] }
+  let droppedRows = 0
   try {
     const raw = JSON.parse(await readFile(statePath, 'utf-8'))
-    state = { rows: Array.isArray(raw.rows) ? raw.rows : [], rollups: Array.isArray(raw.rollups) ? raw.rollups : [] }
+    const rawRows: unknown[] = Array.isArray(raw.rows) ? raw.rows : []
+    state = { rows: rawRows.filter(isRow), rollups: Array.isArray(raw.rollups) ? raw.rollups : [] }
+    droppedRows = rawRows.length - state.rows.length
   } catch (err) {
     // ENOENT is a first run. Anything else — a transient EMFILE, a file
     // truncated by an unrelated crash, a hand-edit typo — must not start
@@ -195,7 +221,8 @@ export async function handler(
     phases_failed: [],
     errors: [],
     data_freshness: { metrics: new Date().toISOString() },
-    summary: `appended ${appended} rows, retired ${retired.length} into ${rollups.length} weekly rollups (${kept.length} rows retained)`,
+    summary: `appended ${appended} rows, retired ${retired.length} into ${rollups.length} weekly rollups (${kept.length} rows retained)`
+      + (droppedSeries || droppedRows ? `; dropped ${droppedSeries} malformed series and ${droppedRows} malformed retained rows` : ''),
     artifacts_produced: [],
     schema_version: 1,
   }
