@@ -154,4 +154,39 @@ describe('anomaly-issue handler ledger', () => {
       else process.env.WARPLINE_HOME = realHome
     }
   })
+
+  test('refuses to file when the ledger exists but cannot be parsed', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'anomaly-issue-'))
+    const realFetch = globalThis.fetch
+    const realToken = process.env.GITHUB_TOKEN
+    const realHome = process.env.WARPLINE_HOME
+    process.env.WARPLINE_HOME = home
+    process.env.GITHUB_TOKEN = 'tok-123'
+
+    const anomaliesPath = join(home, 'anomalies.json')
+    await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors] }))
+    await mkdir(join(home, 'state'), { recursive: true })
+    await writeFile(join(home, 'state', 'anomaly-issue.filed.json'), '{"filed": {truncat')
+
+    globalThis.fetch = (async () => {
+      throw new Error('fetch must not be called')
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await handler(
+        {} as PluginManifest,
+        { repo: 'o/r', anomalies_path: anomaliesPath },
+        new AbortController().signal,
+      )
+      expect(result.status).toBe('failed')
+      expect(result.errors[0]?.code).toBe('parse_error')
+      expect(result.summary).toContain('would duplicate')
+    } finally {
+      globalThis.fetch = realFetch
+      if (realToken === undefined) delete process.env.GITHUB_TOKEN
+      else process.env.GITHUB_TOKEN = realToken
+      if (realHome === undefined) delete process.env.WARPLINE_HOME
+      else process.env.WARPLINE_HOME = realHome
+    }
+  })
 })

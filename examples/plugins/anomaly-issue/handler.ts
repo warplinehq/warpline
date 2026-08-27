@@ -176,8 +176,16 @@ export async function handler(
   try {
     const raw = JSON.parse(await readFile(ledgerPath, 'utf-8'))
     if (raw && typeof raw.filed === 'object' && raw.filed !== null) filed = raw.filed
-  } catch {
-    // no ledger yet
+  } catch (err) {
+    // ENOENT is "no ledger yet". Everything else — EACCES, EISDIR, a
+    // truncated file — must NOT read as an empty ledger: that re-files every
+    // anomaly AND overwrites the history that would have stopped it.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      return fail(
+        makeSkillError('parse_error', `cannot read ledger ${ledgerPath}: ${err instanceof Error ? err.message : String(err)}`, { impact: 'HIGH', retryable: false }),
+        'anomaly-issue: ledger unreadable — refusing to file (would duplicate)',
+      )
+    }
   }
 
   // No per-run cap on issue count: the input file is operator-side, the run
