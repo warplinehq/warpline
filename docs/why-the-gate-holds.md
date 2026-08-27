@@ -16,8 +16,10 @@ into each other.
 Everything a plugin does that reaches outside its own process — sending mail,
 filing an issue, writing to a database, calling somebody else's API — it has to
 declare in its manifest. Anything it declares there waits on an approval I grant
-by hand, for this session, or the run records that plugin gated and finishes the
-level without it. That is the gate. What follows is the argument for keeping it even
+by hand, for this session; without one the run records that plugin `skipped` and
+carries on without it. A `supervised` plugin that has run is recorded `gated` for
+review, and the run stops after its level.
+That is the gate. What follows is the argument for keeping it even
 when it is in the way, which is the only condition under which a gate is ever
 really tested.
 
@@ -215,8 +217,8 @@ runtime records it as delegated rather than failed, and it is never retried as
 if it had broken — the shape is specified in
 [needs-llm-contract.md](needs-llm-contract.md). The second is that the gate is
 not a step somebody remembers to add. It is derived from what the manifest
-declares, applies at every autonomy level, and withholds the plugin and pauses
-rather than failing the run, which is what makes it survivable enough to leave
+declares, applies at every autonomy level, and withholds the plugin rather than
+failing the run, which is what makes it survivable enough to leave
 switched on;
 [runtime-spec.md](runtime-spec.md) has the read semantics. You can build both on
 top of any orchestrator you like. That is rather the point — you would be
@@ -308,4 +310,16 @@ grants itself anything" is tied below to the search that established it. Run
 5. "the ceiling is liftable" — the CLI's own help text, at approve.ts:33:
      33:  --long       Permit an expiry past 24h from the first grant.
    This is why no sentence above calls the ceiling absolute.
+
+6. "records that plugin skipped and carries on" vs "recorded gated, and the run
+   stops after its level" — two different mechanisms, and the essay used to
+   describe the second under the first's trigger. Both are in the engine:
+     613:  result_summary: `skipped (unapproved): side effects [...] require
+           session approval`
+   is the unapproved-declared-effect path; it pushes a `skipped` entry and
+   returns, so siblings and later levels run normally. Whereas:
+     679:  plugin_states.set(pluginName, 'gated')
+   is the post-execution supervised path, and the level-end check that follows
+   it sets `stopped = true`. `warpline plan` prints the first as
+   `skipped (unapproved)`, which is the one-command check.
 -->
