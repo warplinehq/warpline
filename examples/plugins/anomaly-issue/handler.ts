@@ -25,9 +25,14 @@ export interface Anomaly {
 
 type FetchImpl = typeof fetch
 
-/** Anomalies not yet in the ledger. */
+/**
+ * Anomalies not yet in the ledger.
+ *
+ * `hasOwn`, not `in`: `in` is true for every `Object.prototype` key, so an
+ * anomaly named `constructor` or `toString` would be silently dropped forever.
+ */
 export function pending(anomalies: Anomaly[], filed: Record<string, string>): Anomaly[] {
-  return anomalies.filter(a => !(a.name in filed))
+  return anomalies.filter(a => !Object.hasOwn(filed, a.name))
 }
 
 /** Fixed template; the anomaly's fields are interpolated as data, never evaluated. */
@@ -172,10 +177,15 @@ export async function handler(
   }
 
   const ledgerPath = join(warplineHome(), 'state', 'anomaly-issue.filed.json')
-  let filed: Record<string, string> = {}
+  // Null prototype throughout: `filed['__proto__'] = url` on a plain object
+  // sets the prototype instead of an own property, and is never serialised —
+  // that anomaly would then be re-filed on every run.
+  let filed: Record<string, string> = Object.create(null)
   try {
     const raw = JSON.parse(await readFile(ledgerPath, 'utf-8'))
-    if (raw && typeof raw.filed === 'object' && raw.filed !== null) filed = raw.filed
+    if (raw && typeof raw.filed === 'object' && raw.filed !== null) {
+      filed = Object.assign(Object.create(null), raw.filed)
+    }
   } catch (err) {
     // ENOENT is "no ledger yet". Everything else — EACCES, EISDIR, a
     // truncated file — must NOT read as an empty ledger: that re-files every

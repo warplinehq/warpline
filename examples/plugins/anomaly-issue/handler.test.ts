@@ -16,6 +16,11 @@ describe('anomaly-issue pending', () => {
   test('returns all anomalies for an empty ledger', () => {
     expect(pending([errors, signups], {})).toEqual([errors, signups])
   })
+
+  test('does not treat Object.prototype keys as already filed', () => {
+    const proto: Anomaly = { name: 'constructor', latest: 1, threshold: 0, direction: 'above' }
+    expect(pending([proto], {})).toEqual([proto])
+  })
 })
 
 describe('anomaly-issue issueFor', () => {
