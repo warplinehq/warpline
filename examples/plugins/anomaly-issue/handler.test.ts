@@ -1,5 +1,9 @@
 import { describe, test, expect } from 'bun:test'
-import { pending, issueFor, fileIssues, type Anomaly } from './handler.js'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
+import { pending, issueFor, fileIssues, handler, type Anomaly } from './handler.js'
 
 const errors: Anomaly = { name: 'errors', latest: 42, threshold: 10, direction: 'above' }
 const signups: Anomaly = { name: 'signups', latest: 3, threshold: 5, direction: 'below' }
@@ -89,5 +93,65 @@ describe('anomaly-issue fileIssues', () => {
     expect(out.created).toEqual([])
     expect(out.error?.code).toBe('auth_failure')
     expect(out.error?.retryable).toBe(false)
+  })
+
+  test('a rejected fetch returns what was created instead of throwing', async () => {
+    let n = 0
+    const impl = (async () => {
+      if (n++ === 0) return { ok: true, status: 201, json: async () => ({ html_url: 'https://github.com/o/r/issues/1' }) }
+      throw new Error('ECONNRESET')
+    }) as unknown as typeof fetch
+
+    const out = await fileIssues('o/r', [errors, signups], 'tok-123', impl, signal)
+    expect(out.created).toEqual([{ name: 'errors', url: 'https://github.com/o/r/issues/1' }])
+    expect(out.error?.code).toBe('dependency_unavailable')
+    expect(out.error?.message).toContain('ECONNRESET')
+  })
+
+  test('a response without html_url still records the issue as created', async () => {
+    const { impl } = fakeFetch([{ ok: true, status: 201 }])
+    const out = await fileIssues('o/r', [errors], 'tok-123', impl, signal)
+    expect(out.created).toHaveLength(1)
+    expect(out.error?.code).toBe('parse_error')
+  })
+})
+
+describe('anomaly-issue handler ledger', () => {
+  test('writes the ledger for issues filed before a fetch throws', async () => {
+    // `warpline/lib/paths` exports only `warplineHome`, which resolves
+    // `WARPLINE_HOME` per call — the same seam a plugin author has.
+    const home = await mkdtemp(join(tmpdir(), 'anomaly-issue-'))
+    const realFetch = globalThis.fetch
+    const realToken = process.env.GITHUB_TOKEN
+    const realHome = process.env.WARPLINE_HOME
+    process.env.WARPLINE_HOME = home
+    process.env.GITHUB_TOKEN = 'tok-123'
+
+    const anomaliesPath = join(home, 'anomalies.json')
+    await mkdir(home, { recursive: true })
+    await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors, signups] }))
+
+    let n = 0
+    globalThis.fetch = (async () => {
+      if (n++ === 0) return { ok: true, status: 201, json: async () => ({ html_url: 'https://github.com/o/r/issues/1' }) }
+      throw new Error('ECONNRESET')
+    }) as unknown as typeof fetch
+
+    try {
+      const result = await handler(
+        {} as PluginManifest,
+        { repo: 'o/r', anomalies_path: anomaliesPath },
+        new AbortController().signal,
+      )
+      expect(result.status).toBe('partial')
+      const ledger = JSON.parse(await readFile(join(home, 'state', 'anomaly-issue.filed.json'), 'utf-8'))
+      expect(ledger.filed).toEqual({ errors: 'https://github.com/o/r/issues/1' })
+    } finally {
+      globalThis.fetch = realFetch
+      if (realToken === undefined) delete process.env.GITHUB_TOKEN
+      else process.env.GITHUB_TOKEN = realToken
+      if (realHome === undefined) delete process.env.WARPLINE_HOME
+      else process.env.WARPLINE_HOME = realHome
+    }
   })
 })

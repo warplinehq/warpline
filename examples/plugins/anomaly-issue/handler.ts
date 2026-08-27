@@ -61,17 +61,32 @@ export async function fileIssues(
 ): Promise<{ created: { name: string; url: string }[]; error: SkillError | null }> {
   const created: { name: string; url: string }[] = []
   for (const a of anomalies) {
-    const res = await fetchImpl(`https://api.github.com/repos/${repo}/issues`, {
-      method: 'POST',
-      signal,
-      headers: {
-        accept: 'application/vnd.github+json',
-        authorization: `Bearer ${token}`,
-        'user-agent': 'warpline-example',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify(issueFor(a)),
-    })
+    // Nothing here may throw: a throw skips the caller's ledger write, and
+    // every issue already created would be filed a second time on the retry.
+    let res: Response
+    try {
+      res = await fetchImpl(`https://api.github.com/repos/${repo}/issues`, {
+        method: 'POST',
+        signal,
+        headers: {
+          accept: 'application/vnd.github+json',
+          authorization: `Bearer ${token}`,
+          'user-agent': 'warpline-example',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify(issueFor(a)),
+      })
+    } catch (err) {
+      const aborted = signal.aborted
+      return {
+        created,
+        error: makeSkillError(
+          aborted ? 'timeout' : 'dependency_unavailable',
+          `${aborted ? 'aborted' : 'request failed'} filing ${a.name} on ${repo}: ${err instanceof Error ? err.message : String(err)}`,
+          { impact: 'HIGH', retryable: false },
+        ),
+      }
+    }
     if (!res.ok) {
       const code = res.status === 401 || res.status === 403 ? 'auth_failure' : 'dependency_unavailable'
       return {
@@ -79,7 +94,20 @@ export async function fileIssues(
         error: makeSkillError(code, `GitHub API ${res.status} filing ${a.name} on ${repo}`, { impact: 'HIGH', retryable: false }),
       }
     }
-    const { html_url } = (await res.json()) as { html_url: string }
+    let html_url: unknown
+    try {
+      ;({ html_url } = (await res.json()) as { html_url?: unknown })
+    } catch {
+      html_url = undefined
+    }
+    if (typeof html_url !== 'string') {
+      // The issue EXISTS on GitHub by now — record it, or the retry duplicates it.
+      created.push({ name: a.name, url: `https://github.com/${repo}/issues (url not returned)` })
+      return {
+        created,
+        error: makeSkillError('parse_error', `GitHub API returned no html_url for ${a.name}`, { impact: 'HIGH', retryable: false }),
+      }
+    }
     created.push({ name: a.name, url: html_url })
   }
   return { created, error: null }
