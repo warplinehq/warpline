@@ -73,8 +73,8 @@ else `<cwd>/.warpline`.
 - **Engine** — TTL freshness (skip work that is still fresh), dependency
   topological ordering, quiet hours, review gate, and idle-based degradation
   tiers (`normal → degraded → extended → suspended`).
-- **Event board** — append-only `events.jsonl` + acknowledgements; a task
-  board with ack / defer / complete states and severity-FIFO ordering.
+- **Event board** — append-only `events.jsonl` + acknowledgements; tasks
+  with ack / defer / complete states and severity-FIFO ordering.
 - **The `[needs-llm]` contract** — plugins emit judgment work as a typed
   handoff; a Claude Code companion skill picks it up. Deterministic work costs
   nothing to run; judgment work uses your existing Claude subscription. See
@@ -188,7 +188,7 @@ ever picks a handoff up, the deterministic work carries on running without it.
 - [docs/doctrine.md](docs/doctrine.md) — the deterministic/LLM boundary
 - [docs/runtime-spec.md](docs/runtime-spec.md) — manifest fields, retry/timeout/abort semantics, run artifacts
 - [docs/board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)
-  — event board, task states, file formats. The board is a repo-only surface
+  — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface
   at 0.1, so this spec is not shipped in the package and the link is absolute.
 - [docs/needs-llm-contract.md](docs/needs-llm-contract.md) — the LLM handoff protocol
 - [docs/plugin-authoring.md](docs/plugin-authoring.md) — writing and testing plugins

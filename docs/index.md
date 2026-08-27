@@ -12,7 +12,7 @@ plugin, start at the top and work down.
 - [doctrine.md](doctrine.md) — the deterministic/LLM boundary
 - [runtime-spec.md](runtime-spec.md) — manifest fields, retry/timeout/abort semantics, run artifacts
 - [board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)
-  — event board, task states, file formats. The board is a repo-only surface
+  — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface
   at 0.1, so this spec is not shipped in the package and the link is absolute.
 - [needs-llm-contract.md](needs-llm-contract.md) — the LLM handoff protocol
 - [plugin-authoring.md](plugin-authoring.md) — writing and testing plugins
