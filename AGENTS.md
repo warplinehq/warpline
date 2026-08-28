@@ -69,6 +69,13 @@ bun run typecheck           # build, then tsc --noEmit (strict; no
    never reuse a version number.
 5. **History stays stable once public** — no force-pushes to main; the
    flip-day ruleset enforces it (see EXTRACTION-NOTES.md checklist).
+6. **First-person prose has a register, and it is enforced.** Before editing
+   `docs/why-the-gate-holds.md` — or adding a file to `VOICED_DOCS` in
+   `src/__tests__/voice.test.ts` — read CONTRIBUTING.md § Voice. Contractions
+   at speaking rate, no em dashes, no semicolons, short sentences, no balanced
+   "X rather than Y" antithesis. The test catches the measurable half; the
+   guide carries the rest. Accuracy review does not test voice, so this is the
+   only gate that does.
 
 ## Release / launch
 

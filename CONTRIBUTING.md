@@ -42,6 +42,39 @@ for you.
   LOOK different from "checked and fine". This is the project's founding
   operational lesson; new surfaces are reviewed against it.
 
+## Voice
+
+Applies to the prose documents written in the first person — today that's
+`docs/why-the-gate-holds.md`. Reference specs and the README are still in a
+flatter register and are exempt until converted.
+
+The measurable half is enforced by `src/__tests__/voice.test.ts`, so it fails in
+CI rather than in review: no em dashes, no semicolons, median sentence at most
+16 words, at most 22% of sentences over 25 words, at least 20 contractions per
+1000 words. Those are a floor against drift, not a definition of good writing.
+
+The half a test can't check:
+
+- **Write it the way you'd say it.** If you wouldn't say "it is not", don't
+  write it. This is the single biggest tell, and it's why the rate above is
+  enforced rather than suggested.
+- **Open on the claim, not on an article.** "The first rule is older than the
+  gate and much duller: if you can write an `if/else` for it, it is code" buries
+  the point behind a preamble. Lead with the rule, comment on it afterwards.
+- **Skip the balanced antithesis.** "Recorded as delegated rather than failed",
+  "the highest-risk combination rather than the lowest" — one is fine, six in a
+  document reads as a rhetorical tic. Plain "not" usually does the same work.
+- **No elided-verb comparatives.** "Older than the gate, and duller" is a
+  written figure nobody says out loud.
+- **Ground the abstract in the concrete immediately**, and prefer the plain word
+  to the industry one.
+- **State the limit before you're asked.** A claim that names what it doesn't
+  cover is worth more than one that doesn't.
+
+The point isn't stylistic preference. Accuracy review, spec review and code
+review all pass a document that reads as though nobody wrote it, so voice is the
+one property in this repo that no other gate catches.
+
 ## What to expect
 
 - **Response** — you get an acknowledgement within a few days, on issues and
