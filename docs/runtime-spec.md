@@ -124,6 +124,27 @@ the single mapping shared by the persisted run artifact, any live run bus,
 and the board event (severity `info`). A plain `skipped` without the prefix still
 maps to `failed` — widen deliberately if a persisted-run path ever produces one.
 
+### Attempt status
+
+Each entry in `attempts[]` carries its own terminal status, from a five-value
+set: `success | failed | cancelled | timeout | delegated`.
+
+`delegated` joined it on 2026-08-28. Until then the attempt classifier had four
+values and collapsed everything that was not `success` into `failed`, so a
+handoff produced a run artifact that contradicted itself — `status: "delegated"`
+at the run level, `attempts[0].status: "failed"` one field below. Nothing
+behaved wrongly, because `deriveRunStatus` and the CLI both read the result
+rather than the attempt, but anyone reading `attempts[]` directly was told the
+dispatch failed.
+
+Both levels now classify a handoff through one shared predicate, so the run and
+its attempts cannot disagree. A `delegated` attempt also carries `error: null`
+and contributes no `final_error`, even when the handoff result populates
+`errors[]`: the dispatch succeeded, so there is no failure to attribute.
+
+Consumers should treat the set as open and not assume four members. The
+persisted artifact types this field as a plain string for that reason.
+
 ## 4. AbortSignal Contract
 
 `HandlerFn` gained a third parameter in :

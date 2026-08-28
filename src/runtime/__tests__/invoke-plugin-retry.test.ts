@@ -18,7 +18,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
-import { invokePlugin } from '../invoke-plugin.js'
+import { invokePlugin, deriveRunStatus } from '../invoke-plugin.js'
 import * as engineEvents from '../../board/engine-events.js'
 
 const FIXTURES_DIR = testFixturesDir(import.meta.url, '..', '..', '..', 'test-utils', 'fixture-plugins')
@@ -49,6 +49,33 @@ describe('invokePlugin — retry loop', () => {
     setTimeoutSpy.mockRestore()
     emitAttemptFailedSpy.mockRestore()
     rmSync(tmp, { recursive: true, force: true })
+  })
+
+  /**
+   * The run and its own attempts must tell the same story. Before 2026-08-28
+   * they did not: `deriveRunStatus` said `delegated` while the attempt
+   * classifier collapsed every non-success into `failed`, so one artifact
+   * asserted both that the handoff dispatched and that it failed.
+   *
+   * The fixture carries a non-fatal `errors[]` entry on purpose. Without it
+   * `firstError` is null anyway and the two error assertions below pass no
+   * matter what the classifier does.
+   */
+  it('a [needs-llm] handoff is delegated at BOTH the run and attempt level', async () => {
+    const res = await invokePlugin('needs-llm-plugin', {}, { pluginsDir: FIXTURES_DIR })
+
+    expect(deriveRunStatus(res)).toBe('delegated')
+    expect(res.attempts.length).toBe(1)
+    expect(res.attempts[0]?.status).toBe('delegated')
+
+    // A dispatch is not a failure, so it attributes no error — even though the
+    // handoff result populates errors[].
+    expect(res.result.errors?.length).toBe(1)
+    expect(res.attempts[0]?.error).toBeNull()
+    expect(res.final_error).toBeNull()
+
+    // Never retried: a handoff is terminal for the plugin.
+    expect(res.attempt_count).toBe(1)
   })
 
   it('success on first attempt → attempt_count=1, retried=false', async () => {

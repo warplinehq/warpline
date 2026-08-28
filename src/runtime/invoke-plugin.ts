@@ -54,8 +54,15 @@ export interface AttemptRecord {
   started_at: string
   /** Wall-clock duration of this attempt in milliseconds */
   elapsed_ms: number
-  /** Terminal status of this attempt */
-  status: 'success' | 'failed' | 'cancelled' | 'timeout'
+  /**
+   * Terminal status of this attempt.
+   *
+   * `delegated` mirrors the run-level status of the same name: an attempt that
+   * ended in a `[needs-llm]` handoff dispatched successfully, so calling it
+   * `failed` misreports it to anyone reading `attempts[]` directly. Both
+   * levels classify through `isHandoff`, so they cannot drift apart.
+   */
+  status: 'success' | 'failed' | 'cancelled' | 'timeout' | 'delegated'
   /** First error message from the attempt, or null on success */
   error: string | null
 }
@@ -121,6 +128,19 @@ export interface InvokePluginOptions {
 }
 
 /**
+ * Is this result a `[needs-llm]` handoff?
+ *
+ * One definition, because there are two classifiers that must never disagree:
+ * the run-level `deriveRunStatus` below and the attempt-level classifier in
+ * the retry loop. They disagreed until 2026-08-28 — the run said `delegated`
+ * while its own `attempts[0]` said `failed` — and a second copy of this
+ * predicate is exactly how that comes back.
+ */
+function isHandoff(result: SkillResult | null): boolean {
+  return result?.status === 'skipped' && (result.summary?.startsWith('[needs-llm]') ?? false)
+}
+
+/**
  * Terminal run status for an invocation — the SINGLE mapping used by both the
  * persisted RunArtifact and the dashboard's live run bus / board events.
  *
@@ -139,12 +159,7 @@ export function deriveRunStatus(inv: {
   if (inv.cancelled) return 'cancelled'
   if (inv.timed_out) return 'timeout'
   if (inv.result?.status === 'success') return 'success'
-  if (
-    inv.result?.status === 'skipped' &&
-    inv.result.summary?.startsWith('[needs-llm]')
-  ) {
-    return 'delegated'
-  }
+  if (isHandoff(inv.result)) return 'delegated'
   return 'failed'
 }
 
@@ -334,19 +349,30 @@ export async function invokePlugin(
         attemptStatus = 'cancelled'
         cancelled = true
       }
+    } else if (thisResult.status === 'success') {
+      attemptStatus = 'success'
+    } else if (isHandoff(thisResult)) {
+      attemptStatus = 'delegated'
     } else {
-      attemptStatus = thisResult.status === 'success' ? 'success' : 'failed'
+      attemptStatus = 'failed'
     }
+
+    // A dispatched handoff is not an error, so it carries none — the same
+    // reason `delegated` exists at all. Both fields used to test `=== 'success'`,
+    // which meant "not success" implied "failed"; that stopped being true the
+    // moment a fifth status arrived, and a handoff that also set `errors[]`
+    // would have reported a `final_error` on a run that did not fail.
+    const attemptErrored = attemptStatus !== 'success' && attemptStatus !== 'delegated'
 
     attempts.push({
       attempt: attempt + 1,
       started_at: new Date(attemptStart).toISOString(),
       elapsed_ms: elapsed,
       status: attemptStatus,
-      error: attemptStatus === 'success' ? null : firstError,
+      error: attemptErrored ? firstError : null,
     })
     finalResult = thisResult
-    finalErr = attemptStatus === 'success' ? null : firstError
+    finalErr = attemptErrored ? firstError : null
 
     // -- LLM stub pass-through: skipped + [needs-llm] prefix is never retried --
     if (thisResult.status === 'skipped') break
