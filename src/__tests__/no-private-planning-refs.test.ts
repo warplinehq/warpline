@@ -49,7 +49,15 @@ const SELF = 'src/__tests__/no-private-planning-refs.test.ts'
  * paragraph above describes, and this is the most publication-bound prose in
  * the repository to lose out of every check it has.
  */
-const PLANNING_ROOT = '.planning/phases'
+/**
+ * The planning ROOT, not `.planning/phases`. Milestone close moves every phase
+ * directory to `.planning/milestones/<version>-phases/` — so an anchor one
+ * level down goes blind the moment a milestone ships, which is precisely when
+ * the drafts matter most, because that is when they get posted. This turned
+ * red at the v0.1 close on 2026-08-28 rather than passing vacuously, which is
+ * the arrangement the empty-enumeration assertion below exists to produce.
+ */
+const PLANNING_ROOT = '.planning'
 const LAUNCH_DRAFT = /-(SHOW-HN|LAUNCH|ANNOUNCE|DOCTRINE)[^/]*\.md$/
 
 /**
