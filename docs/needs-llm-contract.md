@@ -18,10 +18,18 @@ A plugin that reaches the edge of what code should decide returns a
 ```jsonc
 {
   "status": "skipped",
-  "summary": "[needs-llm] Draft distribution posts for 2 articles. Context: <path or inline payload>",
+  "summary": "[needs-llm] Draft distribution posts for 2 articles. Context: <path>",
   // ...rest of the normal SkillResult fields
 }
 ```
+
+`Context:` names a **path**, not an inline payload. The scanner resolves it and
+reads the file, and it will only read paths that resolve inside the warpline
+home — an inline blob would be treated as a path, fail to resolve, and be
+reported as out-of-home rather than consumed. The in-home restriction is the
+point: the scanner runs in a session with the user's rights, so the set of
+things a plugin can make it open is bounded by the home, not by the plugin.
+Write the payload to a file under the home and name that.
 
 Three rules, all enforced or honoured by the runtime:
 
