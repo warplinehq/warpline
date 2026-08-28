@@ -61,16 +61,26 @@ interface ApprovalFile {
  *
  * Returns true if approved, false otherwise. Never throws — a missing or
  * corrupt approval file is treated as unapproved.
+ *
+ * `opts.now` is the clock seam. It is appended rather than slotted before
+ * `approvalPath` because both the engine and the tests already pass the path
+ * positionally. Callers that hold an injected clock MUST pass it: a caller
+ * that threads `now` into some of its reads and lets the rest hit the wall
+ * clock renders a view that disagrees with itself, which is the bug this
+ * parameter closes, not a style preference.
  */
 export async function checkApproval(
   scope: string,
   approvalPath: string = sessionApprovalPath(),
+  opts: { now?: number } = {},
 ): Promise<boolean> {
+  const now = opts.now ?? Date.now()
   try {
     const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
 
-    // Check expiry
-    if (Date.now() > new Date(raw.expires_at).getTime()) return false
+    // Check expiry. Strict `>`, so a grant is live up to and including its
+    // expiry millisecond — the edge `engine-loader.test.ts:218` pins.
+    if (now > new Date(raw.expires_at).getTime()) return false
 
     // Wildcard grants all scopes
     if (raw.scopes === '*') return true

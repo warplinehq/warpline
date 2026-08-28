@@ -157,7 +157,7 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
             level,
             // Manifest declaration order, never re-sorted.
             sideEffects: [...manifest.side_effects],
-            approved: await checkApproval(name, approvalPath),
+            approved: await checkApproval(name, approvalPath, { now }),
           }
           if (evaluation.due) due.push(entry)
           else notDue.push({ ...entry, reason: evaluation.reason, detail: evaluation.detail })

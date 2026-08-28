@@ -58,12 +58,15 @@ export interface FreshnessResult {
  * @param manifest   - Plugin manifest (provides ttl_hours and dependencies)
  * @param state      - Current v2 state (provides plugin_runs timestamps)
  * @param options.force - Override both gates; always returns { fresh: false, reason: 'forced' }
+ * @param options.now - Clock seam, epoch ms. Defaults to the wall clock. A
+ *   caller holding an injected clock MUST pass it, or its freshness verdicts
+ *   silently disagree with the rest of the view it is building.
  */
 export function isPluginFresh(
   pluginName: string,
   manifest: PluginManifest,
   state: EngineState,
-  options: { force?: boolean } = {},
+  options: { force?: boolean; now?: number } = {},
 ): FreshnessResult {
   // -- Force override ---------
   if (options.force) {
@@ -77,7 +80,7 @@ export function isPluginFresh(
   }
 
   const lastRunMs = new Date(pluginState.last_run_at).getTime()
-  const now = Date.now()
+  const now = options.now ?? Date.now()
 
   // -- Dependency invalidation (additive, checked first) --
   // A dependency that ran more recently than this plugin invalidates it. This is an

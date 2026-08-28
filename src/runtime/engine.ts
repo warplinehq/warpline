@@ -202,12 +202,13 @@ export interface EvalContext {
  * threads it through the evaluator and the renderer so two consecutive
  * previews are byte-identical.
  *
- * ponytail: `now` is currently a contract parameter only. The two clock reads
- * that actually matter live inside `isPluginFresh` (`staleness.ts`) and
- * `checkApproval` (`approval-gate.ts`), which take no clock seam, and copying
- * their comparisons here to use `now` is exactly the restatement this
- * extraction exists to prevent. Thread `now` into those two when either grows
- * an options bag; until then tests pin the edges with `setSystemTime`.
+ * `now` reaches every clock read this function makes, not just its own: it is
+ * threaded into `isPluginFresh` (`staleness.ts`) and `checkApproval`
+ * (`approval-gate.ts`), which grew a `now` option for exactly this. That is
+ * what makes the promise above literally true rather than nearly true. Pass a
+ * past `now` and the freshness verdicts, the approval rows and the header all
+ * move together; before the seam existed they did not, and the render
+ * disagreed with itself.
  */
 export async function evaluatePlugin(
   pluginName: string,
@@ -248,7 +249,7 @@ export async function evaluatePlugin(
   }
 
   // -- Staleness check: skip if fresh --
-  const freshness = isPluginFresh(pluginName, manifest, ctx.state, { force: ctx.force })
+  const freshness = isPluginFresh(pluginName, manifest, ctx.state, { force: ctx.force, now })
   if (freshness.fresh) {
     return { due: false, reason: 'fresh', detail: freshness.reason ?? 'fresh' }
   }
@@ -259,7 +260,10 @@ export async function evaluatePlugin(
   }
 
   // -- Side-effect approval gate ---------------------------------
-  if (manifest.side_effects.length > 0 && !(await checkApproval(pluginName, ctx.approvalPath))) {
+  if (
+    manifest.side_effects.length > 0 &&
+    !(await checkApproval(pluginName, ctx.approvalPath, { now }))
+  ) {
     return {
       due: false,
       reason: 'unapproved',

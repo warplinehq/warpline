@@ -49,6 +49,34 @@ describe('checkApproval', () => {
     expect(result).toBe(false)
   })
 
+  /**
+   * WR-19's discriminating pair. Both cases read the SAME grant file and
+   * differ only in the injected clock, so neither can pass by accident and
+   * deleting the `now` option fails both: without the seam each call reads the
+   * wall clock, and the file is live at the wall clock by construction.
+   *
+   * This is the bug in its smallest form. `buildPlanModel(now)` promises that
+   * everything time-derived comes from its injected value; before the seam,
+   * `checkApproval` read `Date.now()` regardless, so a render built on a past
+   * `now` printed a header and per-plugin rows computed against two different
+   * clocks.
+   */
+  test('the injected clock decides expiry, not the wall clock', async () => {
+    const HOUR = 60 * 60 * 1000
+    await grantApproval('enrich.issue-render', 4 * HOUR, approvalPath)
+
+    // Live now, and live at a `now` inside the window.
+    expect(await checkApproval('enrich.issue-render', approvalPath)).toBe(true)
+    expect(
+      await checkApproval('enrich.issue-render', approvalPath, { now: Date.now() + 1 * HOUR }),
+    ).toBe(true)
+
+    // Same file, a `now` past the expiry — expired, though the wall clock says live.
+    expect(
+      await checkApproval('enrich.issue-render', approvalPath, { now: Date.now() + 5 * HOUR }),
+    ).toBe(false)
+  })
+
   test('returns false when scope does not match', async () => {
     await grantApproval('ops.digest-sender', 4 * 60 * 60 * 1000, approvalPath)
     const result = await checkApproval('enrich.issue-render', approvalPath)

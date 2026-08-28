@@ -477,11 +477,12 @@ describe('main([plan]) end to end', () => {
  * live state and the fixture proves nothing. The global is restored in this
  * file's existing `afterAll`.
  *
- * Clock: `now` is injected into `buildPlanModel`, but `isPluginFresh` and
- * `checkApproval` read the wall clock directly (02-04's documented seam limit),
- * so every fixture boundary below is hours away from its threshold rather than
- * milliseconds. This proof is about set membership, not about edge timing —
- * the exactly-at-TTL edges are pinned in the runtime's own tests.
+ * Clock: `now` is injected into `buildPlanModel` and now reaches every read it
+ * makes — `isPluginFresh` and `checkApproval` both take it (WR-19). The
+ * fixture boundaries below are still hours away from their thresholds rather
+ * than milliseconds, because this proof is about set membership, not about
+ * edge timing — the exactly-at-TTL edges are pinned in the runtime's own
+ * tests, and widening this fixture to chase them would prove less, not more.
  */
 describe('plan ≡ what a run would attempt', () => {
   const DAY_MS = 86_400_000
