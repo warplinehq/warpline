@@ -8,17 +8,20 @@
 [![Secret scan](https://github.com/warplinehq/warpline/actions/workflows/gitleaks.yml/badge.svg?branch=main)](https://github.com/warplinehq/warpline/actions/workflows/gitleaks.yml)
 [![License](https://img.shields.io/github/license/warplinehq/warpline)](LICENSE)
 
-Warpline runs the recurring work that keeps a business going —
-outbound sequencing, market research pulls, content pipelines,
-competitor monitoring, lead qualification, report generation — on a schedule.
+Warpline runs the recurring work that keeps a business going, on a schedule.
+Outbound sequencing, market research pulls, content pipelines, competitor
+monitoring, lead qualification, report generation.
+
 A plugin that declares a side effect (sending email, creating issues, writing
-to a database, calling external APIs, modifying files) does not run without
-explicit human session approval — including at `autonomous`, because the
-autonomy level is *dispatch* autonomy: it decides whether the scheduler may
-start a plugin without asking, never whether that plugin may act on the world
-without asking. Blanket approval exists and is deliberate: `warpline approve --all`
-writes a wildcard grant. What it covers, what it prints before writing anything,
-when it expires, and why a run cannot widen its own scope:
+to a database, calling external APIs, modifying files) doesn't run without
+explicit human session approval. That includes at `autonomous`, because the
+autonomy level is *dispatch* autonomy. It decides whether the scheduler can
+start a plugin without asking. It never decides whether that plugin can act on
+the world without asking.
+
+Blanket approval exists and it's deliberate. `warpline approve --all` writes a
+wildcard grant. What it covers, what it prints before writing anything, when it
+expires, and why a run can't widen its own scope:
 [Can the gate be bypassed?](#can-the-gate-be-bypassed).
 
 Published docs: [warplinehq.github.io/warpline](https://warplinehq.github.io/warpline/).
@@ -58,9 +61,9 @@ npm i warpline          # or: bun add warpline
 npx warpline --help
 ```
 
-Runs on Node 22.18+ or 23.6+ (`engines.node` excludes 23.0–23.5), or Bun ≥ 1.3
-— Node alone is enough, Bun is not required to use warpline. v0.1 supports
-POSIX systems (macOS, Linux); Windows is untested and unclaimed.
+Runs on Node 22.18+ or 23.6+ (`engines.node` excludes 23.0–23.5), or Bun ≥ 1.3.
+Node alone is enough. You don't need Bun to use warpline. v0.1 supports POSIX
+systems (macOS, Linux). Windows is untested and unclaimed.
 
 Every file warpline reads or writes lives under one home directory: the
 `WARPLINE_HOME` env var, else the nearest ancestor `.warpline/` directory,
@@ -98,7 +101,7 @@ my-plugin/
 The manifest declares what the plugin is allowed to do (side effects,
 schedule, TTL, timeout, retries, minimum degradation tier). The handler does
 the work and returns a structured `SkillResult`. Invalid manifests are a
-hard-stop at load — a misconfigured plugin never silently runs.
+hard-stop at load, so a misconfigured plugin never silently runs.
 
 Worked examples in [examples/plugins/](examples/plugins/):
 
@@ -129,7 +132,7 @@ npx warpline revoke
 ```
 
 Those five subcommands are the whole CLI surface at 0.1. Running everything
-that is due on a schedule is a library call, not a command — `runAdvance()`
+that's due on a schedule is a library call, not a command. It's `runAdvance()`
 from the package root:
 
 ```typescript
@@ -140,21 +143,21 @@ const result = await runAdvance()
 
 ## Where the LLM fits
 
-> If you can write an `if/else` for it, it is code.
-> If it needs understanding or judgment, it is an LLM task — and the plugin
+> If you can write an `if/else` for it, it's code.
+> If it needs understanding or judgment, it's an LLM task, and the plugin
 > *hands it off* instead of calling a model.
 
 Read the full doctrine: [docs/doctrine.md](docs/doctrine.md).
 
-Nowhere in this repo — that is the point. Plugins that reach a judgment step
+Nowhere in this repo. That's the point. Plugins that reach a judgment step
 return a `[needs-llm]` handoff (mapped to the `delegated` run status, never
 retried). An orchestrating Claude Code session consumes those handoffs via
-companion skills; a template lives in
+companion skills, and a template lives in
 [skills/needs-llm-template/](https://github.com/warplinehq/warpline/tree/main/skills/needs-llm-template).
 That directory is deliberately not shipped in the package, so the link is
-absolute — it resolves the same from npm, from GitHub, and from node_modules.
-Side effects that
-follow from judgment work still go through the approval gate.
+absolute. It resolves the same from npm, from GitHub, and from node_modules.
+Side effects that follow from judgment work still go through the approval
+gate.
 
 ## FAQ
 
@@ -163,11 +166,11 @@ follow from judgment work still go through the approval gate.
 Only deliberately, and only by a human at a keyboard. `warpline approve --all`
 is the one route to a wildcard `scopes: '*'` grant, and it refuses to run if you
 also name plugins, so no plugin name, glob or shell expansion can widen a grant
-past what you typed. It prints the coverage it is about to grant before it
-writes anything. The grant is session-scoped and it expires — see
+past what you typed. It prints the coverage it's about to grant before it writes
+anything. The grant is session-scoped and it expires. See
 [the session approval file](docs/runtime-spec.md#9-session-approval-file) for
 the default lifetime and the ceiling from first grant. And nothing inside a run
-can widen its own scope: the grant helpers have no caller on the advance path,
+can widen its own scope. The grant helpers have no caller on the advance path,
 so a run can only ever spend approval a human already gave.
 
 ### Why not just let the plugin call a model?
@@ -175,19 +178,19 @@ so a run can only ever spend approval a human already gave.
 Because a plugin that calls a model has quietly made every future rerun an
 experiment. The deterministic half stops being reproducible, the judgment half
 stops being reviewable, and you find out which was which when they disagree
-with each other. If you can write an `if/else` for it, it is code; if it needs
-understanding, it is a handoff. Keeping the boundary in the manifest means you
-can read a plugin and know which one you are looking at.
+with each other. If you can write an `if/else` for it, it's code. If it needs
+understanding, it's a handoff. Keep the boundary in the manifest and you can
+read a plugin and know which one you're looking at.
 
 ### Do I need Bun / a Claude subscription?
 
 No to both, in different ways. Node 22.18+ or 23.6+ is enough to install and
-run warpline — 23.0–23.5 is excluded by `engines.node`, and npm reports
+run warpline. 23.0–23.5 is excluded by `engines.node`, and npm reports
 `EBADENGINE` there (a hard failure wherever `engine-strict` is set). Bun is the
 development runtime for this repository's own test suite, not a user
-requirement. The `[needs-llm]` half is a handoff rather than an API
-call — it uses whatever Claude Code session you already have, and if nobody
-ever picks a handoff up, the deterministic work carries on running without it.
+requirement. The `[needs-llm]` half is a handoff, not an API call. It uses
+whatever Claude Code session you already have, and if nobody ever picks a
+handoff up, the deterministic work carries on running without it.
 
 ## Docs
 
@@ -213,7 +216,7 @@ bun install
 bun run test                  # builds, then runs the full suite
 ```
 
-Requires [bun](https://bun.sh) ≥ 1.3 — this is the one place it is genuinely
+Requires [bun](https://bun.sh) ≥ 1.3. This is the one place it's genuinely
 required, because the suite is written against `bun:test`.
 
 ```bash
@@ -225,8 +228,8 @@ bun run src/cli/board-cli.ts tasks
 ## Provenance
 
 Warpline was extracted in August 2026 from the private automation engine
-that has run one company's marketing operations since early 2026. The domain
-plugins stayed behind; the runtime, gates, board, and doctrine are what
+that's run one company's marketing operations since early 2026. The domain
+plugins stayed behind. The runtime, gates, board, and doctrine are what
 generalised.
 
 ## License
