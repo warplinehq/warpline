@@ -356,17 +356,29 @@ objects that do not exist.
    is written, so one unknown name aborts the whole command with nothing on
    disk — a half-applied denial would leave the operator believing they had
    silenced three plugins when they had silenced one.
-2. **Run linkage on Asks.** *Landed.* `BoardEvent` carries `run_id` as a
-   first-class field beside `task_id`, and task aging carries `first_run_id`
-   (the run that raised the task) and `last_flagged_run_id` (the most recent
-   run to re-flag it) — an Ask links the latter. All three are nullable and
-   default to `null` on read, which is a read-compatibility shim: every line of
-   `events.jsonl` is validated on its own and dropped on failure, so a required
-   field would have discarded the whole existing log rather than reporting an
-   error. `null` means the event was emitted outside any run, which is a fact
-   and not a gap — the tier-transition notice is the standing example. A run id
-   whose run log has been pruned at 30 days resolves to "run no longer
-   retained", distinct from `null`.
+2. **Run linkage on Asks.** *Landed on events; reserved on tasks.* `BoardEvent`
+   carries `run_id` as a first-class field beside `task_id`, and the engine
+   writes it: a notice names the advance that emitted it. Task aging carries
+   `first_run_id` (the run that raised the task) and `last_flagged_run_id` (the
+   most recent run to re-flag it), and an Ask is meant to link the latter.
+
+   **Those two task fields are reserved and unwritten.** `createTask` accepts
+   both and no caller supplies one, so in shipped operation they are
+   permanently `null` and nothing reads them: threading the advance's run id
+   into task creation is Board-build work, because nothing in the engine raises
+   a task yet. An Ask therefore cannot name the run that raised its task. The
+   schema is the contract the Board build fills in, not a behaviour that
+   already exists — a planner reading the field list should not assume data
+   arrives in them.
+
+   All three are nullable and default to `null` on read, which is a
+   read-compatibility shim: every line of `events.jsonl` is validated on its own
+   and dropped on failure, so a required field would have discarded the whole
+   existing log rather than reporting an error. On an event `null` means it was
+   emitted outside any run, which is a fact and not a gap — the tier-transition
+   notice is the standing example. On a task it currently means "not yet
+   wired". A run id whose run log has been pruned at 30 days resolves to "run no
+   longer retained", distinct from `null`.
 3. **Output as data.** `artifacts_produced: string[]` becomes a record with
    type, path or body, and the producing run id, so the Board can render and
    version it.
@@ -415,7 +427,7 @@ objects that do not exist.
 | Schema | Used by | Purpose |
 |--------|---------|---------|
 | `BoardEventSchema` | Ask (`notice`), Run | One line of `events.jsonl`, validated on read; `run_id` names the advance that emitted it, `null` when there was none |
-| `TaskAgingSchema` / `TaskDisplaySchema` | Ask (`decision`, `chore`) | Tasks and their `pending → active → completed / deferred` states; `first_run_id` and `last_flagged_run_id` link the task to the runs that raised and last re-flagged it |
+| `TaskAgingSchema` / `TaskDisplaySchema` | Ask (`decision`, `chore`) | Tasks and their `pending → active → completed / deferred` states; `first_run_id` and `last_flagged_run_id` are reserved for the runs that raised and last re-flagged the task, and are unwritten until the Board build (§ 7, item 2) |
 | `AcknowledgementsSchema` | Ask | Persists answers across sessions |
 | `ActionType` | Ask | `acknowledge`, `action`, `defer`, `mark_done` — the 0.1 verbs the 0.2 verbs map onto |
 | `RunArtifact` | Run, Output | `runs/` entries |

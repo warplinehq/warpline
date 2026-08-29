@@ -84,6 +84,13 @@ export const TaskAgingSchema = z.object({
    * `BoardEventSchema.run_id`: task_aging entries written before run linkage
    * existed carry neither field, and the engine's own state document must not
    * fail validation over it.
+   *
+   * **Reserved and unwritten.** `createTask` accepts both and no caller
+   * supplies one, so in shipped operation they are permanently null and
+   * nothing reads them. Threading the advance's run id into task creation is
+   * Board-build work — nothing in the engine raises a task yet. Read this as
+   * the contract that build fills in, not as data that arrives today.
+   * `docs/board-spec.md` § 7 item 2 says the same, so a planner meets it either way.
    */
   first_run_id: z.string().nullable().default(null),
   last_flagged_run_id: z.string().nullable().default(null),
