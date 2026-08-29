@@ -39,7 +39,7 @@ import {
 import type { EngineState } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs } from '../schemas/run-log.js'
 import type { RunLog } from '../schemas/run-log.js'
-import type { SkillResult } from '../schemas/skill-result.js'
+import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
 import {
   emitBoardEvent,
   makeEvent,
@@ -713,6 +713,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               last_run_at: new Date().toISOString(),
               status: 'gated',
               duration_ms: Date.now() - entryStart,
+              // last_output: written here as well as on the autonomous path. A
+              // gated run produced its Outputs before the gate saw them.
+              ...lastOutputOf(result),
             }
           }
           return
@@ -744,6 +747,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           last_run_at: new Date().toISOString(),
           status: result.status === 'failed' ? 'failed' : result.status === 'partial' ? 'partial' : 'success',
           duration_ms: Date.now() - entryStart,
+          // last_output: absent, not null, when this run produced no Output.
+          ...lastOutputOf(result),
         }
       }),
     )
@@ -984,6 +989,21 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
   }
 
   return { manifests: plugins, failures }
+}
+
+/**
+ * The `last_output` slice of a `plugin_runs` entry, spread into the write.
+ *
+ * Returns an EMPTY object when the result produced no Output, so the key is
+ * absent from the JSON rather than present as `null` or `{}` — a reader should
+ * not have to tell an unproductive run from a malformed pointer.
+ *
+ * "Most recent" is the last element: `artifacts_produced` is written in the
+ * order the handler produced them.
+ */
+function lastOutputOf(result: SkillResult): { last_output?: OutputRecord } {
+  const last = result.artifacts_produced.at(-1)
+  return last === undefined ? {} : { last_output: last }
 }
 
 function getDefaultPluginsDir(): string {

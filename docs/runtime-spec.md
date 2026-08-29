@@ -586,6 +586,7 @@ TTL staleness check reads, and the only field that check consults is
 | `last_run_at` | ISO 8601 string | When the run ended |
 | `status` | `success` \| `partial` \| `failed` \| `skipped` \| `gated` | How it ended |
 | `duration_ms` | integer, optional | Wall time for the run |
+| `last_output` | Output record, optional | The most recent Output this plugin produced |
 
 `gated` records a supervised plugin that ran and was parked pending approval.
 It is written when the plugin is parked, anchored at the gate's completion
@@ -602,3 +603,25 @@ window, on one approval.
 The status set is closed. Adding a member fans out into this document, and
 into every operator state file written afterwards, which is why it is not
 extended casually.
+
+### `last_output`
+
+A pointer to the most recent Output a plugin produced, so a reader can name it
+without scanning the runs directory. It is the Output record shape from § 5,
+reused rather than restated — a second shape would be a second thing that could
+disagree with the first.
+
+It is written wherever `plugin_runs` is written, which is both the autonomous
+completion and the supervised park. A gated run produced its Outputs before the
+gate ever saw them, so it carries a pointer like any other run.
+
+**Absent, not null.** A run that produced no Output writes no `last_output` key
+at all — not `null`, not `{}`. Reading a missing key is unambiguous; reading an
+empty object means guessing whether the run produced nothing or the writer
+failed.
+
+The pointer may dangle. Its `run_id` names a run log, and run logs are pruned at
+30 days by mtime (§ 6), so a pointer can outlive the run it names. That resolves
+to "run no longer retained" rather than an error, and nothing deletes the
+pointer to avoid the case — the pointer is the only remaining record that the
+Output existed.

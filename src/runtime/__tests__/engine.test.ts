@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { topoSort } from '../engine.js'
 import { grantApproval } from '../approval-gate.js'
@@ -843,7 +843,11 @@ describe('runAdvance Output handling', () => {
    * caller passes, so a test can say "produced an Output" or "produced none"
    * without a second fixture.
    */
-  async function createOutputPlugin(name: string, artifactsLiteral: string): Promise<void> {
+  async function createOutputPlugin(
+    name: string,
+    artifactsLiteral: string,
+    autonomyLevel: 'autonomous' | 'supervised' = 'autonomous',
+  ): Promise<void> {
     const pluginDir = join(ctx.pluginsDir, name)
     await mkdir(pluginDir, { recursive: true })
 
@@ -855,8 +859,8 @@ describe('runAdvance Output handling', () => {
       outputs: {},
       capabilities: [],
       schedule: 'on_run',
-      autonomy_level: 'autonomous',
-      side_effects: [],
+      autonomy_level: autonomyLevel,
+      side_effects: autonomyLevel === 'supervised' ? ['writes_db'] : [],
       ttl_hours: 0.001,
       dependencies: [],
       timeout_ms: 5000,
@@ -942,5 +946,105 @@ export async function handler(manifest, args) {
     expect(output).toBeDefined()
     expect(output?.run_id).toBe('run-under-test')
     expect(typeof output?.produced_at).toBe('string')
+  })
+  test('Test 30: after an advance producing an Output, plugin_runs names it', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await createOutputPlugin(
+      'brief-writer',
+      JSON.stringify([{ type: 'brief', format: 'markdown', path: 'brief.md' }]),
+    )
+
+    const result = await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+    })
+
+    const state = JSON.parse(await readFile(statePath, 'utf-8'))
+    const entry = state.plugin_runs['brief-writer']
+    expect(entry).toBeDefined()
+    expect(entry.last_output).toEqual({
+      type: 'brief',
+      format: 'markdown',
+      path: 'brief.md',
+      run_id: result.run_id,
+      produced_at: expect.any(String),
+    })
+  })
+
+  test('Test 31: after an advance producing no Output, the pointer is absent from the JSON', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await createOutputPlugin('quiet-plugin', '[]')
+
+    await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+    })
+
+    const state = JSON.parse(await readFile(statePath, 'utf-8'))
+    const entry = state.plugin_runs['quiet-plugin']
+    expect(entry).toBeDefined()
+    // Absent, not null and not an empty object — asserted on the raw JSON,
+    // because that is the only place the three are distinguishable.
+    expect('last_output' in entry).toBe(false)
+  })
+
+  test('Test 32: a gated advance records the parked run\'s Output too', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await createOutputPlugin(
+      'gated-writer',
+      JSON.stringify([{ type: 'brief', format: 'markdown', path: 'brief.md' }]),
+      'supervised',
+    )
+
+    const approvalPath = join(ctx.root, '.session-approval-test32')
+    await grantApproval('gated-writer', 4 * 60 * 60 * 1000, approvalPath)
+
+    const result = await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+      approvalPath,
+    })
+
+    expect(result.plugin_states.get('gated-writer')).toBe('gated')
+    const state = JSON.parse(await readFile(statePath, 'utf-8'))
+    expect(state.plugin_runs['gated-writer'].status).toBe('gated')
+    expect(state.plugin_runs['gated-writer'].last_output.path).toBe('brief.md')
+  })
+
+  test('Test 33: a last_output naming a pruned run resolves to not-retained rather than throwing', async () => {
+    const { isRunLogRetained } = await import('../../schemas/run-log.js')
+    const { runAdvance } = await import('../engine.js')
+    await createOutputPlugin(
+      'brief-writer',
+      JSON.stringify([{ type: 'brief', format: 'markdown', path: 'brief.md' }]),
+    )
+
+    const result = await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+    })
+
+    const state = JSON.parse(await readFile(statePath, 'utf-8'))
+    const runId = state.plugin_runs['brief-writer'].last_output.run_id
+    expect(runId).toBe(result.run_id)
+    expect(isRunLogRetained(runId, ctx.runsDir)).toBe(true)
+
+    // Prune the producing run log out from under the pointer. The pointer is
+    // left dangling on purpose — deleting it to avoid the case would lose the
+    // only record that the Output ever existed.
+    await rm(join(ctx.runsDir, `${runId}.json`))
+
+    const after = JSON.parse(await readFile(statePath, 'utf-8'))
+    expect(after.plugin_runs['brief-writer'].last_output.run_id).toBe(runId)
+    expect(() => isRunLogRetained(runId, ctx.runsDir)).not.toThrow()
+    expect(isRunLogRetained(runId, ctx.runsDir)).toBe(false)
   })
 })

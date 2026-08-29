@@ -232,3 +232,65 @@ describe('PluginRunSchema.status', () => {
     expect(PluginRunSchema.safeParse({ ...base, status: 'approved' }).success).toBe(false)
   })
 })
+
+// ── The per-plugin last Output pointer (R7) ──────────────────────────────
+
+describe('PluginRunSchema.last_output', () => {
+  let stateDir: string
+  let statePath: string
+
+  beforeEach(async () => {
+    stateDir = await mkdtemp(join(tmpdir(), 'warpline-last-output-'))
+    statePath = join(stateDir, 'engine-state.json')
+  })
+
+  afterEach(async () => {
+    await rm(stateDir, { recursive: true, force: true })
+  })
+
+  const base = { last_run_at: '2026-08-01T00:00:00Z', status: 'success' as const }
+  const output = {
+    type: 'brief',
+    format: 'markdown' as const,
+    run_id: '20260801T000000-abcd1234',
+    produced_at: '2026-08-01T00:00:00Z',
+    path: 'brief.md',
+  }
+
+  it('parses a run carrying a last_output', () => {
+    const result = PluginRunSchema.safeParse({ ...base, last_output: output })
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.last_output).toEqual(output)
+  })
+
+  it('reuses the Output record shape rather than defining a second one', () => {
+    // Both-present is invalid for an Output, so it must be invalid here too.
+    const result = PluginRunSchema.safeParse({
+      ...base,
+      last_output: { type: 'brief', body: 'x', path: 'y.md' },
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('round-trips the pointer through writeEngineState', async () => {
+    const state = defaultEngineState()
+    state.plugin_runs['brief-writer'] = { ...base, last_output: output }
+    await writeEngineState(state, statePath)
+
+    const reread = await readEngineState(statePath)
+    expect(reread.plugin_runs['brief-writer']?.last_output).toEqual(output)
+  })
+
+  // Asserted on the RAW re-read JSON, not on the parsed object: absent and
+  // `null` and `{}` all read the same after parsing, and the whole point of
+  // `.optional()` over `.nullable()` is which one lands on disk.
+  it('omits the key entirely for a run that produced no Output', async () => {
+    const state = defaultEngineState()
+    state.plugin_runs['quiet-plugin'] = { ...base }
+    await writeEngineState(state, statePath)
+
+    const raw = JSON.parse(await readFile(statePath, 'utf-8'))
+    expect(raw.plugin_runs['quiet-plugin']).toBeDefined()
+    expect('last_output' in raw.plugin_runs['quiet-plugin']).toBe(false)
+  })
+})

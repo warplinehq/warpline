@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { SkillResultSchema } from './skill-result.js'
 
@@ -131,4 +132,16 @@ export async function pruneRunLogs(baseDir: string = runsDir()): Promise<number>
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
   }
   return pruned
+}
+
+/**
+ * Whether the run log a `run_id` names is still on disk.
+ *
+ * `pruneRunLogs` deletes on mtime, so any stored `run_id` — a `last_output`
+ * pointer, a versioned Output's history — can outlive the run it names. That is
+ * a defined state rather than an error: the caller renders "run no longer
+ * retained" instead of failing.
+ */
+export function isRunLogRetained(runId: string, baseDir: string = runsDir()): boolean {
+  return existsSync(join(baseDir, runLogFilename(runId)))
 }

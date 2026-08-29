@@ -10,7 +10,7 @@ import { z } from 'zod'
 import { readFile, rename, writeFile } from 'node:fs/promises'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
-import { SkillResultSchema } from './skill-result.js'
+import { OutputRecordSchema, SkillResultSchema } from './skill-result.js'
 
 // ── Task-board records ────────────────────────────────────────────────────
 
@@ -98,6 +98,22 @@ export const PluginRunSchema = z.object({
   last_run_at: z.string(),
   status: z.enum(['success', 'partial', 'failed', 'skipped', 'gated']),
   duration_ms: z.number().int().optional(),
+  /**
+   * The most recent Output this plugin produced, so the Board can name it
+   * without scanning the runs directory. The same record shape a `SkillResult`
+   * carries — not a second one that could disagree with it.
+   *
+   * `.optional()` rather than `.nullable()`: an absent optional is omitted by
+   * Zod and dropped by `JSON.stringify`, so a plugin that produced nothing
+   * carries no key at all rather than a `null` or an empty object a reader
+   * would have to interpret.
+   *
+   * The `run_id` inside it may name a run log that has been pruned — logs go
+   * at 30 days by mtime. That is a dangling pointer by design: it resolves to
+   * not-retained, and deleting the pointer to avoid the case would throw away
+   * the only record that the Output existed.
+   */
+  last_output: OutputRecordSchema.optional(),
 })
 export type PluginRun = z.infer<typeof PluginRunSchema>
 
