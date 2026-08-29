@@ -217,11 +217,12 @@ export function denialFingerprint(
  * of arithmetic.
  *
  * The Outputs come from `plugin_runs[plugin].last_output` and deliberately NOT
- * from a parked gate. A gate is destroyed by the next advance — `pending_gates`
- * is assigned wholesale — so a fingerprint drawing on one would change the day
- * after it was recorded and re-raise an answered question for a reason the
- * operator could not see. `plugin_runs` survives, and it is written on the same
- * branch that parks the gate, so it holds the same run's Output.
+ * from a parked gate. An unapplied gate is destroyed by the next advance —
+ * `pending_gates` is overwritten, and only an APPLIED gate survives, as a
+ * marker — so a fingerprint drawing on one would change the day after it was
+ * recorded and re-raise an answered question for a reason the operator could
+ * not see. `plugin_runs` survives, and it is written on the same branch that
+ * parks the gate, so it holds the same run's Output.
  *
  * The narrowing that buys: `last_output` is the LAST Output of the run
  * (`lastOutputOf` takes `.at(-1)`), so a change confined to an earlier Output
@@ -990,7 +991,35 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
   // Add pending_gates to state for gated plugins. Assembled in the gated arm
   // above, where the plugin's real result is still in hand.
-  ;(updatedState as Record<string, unknown>)['pending_gates'] = parked_gates
+  //
+  // **An APPLIED gate survives the advance.** `applyPendingGate` marks rather
+  // than deletes precisely so a second `approve` finds the gate and refuses
+  // instead of falling through to the Grant path — and assigning `parked_gates`
+  // over the whole array destroyed that marker on the next advance, so the
+  // sequence apply, advance, approve minted a session Grant. That is the
+  // wrong-gesture outcome mark-not-delete was chosen to prevent, reintroduced
+  // one advance later.
+  //
+  // They are dropped once older than the gate ceiling, so the array does not
+  // grow without bound, and a plugin that has gated again supersedes its own
+  // marker: the new parked gate is the live answer and the old marker has
+  // nothing left to refuse.
+  //
+  // UNAPPLIED gates are still overwritten wholesale. That limitation is the
+  // phase's recorded deferred item and is deliberately not what this changes —
+  // `proposalFingerprint` reads `plugin_runs` rather than a gate BECAUSE an
+  // unapplied gate does not outlive the next advance.
+  const gateFloorMs = Date.now() - GATE_MAX_AGE_MS
+  const appliedSurvivors = state.pending_gates.filter(
+    (g) =>
+      g.applied_at !== null &&
+      new Date(g.applied_at).getTime() > gateFloorMs &&
+      !parked_gates.some((p) => p.plugin === g.plugin),
+  )
+  ;(updatedState as Record<string, unknown>)['pending_gates'] = [
+    ...appliedSurvivors,
+    ...parked_gates,
+  ]
 
   await writeEngineState(updatedState as EngineState, stateDir)
 

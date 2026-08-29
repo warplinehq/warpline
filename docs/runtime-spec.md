@@ -696,7 +696,12 @@ does, in order, all decided before anything is written:
 1. **Already applied** (`applied_at` is set) — refused, and nothing is written.
    The gate is marked rather than deleted precisely so this case exists: a
    deleted gate is an invisible one, and the verb would fall through to merging
-   a Grant instead of refusing.
+   a Grant instead of refusing. **An applied gate survives the next advance**,
+   for the same reason: the marker lives inside `pending_gates`, and overwriting
+   the array wholesale destroyed it, so apply, advance, approve minted a session
+   Grant — the outcome mark-not-delete exists to prevent, one advance later. An
+   applied marker is dropped when it passes the 24-hour gate ceiling, or when
+   the plugin gates again and the new parked gate supersedes it.
 2. **A dependency moved** — some dependency's `plugin_runs.last_run_at` is newer
    than `run_started_at`. The parked result was computed against inputs that
    have since changed, so it is refused, the gate is discarded, and a `notice`
@@ -769,10 +774,10 @@ which bounds the fingerprint whatever the inline cap allows and keeps Output
 content out of the record.
 
 The Outputs hashed are the ones in `plugin_runs[plugin].last_output`, not the
-ones in a parked gate. `pending_gates` is assigned wholesale on every advance,
-so a gate does not survive the next one, and a fingerprint drawing on one would
-change a day later and re-raise an answered question for a reason the operator
-could not see. The narrowing that buys: `last_output` is the last Output of the
+ones in a parked gate. `pending_gates` is overwritten on every advance and only
+an applied gate survives it, so an unapplied gate does not outlive the advance
+that follows it, and a fingerprint drawing on one would change a day later and
+re-raise an answered question for a reason the operator could not see. The narrowing that buys: `last_output` is the last Output of the
 run, so a change confined to an earlier Output of a multi-Output result does not
 re-raise.
 

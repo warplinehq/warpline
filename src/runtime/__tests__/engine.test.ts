@@ -1162,6 +1162,117 @@ export async function handler(manifest, args) {
     expect(event.summary).toContain('legacy-plugin')
     expect(JSON.parse(event.metadata_json).event).toBe('gate_invalidated')
   })
+
+  /**
+   * `applyPendingGate` marks rather than deletes for one stated reason: a
+   * deleted gate is an invisible one, so the next `approve` would fall through
+   * to minting a session Grant instead of refusing. The marker lives inside
+   * `pending_gates`, and the advance used to assign the freshly parked gates
+   * over that whole array — so apply, advance, approve reintroduced exactly
+   * the outcome mark-not-delete was chosen to prevent, one advance later.
+   */
+  test('Test 43: an applied gate survives the next advance, so a second approve is still refused', async () => {
+    const { runAdvance, applyPendingGate, findPendingGate, loadPluginManifests } = await import(
+      '../engine.js'
+    )
+    const { readEngineState } = await import('../../schemas/engine-state.js')
+    await createOutputPlugin(
+      'gated-writer',
+      JSON.stringify([{ type: 'brief', format: 'markdown', path: 'brief.md' }]),
+      'supervised',
+    )
+
+    const approvalPath = join(ctx.root, '.session-approval-test43')
+    await grantApproval('gated-writer', 4 * 60 * 60 * 1000, approvalPath)
+    const advance = () =>
+      runAdvance({
+        pluginsDir: ctx.pluginsDir,
+        stateDir: statePath,
+        runsDir: ctx.runsDir,
+        eventsPath,
+        approvalPath,
+      })
+
+    await advance()
+
+    const { manifests } = await loadPluginManifests(ctx.pluginsDir)
+    const parked = await readEngineState(statePath)
+    const gate = findPendingGate(parked, 'gated-writer')
+    expect(gate).toBeDefined()
+    const applied = await applyPendingGate(
+      parked,
+      gate as NonNullable<typeof gate>,
+      manifests.get('gated-writer') as PluginManifest,
+      { statePath },
+    )
+    expect(applied.outcome).toBe('applied')
+
+    // The advance in between is the whole test. The plugin is inside its TTL,
+    // so it does not run and parks nothing new — there is no fresh gate for the
+    // marker to be superseded by.
+    await advance()
+
+    const after = await readEngineState(statePath)
+    const survivor = findPendingGate(after, 'gated-writer')
+    expect(survivor).toBeDefined()
+    expect((survivor as NonNullable<typeof survivor>).applied_at).not.toBeNull()
+
+    // The consequence, stated as the caller sees it: still refused, not fallen
+    // through to the Grant path.
+    const second = await applyPendingGate(
+      after,
+      survivor as NonNullable<typeof survivor>,
+      manifests.get('gated-writer') as PluginManifest,
+      { statePath },
+    )
+    expect(second.outcome).toBe('already_applied')
+  })
+
+  test('Test 44: an applied marker past the gate ceiling is dropped by the advance, one inside it is kept', async () => {
+    const { runAdvance, GATE_MAX_AGE_MS } = await import('../engine.js')
+    await createOutputPlugin('quiet-writer', '[]')
+
+    const marker = (plugin: string, appliedAgoMs: number) => ({
+      plugin,
+      run_id: `run-${plugin}`,
+      created_at: new Date(Date.now() - appliedAgoMs).toISOString(),
+      payload_summary: 'done',
+      plugin_result: {
+        status: 'success',
+        phases_completed: [plugin],
+        phases_failed: [],
+        errors: [],
+        data_freshness: {},
+        summary: 'done',
+        artifacts_produced: [],
+        schema_version: 2,
+      },
+      run_started_at: new Date(Date.now() - appliedAgoMs).toISOString(),
+      run_completed_at: new Date(Date.now() - appliedAgoMs).toISOString(),
+      applied_at: new Date(Date.now() - appliedAgoMs).toISOString(),
+    })
+
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: {},
+        pending_gates: [marker('stale-marker', GATE_MAX_AGE_MS + 60_000), marker('live-marker', 60_000)],
+      }),
+    )
+
+    await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+      approvalPath: join(ctx.root, '.session-approval-test44'),
+    })
+
+    // Kept until they age out, so the array cannot grow without bound.
+    const state = JSON.parse(await readFile(statePath, 'utf-8'))
+    expect(state.pending_gates.map((g: { plugin: string }) => g.plugin)).toEqual(['live-marker'])
+  })
 })
 
 /**
