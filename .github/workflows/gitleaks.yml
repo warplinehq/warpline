@@ -2,12 +2,30 @@ name: Secret scan
 
 # The standing half of the credential check. The pre-flight scan before the
 # repository went public was a one-time pass over the whole history; this is
-# the part that runs afterwards, on the working tree, on every branch.
+# the part that runs afterwards, over the commit history, on every branch.
 #
-# Working tree, not history, on purpose: the history was cleared once against
-# the current single-root history and does not change, so re-walking 131
-# unchanging commits on every push buys nothing. The default shallow checkout
-# is what makes that true — do not add fetch-depth: 0.
+# History, not working tree — reversed 2026-08-29, and the previous comment
+# here argued the opposite, so here is why it was wrong.
+#
+# The old reasoning was that history does not change, so re-walking it buys
+# nothing, and the default shallow checkout is what makes a tree scan correct.
+# History does not change, but it does GROW, and the growth is the hole. A
+# secret committed in A and removed in B, pushed together, leaves a working
+# tree at HEAD that is clean. `gitleaks dir .` reads that tree, finds nothing,
+# and the job is green forever while the secret sits in the published history
+# where anyone can `git log -p` it. Measured, not reasoned: on a three-commit
+# repository built to that shape, `dir` exits 0 and `git` exits 2.
+#
+# The cost argument was also backwards. Measured on this repository at 210
+# commits: `gitleaks git .` takes 0.34s, `gitleaks dir .` takes 1.24s. Scanning
+# the whole history is roughly four times CHEAPER than scanning the tree,
+# because the pack is compressed and the tree is not.
+#
+# One step, not two. In CI the checkout contains only tracked files, so every
+# byte `dir` would scan was introduced by some commit that `git` already reads.
+# Keeping both would only re-add the false positive: `gitleaks dir .` in a real
+# working clone exits 2 on the untracked, gitignored `.planning/` tree, which is
+# why local and CI disagreed before (04-REVIEW WR-02).
 #
 # Every branch, not just main, also on purpose: a scan that has never been
 # observed catching anything is a claim, not a capability, and the proof runs
@@ -41,7 +59,13 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 is load-bearing now, not optional. A shallow checkout
+      # gives `gitleaks git` only the tip commit to walk, which would silently
+      # reduce this job to the tree scan it just replaced — green for the same
+      # wrong reason, with no error to notice.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       # Version and checksum both in the diff, for the same reason every action
       # here carries a SHA: a release asset can be replaced, a checksum cannot
@@ -64,5 +88,10 @@ jobs:
       # "gitleaks itself broke" are distinguishable: gitleaks returns 1 for
       # both by default, and this repository's pre-flight gate already uses 2
       # for the same reason.
-      - name: scan the working tree
-        run: ./gitleaks dir . --config .gitleaks.toml --redact --exit-code 2 --no-banner --verbose
+      # `git` rather than `dir`: see the header. `.gitleaksignore` is committed
+      # and empty on purpose — gitleaks suppresses findings by fingerprint from
+      # that file, so an empty tracked one makes every future suppression show
+      # up as a reviewable diff instead of as a finding that quietly stops
+      # appearing.
+      - name: scan the commit history
+        run: ./gitleaks git . --config .gitleaks.toml --redact --exit-code 2 --no-banner --verbose

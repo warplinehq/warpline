@@ -1,0 +1,10 @@
+# Intentionally empty.
+#
+# gitleaks suppresses findings by fingerprint from this file. Committing it
+# empty means any future suppression arrives as a reviewable line in a diff,
+# rather than as a finding that quietly stops appearing. An absent file would
+# work identically for the scanner and tell a reviewer nothing.
+#
+# Nothing is suppressed. If you are about to add a line here, the question to
+# answer in the commit message is why the finding is not a secret — not why it
+# is inconvenient.
