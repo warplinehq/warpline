@@ -1352,6 +1352,24 @@ export async function applyPendingGate(
     delete state.plugin_runs[gate.plugin]
     if (denial !== undefined && denialWasLive) {
       denial.fingerprint = proposalFingerprint(state, gate.plugin, manifest)
+      // Say what the re-binding did, because it changed what the denial MEANS.
+      // With `plugin_runs` gone the fingerprint is `hash(plugin, side_effects,
+      // [])`, which can only stop matching if the manifest's side effects
+      // change: the plugin is suppressed at the denial check, which sits before
+      // the approval gate, so it never runs and can never produce a new Output
+      // to move the proposal. The denial is now permanent by name. That is the
+      // right call — the alternative is re-firing side effects the operator
+      // said no to — but the old reason names a parked result this discard just
+      // threw away, and that sentence is what `deny --list` prints, what the
+      // `denial_recorded` notice carries, and what the evaluator quotes on
+      // every suppressed advance. Nothing else narrates the transition:
+      // `emitGateInvalidated` below reports the GATE discard, and the
+      // superseded note only rides the `unapproved` arm, which a denied plugin
+      // never reaches.
+      denial.reason =
+        `the operator declined the parked result from run ${gate.run_id}, which was then ` +
+        `discarded (${reason}) — ${gate.plugin} is denied by name until the denial is taken ` +
+        `back with warpline deny --remove ${gate.plugin}`
     }
     await writeEngineState(state, opts.statePath)
     await emitGateInvalidated(gate.plugin, gate.run_id, reason, opts.eventsPath).catch(() => {

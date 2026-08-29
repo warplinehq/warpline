@@ -755,6 +755,20 @@ Output-less proposal: it is denied by name until the operator takes it back.
 A denial that was already stale is left alone — re-stamping it would revive an
 answer to a proposal that no longer exists.
 
+**"Denied by name" means permanently, and the record now says so.** With
+`plugin_runs` deleted the fingerprint is `hash(plugin, side_effects, [])`, and
+that value can only stop matching if the manifest's declared side effects
+change: the denial check sits *before* the approval gate, so the plugin never
+runs and can never produce a new Output to move its own proposal. Choosing
+permanent suppression over re-firing side effects the operator refused is the
+intended trade. Making it silently was not — so the denial's `reason` is
+rewritten at the same moment as its fingerprint, naming the run whose result was
+declined, the fact that the result was then discarded, and
+`warpline deny --remove <plugin>` as the only thing that lifts it. Nothing else
+narrates the transition: the `gate_invalidated` notice reports the *gate*
+discard, and the superseded-denial note only rides the `unapproved` arm, which a
+denied plugin never reaches.
+
 The handler is never re-invoked. Its declared side effects fired at invocation,
 long before the supervision gate saw the result, so re-running would double
 effects that already happened. Downstream dependents run on the next advance

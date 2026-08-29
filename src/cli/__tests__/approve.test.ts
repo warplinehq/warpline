@@ -668,12 +668,21 @@ export async function handler() {
     expect(state.denials['gated-writer'].fingerprint).toBe(
       denialFingerprint('gated-writer', ['sends_email'], []),
     )
-    // The rest of the record is untouched: this re-binds an answer, it does not
-    // record a new one.
+    // `denied_at` is untouched: this re-binds an answer, it does not record a
+    // new one, and the operator gave that answer when they gave it.
     expect(state.denials['gated-writer'].denied_at).toBe('2026-08-29T11:00:00.000Z')
-    expect(state.denials['gated-writer'].reason).toBe(
-      'the operator declined the parked result from run run-a',
-    )
+
+    // The reason must say what the re-binding DID. run-a's parked result no
+    // longer exists — this discard threw it away — and with `plugin_runs` gone
+    // the fingerprint can only stop matching if the manifest's side effects
+    // change, because the plugin is suppressed before the approval gate and can
+    // never produce a new Output. The denial is permanent by name, and the old
+    // string said only that a run the operator can no longer see was declined.
+    const reason = state.denials['gated-writer'].reason
+    expect(reason).toContain('run run-a')
+    expect(reason).toContain('discarded')
+    expect(reason).toContain('denied by name')
+    expect(reason).toContain('warpline deny --remove gated-writer')
   })
 
   test('19b: a denial that was already stale is left exactly as it was', async () => {
