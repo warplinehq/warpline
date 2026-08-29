@@ -1146,6 +1146,29 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
 
   await Promise.all(
     entries.map(async (entry) => {
+      // The DIRECTORY name is the record key, so it is the string that has to
+      // be safe. Every downstream key comes out of this map: `runAdvance`
+      // iterates it and writes `state.plugin_runs[name]`, `deny` validates
+      // positionals against it and writes `state.denials[plugin]`. A
+      // `__proto__` directory would invoke the prototype setter and drop the
+      // write silently — no `plugin_runs` record after a gated run, which is
+      // the re-firing defect the record exists to close, and a `Denied
+      // __proto__` line over a state file that gained nothing.
+      //
+      // `PluginManifestSchema.name` carries the same refusal, deliberately
+      // independently: the two strings are not the same string, `manifest.name`
+      // is decorative here (a warning string and a dependency fallback set),
+      // and a future keying change should meet a guard wherever it lands.
+      // Derived from the prototype rather than listed, so it cannot go stale.
+      if (entry in Object.prototype) {
+        failures.push({
+          plugin: entry,
+          error:
+            `directory name '${entry}' is a member of Object.prototype and cannot be a record ` +
+            `key — rename the directory`,
+        })
+        return
+      }
       const manifestPath = join(pluginsDir, entry, 'manifest.ts')
       try {
         // import() needs a file:// URL, not a bare absolute path.

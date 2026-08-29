@@ -1539,3 +1539,88 @@ export async function handler(manifest, args) {
     expect(await invocations()).toBe(0)
   })
 })
+
+/**
+ * The loader's record-key guard.
+ *
+ * `PluginManifestSchema` refuses a prototype `name`, but the loader never parses
+ * a manifest through the schema — it imports the module and casts. And the key
+ * it stores under is the DIRECTORY entry, not `manifest.name`. So the schema
+ * refinement, on its own, guarded a string that is never a record key: a
+ * `__proto__` directory carrying a perfectly legal `manifest.name` loaded fine
+ * and then dropped every `plugin_runs` and `denials` write made against it.
+ */
+describe('loadPluginManifests record-key guard', () => {
+  let ctx: TestHome
+
+  beforeEach(async () => {
+    ctx = await createTestHome()
+    _setHome(ctx.root)
+  })
+
+  afterEach(async () => {
+    _setHome(null)
+    await ctx.cleanup()
+  })
+
+  /** A directory whose name and manifest name are deliberately allowed to differ. */
+  async function createNamedPlugin(dir: string, manifestName: string): Promise<void> {
+    const pluginDir = join(ctx.pluginsDir, dir)
+    await mkdir(pluginDir, { recursive: true })
+    await writeFile(
+      join(pluginDir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify({
+        name: manifestName,
+        version: '1.0.0',
+        description: `${manifestName} fixture`,
+        inputs: {},
+        outputs: {},
+        capabilities: [],
+        schedule: 'on_run',
+        autonomy_level: 'autonomous',
+        side_effects: [],
+        ttl_hours: 1,
+        dependencies: [],
+        timeout_ms: 5000,
+        max_parallelism: 1,
+      })}`,
+    )
+  }
+
+  test('a directory named after an Object.prototype member is a load failure, not a silent key', async () => {
+    const { loadPluginManifests } = await import('../engine.js')
+
+    // Each manifest name is LEGAL — the schema refusal would not have caught
+    // any of these. The directory is the whole defect.
+    await createNamedPlugin('__proto__', 'legal-name-one')
+    await createNamedPlugin('toString', 'legal-name-two')
+    await createNamedPlugin('normal', 'normal')
+
+    const { manifests, failures } = await loadPluginManifests(ctx.pluginsDir)
+
+    expect([...manifests.keys()]).toEqual(['normal'])
+    const refused = failures.map((f) => f.plugin).sort()
+    expect(refused).toEqual(['__proto__', 'toString'])
+    for (const f of failures) expect(f.error).toContain('Object.prototype')
+
+    // The consequence, shown rather than asserted about: writing the loaded
+    // keys into a plain-object record round-trips every one of them. Before the
+    // guard this produced `{"toString":…,"normal":…}` — the `__proto__` record
+    // gone, so a gated run recorded nothing and the plugin re-fired.
+    const record: Record<string, number> = {}
+    for (const [key] of manifests) record[key] = 1
+    expect(Object.keys(record)).toEqual([...manifests.keys()])
+  })
+
+  test('a directory named `prototype` loads, because it is not a member of the prototype', async () => {
+    const { loadPluginManifests } = await import('../engine.js')
+    await createNamedPlugin('prototype', 'prototype')
+
+    // Non-vacuity for the case above: the refusal is derived from
+    // `Object.prototype` rather than a blocklist of suspicious-looking words,
+    // so a name that merely reads like one is not swept up.
+    const { manifests, failures } = await loadPluginManifests(ctx.pluginsDir)
+    expect([...manifests.keys()]).toEqual(['prototype'])
+    expect(failures).toEqual([])
+  })
+})

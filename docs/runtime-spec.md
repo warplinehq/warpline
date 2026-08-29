@@ -53,11 +53,22 @@ drift from the code. Edit the schema, not the table.
 Every field with a default is optional in a manifest file, so adding one never
 invalidates an existing plugin. `name` may not be a member of
 `Object.prototype` — `__proto__`, `constructor`, `toString`, `valueOf` and the
-rest are refused, because the name is a key in the plain-object `plugin_runs`
-and `denials` records: `__proto__` would invoke the prototype setter and drop
-the record on write, and the others answer a lookup with an inherited member
-rather than the absence that is the truth. The set is derived from the
-prototype, not listed, so it cannot go stale. `ttl_hours` must be positive —
+rest are refused. The set is derived from the prototype, not listed, so it
+cannot go stale.
+
+**The key in the plain-object `plugin_runs` and `denials` records is the plugin
+DIRECTORY name, not `manifest.name`,** and it carries the same refusal at the
+loader — a directory named after a prototype member is a load failure with the
+plugin absent from `manifests`. That is where the constraint has to bite:
+`loadPluginManifests` keys its map by the directory entry, every downstream key
+comes out of that map, and it casts the imported module rather than parsing it
+through `PluginManifestSchema`, so the schema refinement above never runs on a
+load. A `__proto__` key would invoke the prototype setter and drop the record on
+write — no `plugin_runs` entry after a gated run, which is the re-firing defect
+that record exists to close — and the others answer a lookup with an inherited
+member rather than the absence that is the truth. The two refusals are
+independent on purpose: the strings are not the same string, and `manifest.name`
+is not today a record key anywhere. `ttl_hours` must be positive —
 zero or negative would disable caching rather than mean "always fresh". `max_retries` is capped
 at 10 and `retry_delay_ms` at 60s; the backoff that uses them is described in
 §2. `actions` is an optional registry that only surfaces in a host UI when
@@ -421,7 +432,8 @@ describe('my route', () => {
 directory whose `manifest.ts` cannot be imported is absent from `manifests` and
 present in `failures` as `{ plugin, error }`, where `plugin` is the directory
 name (a broken manifest has no trustworthy `name` field) and `error` is the
-thrown `Error.message` — no stack trace. `failures` is sorted by `plugin` inside
+thrown `Error.message` — no stack trace. A directory whose name is a member of
+`Object.prototype` fails the same way, without being imported at all. `failures` is sorted by `plugin` inside
 the loader, so alphabetical ordering is a property of the data rather than of
 whichever surface renders it, and it is always an array: an all-valid directory
 and a missing directory both yield `[]`. A mock that returns a bare `Map` no
