@@ -60,22 +60,45 @@ const MIN_CONTRACTIONS_PER_1K = 20
  * not prose), and link targets — a URL is not a sentence, and its punctuation
  * is not the author's.
  */
+/**
+ * Repeat a strip until the text stops changing.
+ *
+ * One pass over a delimited construct can REINTRODUCE the delimiter it removes.
+ * Given `<!<!-- -->-- evil -->`, a single global replace consumes the inner
+ * `<!-- -->` and splices its neighbours into `<!-- evil -->` — a whole, intact
+ * comment that the strip has just finished running and will not look at again.
+ * "Global" means every match in one pass, not every match; that gap is what
+ * CodeQL reports as js/incomplete-multi-character-sanitization.
+ *
+ * Nothing here is a security sanitizer — `prose()` reads a repo-local markdown
+ * file to count contractions, with no untrusted input and no injection sink.
+ * The correctness point stands on its own though: a nested comment that
+ * survives the strip gets counted as prose, and its punctuation lands in the
+ * sentence statistics as if the author had written it.
+ */
+function stripToFixpoint(text: string, pattern: RegExp): string {
+  let previous: string
+  do {
+    previous = text
+    text = text.replace(pattern, '')
+  } while (text !== previous)
+  return text
+}
+
 function prose(markdown: string): string {
-  return markdown
-    // `g` without `m`, deliberately. CodeQL reads a non-global multi-character
-    // replace as an incomplete sanitizer (js/incomplete-multi-character-
-    // sanitization), and the flag costs nothing here: `^` without `m` can only
-    // match at index 0, so this still strips exactly one leading block and the
-    // extracted prose is byte-identical either way.
+  return [
+    // `g` without `m`, deliberately. `^` without `m` can only match at index 0,
+    // so this strips exactly one leading block — which is all frontmatter is.
     //
-    // Adding `m` too would satisfy the same alert and quietly break the file:
-    // `---` on its own line is also a markdown horizontal rule, so a doc with a
-    // pair of them would have the prose BETWEEN them deleted before it was
-    // measured. The voice numbers would stay green while measuring less text,
-    // which is the one failure mode a register check must not have.
-    .replace(/^---\n[\s\S]*?\n---\n/g, '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/```[\s\S]*?```/g, '')
+    // Adding `m` would quietly break the file: `---` on its own line is also a
+    // markdown horizontal rule, so a doc with a pair of them would have the
+    // prose BETWEEN them deleted before it was measured. The voice numbers
+    // would stay green while measuring less text, which is the one failure
+    // mode a register check must not have.
+    (s: string) => s.replace(/^---\n[\s\S]*?\n---\n/g, ''),
+    (s: string) => stripToFixpoint(s, /<!--[\s\S]*?-->/g),
+    (s: string) => stripToFixpoint(s, /```[\s\S]*?```/g),
+  ].reduce((s, step) => step(s), markdown)
     .replace(/^#{1,6} .*$/gm, '')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/`[^`]*`/g, 'X')
