@@ -25,7 +25,12 @@
  * The order of operations in `run()` is the security property, not an
  * implementation detail: EVERY positional name is checked against the loaded
  * manifests, and the TTL is parsed, BEFORE anything is written. One unknown
- * name aborts the whole command with nothing on disk. Validating as you go and
+ * name aborts the whole command with nothing on disk. **That is a claim about
+ * name validation, and it does not extend to the apply loop** —
+ * `applyPendingGate` writes state per call, so with several gated plugins a
+ * later refusal leaves the earlier applies on disk. It cannot be otherwise
+ * without buffering outcome records across plugins, and the loop says so in a
+ * summary rather than letting the reader carry the stronger claim across. Validating as you go and
  * writing per name would leave a half-applied grant behind on a typo — the
  * operator would then believe they had granted three scopes and actually have
  * granted one, which is exactly the state a gate must never be in. A mixed
@@ -99,7 +104,12 @@ export async function run(argv: string[]): Promise<number> {
       strict: true,
     })
     values = parsed.values
-    positionals = parsed.positionals
+    // De-duplicated once, here, so every later stage sees each name exactly
+    // once. `approve foo foo` used to apply the gate and then re-find it with
+    // `applied_at` set, reporting "already applied" and exiting 1 on a
+    // successful apply. Order is preserved, so the output still follows what
+    // the operator typed.
+    positionals = [...new Set(parsed.positionals)]
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`)
     return 1
@@ -207,15 +217,29 @@ export async function run(argv: string[]): Promise<number> {
     }
 
     if (gated.length > 0) {
-      let failed = false
+      // Counted, not latched. `applyPendingGate` writes state per call, so with
+      // several gated plugins a third refusal leaves the first two applied —
+      // and a bare `failed` flag exited 1 while printing nothing to say that
+      // anything had succeeded. The module docstring's "one bad name aborts the
+      // whole command with nothing on disk" is a claim about NAME VALIDATION,
+      // which happens before any write; it does not extend to this loop, and
+      // the summary below is what stops a reader assuming it does.
+      const applied: string[] = []
+      const refused: string[] = []
       for (const name of gated) {
         // Re-found each time: a preceding apply may have rewritten the array,
         // and an apply this loop already performed leaves a marker rather than
         // a live gate — so a repeated name applies once and is skipped after.
         const gate = liveGate(name)
         if (gate === undefined) continue
+        // Not a guard: every positional was checked against `manifests` above,
+        // before anything was written, so an absence here is a broken invariant
+        // rather than an operator error. `continue` swallowed it silently and
+        // would have skipped the plugin's apply without saying so.
         const manifest = manifests.get(name)
-        if (manifest === undefined) continue
+        if (manifest === undefined) {
+          throw new Error(`approve: '${name}' passed name validation but has no manifest`)
+        }
 
         // A standing denial outranks an apply. `deny` and `approve` answer the
         // same proposal, so applying a result the operator explicitly refused
@@ -237,13 +261,14 @@ export async function run(argv: string[]): Promise<number> {
               `matches this proposal. Nothing was applied and no grant was written — take the ` +
               `denial back first: warpline deny --remove ${name}\n`,
           )
-          failed = true
+          refused.push(name)
           continue
         }
 
         const result = await applyPendingGate(state, gate, manifest, { statePath, now })
 
         if (result.outcome === 'applied') {
+          applied.push(name)
           process.stdout.write(
             `Applied the parked result for ${name} from run ${result.run_id}: ${result.summary}\n` +
               `Recorded at ${result.run_completed_at}, when the run finished. ` +
@@ -251,7 +276,7 @@ export async function run(argv: string[]): Promise<number> {
           )
           continue
         }
-        failed = true
+        refused.push(name)
         if (result.outcome === 'already_applied') {
           process.stderr.write(
             `The parked result for ${name} was already applied at ${result.applied_at}. ` +
@@ -265,7 +290,17 @@ export async function run(argv: string[]): Promise<number> {
           )
         }
       }
-      return failed ? 1 : 0
+
+      // Only when there is something a per-plugin line did not already say. On
+      // the single-plugin case the lines above are the whole story.
+      if (applied.length > 0 && refused.length > 0) {
+        process.stderr.write(
+          `Applied ${plural(applied.length, 'parked result')} (${applied.join(', ')}) and ` +
+            `refused ${refused.length} (${refused.join(', ')}). The applies are on disk — ` +
+            `a refusal does not undo them.\n`,
+        )
+      }
+      return refused.length > 0 ? 1 : 0
     }
 
     // Falling through to the Grant path. Two things the operator cannot see

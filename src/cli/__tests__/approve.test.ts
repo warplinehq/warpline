@@ -473,6 +473,52 @@ export async function handler() {
     expect(state.pending_gates[0].applied_at).toBe(stamp)
   })
 
+  test('13b: a repeated name applies once and does not report itself already applied', async () => {
+    // `approve foo foo` applied the gate, re-found it with `applied_at` set,
+    // and reported "already applied" — exiting 1 on a successful apply.
+    await writeGatedPlugin('gated-writer')
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
+
+    const { code, stdout, stderr } = await capture('approve', ['gated-writer', 'gated-writer'])
+
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    // Once, not twice: the name is de-duplicated before anything is written.
+    expect(stdout.match(/Applied the parked result/g)).toHaveLength(1)
+    expect((await readState()).pending_gates).toHaveLength(1)
+  })
+
+  test('13c: a mixed batch says what was applied as well as what was refused', async () => {
+    // `applyPendingGate` writes state per call, so a later refusal cannot undo
+    // an earlier apply. A bare failure latch exited 1 while printing nothing to
+    // say anything had succeeded, which reads as "nothing happened".
+    await writeGatedPlugin('gated-writer')
+    await writeGatedPlugin('db-writer', { ttl_hours: 48 })
+    const HOUR = 60 * 60 * 1000
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
+    const good = JSON.parse(await readFile(statePath, 'utf-8'))
+    await seedGate('db-writer', { startedAgoMs: 26 * HOUR, completedAgoMs: 25 * HOUR })
+    const stale = JSON.parse(await readFile(statePath, 'utf-8'))
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        ...stale,
+        plugin_runs: { ...good.plugin_runs, ...stale.plugin_runs },
+        pending_gates: [...good.pending_gates, ...stale.pending_gates],
+      }),
+    )
+
+    const { code, stdout, stderr } = await capture('approve', ['gated-writer', 'db-writer'])
+
+    expect(code).toBe(1)
+    expect(stdout).toContain('Applied the parked result for gated-writer')
+    expect(stderr).toContain('expired')
+    // The half the operator could not otherwise see from an exit code of 1.
+    expect(stderr).toContain('gated-writer')
+    expect(stderr).toContain('does not undo them')
+    expect((await readState()).plugin_runs['gated-writer'].status).toBe('success')
+  })
+
   test('14: a gate whose dependency re-ran since the gated run started is refused and discarded', async () => {
     await writeGatedPlugin('gated-writer', { dependencies: ['render-issue'] })
     await seedGate(
