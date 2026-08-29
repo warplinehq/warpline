@@ -20,6 +20,7 @@ import { join } from 'node:path'
 import {
   ENGINE_STATE_MAX_SCHEMA_VERSION,
   EngineStateInvalidError,
+  PluginRunSchema,
   defaultEngineState,
   readEngineState,
   readEngineStateReadOnly,
@@ -203,5 +204,31 @@ describe('engine state read policy', () => {
     await mkdir(stateDir, { recursive: true })
     await writeEngineState(defaultEngineState(), statePath)
     expect(await siblings()).toEqual([])
+  })
+})
+
+describe('PluginRunSchema.status', () => {
+  const base = { last_run_at: '2026-08-01T00:00:00Z', duration_ms: 12 }
+
+  /**
+   * A parked supervised plugin records a run. Before it did, the supervised
+   * branch returned before the only `plugin_runs` write, so a side-effecting
+   * plugin with a live Grant was due again on the very next advance and
+   * re-fired its effects for the whole grant window on one human "yes".
+   */
+  it('accepts the gated member', () => {
+    const result = PluginRunSchema.safeParse({ ...base, status: 'gated' })
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.status).toBe('gated')
+  })
+
+  it('still accepts the four members that were already there', () => {
+    for (const status of ['success', 'partial', 'failed', 'skipped']) {
+      expect(PluginRunSchema.safeParse({ ...base, status }).success).toBe(true)
+    }
+  })
+
+  it('is still a closed enum', () => {
+    expect(PluginRunSchema.safeParse({ ...base, status: 'approved' }).success).toBe(false)
   })
 })

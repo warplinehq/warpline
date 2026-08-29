@@ -690,6 +690,25 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             })
             await emitPluginGated(pluginName, eventsPath)
             onPluginEnd?.(pluginName, 'gated', gatedElapsed)
+
+            // -- Record the gated run in state --
+            // Inside this arm, not before the shared `return` below: the
+            // dry-run arm above must stay write-free.
+            //
+            // This is what stops the side effects re-firing. They already went
+            // out — the handler was invoked well above, and the gate only
+            // decides what happens to the RESULT — so without a run record the
+            // plugin was due again on the next advance, and did it all again,
+            // every advance, for the whole grant window, on one human "yes".
+            //
+            // Anchored at the gate's completion time, which is when the run
+            // ended. A later approval is a separate event and must not
+            // retroactively move when the work happened.
+            state.plugin_runs[pluginName] = {
+              last_run_at: new Date().toISOString(),
+              status: 'gated',
+              duration_ms: Date.now() - entryStart,
+            }
           }
           return
         }

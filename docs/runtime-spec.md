@@ -475,3 +475,31 @@ read and rewritten by an older one, so a rollback does not silently delete it.
 The accepted cost: a typo'd top-level key round-trips silently instead of
 failing validation loudly. The named fields stay strict, so a typo surfaces as
 a missing value rather than as a rejected file.
+
+### `plugin_runs`
+
+A record keyed by plugin name, holding the last run of each. It is what the
+TTL staleness check reads, and the only field that check consults is
+`last_run_at`.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `last_run_at` | ISO 8601 string | When the run ended |
+| `status` | `success` \| `partial` \| `failed` \| `skipped` \| `gated` | How it ended |
+| `duration_ms` | integer, optional | Wall time for the run |
+
+`gated` records a supervised plugin that ran and was parked pending approval.
+It is written when the plugin is parked, anchored at the gate's completion
+time — a later approval is a separate event and does not move when the work
+happened.
+
+It is recorded as a run because it is one. The handler is invoked, and its
+declared side effects fire, before the supervision gate sees the result at
+all; the gate decides what happens to the result, not whether the work
+happened. A parked run that recorded nothing left the plugin due on the next
+advance, so its side effects fired again — every advance, for the whole grant
+window, on one approval.
+
+The status set is closed. Adding a member fans out into this document, and
+into every operator state file written afterwards, which is why it is not
+extended casually.

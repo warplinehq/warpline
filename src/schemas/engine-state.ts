@@ -79,10 +79,24 @@ export type TaskDisplay = z.infer<typeof TaskDisplaySchema>
 
 // ── Engine bookkeeping ────────────────────────────────────────────────────
 
-/** Per-plugin run tracking entry, keyed by plugin name. Drives TTL staleness checks. */
+/**
+ * Per-plugin run tracking entry, keyed by plugin name. Drives TTL staleness
+ * checks.
+ *
+ * `gated` records that a supervised plugin ran and was parked. It IS a run —
+ * the handler executed and its declared side effects fired before the
+ * supervision gate ever saw the result — so it belongs here for exactly the
+ * reason the other four do. `isPluginFresh` reads only `last_run_at`, never
+ * `status`, so adding the member changes no staleness arithmetic.
+ *
+ * Same vocabulary as the sibling `PluginLogEntrySchema.status` in
+ * `run-log.ts` and as `PluginFsmState`. Not `partial`: that is what the
+ * pending-gate stub already fabricates, and conflating the two is the thing
+ * this phase exists to stop.
+ */
 export const PluginRunSchema = z.object({
   last_run_at: z.string(),
-  status: z.enum(['success', 'partial', 'failed', 'skipped']),
+  status: z.enum(['success', 'partial', 'failed', 'skipped', 'gated']),
   duration_ms: z.number().int().optional(),
 })
 export type PluginRun = z.infer<typeof PluginRunSchema>

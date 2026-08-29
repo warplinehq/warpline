@@ -274,9 +274,14 @@ objects that do not exist.
    without scanning `runs/`.
 6. **The gated → approved path.** `PluginFsmState` has an `'approved'` state
    that no transition reaches: once a supervised plugin is `gated`, nothing
-   un-gates it, and a re-run on the next advance may be skipped by the
-   staleness TTL. The approve verb on a `gated` Ask needs a defined effect
-   before the Board can offer it.
+   un-gates it. Gating now records a run — a `plugin_runs` entry with status
+   `gated`, anchored at the gate's completion time — so the plugin is not due
+   again until its TTL lapses. That is what stops a supervised plugin with a
+   live Grant re-firing its declared side effects on every advance: the handler
+   runs before the gate ever sees the result, so an unrecorded parked run meant
+   the effects fired again on the next pass, and the one after that, for the
+   whole grant window. The approve verb on a `gated` Ask still needs a defined
+   effect before the Board can offer it.
 
 ## 8. Schema references
 

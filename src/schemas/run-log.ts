@@ -105,6 +105,14 @@ export async function writeRunLog(log: RunLog, baseDir: string = runsDir()): Pro
   return filepath
 }
 
+/**
+ * ponytail: deletes `*.json` older than the retention window and leaves the
+ * `.log` sibling behind, so a pruned run can strand its own transcript — the
+ * exact orphan class `trimPluginHistory` unlinks the pair to avoid
+ * (`run-artifacts.ts:121-122`). Upgrade path: unlink the pair here too. Fine
+ * while the two live in different directories and the strays are small; stop
+ * being fine the moment anything prunes a directory holding both.
+ */
 export async function pruneRunLogs(baseDir: string = runsDir()): Promise<number> {
   const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000
   let pruned = 0
