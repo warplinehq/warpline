@@ -1228,16 +1228,6 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
 }
 
 /**
- * The `last_output` slice of a `plugin_runs` entry, spread into the write.
- *
- * Returns an EMPTY object when the result produced no Output, so the key is
- * absent from the JSON rather than present as `null` or `{}` — a reader should
- * not have to tell an unproductive run from a malformed pointer.
- *
- * "Most recent" is the last element: `artifacts_produced` is written in the
- * order the handler produced them.
- */
-/**
  * Absolute ceiling on how long a parked gate may be applied after its run
  * finished. The effective ceiling is the EARLIER of this and the plugin's own
  * `ttl_hours`: a plugin that considers its work stale after an hour cannot have
@@ -1440,6 +1430,16 @@ export async function applyPendingGate(
   }
 }
 
+/**
+ * The `last_output` slice of a `plugin_runs` entry, spread into the write.
+ *
+ * Returns an EMPTY object when the result produced no Output, so the key is
+ * absent from the JSON rather than present as `null` or `{}` — a reader should
+ * not have to tell an unproductive run from a malformed pointer.
+ *
+ * "Most recent" is the last element: `artifacts_produced` is written in the
+ * order the handler produced them.
+ */
 function lastOutputOf(result: SkillResult): { last_output?: OutputRecord } {
   const last = result.artifacts_produced.at(-1)
   return last === undefined ? {} : { last_output: last }
