@@ -12,7 +12,8 @@
  *   bun run src/cli/board-cli.ts done <id>     — mark task done
  *   bun run src/cli/board-cli.ts budget        — show API budget table
  *
- * Reads the same state files as the Ink TUI — fully interoperable.
+ * Reads the state files the engine writes, and nothing else — there is no
+ * second store for a board to fall out of sync with.
  */
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'

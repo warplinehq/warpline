@@ -27,7 +27,7 @@ describe('BoardEventSchema', () => {
     expect(result.summary).toBe(validEvent.summary)
   })
 
-  test('Test 6: BoardEvent fields are flat/scalar (no nested objects — Ink constraint)', () => {
+  test('Test 6: BoardEvent renderable fields are flat/scalar and metadata_json is a string', () => {
     const result = BoardEventSchema.parse(validEvent)
     // All rendered fields must be scalar
     expect(typeof result.event_id).toBe('string')
@@ -39,7 +39,7 @@ describe('BoardEventSchema', () => {
     expect(result.metadata_json === null || typeof result.metadata_json === 'string').toBe(true)
   })
 
-  test('BoardEvent summary is max 200 chars (Ink constraint)', () => {
+  test('BoardEvent summary is capped at 200 chars — one rendered row per event', () => {
     const longSummary = 'x'.repeat(201)
     expect(() =>
       BoardEventSchema.parse({ ...validEvent, summary: longSummary })

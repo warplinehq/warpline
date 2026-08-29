@@ -21,8 +21,9 @@ export const ActionType = z.enum(['acknowledge', 'action', 'defer', 'mark_done']
 export type ActionType = z.infer<typeof ActionType>
 
 /**
- * Severity levels — matches TaskAgingSchema.severity in warpline-state.ts.
- * Used for sorting (critical first) and icon rendering in Ink UI.
+ * Severity levels — the same three `TaskAgingSchema.severity` carries in
+ * engine-state.ts. Drives sort order (critical first) and the icon a board
+ * surface puts on the row.
  */
 export const Severity = z.enum(['critical', 'warning', 'info'])
 export type Severity = z.infer<typeof Severity>
@@ -30,10 +31,12 @@ export type Severity = z.infer<typeof Severity>
 /**
  * Board event — one JSON line in .warpline/state/events.jsonl.
  *
- * Ink constraint (Pitfall 6): All renderable fields MUST be flat/scalar.
- * Complex data goes into metadata_json (serialized string) to avoid
- * React key/render issues in Ink's reconciler.
- *
+ * Every renderable field is flat and scalar, and anything richer is serialised
+ * into `metadata_json`. Two reasons, both current: the log is append-only and
+ * read with a per-line `safeParse` that drops what it cannot validate, so a
+ * nested shape arriving where a scalar was expected costs the whole line
+ * rather than one field; and an event is rendered as one row, which has
+ * nothing to do with a nested object anyway.
  */
 export const BoardEventSchema = z.object({
   /** Unique event identifier */
@@ -60,8 +63,9 @@ export const BoardEventSchema = z.object({
 
   /**
    * Single-line human-readable summary.
-   * Max 200 chars enforced: Ink renders one line per event — longer summaries
-   * would overflow terminal columns and corrupt the layout.
+   * Capped at 200 characters: an event is one row in a list, and a summary
+   * longer than the row overflows it rather than saying more. Anything that
+   * needs the space is opened, not inlined.
    */
   summary: z.string().max(200),
 
@@ -92,7 +96,9 @@ export const BoardEventSchema = z.object({
 
   /**
    * Serialized JSON string for extra data not rendered directly.
-   * Never a nested object — Ink constraint requires flat field structure.
+   * A string, never a nested object: see the flat/scalar note on the schema
+   * above. This is also where a sub-typed `notice` carries its discriminator,
+   * which is why the `type` enum stays closed.
    */
   metadata_json: z.string().nullable().default(null),
 })
