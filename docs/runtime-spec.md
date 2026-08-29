@@ -57,6 +57,37 @@ at 10 and `retry_delay_ms` at 60s; the backoff that uses them is described in
 §2. `actions` is an optional registry that only surfaces in a host UI when
 non-empty.
 
+### `outputs.temporality`
+
+Each entry in `outputs` also declares `temporality`, which says what a re-run
+does to that output:
+
+| Value | Meaning |
+|---|---|
+| `versioned` | Each run yields a new Output instance. The latest is shown by default; older ones stay reachable. |
+| `replace` | A run overwrites the previous Output. |
+
+`replace` is the default, so an entry that declares no temporality is not
+versioned and the Board says so. Reports and briefs are the versioning case;
+snapshots and current-state summaries are the replacing one.
+
+A value outside those two is a hard validation failure, not a silent fall back
+to the default. Manifests are parsed at import time, so a plugin that misspells
+its temporality stops rather than running under a policy nobody declared.
+
+Versioned history is bounded by run retention, and the bound is not generous:
+an older Output version is reachable exactly while its producing run log
+survives, and run logs are pruned when their mtime is older than 30 days.
+
+`append` is a known deferred third value — a run adding to the previous Output
+rather than replacing or superseding it. It is not implemented. It is recorded
+here because the enum can grow additively, and a reader who needs it should
+know it was considered rather than overlooked.
+
+This field is nested inside the `outputs` record value, so it does not appear in
+the generated table above — that table lists top-level manifest fields only.
+This prose is the documentation for it.
+
 ### Contract stability
 
 The manifest contract is best-effort and explicitly pre-1.0 — it
@@ -293,6 +324,26 @@ accumulate.
 
 Applies to NEW runs only. The 51 pre-existing artifacts from pre-121 engine
 runs are left alone; a one-shot cleanup is tracked as deferred work.
+
+### The other deletion path
+
+The 20-newest trim is not the only thing that deletes out of `<home>/runs/`,
+and reading this section as though it were will mislead you about what survives.
+
+`trimPluginHistory` runs only under `persistArtifact: true`. The manual path,
+`warpline run`, passes it. **An engine advance does not, deliberately** — an
+advance writes a `RunLog` rather than a per-plugin `RunArtifact`, so the
+20-newest trim never sees an advance's output at all.
+
+What deletes an advance's run log is `pruneRunLogs`, and its rule is different:
+any `<run_id>.json` in the runs directory whose **mtime is older than 30 days**,
+regardless of plugin or count. That is the retention bound anything holding a
+`run_id` is subject to — a versioned Output's history, and a `last_output`
+pointer both.
+
+The two also differ in what they leave behind. The 20-newest trim unlinks the
+JSON and its `.log` sibling together. `pruneRunLogs` unlinks the JSON only, so
+a pruned run can strand its own transcript.
 
 ## 7. HTTP / SSE surface (not in this repo)
 

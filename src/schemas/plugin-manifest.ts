@@ -67,6 +67,20 @@ export const PluginManifestSchema = z.object({
     z.object({
       type: z.string(),
       description: z.string().optional(),
+      /**
+       * What a re-run does to this output.
+       *
+       * `versioned` — each run yields a new Output instance; the latest is
+       * shown by default and older ones stay reachable while their producing
+       * run log survives.
+       * `replace` — a run overwrites the previous Output. The default, so an
+       * output that says nothing is not versioned.
+       *
+       * A value outside the enum fails `.parse()` rather than falling back to
+       * the default, and manifests are parsed at import time, so a plugin
+       * cannot quietly run under a versioning policy nobody declared.
+       */
+      temporality: z.enum(['versioned', 'replace']).default('replace'),
     }),
   ).default({}),
 

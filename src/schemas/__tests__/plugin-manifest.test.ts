@@ -100,3 +100,39 @@ describe('AutonomyLevel enum', () => {
     }
   })
 })
+
+// ── Output temporality (R6) ──────────────────────────────────────────────
+
+describe('outputs.temporality', () => {
+  const withOutputs = (outputs: Record<string, unknown>) => ({ ...validManifest, outputs })
+
+  test('an outputs entry omitting temporality reads replace', () => {
+    const parsed = PluginManifestSchema.parse(
+      withOutputs({ keywords_json: { type: 'string', description: 'Path to output JSON' } }),
+    )
+    expect(parsed.outputs['keywords_json']?.temporality).toBe('replace')
+  })
+
+  test("an outputs entry declaring 'versioned' reads versioned", () => {
+    const parsed = PluginManifestSchema.parse(
+      withOutputs({ weekly_report: { type: 'string', temporality: 'versioned' } }),
+    )
+    expect(parsed.outputs['weekly_report']?.temporality).toBe('versioned')
+  })
+
+  // The load-bearing case. A misdeclared value must stop the plugin at import
+  // rather than fall back to the default — a plugin running under a guessed
+  // versioning policy is the failure this field exists to prevent.
+  test('an unrecognised temporality throws, naming the field, rather than defaulting', () => {
+    let threw = false
+    try {
+      PluginManifestSchema.parse(withOutputs({ report: { type: 'string', temporality: 'append' } }))
+    } catch (e) {
+      threw = true
+      expect(e).toBeInstanceOf(z.ZodError)
+      const issue = (e as z.ZodError).issues[0]
+      expect(issue?.path).toEqual(['outputs', 'report', 'temporality'])
+    }
+    expect(threw).toBe(true)
+  })
+})

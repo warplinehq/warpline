@@ -105,8 +105,8 @@ Rules that follow from the runtime, not from taste:
 ### 2.3 Output temporality
 
 Whether a re-run replaces the previous Output or versions it is declared by
-the Plugin, per output type, in the manifest's `outputs` record
-(**0.2 manifest field**, to be specified in runtime-spec § 1 when it lands).
+the Plugin, per output type, in the manifest's `outputs` record — the
+`temporality` field, specified in runtime-spec § 1.
 Reports and briefs version — a new Output instance per Run, latest shown by
 default, older reachable. Snapshots and state replace. **Undeclared defaults
 to replace**, and the Output says "not versioned".

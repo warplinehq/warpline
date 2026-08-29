@@ -1069,3 +1069,20 @@ describe('the README opening keeps its positioning promises', () => {
     expect(offenders).toEqual([])
   })
 })
+
+// ── Nested manifest fields have no generated documentation ───────────────
+//
+// `bun run docs:generate` iterates top-level `PluginManifestSchema.shape` keys
+// only, so a field nested inside the `outputs` record value produces no table
+// row and no diff — the CI docs job sees nothing. The § 1 prose is the whole
+// deliverable, and prose is what gets forgotten with the suite green.
+//
+// This assertion is an ADDITION beyond `08-SPEC.md`'s acceptance list, not a
+// criterion it mandates. It exists because `outputs.temporality` is the one
+// contract change in that phase with no other detector.
+
+describe('hand-written manifest prose', () => {
+  test('runtime-spec § 1 documents outputs.temporality, which the generator cannot', () => {
+    expect(read('docs/runtime-spec.md')).toContain('temporality')
+  })
+})
