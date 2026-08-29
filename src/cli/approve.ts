@@ -23,20 +23,23 @@
  * convenience would quietly turn a structural guarantee back into a hope.
  *
  * The order of operations in `run()` is the security property, not an
- * implementation detail: EVERY positional name is checked against the loaded
- * manifests, and the TTL is parsed, BEFORE anything is written. One unknown
- * name aborts the whole command with nothing on disk. **That is a claim about
- * name validation, and it does not extend to the apply loop** —
+ * implementation detail. Everything that can refuse the command runs BEFORE
+ * anything is written: every positional is checked against the loaded
+ * manifests, the TTL is parsed, and on the Grant path every name is checked
+ * against the denial record. Any one of them refuses the whole command with
+ * nothing on disk. Validating as you go and writing per name would leave a
+ * half-applied grant behind on a typo — the operator would then believe they
+ * had granted three scopes and actually have granted one, which is exactly the
+ * state a gate must never be in. A mixed invocation — some names with a parked
+ * gate, some without — is refused whole for the same reason: there is no
+ * half-answer that is not a lie about one of the two gates.
+ *
+ * That property covers the refusals, and it stops at the apply loop.
  * `applyPendingGate` writes state per call, so with several gated plugins a
  * later refusal leaves the earlier applies on disk. It cannot be otherwise
- * without buffering outcome records across plugins, and the loop says so in a
- * summary rather than letting the reader carry the stronger claim across. Validating as you go and
- * writing per name would leave a half-applied grant behind on a typo — the
- * operator would then believe they had granted three scopes and actually have
- * granted one, which is exactly the state a gate must never be in. A mixed
- * invocation — some names with a parked gate, some without — is refused whole
- * for the same reason: there is no half-answer that is not a lie about one of
- * the two gates.
+ * without buffering outcome records across plugins. The loop prints a summary
+ * naming what was applied and what was refused, so a reader never carries the
+ * stronger all-or-nothing claim across into a place where it is false.
  *
  * Blanket approval is reachable ONLY through an explicit `--all`. No positional
  * name is treated as a wildcard, so no plugin name, glob or shell expansion can
@@ -301,16 +304,33 @@ export async function run(argv: string[]): Promise<number> {
       return refused.length > 0 ? 1 : 0
     }
 
-    // Falling through to the Grant path. Two things the operator cannot see
-    // from here would otherwise make this command's exit 0 a lie about what it
-    // achieved, so both are narrated. Narrating rather than refusing is the
-    // deliberate choice in each case: pre-staging a Grant is a legitimate
-    // gesture, and a refusal here is what locked the verb out.
+    // Falling through to the Grant path.
+    //
+    // A live denial REFUSES here, it does not merely annotate. The denial check
+    // in `evaluatePlugin` sits before the approval gate, so a denied plugin is
+    // skipped as `denied` on the next advance no matter what is granted — a
+    // grant written here buys the operator nothing and widens side-effect
+    // authority to get it. Reporting exit 0 and "Approved 1 scope" for a
+    // plugin that will not run is the gate reporting a success it did not
+    // achieve, which is the one thing it must never do.
+    //
+    // The apply arm above already refuses on the same standing. Answering the
+    // same fact two different ways depending on which arm the operator landed
+    // in was the actual defect: `deny p` then `approve p` exited 0 while `deny
+    // p` then `approve p` on a parked result exited 1, for one denial.
+    //
+    // This is not the lockout CR-01 was. That had no in-band escape; this names
+    // one, `warpline deny --remove`, which is the gesture that retires the
+    // answer standing in the way. Every name is checked before anything is
+    // written, so a refusal leaves nothing on disk — the same property name
+    // validation has, and for the same reason.
+    const denied: string[] = []
     for (const name of positionals) {
       // A spent marker on file. The operator typed the same words that applied
       // a result a moment ago and is getting a different answer, and an
       // unexplained change of behaviour on an unchanged gesture is exactly what
-      // a gate must never do.
+      // a gate must never do. A note and not a refusal: the grant is real and
+      // does what the line says, so there is no false success to prevent.
       const spent = findPendingGate(state, name)
       if (spent?.applied_at != null) {
         process.stdout.write(
@@ -320,25 +340,32 @@ export async function run(argv: string[]): Promise<number> {
         )
       }
 
-      // A live denial. The denial check in `evaluatePlugin` sits BEFORE the
-      // approval gate, so the plugin is skipped as `denied` on the next advance
-      // no matter what is granted here. Without this the operator was told,
-      // with exit 0 and no qualification, that they had approved something that
-      // will not run — and side-effect authority was widened for nothing. Only
-      // a denial that still matches is worth saying; a superseded one is
-      // already stale everywhere else.
+      // Only a denial that still matches. A superseded one is stale everywhere
+      // else and refusing on it would strand the operator behind an answer to a
+      // question that no longer exists.
       const manifest = manifests.get(name)
       const standing =
         manifest === undefined
           ? ({ standing: 'none' } as const)
           : denialStanding(state, name, manifest)
       if (standing.standing === 'live') {
-        process.stdout.write(
-          `Note: ${name} was denied at ${standing.denial.denied_at} and that answer still matches its ` +
-            `proposal, so it will be skipped as denied on the next advance and this grant will ` +
-            `not make it run. Take the denial back first: warpline deny --remove ${name}\n`,
+        process.stderr.write(
+          `${name} was denied at ${standing.denial.denied_at} ('${standing.denial.reason}') and ` +
+            `that answer still matches its proposal, so it would be skipped as denied on the ` +
+            `next advance and this grant would not make it run.\n`,
         )
+        denied.push(name)
       }
+    }
+
+    // Every name, then refuse once — the operator fixes one thing rather than
+    // rediscovering the next on each retry.
+    if (denied.length > 0) {
+      process.stderr.write(
+        `Nothing was granted. Take the ${denied.length === 1 ? 'denial' : 'denials'} back ` +
+          `first: warpline deny --remove ${denied.join(' ')}\n`,
+      )
+      return 1
     }
   }
 

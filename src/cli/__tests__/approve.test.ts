@@ -751,11 +751,9 @@ export async function handler() {
     expect(state.denials['gated-writer'].fingerprint).toBe(stale)
   })
 
-  test('20: granting a plugin that is denied says the grant will not make it run', async () => {
+  test('20: a live denial refuses the grant, and nothing is written', async () => {
     // No parked gate, so this falls straight through to the Grant path — the
-    // exact hole the denial guard inside the gated branch does not cover. The
-    // denial check in `evaluatePlugin` sits BEFORE the approval gate, so the
-    // plugin is skipped as `denied` on the next advance regardless.
+    // arm the denial guard inside the gated branch does not cover.
     await mkdir(join(root, 'state'), { recursive: true })
     await writeFile(
       statePath,
@@ -775,15 +773,62 @@ export async function handler() {
       }),
     )
 
-    const { code, stdout } = await capture('approve', ['db-writer'])
+    const { code, stderr } = await capture('approve', ['db-writer'])
 
-    // Not refused: pre-staging a Grant for when the denial is taken back is a
-    // legitimate gesture. Silence about it was not.
-    expect(code).toBe(0)
-    expect(stdout).toContain('denied at 2026-08-29T11:00:00.000Z')
-    expect(stdout).toContain('will not make it run')
-    expect(stdout).toContain('warpline deny --remove db-writer')
-    expect((await readGrant()).scopes).toEqual(['db-writer'])
+    // Refused, and nothing written. A grant here buys the operator nothing —
+    // the denial check sits before the approval gate, so the plugin is skipped
+    // as `denied` on the next advance either way — and reporting exit 0 and
+    // "Approved 1 scope" for a plugin that will not run is the gate claiming a
+    // success it did not achieve. The apply arm already refuses on this exact
+    // standing; answering the same fact two ways depending on which arm the
+    // operator landed in was the defect.
+    expect(code).toBe(1)
+    expect(stderr).toContain('denied at 2026-08-29T11:00:00.000Z')
+    expect(stderr).toContain('would not make it run')
+    expect(stderr).toContain('Nothing was granted')
+    // The escape is named, so this is a refusal with a way out and not the
+    // lockout CR-01 was.
+    expect(stderr).toContain('warpline deny --remove db-writer')
+    // Nothing on disk: the refusal runs before any write, like name validation.
+    await expect(readGrant()).rejects.toThrow()
+  })
+
+  test('20c: every denied name is reported before the command refuses', async () => {
+    // One refusal naming both, rather than sending the operator round again for
+    // the second. Same property the unknown-name path has.
+    await mkdir(join(root, 'state'), { recursive: true })
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: {},
+        pending_gates: [],
+        denials: {
+          'db-writer': {
+            plugin: 'db-writer',
+            reason: 'the operator declined this proposal',
+            denied_at: '2026-08-29T11:00:00.000Z',
+            note: null,
+            fingerprint: denialFingerprint('db-writer', ['writes_db'], []),
+          },
+          'digest-sender': {
+            plugin: 'digest-sender',
+            reason: 'the operator declined this proposal',
+            denied_at: '2026-08-29T11:30:00.000Z',
+            note: null,
+            fingerprint: denialFingerprint('digest-sender', ['sends_email', 'external_api'], []),
+          },
+        },
+      }),
+    )
+
+    const { code, stderr } = await capture('approve', ['db-writer', 'digest-sender'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('db-writer was denied')
+    expect(stderr).toContain('digest-sender was denied')
+    expect(stderr).toContain('warpline deny --remove db-writer digest-sender')
+    await expect(readGrant()).rejects.toThrow()
   })
 
   test('20b: a superseded denial is not narrated, because it no longer answers anything', async () => {
@@ -812,6 +857,9 @@ export async function handler() {
 
     const { code, stdout } = await capture('approve', ['db-writer'])
 
+    // Non-vacuity for 20: same path, same record, and the only difference is
+    // whether the answer still matches. A stale denial must not refuse — that
+    // would strand the operator behind a question that no longer exists.
     expect(code).toBe(0)
     expect(stdout).not.toContain('denied at')
     expect((await readGrant()).scopes).toEqual(['db-writer'])

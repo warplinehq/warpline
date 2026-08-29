@@ -776,15 +776,31 @@ under the normal guard chain, not from inside the CLI command.
 
 #### Granting a plugin that is denied
 
-Step 0 above refuses an *apply* on a live denial. The **Grant** path narrates
-one instead of refusing it: pre-staging a Grant for when the proposal moves is a
-legitimate gesture, so `approve` writes the grant, exits 0, and says that the
-plugin will still be skipped as `denied` on the next advance because the denial
-check in `evaluatePlugin` sits *before* the approval gate. The note names the
-denial's timestamp and gives `warpline deny --remove <plugin>`. Silence here
-told the operator, with exit 0 and no qualification, that they had approved
-something that would not run, and widened side-effect authority for nothing.
-A superseded denial is not narrated — it is already stale everywhere else.
+**Both arms refuse on a live denial.** Step 0 above refuses an *apply*; the
+**Grant** path refuses too. `approve <plugin>` writes nothing, exits 1, and
+names the denial's timestamp, its reason, and `warpline deny --remove <plugin>`.
+
+The denial check in `evaluatePlugin` sits *before* the approval gate, so a
+denied plugin is skipped as `denied` on the next advance no matter what is
+granted. A grant written here buys the operator nothing and widens side-effect
+authority to get it, and reporting exit 0 and `Approved 1 scope` for a plugin
+that will not run is the gate claiming a success it did not achieve.
+
+The two arms answering the same standing differently was itself the defect:
+one denial produced exit 1 on a parked result and exit 0 without one.
+
+This is a refusal with a way out, not a lockout — `warpline deny --remove`
+retires the answer standing in the way, and the refusal names it. Every name is
+checked before anything is written, so a refusal leaves nothing on disk. When
+several names are denied, all of them are reported and the command refuses once.
+
+A superseded denial does not refuse — it is already stale everywhere else, and
+refusing on it would strand the operator behind a question that no longer
+exists.
+
+`--all` is out of scope for this check: the blanket path does not read the
+engine state, so it cannot see the denial record. A denied plugin stays
+suppressed under a blanket grant exactly as it does under a named one.
 
 ### `denials`
 
