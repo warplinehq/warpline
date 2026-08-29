@@ -220,6 +220,31 @@ describe('warpline deny', () => {
   })
 
   /**
+   * `denials` is a plain object, so every inherited member of
+   * `Object.prototype` answers a bare `denials[name]` lookup with something
+   * that is not a denial. The removal path is where this reaches the operator:
+   * its names are deliberately validated against the record and not against
+   * the manifests, so any string arrives here.
+   */
+  test('9b: `--remove` of a prototype member is refused, and the state file is untouched', async () => {
+    await capture(['render-issue'])
+    const before = await rawState()
+
+    for (const name of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      const { code, stderr } = await capture(['--remove', name])
+
+      expect(code).toBe(1)
+      expect(stderr).toContain(`No denial recorded for ${name}.`)
+      // The state document is byte-identical: the removal reported success and
+      // rewrote the file while deleting nothing.
+      expect(await rawState()).toBe(before)
+    }
+
+    // Non-vacuity: the same path DOES remove a name that really is there.
+    expect((await capture(['--remove', 'render-issue'])).code).toBe(0)
+  })
+
+  /**
    * The explicit evidence for "denying twice is a no-op". The record's key
    * makes it structurally true; this makes it observable — the second command
    * writes nothing at all, so the state file is byte-identical.

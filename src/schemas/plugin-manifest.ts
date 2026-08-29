@@ -42,8 +42,28 @@ export type AutonomyLevel = z.infer<typeof AutonomyLevel>
  * are a hard stop. A misconfigured plugin must not silently run.
  */
 export const PluginManifestSchema = z.object({
-  /** Plugin key — must be unique across all plugins */
-  name: z.string().min(1),
+  /**
+   * Plugin key — must be unique across all plugins.
+   *
+   * A name that already exists on `Object.prototype` is refused. The name is a
+   * KEY in `plugin_runs` and `denials`, both plain objects, so `__proto__`
+   * would invoke the prototype setter and drop the record on write: the run
+   * record vanishes and the plugin re-fires its side effects on the next
+   * advance, which is the exact defect those records exist to close. The rest
+   * of the prototype (`toString`, `constructor`, `valueOf`, …) answers a
+   * lookup with an inherited member rather than the absence that is the truth.
+   *
+   * Derived from the prototype rather than listed, so it cannot go stale
+   * against a future addition. `prototype` itself is not on it and is not
+   * refused: it is not a member of `Object.prototype`, so it reads as absent
+   * like any other unused key.
+   */
+  name: z
+    .string()
+    .min(1)
+    .refine((n) => !(n in Object.prototype), {
+      message: 'name collides with an Object.prototype member and cannot be a record key',
+    }),
 
   /** Semantic version string */
   version: z.string().min(1),

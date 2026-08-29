@@ -120,6 +120,33 @@ describe('outputs.temporality', () => {
     expect(parsed.outputs['weekly_report']?.temporality).toBe('versioned')
   })
 
+  /**
+   * The name is a KEY in `plugin_runs` and `denials`, both plain objects. A
+   * plugin called `__proto__` invoked the prototype setter on write: the
+   * record was silently dropped, so the plugin was due again on the next
+   * advance and re-fired the side effects the record exists to stop. The rest
+   * of the prototype answers a lookup with an inherited member rather than the
+   * absence that is the truth.
+   */
+  test('a name that is a member of Object.prototype is refused, naming the field', () => {
+    for (const name of ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+      let threw = false
+      try {
+        PluginManifestSchema.parse({ ...validManifest, name })
+      } catch (e) {
+        threw = true
+        expect((e as z.ZodError).issues[0]?.path).toEqual(['name'])
+      }
+      expect(threw).toBe(true)
+    }
+
+    // `prototype` is NOT a member of Object.prototype, so it reads as absent
+    // like any other unused key and is not refused. Non-vacuity for the loop:
+    // the refusal is derived from the prototype, not a blocklist of
+    // suspicious-looking words.
+    expect(PluginManifestSchema.parse({ ...validManifest, name: 'prototype' }).name).toBe('prototype')
+  })
+
   // The load-bearing case. A misdeclared value must stop the plugin at import
   // rather than fall back to the default — a plugin running under a guessed
   // versioning policy is the failure this field exists to prevent.

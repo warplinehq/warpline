@@ -51,8 +51,14 @@ drift from the code. Edit the schema, not the table.
 <!-- /generated -->
 
 Every field with a default is optional in a manifest file, so adding one never
-invalidates an existing plugin. `ttl_hours` must be positive — zero or negative
-would disable caching rather than mean "always fresh". `max_retries` is capped
+invalidates an existing plugin. `name` may not be a member of
+`Object.prototype` — `__proto__`, `constructor`, `toString`, `valueOf` and the
+rest are refused, because the name is a key in the plain-object `plugin_runs`
+and `denials` records: `__proto__` would invoke the prototype setter and drop
+the record on write, and the others answer a lookup with an inherited member
+rather than the absence that is the truth. The set is derived from the
+prototype, not listed, so it cannot go stale. `ttl_hours` must be positive —
+zero or negative would disable caching rather than mean "always fresh". `max_retries` is capped
 at 10 and `retry_delay_ms` at 60s; the backoff that uses them is described in
 §2. `actions` is an optional registry that only surfaces in a host UI when
 non-empty.

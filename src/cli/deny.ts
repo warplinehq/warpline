@@ -157,7 +157,14 @@ export async function run(argv: string[]): Promise<number> {
     const state = await loadState(statePath)
     if (state === null) return 1
 
-    const missing = positionals.filter((name) => state.denials[name] === undefined)
+    // `Object.hasOwn`, not `!== undefined`. These names come straight from the
+    // operator and are deliberately NOT validated against the manifests, so
+    // `--remove toString` arrives here — and on a plain-object record that
+    // lookup answers with `Object.prototype.toString`. The guard would not
+    // fire, the delete would remove nothing, the state document would be
+    // rewritten anyway, and the operator would be told a denial they never had
+    // was taken back.
+    const missing = positionals.filter((name) => !Object.hasOwn(state.denials, name))
     if (missing.length > 0) {
       for (const name of missing) {
         process.stderr.write(`No denial recorded for ${name}.\n`)
@@ -209,7 +216,10 @@ export async function run(argv: string[]): Promise<number> {
 
   for (const plugin of positionals) {
     const fingerprint = proposalFingerprint(state, plugin, manifests.get(plugin)!)
-    const existing = state.denials[plugin]
+    // Own-property lookup for the same reason as `--remove` above. The
+    // manifest schema already refuses a name off `Object.prototype`, so this
+    // holds independently of that rather than duplicating it.
+    const existing = Object.hasOwn(state.denials, plugin) ? state.denials[plugin] : undefined
 
     // Denying twice against an unchanged proposal is a no-op, and observably
     // so: nothing is written, so the state document is byte-identical. The

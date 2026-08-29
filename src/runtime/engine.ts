@@ -359,7 +359,13 @@ export async function evaluatePlugin(
   // the answer is stale and the plugin is asked again — but the question is a
   // returning one, and `supersededNote` below makes the difference visible
   // rather than letting it reappear looking new.
-  const denial = ctx.state.denials[pluginName]
+  //
+  // An own-property lookup: `denials` is a plain object, so `denials[name]`
+  // answers with an inherited member for any name off `Object.prototype`. The
+  // manifest schema refuses such a name, and this holds whether or not it does.
+  const denial = Object.hasOwn(ctx.state.denials, pluginName)
+    ? ctx.state.denials[pluginName]
+    : undefined
   const currentProposal =
     denial === undefined ? undefined : proposalFingerprint(ctx.state, pluginName, manifest)
   if (denial !== undefined && denial.fingerprint === currentProposal) {
