@@ -21,6 +21,7 @@ import {
   ENGINE_STATE_MAX_SCHEMA_VERSION,
   EngineStateInvalidError,
   PluginRunSchema,
+  TaskAgingSchema,
   defaultEngineState,
   readEngineState,
   readEngineStateReadOnly,
@@ -292,5 +293,68 @@ describe('PluginRunSchema.last_output', () => {
     const raw = JSON.parse(await readFile(statePath, 'utf-8'))
     expect(raw.plugin_runs['quiet-plugin']).toBeDefined()
     expect('last_output' in raw.plugin_runs['quiet-plugin']).toBe(false)
+  })
+})
+
+/**
+ * Run linkage on task aging (R4). The fields live here rather than in
+ * `board.ts` because `TaskAgingSchema` does: `TaskDisplaySchema` extends it and
+ * `EngineStateSchema.task_aging` holds it.
+ */
+describe('TaskAgingSchema run linkage', () => {
+  const baseTask = {
+    task_id: 'task-001',
+    first_flagged: '2026-08-01T10:00:00Z',
+    description: 'Renewal certificate expires in 12 days',
+    severity: 'warning' as const,
+  }
+
+  it('reads null for both run ids on a task written before run linkage', () => {
+    const result = TaskAgingSchema.parse(baseTask)
+    expect(result.first_run_id).toBeNull()
+    expect(result.last_flagged_run_id).toBeNull()
+  })
+
+  it('carries the run that first raised the task and the run that last re-flagged it', () => {
+    const result = TaskAgingSchema.parse({
+      ...baseTask,
+      first_run_id: 'run-a',
+      last_flagged_run_id: 'run-c',
+    })
+    expect(result.first_run_id).toBe('run-a')
+    expect(result.last_flagged_run_id).toBe('run-c')
+  })
+
+  /**
+   * A run that raises a task and re-flags it in the same advance writes the
+   * same id twice. That is the ordinary first-advance case, not a corruption
+   * to reject — the two fields answer different questions that happen to have
+   * one answer here.
+   */
+  it('accepts the same run id in both fields — a run that raised and re-flagged in one advance', () => {
+    const result = TaskAgingSchema.parse({
+      ...baseTask,
+      first_run_id: 'run-a',
+      last_flagged_run_id: 'run-a',
+    })
+    expect(result.first_run_id).toBe(result.last_flagged_run_id)
+    expect(result.first_run_id).toBe('run-a')
+  })
+
+  it('survives a read-then-write round trip through engine state', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'warpline-aging-'))
+    const statePath = join(dir, 'engine-state.json')
+    try {
+      const state = defaultEngineState()
+      state.task_aging.push(
+        TaskAgingSchema.parse({ ...baseTask, first_run_id: 'run-a', last_flagged_run_id: 'run-b' }),
+      )
+      await writeEngineState(statePath, state)
+      const reread = await readEngineState(statePath)
+      expect(reread.task_aging[0]?.first_run_id).toBe('run-a')
+      expect(reread.task_aging[0]?.last_flagged_run_id).toBe('run-b')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

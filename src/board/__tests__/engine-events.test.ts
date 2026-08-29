@@ -425,5 +425,101 @@ export async function handler(manifest, args) {
     // reversible should be undefined or absent when not set by handler
     expect(entry['reversible']).toBeUndefined()
   })
+
+  test('Test 18: every event an advance emits names that advance', async () => {
+    const { runAdvance } = await import('../../runtime/engine.js')
+    await createPlugin('linked-plugin')
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: join(stateDir, 'engine-state.json'),
+      runsDir,
+      eventsPath: testEventsPath,
+    })
+
+    const events = await readEvents(testEventsPath)
+    expect(events.length).toBeGreaterThan(0)
+    const unlinked = events.filter(e => e['run_id'] !== result.run_id)
+    expect(unlinked).toEqual([])
+  })
 })
 
+
+// -----------------------------------------------------------------------
+// Run linkage (R4) — an Ask can name the Run that raised it
+// -----------------------------------------------------------------------
+
+describe('run linkage on emitted events', () => {
+  installStatePathIsolation()
+
+  test('an event emitted with a run id carries it as a top-level field', async () => {
+    await mkdir(join(tmpDir, 'state'), { recursive: true })
+    await emitBoardEvent(makeEvent('notice', 'engine', 'linked', 'run-abc'), eventsPath)
+
+    const events = await readEvents(eventsPath)
+    expect(events[0]!['run_id']).toBe('run-abc')
+    // Never smuggled into metadata_json — a Board that has to JSON.parse a
+    // string to find the run cannot index on it.
+    expect(events[0]!['metadata_json']).toBeNull()
+  })
+
+  test('an event emitted outside any run carries null, not a guess', async () => {
+    await mkdir(join(tmpDir, 'state'), { recursive: true })
+    await emitBoardEvent(makeEvent('notice', 'engine:tier-transition', 'Entered dormant mode', null), eventsPath)
+
+    const events = await readEvents(eventsPath)
+    expect(events[0]!['run_id']).toBeNull()
+  })
+
+  test('the convenience emitters thread the run id too', async () => {
+    await mkdir(join(tmpDir, 'state'), { recursive: true })
+    await emitRunStarted('run-abc', eventsPath)
+    await emitPluginStarted('source-scan', 'run-abc', eventsPath)
+    await emitPluginCompleted('source-scan', 'done', 'run-abc', eventsPath)
+    await emitPluginFailed('source-scan', 'boom', 'run-abc', eventsPath)
+    await emitPluginSkipped('source-scan', 'fresh', 'run-abc', eventsPath)
+    await emitPluginGated('supervised-sender', 'run-abc', eventsPath)
+    await emitRunCompleted('run-abc', 'complete', eventsPath)
+
+    const events = await readEvents(eventsPath)
+    expect(events).toHaveLength(7)
+    expect(events.map(e => e['run_id'])).toEqual(Array(7).fill('run-abc'))
+  })
+
+  /**
+   * The read-compat shim, asserted rather than assumed. `readEvents` safeParses
+   * each line independently and pushes only on success, so a line written
+   * before this field existed is exactly the thing a defaultless field would
+   * drop — silently, and for the whole log.
+   */
+  test('a raw events.jsonl line written without a run_id key is still read back', async () => {
+    const { readEvents: readEventsThroughSchema, _setPaths } = await import('../state-manager.js')
+    const stateDir = join(tmpDir, 'state')
+    await mkdir(stateDir, { recursive: true })
+
+    const historical = {
+      event_id: 'evt-historical',
+      type: 'notice',
+      timestamp: '2026-01-01T00:00:00Z',
+      source: 'engine',
+      summary: 'written before run linkage existed',
+      severity: 'info',
+      task_id: null,
+      metadata_json: null,
+    }
+    expect('run_id' in historical).toBe(false)
+    await writeFile(eventsPath, JSON.stringify(historical) + '\n', 'utf-8')
+
+    _setPaths({
+      v2StatePath: join(stateDir, 'engine-state.json'),
+      eventsPath,
+      acksPath: join(stateDir, 'acknowledgements.json'),
+      lockPath: join(stateDir, '.state.lock'),
+    })
+
+    const read = await readEventsThroughSchema()
+    expect(read).toHaveLength(1)
+    expect(read[0]!.event_id).toBe('evt-historical')
+    expect(read[0]!.run_id).toBeNull()
+  })
+})

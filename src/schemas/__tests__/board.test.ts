@@ -45,6 +45,26 @@ describe('BoardEventSchema', () => {
       BoardEventSchema.parse({ ...validEvent, summary: longSummary })
     ).toThrow(z.ZodError)
   })
+
+  /**
+   * Read compatibility, not convenience. `state-manager.ts` safeParses each
+   * events.jsonl line on its own and pushes only on success, so a required
+   * `run_id` would silently drop every line written before run linkage
+   * existed — the whole history, from every board view, with no error.
+   */
+  test('a line written before run linkage carries no run_id key, parses, and reads null', () => {
+    expect('run_id' in validEvent).toBe(false)
+    const result = BoardEventSchema.parse(validEvent)
+    expect(result.run_id).toBeNull()
+  })
+
+  test('a BoardEvent carrying a run_id preserves it as a top-level field', () => {
+    const runId = '20260829T101112000Z-ab12cd34'
+    const result = BoardEventSchema.parse({ ...validEvent, run_id: runId })
+    expect(result.run_id).toBe(runId)
+    // Run linkage is a field of its own, never smuggled into metadata_json.
+    expect(result.metadata_json).toBeNull()
+  })
 })
 
 describe('TaskState enum', () => {
