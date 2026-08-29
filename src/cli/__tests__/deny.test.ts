@@ -249,6 +249,73 @@ describe('warpline deny', () => {
    * makes it structurally true; this makes it observable — the second command
    * writes nothing at all, so the state file is byte-identical.
    */
+  /**
+   * The reason string is read back in three places — `deny --list`, the
+   * `denial_recorded` notice in `events.jsonl`, and the skip detail the
+   * evaluator writes on every suppressed advance — so a false one is not
+   * cosmetic. `findPendingGate` returns already-applied markers on purpose, and
+   * a marker means the operator ACCEPTED that result. Markers now live up to 24
+   * hours, so this window is not a corner.
+   */
+  async function seedGateFor(plugin: string, appliedAt: string | null): Promise<void> {
+    const at = new Date(Date.now() - 30_000).toISOString()
+    await mkdir(join(root, 'state'), { recursive: true })
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: {},
+        denials: {},
+        pending_gates: [
+          {
+            plugin,
+            run_id: 'run-a',
+            created_at: at,
+            payload_summary: 'sent the weekly digest',
+            plugin_result: {
+              status: 'success',
+              phases_completed: [plugin],
+              phases_failed: [],
+              errors: [],
+              data_freshness: {},
+              summary: 'sent the weekly digest',
+              artifacts_produced: [],
+              schema_version: 2,
+            },
+            run_started_at: at,
+            run_completed_at: at,
+            applied_at: appliedAt,
+          },
+        ],
+      }),
+    )
+  }
+
+  test('9c: a denial against a spent marker does not claim the operator declined a result they applied', async () => {
+    await seedGateFor('render-issue', new Date(Date.now() - 10_000).toISOString())
+
+    const { code } = await capture(['render-issue'])
+
+    expect(code).toBe(0)
+    // The standing proposal is what is being answered. The applied result was
+    // accepted, and no record may say otherwise.
+    expect((await readState()).denials['render-issue'].reason).toBe(
+      'the operator declined this proposal',
+    )
+  })
+
+  test('9d: a denial against a LIVE parked gate still names the run it declined', async () => {
+    // Non-vacuity for 9c: same path, same seed shape, and the only difference
+    // is `applied_at`. Without this the fix would read as "never name a run".
+    await seedGateFor('render-issue', null)
+
+    expect((await capture(['render-issue'])).code).toBe(0)
+
+    expect((await readState()).denials['render-issue'].reason).toBe(
+      'the operator declined the parked result from run run-a',
+    )
+  })
+
   test('10: denying the same plugin twice against an unchanged proposal writes nothing the second time', async () => {
     await capture(['render-issue'])
     const before = await rawState()

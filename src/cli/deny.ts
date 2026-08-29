@@ -236,11 +236,18 @@ export async function run(argv: string[]): Promise<number> {
     // A parked result is what a denial most often answers, so the reason says
     // which run it was. Without one, the operator is answering the standing
     // proposal rather than a specific outcome, and the reason says that.
+    //
+    // A LIVE gate, not merely a gate: `findPendingGate` returns already-applied
+    // markers on purpose, and a marker means the operator ACCEPTED that result.
+    // Recording that they declined it puts a false sentence somewhere it is
+    // read back — `deny --list` prints it, `emitDenialRecorded` writes it into
+    // `events.jsonl`, and the evaluator quotes it on every suppressed advance.
+    // A marker now lives up to 24 hours, so the window is not a corner.
     const gate = findPendingGate(state, plugin)
     const reason =
-      gate === undefined
-        ? 'the operator declined this proposal'
-        : `the operator declined the parked result from run ${gate.run_id}`
+      gate !== undefined && gate.applied_at === null
+        ? `the operator declined the parked result from run ${gate.run_id}`
+        : 'the operator declined this proposal'
 
     const denial = DenialSchema.parse({
       plugin,
