@@ -62,7 +62,18 @@ const MIN_CONTRACTIONS_PER_1K = 20
  */
 function prose(markdown: string): string {
   return markdown
-    .replace(/^---\n[\s\S]*?\n---\n/, '')
+    // `g` without `m`, deliberately. CodeQL reads a non-global multi-character
+    // replace as an incomplete sanitizer (js/incomplete-multi-character-
+    // sanitization), and the flag costs nothing here: `^` without `m` can only
+    // match at index 0, so this still strips exactly one leading block and the
+    // extracted prose is byte-identical either way.
+    //
+    // Adding `m` too would satisfy the same alert and quietly break the file:
+    // `---` on its own line is also a markdown horizontal rule, so a doc with a
+    // pair of them would have the prose BETWEEN them deleted before it was
+    // measured. The voice numbers would stay green while measuring less text,
+    // which is the one failure mode a register check must not have.
+    .replace(/^---\n[\s\S]*?\n---\n/g, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/```[\s\S]*?```/g, '')
     .replace(/^#{1,6} .*$/gm, '')
