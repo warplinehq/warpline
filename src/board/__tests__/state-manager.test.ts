@@ -262,7 +262,7 @@ describe('readEvents / appendEvent', () => {
 
   test('appendEvent appends a line to events.jsonl', async () => {
     await writeV2State()
-    const event = { event_id: 'e3', type: 'notice' as const, timestamp: '2026-04-09T12:00:00Z', source: 'test', summary: 'Appended', severity: 'info' as const, task_id: null, metadata_json: null }
+    const event = { event_id: 'e3', type: 'notice' as const, timestamp: '2026-04-09T12:00:00Z', source: 'test', summary: 'Appended', severity: 'info' as const, task_id: null, run_id: null, metadata_json: null }
 
     await appendEvent(event)
 
@@ -286,6 +286,8 @@ describe('mutateState', () => {
         first_flagged: new Date().toISOString(),
         description: 'Mutated',
         severity: 'info',
+        first_run_id: null,
+        last_flagged_run_id: null,
         run_count: 1,
         clean_streak: 0,
         last_detail: '',

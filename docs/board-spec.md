@@ -263,9 +263,17 @@ objects that do not exist.
    `gated` (supervised) and nothing records a human saying no. The `deny`
    verb needs somewhere to land — an engine-state record the next advance
    reads, so a denied plugin is not re-raised every run.
-2. **Run linkage on Asks.** `BoardEvent` carries `task_id` but no run id;
-   `TaskItem` carries `source_check` but no run id. An Ask must be able to
-   name the Run that raised it.
+2. **Run linkage on Asks.** *Landed.* `BoardEvent` carries `run_id` as a
+   first-class field beside `task_id`, and task aging carries `first_run_id`
+   (the run that raised the task) and `last_flagged_run_id` (the most recent
+   run to re-flag it) — an Ask links the latter. All three are nullable and
+   default to `null` on read, which is a read-compatibility shim: every line of
+   `events.jsonl` is validated on its own and dropped on failure, so a required
+   field would have discarded the whole existing log rather than reporting an
+   error. `null` means the event was emitted outside any run, which is a fact
+   and not a gap — the tier-transition notice is the standing example. A run id
+   whose run log has been pruned at 30 days resolves to "run no longer
+   retained", distinct from `null`.
 3. **Output as data.** `artifacts_produced: string[]` becomes a record with
    type, path or body, and the producing run id, so the Board can render and
    version it.
@@ -287,8 +295,8 @@ objects that do not exist.
 
 | Schema | Used by | Purpose |
 |--------|---------|---------|
-| `BoardEventSchema` | Ask (`notice`), Run | One line of `events.jsonl`, validated on read |
-| `TaskItemSchema` / `TaskDisplaySchema` | Ask (`decision`, `chore`) | Tasks and their `pending → active → completed / deferred` states |
+| `BoardEventSchema` | Ask (`notice`), Run | One line of `events.jsonl`, validated on read; `run_id` names the advance that emitted it, `null` when there was none |
+| `TaskAgingSchema` / `TaskDisplaySchema` | Ask (`decision`, `chore`) | Tasks and their `pending → active → completed / deferred` states; `first_run_id` and `last_flagged_run_id` link the task to the runs that raised and last re-flagged it |
 | `AcknowledgementsSchema` | Ask | Persists answers across sessions |
 | `ActionType` | Ask | `acknowledge`, `action`, `defer`, `mark_done` — the 0.1 verbs the 0.2 verbs map onto |
 | `RunArtifact` | Run, Output | `runs/` entries |

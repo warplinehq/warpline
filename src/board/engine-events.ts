@@ -88,12 +88,21 @@ export async function emitBoardEvent(
 
 /**
  * Construct a BoardEvent with required fields and sane defaults.
- * Summary is capped at 200 chars per the Ink single-line constraint.
+ *
+ * Summary is capped at 200 chars because an event is rendered as one line in a
+ * list — the board CLI's notice table and the Board's Ask rows both — and a
+ * longer summary overflows the row rather than telling anyone more.
+ *
+ * `runId` is required and has no default on purpose. Every call site has to
+ * decide whether this event belongs to an advance or not, and the compiler is
+ * what asks: a default would let a new emitter quietly write `null` for an
+ * event the engine could have named. Pass `null` only where it is true.
  */
 export function makeEvent(
   type: BoardEvent['type'],
   source: string,
   summary: string,
+  runId: string | null,
   overrides: Partial<BoardEvent> = {},
 ): BoardEvent {
   return {
@@ -104,6 +113,7 @@ export function makeEvent(
     summary: summary.slice(0, 200),
     severity: 'info',
     task_id: null,
+    run_id: runId,
     metadata_json: null,
     ...overrides,
   }
@@ -115,34 +125,34 @@ export function makeEvent(
 
 /** Emit run_started event — call at the very beginning of runAdvance. */
 export const emitRunStarted = (runId: string, eventsPath?: string): Promise<void> =>
-  emitBoardEvent(makeEvent('run_started', 'engine', `Run ${runId} started`), eventsPath)
+  emitBoardEvent(makeEvent('run_started', 'engine', `Run ${runId} started`, runId), eventsPath)
 
 /** Emit run_completed event — call at the end of runAdvance with final status. */
 export const emitRunCompleted = (runId: string, status: string, eventsPath?: string): Promise<void> =>
-  emitBoardEvent(makeEvent('run_completed', 'engine', `Run ${runId} ${status}`), eventsPath)
+  emitBoardEvent(makeEvent('run_completed', 'engine', `Run ${runId} ${status}`, runId), eventsPath)
 
 /** Emit plugin_result event indicating plugin execution has begun. */
-export const emitPluginStarted = (plugin: string, eventsPath?: string): Promise<void> =>
-  emitBoardEvent(makeEvent('plugin_result', plugin, `${plugin}: started`), eventsPath)
+export const emitPluginStarted = (plugin: string, runId: string | null, eventsPath?: string): Promise<void> =>
+  emitBoardEvent(makeEvent('plugin_result', plugin, `${plugin}: started`, runId), eventsPath)
 
 /** Emit plugin_result event indicating plugin completed successfully. */
-export const emitPluginCompleted = (plugin: string, summary: string, eventsPath?: string): Promise<void> =>
-  emitBoardEvent(makeEvent('plugin_result', plugin, `${plugin}: ${summary}`), eventsPath)
+export const emitPluginCompleted = (plugin: string, summary: string, runId: string | null, eventsPath?: string): Promise<void> =>
+  emitBoardEvent(makeEvent('plugin_result', plugin, `${plugin}: ${summary}`, runId), eventsPath)
 
 /**
  * Emit error event indicating plugin failed.
  * severity=warning (not critical) — failed plugins are logged and execution continues
  * for remaining plugins in the level.
  */
-export const emitPluginFailed = (plugin: string, error: string, eventsPath?: string): Promise<void> =>
+export const emitPluginFailed = (plugin: string, error: string, runId: string | null, eventsPath?: string): Promise<void> =>
   emitBoardEvent(
-    makeEvent('error', plugin, `${plugin}: ${error}`, { severity: 'warning' }),
+    makeEvent('error', plugin, `${plugin}: ${error}`, runId, { severity: 'warning' }),
     eventsPath,
   )
 
 /** Emit plugin_result event indicating plugin was skipped (fresh, manual, or locked). */
-export const emitPluginSkipped = (plugin: string, reason: string, eventsPath?: string): Promise<void> =>
-  emitBoardEvent(makeEvent('plugin_result', plugin, `${plugin}: skipped — ${reason}`), eventsPath)
+export const emitPluginSkipped = (plugin: string, reason: string, runId: string | null, eventsPath?: string): Promise<void> =>
+  emitBoardEvent(makeEvent('plugin_result', plugin, `${plugin}: skipped — ${reason}`, runId), eventsPath)
 
 /**
  * Emit an attempt_failed notice during invokePlugin's retry loop.
@@ -155,10 +165,11 @@ export const emitAttemptFailed = (
   plugin: string,
   attempt: number,
   error: string,
+  runId: string | null,
   eventsPath?: string,
 ): Promise<void> =>
   emitBoardEvent(
-    makeEvent('notice', plugin, `attempt ${attempt} failed: ${error}`, {
+    makeEvent('notice', plugin, `attempt ${attempt} failed: ${error}`, runId, {
       metadata_json: JSON.stringify({ plugin, attempt, retryable: true }),
     }),
     eventsPath,
@@ -168,9 +179,9 @@ export const emitAttemptFailed = (
  * Emit plugin_result event indicating supervised plugin is awaiting human approval.
  * severity=warning — gate requires action before engine can continue.
  */
-export const emitPluginGated = (plugin: string, eventsPath?: string): Promise<void> =>
+export const emitPluginGated = (plugin: string, runId: string | null, eventsPath?: string): Promise<void> =>
   emitBoardEvent(
-    makeEvent('plugin_result', plugin, `${plugin}: awaiting approval`, { severity: 'warning' }),
+    makeEvent('plugin_result', plugin, `${plugin}: awaiting approval`, runId, { severity: 'warning' }),
     eventsPath,
   )
 

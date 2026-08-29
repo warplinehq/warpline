@@ -349,7 +349,7 @@ describe('TaskAgingSchema run linkage', () => {
       state.task_aging.push(
         TaskAgingSchema.parse({ ...baseTask, first_run_id: 'run-a', last_flagged_run_id: 'run-b' }),
       )
-      await writeEngineState(statePath, state)
+      await writeEngineState(state, statePath)
       const reread = await readEngineState(statePath)
       expect(reread.task_aging[0]?.first_run_id).toBe('run-a')
       expect(reread.task_aging[0]?.last_flagged_run_id).toBe('run-b')

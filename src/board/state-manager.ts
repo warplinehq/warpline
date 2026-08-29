@@ -184,12 +184,17 @@ export async function readTasks(): Promise<TaskDisplay[]> {
     .sort(sortByPriority)
 }
 
+// The run-linkage pair is optional here for the same reason the other six are:
+// a caller that knows the task does not necessarily know the advance, and a
+// null run id is a defined state rather than a missing one.
+type CreateTaskDefaulted = 'run_count' | 'clean_streak' | 'last_detail' | 'source_check' | 'action_type' | 'extensions' | 'first_run_id' | 'last_flagged_run_id'
+
 export async function createTask(
-  task: Omit<TaskAging, 'run_count' | 'clean_streak' | 'last_detail' | 'source_check' | 'action_type' | 'extensions'> & Partial<Pick<TaskAging, 'run_count' | 'clean_streak' | 'last_detail' | 'source_check' | 'action_type' | 'extensions'>>
+  task: Omit<TaskAging, CreateTaskDefaulted> & Partial<Pick<TaskAging, CreateTaskDefaulted>>
 ): Promise<void> {
   await withStateLock(async () => {
     const state = await readEngineState(activePaths().v2StatePath)
-    const full: TaskAging = { run_count: 1, clean_streak: 0, last_detail: '', source_check: '', action_type: 'self_directed', extensions: {}, ...task }
+    const full: TaskAging = { run_count: 1, clean_streak: 0, last_detail: '', source_check: '', action_type: 'self_directed', extensions: {}, first_run_id: null, last_flagged_run_id: null, ...task }
     state.task_aging.push(full)
     await writeEngineState(state, activePaths().v2StatePath)
   })

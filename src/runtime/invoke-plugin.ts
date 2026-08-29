@@ -421,10 +421,14 @@ export async function invokePlugin(
     if (!shouldRetry) break
 
     // -- Emit an attempt_failed notice before sleeping again --
+    // `options.runId` is set by the engine advance and by `warpline run`
+    // alike; null only where a caller invoked a plugin outside either, which
+    // is exactly what a null run id means.
     await emitAttemptFailed(
       pluginName,
       attempt + 1,
       firstError ?? 'unknown error',
+      options.runId ?? null,
       options.eventsPath,
     )
   }

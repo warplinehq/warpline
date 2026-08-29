@@ -45,6 +45,22 @@ export const TaskAgingSchema = z.object({
    * `source_check` during resolution.
    */
   origin_check: z.string().optional(),
+  /**
+   * The run that first raised this task, and the most recent run to re-flag it.
+   * An Ask links the latter — it answers "which advance is telling me this
+   * now", where `first_run_id` answers "how long has this been true".
+   *
+   * A run that raises a task and re-flags it in the same advance writes the
+   * same id into both. That is the ordinary first-advance case, not a
+   * corruption to reject.
+   *
+   * Nullable with a default for the same read-compat reason as
+   * `BoardEventSchema.run_id`: task_aging entries written before run linkage
+   * existed carry neither field, and the engine's own state document must not
+   * fail validation over it.
+   */
+  first_run_id: z.string().nullable().default(null),
+  last_flagged_run_id: z.string().nullable().default(null),
   action_type: z.enum(['guided', 'self_directed']).default('self_directed'),
   /** Tasks with null due_date are NEVER classified as overdue. */
   due_date: z.string().nullable().default(null),

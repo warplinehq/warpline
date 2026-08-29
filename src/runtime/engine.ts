@@ -407,8 +407,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       : Date.now()
     const idleDays = Math.round((Date.now() - previousMs) / 86_400_000)
     const tierTransitionSummary = `Entered ${currentTier} mode (${idleDays}d absent)`
+    // Deliberately null, not `run_id`. The tier transition is a property of
+    // how long the operator has been away — it is observed at the top of an
+    // advance but is not something this advance did, and attributing it to a
+    // run would make "which run raised this" answer a question it did not ask.
     await emitBoardEvent(
-      makeEvent('notice', 'engine:tier-transition', tierTransitionSummary),
+      makeEvent('notice', 'engine:tier-transition', tierTransitionSummary, null),
       eventsPath,
     )
   }
@@ -510,7 +514,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             result_summary: `blocked (dry-run): declares side effects [${manifest.side_effects.join(', ')}]`,
             retried: false,
           })
-          await emitPluginSkipped(pluginName, `blocked (dry-run): declares side effects [${manifest.side_effects.join(', ')}]`, eventsPath)
+          await emitPluginSkipped(pluginName, `blocked (dry-run): declares side effects [${manifest.side_effects.join(', ')}]`, run_id, eventsPath)
           onPluginEnd?.(pluginName, 'skipped', dryBlockElapsed, 'blocked (dry-run)')
           return
         }
@@ -532,7 +536,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               result_summary: ev.detail,
               retried: false,
             })
-            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
             return
           }
 
@@ -546,7 +550,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               result_summary: ev.detail,
               retried: false,
             })
-            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
             return
           }
 
@@ -560,7 +564,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               result_summary: ev.detail,
               retried: false,
             })
-            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
             return
           }
 
@@ -574,7 +578,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               result_summary: ev.detail,
               retried: false,
             })
-            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
             return
           }
 
@@ -588,7 +592,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               result_summary: `skipped: ${ev.detail}`,
               retried: false,
             })
-            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
             return
           }
 
@@ -602,7 +606,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               result_summary: ev.detail,
               retried: false,
             })
-            await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
             return
           }
 
@@ -617,7 +621,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             result_summary: `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
             retried: false,
           })
-          await emitPluginSkipped(pluginName, ev.detail, eventsPath)
+          await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
           onPluginEnd?.(pluginName, 'skipped', unapprovedElapsed, 'unapproved side effects')
           return
         }
@@ -625,7 +629,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         // -- Set FSM to running --
         plugin_states.set(pluginName, 'running')
         onPluginStart?.(pluginName)
-        await emitPluginStarted(pluginName, eventsPath)
+        await emitPluginStarted(pluginName, run_id, eventsPath)
 
         // -- Invoke plugin --
         let invocationResult: Awaited<ReturnType<typeof invokePlugin>>
@@ -648,7 +652,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             result_summary: `invocation threw: ${errMsg}`,
             retried: false,
           })
-          await emitPluginFailed(pluginName, errMsg, eventsPath)
+          await emitPluginFailed(pluginName, errMsg, run_id, eventsPath)
           onPluginEnd?.(pluginName, 'failed', failedElapsed, errMsg)
           return
         }
@@ -677,7 +681,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               undo_instruction: result.undo_instruction,
               retried,
             })
-            await emitPluginCompleted(pluginName, `[dry-run] would pause here: ${result.summary}`, eventsPath)
+            await emitPluginCompleted(pluginName, `[dry-run] would pause here: ${result.summary}`, run_id, eventsPath)
             onPluginEnd?.(pluginName, 'completed', dryRunElapsed, '[dry-run] would pause here')
           } else {
             plugin_states.set(pluginName, 'gated')
@@ -693,7 +697,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               undo_instruction: result.undo_instruction,
               retried,
             })
-            await emitPluginGated(pluginName, eventsPath)
+            await emitPluginGated(pluginName, run_id, eventsPath)
             onPluginEnd?.(pluginName, 'gated', gatedElapsed)
 
             // -- Record the gated run in state --
@@ -736,9 +740,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           retried,
         })
         if (finalStatus === 'failed') {
-          await emitPluginFailed(pluginName, result.summary, eventsPath)
+          await emitPluginFailed(pluginName, result.summary, run_id, eventsPath)
         } else {
-          await emitPluginCompleted(pluginName, result.summary, eventsPath)
+          await emitPluginCompleted(pluginName, result.summary, run_id, eventsPath)
         }
         onPluginEnd?.(pluginName, finalStatus, autonomousElapsed)
 

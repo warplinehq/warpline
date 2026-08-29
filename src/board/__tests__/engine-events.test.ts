@@ -56,7 +56,7 @@ async function readEvents(path: string): Promise<Record<string, unknown>[]> {
 describe('emitBoardEvent', () => {
   test('Test 1: appends one JSON line to events.jsonl', async () => {
     await mkdir(join(tmpDir, 'state'), { recursive: true })
-    const event = makeEvent('notice', 'engine', 'hello world')
+    const event = makeEvent('notice', 'engine', 'hello world', 'run-abc')
     await emitBoardEvent(event, eventsPath)
 
     const events = await readEvents(eventsPath)
@@ -68,7 +68,7 @@ describe('emitBoardEvent', () => {
 
   test('Test 2: creates parent directory if events.jsonl does not exist', async () => {
     // tmpDir doesn't exist at all yet — emitBoardEvent must create it
-    const event = makeEvent('notice', 'engine', 'auto-create test')
+    const event = makeEvent('notice', 'engine', 'auto-create test', 'run-abc')
     await emitBoardEvent(event, eventsPath)
 
     const events = await readEvents(eventsPath)
@@ -77,7 +77,7 @@ describe('emitBoardEvent', () => {
 
   test('Test 3: multiple calls append multiple lines (append-only)', async () => {
     for (let i = 0; i < 3; i++) {
-      await emitBoardEvent(makeEvent('notice', 'engine', `event-${i}`), eventsPath)
+      await emitBoardEvent(makeEvent('notice', 'engine', `event-${i}`, 'run-abc'), eventsPath)
     }
     const events = await readEvents(eventsPath)
     expect(events).toHaveLength(3)
@@ -85,7 +85,7 @@ describe('emitBoardEvent', () => {
   })
 
   test('Test 4: each event has event_id, timestamp, type, source, summary, severity, task_id, metadata_json', async () => {
-    const event = makeEvent('notice', 'engine', 'full fields')
+    const event = makeEvent('notice', 'engine', 'full fields', 'run-abc')
     await emitBoardEvent(event, eventsPath)
     const events = await readEvents(eventsPath)
     const e = events[0]
@@ -156,7 +156,7 @@ describe('emitRunCompleted', () => {
 
 describe('emitPluginStarted', () => {
   test('Test 7: emitPluginStarted writes event with type=plugin_result, summary containing plugin name', async () => {
-    await emitPluginStarted('source-scan', eventsPath)
+    await emitPluginStarted('source-scan', 'run-abc', eventsPath)
     const events = await readEvents(eventsPath)
     expect(events[0]['type']).toBe('plugin_result')
     expect((events[0]['summary'] as string)).toContain('source-scan')
@@ -165,7 +165,7 @@ describe('emitPluginStarted', () => {
 
 describe('emitPluginCompleted', () => {
   test('Test 8: emitPluginCompleted writes event with type=plugin_result', async () => {
-    await emitPluginCompleted('source-scan', 'scan done', eventsPath)
+    await emitPluginCompleted('source-scan', 'scan done', 'run-abc', eventsPath)
     const events = await readEvents(eventsPath)
     expect(events[0]['type']).toBe('plugin_result')
     expect((events[0]['summary'] as string)).toContain('source-scan')
@@ -174,7 +174,7 @@ describe('emitPluginCompleted', () => {
 
 describe('emitPluginFailed', () => {
   test('Test 9: emitPluginFailed writes event with type=error, severity=warning', async () => {
-    await emitPluginFailed('source-scan', 'timed out', eventsPath)
+    await emitPluginFailed('source-scan', 'timed out', 'run-abc', eventsPath)
     const events = await readEvents(eventsPath)
     expect(events[0]['type']).toBe('error')
     expect(events[0]['severity']).toBe('warning')
@@ -184,7 +184,7 @@ describe('emitPluginFailed', () => {
 
 describe('emitPluginSkipped', () => {
   test('Test 10: emitPluginSkipped writes event with type=plugin_result, severity=info', async () => {
-    await emitPluginSkipped('source-scan', 'already fresh', eventsPath)
+    await emitPluginSkipped('source-scan', 'already fresh', 'run-abc', eventsPath)
     const events = await readEvents(eventsPath)
     expect(events[0]['type']).toBe('plugin_result')
     expect(events[0]['severity']).toBe('info')
@@ -195,7 +195,7 @@ describe('emitPluginSkipped', () => {
 
 describe('emitPluginGated', () => {
   test('Test 11: emitPluginGated writes event with type=plugin_result, severity=warning, summary containing "awaiting approval"', async () => {
-    await emitPluginGated('supervised-sender', eventsPath)
+    await emitPluginGated('supervised-sender', 'run-abc', eventsPath)
     const events = await readEvents(eventsPath)
     expect(events[0]['type']).toBe('plugin_result')
     expect(events[0]['severity']).toBe('warning')

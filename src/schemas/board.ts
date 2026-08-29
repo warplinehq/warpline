@@ -75,6 +75,22 @@ export const BoardEventSchema = z.object({
   task_id: z.string().nullable().default(null),
 
   /**
+   * The engine advance that emitted this event — a sibling of `task_id`, never
+   * a key inside `metadata_json`: a Board that has to JSON.parse a string to
+   * find the run cannot index or filter on it.
+   *
+   * null means the event was emitted outside any run, which is a fact rather
+   * than a gap. Distinct from a run id whose log has since been pruned, which
+   * resolves through `resolveRunRef` in `schemas/run-log.ts`.
+   *
+   * `.default(null)` is a read-compat shim and nothing else. `state-manager.ts`
+   * safeParses each events.jsonl line on its own and pushes only on success, so
+   * a required field here would silently drop every line written before run
+   * linkage existed — the whole history, from every board view, with no error.
+   */
+  run_id: z.string().nullable().default(null),
+
+  /**
    * Serialized JSON string for extra data not rendered directly.
    * Never a nested object — Ink constraint requires flat field structure.
    */
