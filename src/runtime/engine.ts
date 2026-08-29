@@ -1265,8 +1265,29 @@ export async function applyPendingGate(
     reason: 'dependency_moved' | 'expired',
     detail: string,
   ): Promise<GateApplyOutcome> => {
+    // Carry a live denial across the delete below. The denial was recorded
+    // against the proposal as it stood WITH this run's Output, and
+    // `proposalFingerprint` reads that Output out of `plugin_runs` — so
+    // deleting the entry moves the live fingerprint, the answer stops
+    // matching, and the plugin runs again on the next advance, re-firing the
+    // side effects the operator said no to. Silently, under a live Grant: the
+    // superseded-denial note only rides the `unapproved` arm.
+    //
+    // Measured BEFORE the delete, and only carried when it still matched. A
+    // denial that was already stale stays stale — re-stamping it would revive
+    // an answer to a proposal that no longer exists.
+    const denial = Object.hasOwn(state.denials, gate.plugin)
+      ? state.denials[gate.plugin]
+      : undefined
+    const denialWasLive =
+      denial !== undefined &&
+      denial.fingerprint === proposalFingerprint(state, gate.plugin, manifest)
+
     state.pending_gates = state.pending_gates.filter((g) => g !== gate)
     delete state.plugin_runs[gate.plugin]
+    if (denial !== undefined && denialWasLive) {
+      denial.fingerprint = proposalFingerprint(state, gate.plugin, manifest)
+    }
     await writeEngineState(state, opts.statePath)
     await emitGateInvalidated(gate.plugin, gate.run_id, reason, opts.eventsPath).catch(() => {
       /* a discard notice that cannot be written must not undo the discard */

@@ -678,6 +678,15 @@ there is nothing to migrate, because the real result was never recorded.
 `warpline approve <plugin>` applies the parked gate when one is live. What that
 does, in order, all decided before anything is written:
 
+0. **Already denied** — `denials[plugin]` exists and its fingerprint still
+   matches the live proposal. Refused, and nothing is written. `deny` and
+   `approve` answer the same proposal, so applying a result the operator
+   explicitly refused is the one gesture the denial record exists to make
+   impossible; without this check it succeeded silently and left a live denial
+   and an applied outcome for the same proposal in the same document. A
+   superseded denial does not block — it is already stale everywhere else. The
+   refusal names the denial and says to take it back with
+   `warpline deny --remove <plugin>`.
 1. **Already applied** (`applied_at` is set) — refused, and nothing is written.
    The gate is marked rather than deleted precisely so this case exists: a
    deleted gate is an invisible one, and the verb would fall through to merging
@@ -700,6 +709,17 @@ On either refusal the plugin's `plugin_runs` entry is deleted, which leaves it
 due on the next advance. The parked result was never accepted, so there is no
 accepted run to hold the work back; the `gated` entry existed to stop the
 effects re-firing during the hold, and the hold is over.
+
+**A denial that was live at the moment of the refusal is re-fingerprinted, not
+stranded.** The fingerprint is read out of `plugin_runs[plugin].last_output`, so
+deleting the entry moves it, and a denial recorded against the parked result
+would stop matching — the plugin would be due again and re-fire the side effects
+the operator said no to, silently, since the superseded-denial note only rides
+the unapproved arm. So the fingerprint is measured before the delete and, if it
+still matched, recomputed after it. The denial then answers the plugin's
+Output-less proposal: it is denied by name until the operator takes it back.
+A denial that was already stale is left alone — re-stamping it would revive an
+answer to a proposal that no longer exists.
 
 The handler is never re-invoked. Its declared side effects fired at invocation,
 long before the supervision gate saw the result, so re-running would double

@@ -16,6 +16,8 @@ import { tmpdir } from 'node:os'
 import { _setHome, sessionApprovalPath } from '../../lib/paths.js'
 import { checkApproval, mergeGrant } from '../../runtime/approval-gate.js'
 import { invokePlugin } from '../../runtime/invoke-plugin.js'
+import { applyPendingGate, denialFingerprint, findPendingGate } from '../../runtime/engine.js'
+import { readEngineState } from '../../schemas/engine-state.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 let root: string
@@ -347,7 +349,11 @@ export async function handler() {
   async function seedGate(
     plugin: string,
     clocks: { startedAgoMs: number; completedAgoMs: number },
-    extra: { pluginRuns?: Record<string, unknown>; appliedAt?: string | null } = {},
+    extra: {
+      pluginRuns?: Record<string, unknown>
+      appliedAt?: string | null
+      denials?: Record<string, unknown>
+    } = {},
   ): Promise<{ startedAt: string; completedAt: string }> {
     const startedAt = new Date(Date.now() - clocks.startedAgoMs).toISOString()
     const completedAt = new Date(Date.now() - clocks.completedAgoMs).toISOString()
@@ -360,6 +366,7 @@ export async function handler() {
           [plugin]: { last_run_at: completedAt, status: 'gated' },
           ...extra.pluginRuns,
         },
+        denials: extra.denials ?? {},
         pending_gates: [
           {
             plugin,
@@ -517,6 +524,149 @@ export async function handler() {
 
     const afterB = await snapshotHome(root)
     expect(afterB.find((l) => l.startsWith('.session-approval'))).toBe(grantBefore as string)
+  })
+
+  /**
+   * The state a denied-and-parked plugin is actually in: `plugin_runs` carries
+   * the gated run's Output, and the denial's fingerprint is the one the deny
+   * verb would have computed against it.
+   *
+   * Built from the exported `denialFingerprint` rather than a literal, because
+   * a literal would pin today's hash and go red on any change to the hashed
+   * shape — which is not what these two cases are about.
+   */
+  const deniedGateSeed = (plugin: string, sideEffects: string[] = ['sends_email']) => ({
+    pluginRuns: {
+      [plugin]: {
+        last_run_at: new Date(Date.now() - 30_000).toISOString(),
+        status: 'gated',
+        last_output: RESULT.artifacts_produced[0],
+      },
+    },
+    denials: {
+      [plugin]: {
+        plugin,
+        reason: 'the operator declined the parked result from run run-a',
+        denied_at: '2026-08-29T11:00:00.000Z',
+        note: null,
+        fingerprint: denialFingerprint(plugin, sideEffects, [RESULT.artifacts_produced[0]]),
+      },
+    },
+  })
+
+  test('18: a live denial refuses the apply, and no grant is written either', async () => {
+    await writeGatedPlugin('gated-writer')
+    await seedGate(
+      'gated-writer',
+      { startedAgoMs: 60_000, completedAgoMs: 30_000 },
+      deniedGateSeed('gated-writer'),
+    )
+    const before = await readState()
+
+    const { code, stdout, stderr } = await capture('approve', ['gated-writer'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('was denied at')
+    expect(stderr).toContain('warpline deny --remove gated-writer')
+    // Not the other gate either: a refused apply must not fall through to the
+    // Grant path, which is the wrong-gesture outcome gate-first exists to stop.
+    expect(stdout).toBe('')
+    expect(existsSync(approvalPath)).toBe(false)
+
+    // Nothing applied: the gate is still live and the run record is untouched.
+    const after = await readState()
+    expect(after.pending_gates[0].applied_at).toBeNull()
+    expect(after.plugin_runs).toEqual(before.plugin_runs)
+    expect(existsSync(marker)).toBe(false)
+  })
+
+  test('18b: a superseded denial does not block the apply', async () => {
+    await writeGatedPlugin('gated-writer')
+    const seed = deniedGateSeed('gated-writer')
+    // The proposal moved since the denial was recorded — the manifest declares
+    // 'sends_email', the denial answered a proposal that declared 'writes_db'.
+    // Non-vacuity for 18: the ONLY difference is the fingerprint.
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 }, {
+      ...seed,
+      denials: {
+        'gated-writer': {
+          ...(seed.denials['gated-writer'] as Record<string, unknown>),
+          fingerprint: denialFingerprint('gated-writer', ['writes_db'], [
+            RESULT.artifacts_produced[0],
+          ]),
+        },
+      },
+    })
+
+    const { code, stdout } = await capture('approve', ['gated-writer'])
+
+    expect(code).toBe(0)
+    expect(stdout.toLowerCase()).toContain('parked result')
+    expect((await readState()).pending_gates[0].applied_at).not.toBeNull()
+  })
+
+  /**
+   * Drive a refusal through `applyPendingGate` itself rather than through the
+   * verb. Test 18 is why: the verb now refuses a live denial before it ever
+   * reaches the apply, so the CLI cannot reach the discard while a denial is
+   * live. The invariant belongs to the exported function, which any caller can
+   * reach, so that is where it is held.
+   */
+  async function expireThroughApply(plugin: string, extra: Parameters<typeof seedGate>[2]) {
+    const HOUR = 60 * 60 * 1000
+    await seedGate(plugin, { startedAgoMs: 26 * HOUR, completedAgoMs: 25 * HOUR }, extra)
+    const state = await readEngineState(statePath)
+    const gate = findPendingGate(state, plugin)
+    expect(gate).toBeDefined()
+    const outcome = await applyPendingGate(
+      state,
+      gate as NonNullable<typeof gate>,
+      { ...makeManifest(plugin, ['sends_email']), ttl_hours: 48 },
+      { statePath },
+    )
+    expect(outcome.outcome).toBe('refused')
+    return readState()
+  }
+
+  test('19: a refusal carries a live denial across the plugin_runs delete instead of stranding it', async () => {
+    // The denial is live at the moment of the discard, so it must end up
+    // answering the Output-less proposal. Left alone it would stop matching the
+    // instant plugin_runs went, the plugin would be due on the next advance,
+    // and the side effects the operator said no to would fire again — silently
+    // under a live Grant, since the superseded note only rides the unapproved
+    // arm.
+    const state = await expireThroughApply('gated-writer', deniedGateSeed('gated-writer'))
+
+    expect(state.plugin_runs['gated-writer']).toBeUndefined()
+    expect(state.denials['gated-writer'].fingerprint).toBe(
+      denialFingerprint('gated-writer', ['sends_email'], []),
+    )
+    // The rest of the record is untouched: this re-binds an answer, it does not
+    // record a new one.
+    expect(state.denials['gated-writer'].denied_at).toBe('2026-08-29T11:00:00.000Z')
+    expect(state.denials['gated-writer'].reason).toBe(
+      'the operator declined the parked result from run run-a',
+    )
+  })
+
+  test('19b: a denial that was already stale is left exactly as it was', async () => {
+    const seed = deniedGateSeed('gated-writer')
+    const stale = denialFingerprint('gated-writer', ['writes_db'], [])
+    const state = await expireThroughApply('gated-writer', {
+      ...seed,
+      denials: {
+        'gated-writer': {
+          ...(seed.denials['gated-writer'] as Record<string, unknown>),
+          fingerprint: stale,
+        },
+      },
+    })
+
+    // Re-stamping this would revive an answer to a proposal that no longer
+    // exists — the operator would be silently re-denied by a record they had
+    // already outgrown. Non-vacuity for 19: same path, same discard, and the
+    // only difference is whether the answer still matched.
+    expect(state.denials['gated-writer'].fingerprint).toBe(stale)
   })
 
   test('17: with no parked gate the command merges a Grant exactly as it always did', async () => {

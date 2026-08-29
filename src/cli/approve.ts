@@ -41,7 +41,12 @@
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { parseArgs } from 'node:util'
-import { applyPendingGate, findPendingGate, loadPluginManifests } from '../runtime/engine.js'
+import {
+  applyPendingGate,
+  findPendingGate,
+  loadPluginManifests,
+  proposalFingerprint,
+} from '../runtime/engine.js'
 import { mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { EngineStateInvalidError, readEngineState } from '../schemas/engine-state.js'
 import { engineStatePath, pluginsDir, sessionApprovalPath } from '../lib/paths.js'
@@ -194,6 +199,31 @@ export async function run(argv: string[]): Promise<number> {
         if (gate === undefined) continue
         const manifest = manifests.get(name)
         if (manifest === undefined) continue
+
+        // A standing denial outranks an apply. `deny` and `approve` answer the
+        // same proposal, so applying a result the operator explicitly refused
+        // is the one gesture the denial record exists to make impossible — and
+        // without this it succeeded silently, leaving a live denial and an
+        // applied outcome for the same proposal in the same document.
+        //
+        // Only a denial that still matches blocks. A superseded one is already
+        // stale everywhere else, and refusing on it would strand the operator
+        // behind an answer to a question that no longer exists.
+        //
+        // `Object.hasOwn`, not `!== undefined`: a plain-object record answers
+        // `denials['toString']` with a function off the prototype, and an
+        // existence test that believes it would refuse an apply nobody denied.
+        const denial = Object.hasOwn(state.denials, name) ? state.denials[name] : undefined
+        if (denial !== undefined && denial.fingerprint === proposalFingerprint(state, name, manifest)) {
+          process.stderr.write(
+            `${name} was denied at ${denial.denied_at} ('${denial.reason}') and that answer still ` +
+              `matches this proposal. Nothing was applied and no grant was written — take the ` +
+              `denial back first: warpline deny --remove ${name}\n`,
+          )
+          failed = true
+          continue
+        }
+
         const result = await applyPendingGate(state, gate, manifest, { statePath, now })
 
         if (result.outcome === 'applied') {
