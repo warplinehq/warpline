@@ -430,20 +430,47 @@ export async function handler() {
     expect(entry.last_output.path).toBe('digest.md')
   })
 
-  test('13: the second apply of the same gate is refused and mutates nothing', async () => {
+  /**
+   * Driven through `approve.run()`, deliberately, and not through
+   * `applyPendingGate`. The regression this pins was invisible for exactly that
+   * reason: the two guards it crosses were each tested at the function, and the
+   * seam where they meet the verb was not. `applied_at` is seeded rather than
+   * produced by an advance because the advance-survival half is Test 43's job
+   * (`engine.test.ts`) — a spent marker on file is the state that advance
+   * leaves, and this is what the verb must do when it finds one.
+   */
+  test('13: a spent marker refuses a second apply without blocking a Grant', async () => {
     await writeGatedPlugin('gated-writer')
     await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
 
     expect((await capture('approve', ['gated-writer'])).code).toBe(0)
-    const after = await readFile(statePath, 'utf-8')
+    const applied = (await readState()).plugin_runs['gated-writer']
+    const stamp = (await readState()).pending_gates[0].applied_at
+    expect(stamp).not.toBeNull()
 
+    // The same words a second time. Before this fix the verb refused with exit
+    // 1 and wrote nothing, so an operator whose Grant expired after an apply
+    // could not renew it by name for up to 24 hours.
     const { code, stdout, stderr } = await capture('approve', ['gated-writer'])
 
-    expect(code).toBe(1)
-    expect(stdout).toBe('')
-    expect(stderr.toLowerCase()).toContain('already')
-    expect(await readFile(statePath, 'utf-8')).toBe(after)
-    expect(existsSync(approvalPath)).toBe(false)
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    // Narrated, not silent: the operator typed an unchanged gesture and is
+    // getting a different answer, so the note names the run it is not redoing.
+    expect(stdout).toContain('already applied')
+    expect(stdout).toContain('run-a')
+    expect(stdout.toLowerCase()).toContain('does not re-record')
+
+    // The Grant the operator was locked out of.
+    expect((await readGrant()).scopes).toEqual(['gated-writer'])
+    expect(await checkApproval('gated-writer', approvalPath)).toBe(true)
+
+    // …and the double-record protection is untouched. The result was recorded
+    // once, the marker still carries its original stamp, and nothing re-entered
+    // the apply path.
+    const state = await readState()
+    expect(state.plugin_runs['gated-writer']).toEqual(applied)
+    expect(state.pending_gates[0].applied_at).toBe(stamp)
   })
 
   test('14: a gate whose dependency re-ran since the gated run started is refused and discarded', async () => {

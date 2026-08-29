@@ -693,15 +693,26 @@ does, in order, all decided before anything is written:
    superseded denial does not block — it is already stale everywhere else. The
    refusal names the denial and says to take it back with
    `warpline deny --remove <plugin>`.
-1. **Already applied** (`applied_at` is set) — refused, and nothing is written.
-   The gate is marked rather than deleted precisely so this case exists: a
-   deleted gate is an invisible one, and the verb would fall through to merging
-   a Grant instead of refusing. **An applied gate survives the next advance**,
-   for the same reason: the marker lives inside `pending_gates`, and overwriting
-   the array wholesale destroyed it, so apply, advance, approve minted a session
-   Grant — the outcome mark-not-delete exists to prevent, one advance later. An
-   applied marker is dropped when it passes the 24-hour gate ceiling, or when
-   the plugin gates again and the new parked gate supersedes it.
+1. **Already applied** (`applied_at` is set) — there is no *live* gate, so the
+   verb does not enter this list at all. It prints a note naming the run whose
+   result was already applied and then answers the Grant gate, granting the
+   plugin permission to run again. **A result is still recorded exactly once**:
+   `applyPendingGate` checks `applied_at` itself and refuses a second apply, and
+   the verb simply never reaches it. The refusal narrows to a second *apply*;
+   the verb's answer to a spent marker is a Grant that says so.
+
+   The branch is chosen on "is there a live gate", not "is there a gate".
+   Branching on mere existence locked the Grant verb out for as long as the
+   marker lived — up to 24 hours — so an operator whose Grant expired after an
+   apply saw the plugin skipped as `unapproved` on every advance and could not
+   renew by name, with only the far wider `--all` still working.
+
+   The gate is marked rather than deleted so the note has a run to name and so
+   `deny` can tell an accepted result from a pending one. **An applied gate
+   survives the next advance**: the marker lives inside `pending_gates`, and
+   overwriting the array wholesale destroyed it. An applied marker is dropped
+   when it passes the 24-hour gate ceiling, or when the plugin gates again and
+   the new parked gate supersedes it.
 2. **A dependency moved** — some dependency's `plugin_runs.last_run_at` is newer
    than `run_started_at`. The parked result was computed against inputs that
    have since changed, so it is refused, the gate is discarded, and a `notice`

@@ -1227,10 +1227,17 @@ export type GateApplyOutcome =
 /**
  * The most recent parked gate for a plugin, applied or not.
  *
- * An ALREADY-APPLIED gate is returned on purpose. If it were filtered out, a
- * second `warpline approve` would find no gate and fall through to merging a
- * Grant — writing the one file an outcome approval must never touch, in
- * response to a gesture that should have been refused.
+ * An ALREADY-APPLIED gate is returned on purpose: callers need to SEE a spent
+ * marker, not be shielded from it. `approve` names it in the note it prints
+ * before merging a Grant, and `deny` checks it so its reason cannot claim the
+ * operator declined a result they in fact accepted.
+ *
+ * What the marker must NOT do is choose the branch. A caller deciding between
+ * "apply the parked result" and "grant permission to run" has to filter on
+ * `applied_at === null` itself — branching on mere existence locked the Grant
+ * verb out for as long as the marker lived. A spent marker refuses a second
+ * APPLY, which `applyPendingGate` enforces on its own `applied_at` check; it is
+ * not a bar on granting the plugin permission to run again.
  *
  * Stub gates never reach here: they are discarded when the state document is
  * read.

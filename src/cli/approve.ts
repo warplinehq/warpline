@@ -179,7 +179,22 @@ export async function run(argv: string[]): Promise<number> {
       return 1
     }
 
-    const gated = positionals.filter((name) => findPendingGate(state, name) !== undefined)
+    // A LIVE gate, not merely a gate. `findPendingGate` returns already-applied
+    // markers on purpose, and branching on that predicate is what decides which
+    // of the two gates the operator meant — so a spent marker used to route
+    // every `approve <plugin>` into the apply path, where it was refused. For
+    // as long as the marker lived (up to the 24h ceiling) the Grant verb was
+    // unreachable by name, which stranded any operator whose Grant expired
+    // after an apply: the plugin was skipped as `unapproved` every advance and
+    // the only gesture that still worked was `--all`, a wider authority than
+    // was asked for. A marker's job is to stop a second APPLY re-recording a
+    // result, which `applyPendingGate` enforces on its own `applied_at` check;
+    // it was never permission-to-run.
+    const liveGate = (name: string) => {
+      const g = findPendingGate(state, name)
+      return g !== undefined && g.applied_at === null ? g : undefined
+    }
+    const gated = positionals.filter((name) => liveGate(name) !== undefined)
     if (gated.length > 0 && gated.length < positionals.length) {
       const ungated = positionals.filter((n) => !gated.includes(n))
       process.stderr.write(
@@ -194,8 +209,10 @@ export async function run(argv: string[]): Promise<number> {
     if (gated.length > 0) {
       let failed = false
       for (const name of gated) {
-        // Re-found each time: a preceding apply may have rewritten the array.
-        const gate = findPendingGate(state, name)
+        // Re-found each time: a preceding apply may have rewritten the array,
+        // and an apply this loop already performed leaves a marker rather than
+        // a live gate — so a repeated name applies once and is skipped after.
+        const gate = liveGate(name)
         if (gate === undefined) continue
         const manifest = manifests.get(name)
         if (manifest === undefined) continue
@@ -249,6 +266,22 @@ export async function run(argv: string[]): Promise<number> {
         }
       }
       return failed ? 1 : 0
+    }
+
+    // Falling through to the Grant path with a spent marker on file. Say so:
+    // the operator typed the same words that applied a result a moment ago and
+    // is getting a different answer, and an unexplained change of behaviour on
+    // an unchanged gesture is exactly what a gate must never do. Narrating
+    // beats refusing — a refusal here is what CR-01 was.
+    for (const name of positionals) {
+      const spent = findPendingGate(state, name)
+      if (spent?.applied_at != null) {
+        process.stdout.write(
+          `Note: ${name}'s parked result from run ${spent.run_id} was already applied at ` +
+            `${spent.applied_at}. This grants ${name} permission to run again — it does not ` +
+            `re-record that result.\n`,
+        )
+      }
     }
   }
 
