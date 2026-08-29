@@ -429,7 +429,7 @@ describe('warpline deny', () => {
     expect(added).toEqual(['engine-state.json', 'events.jsonl'])
   })
 
-  test('13: denying touches a session approval file that already exists', async () => {
+  test('13: denying leaves an existing session approval file untouched', async () => {
     await mergeGrant(['digest-sender'], {}, sessionApprovalPath())
     const grantBefore = await readFile(sessionApprovalPath(), 'utf-8')
 
