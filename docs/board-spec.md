@@ -64,13 +64,49 @@ authoring. Dynamic lineage is a hypothesis until a flow needs it.
 
 | Kind | Raised when | Answer verbs | What the answer does |
 |---|---|---|---|
-| `approval` | A plugin with declared side effects was recorded `skipped` for want of a Grant, or a supervised plugin ran and was `gated`. | **approve** · **deny** | approve = merge a Grant for that plugin (exactly `warpline approve <plugin>`); the next advance runs it. deny = record the answer; no Grant; the plugin stays skipped until raised again. |
+| `approval` | A plugin with declared side effects was recorded `skipped` for want of a Grant, or a supervised plugin ran and was `gated`. | **approve** · **deny** | approve answers whichever gate is waiting — see below. deny = record the answer; no Grant; the plugin stays skipped until raised again. |
 | `decision` | A guided task (`action_type: 'guided'`) offers options. | **choose** | Runs the option's handler; the task completes. |
 | `notice` | An event the operator should see and need not act on. | **seen** | Acknowledged: leaves the open list, kept in history. |
 | `chore` | A self-directed task (`action_type: 'self_directed'`): work done outside warpline. | **done** | Asserts the outside work happened; the task completes. |
 
 *seen* and *done* are deliberately distinct verbs: *done* claims something
 happened in the world, *seen* never does.
+
+**approve answers two different gates, and it answers the parked one first.**
+`warpline approve <plugin>` looks for a parked result before it considers a
+Grant:
+
+- **A parked result is waiting** (the plugin ran and was `gated`) — that result
+  is recorded, at the time the run finished. The handler is not called again,
+  and **no Grant is written or extended**. Downstream dependents run on the next
+  advance, under the normal guard chain.
+- **No parked result** — a Grant is merged for that plugin, exactly as before,
+  and the next advance runs it. `warpline approve --all` is always this branch.
+
+The command says which of the two it did. Gate-first because the risk is
+asymmetric: merging a Grant when the operator meant "apply that parked result"
+leaves the plugin due, so it runs again and re-fires side effects that already
+fired. The reverse mistake leaves no Grant and records a skip on the next
+advance.
+
+**Approval is acceptance of an observed outcome, never permission to re-run.**
+The handler runs, and its declared side effects fire, before the supervision
+gate ever sees the result. Re-running would double effects that already
+happened.
+
+A parked result is applied **once**. A second approve is refused and says when
+the first one landed. A gate is also refused, and thrown away, in two other
+cases: when a dependency re-ran after the gated run started — the result was
+computed against inputs that have moved — and when the gate is older than the
+earlier of the plugin's `ttl_hours` and 24 hours. Both leave the plugin due on
+the next advance and write a `notice` naming it. **Expiry is a state transition
+the approve verb makes, not something the Board infers**, which is what stops an
+approval and an expiry racing into a double apply.
+
+The gate clock and the Grant clock are separate objects. Both happen to read 24
+hours; one bounds how long side-effect authority lives, the other how long an
+observed outcome stays acceptable. Applying a parked result never touches the
+Grant or its expiry.
 
 ### 2.2 Ask lifecycle
 
@@ -312,8 +348,10 @@ objects that do not exist.
    written down. Gates are short-lived by construction, so the window in which
    this can happen is at most a day.
 
-   The approve verb on a `gated` Ask still needs a defined effect before the
-   Board can offer it.
+   **The approve verb on a `gated` Ask now has a defined effect** (§ 2.1): it
+   applies the parked result, in place, anchored at the time the run finished,
+   and writes nothing to the session approval file. `'approved'` is a reachable
+   `PluginFsmState` for the first time.
 
 ## 8. Schema references
 

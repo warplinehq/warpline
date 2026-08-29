@@ -58,6 +58,11 @@ export function pluginsDir(): string {
   return path.join(warplineHome(), 'plugins')
 }
 
+/** The engine's persisted state document. */
+export function engineStatePath(): string {
+  return path.join(stateDir(), 'engine-state.json')
+}
+
 /** Session approval marker consumed by the approval gate. */
 export function sessionApprovalPath(): string {
   return path.join(warplineHome(), '.session-approval')

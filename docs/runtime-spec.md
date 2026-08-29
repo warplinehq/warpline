@@ -455,6 +455,19 @@ reading a newer file ignores the field. Removing the field later would silently
 reset every ceiling anchor to the latest grant, which is the failure the field
 exists to prevent — treat it as permanent.
 
+**Approving a parked result never writes this file.** `warpline approve` answers
+whichever gate is waiting, and when a parked result is waiting it records that
+result and touches the session approval file not at all — not its scopes, not
+its expiry, not its mtime. The gate-apply path reaches no symbol in the module
+that owns this file, so there is no code path from an outcome review to a grant
+write.
+
+The two clocks stay separate for that reason. The 24-hour ceiling below bounds
+how long side-effect AUTHORITY lives, anchored at `first_granted_at`. The gate
+ceiling in § 10 bounds how long an OBSERVED OUTCOME stays acceptable, anchored
+at the gated run's completion. They read the same number and answer different
+questions; neither is derived from the other.
+
 ### Read semantics
 
 Reads are **fail-closed and never throw.** A missing, expired, corrupt,
@@ -638,6 +651,39 @@ with a `notice` naming the plugin appended to `events.jsonl`; on the read-only
 read, silently, because a command contracted to write nothing may not append to
 a log. It is never applied. This is the one deliberate data drop in the format:
 there is nothing to migrate, because the real result was never recorded.
+
+#### Applying a gate
+
+`warpline approve <plugin>` applies the parked gate when one is live. What that
+does, in order, all decided before anything is written:
+
+1. **Already applied** (`applied_at` is set) — refused, and nothing is written.
+   The gate is marked rather than deleted precisely so this case exists: a
+   deleted gate is an invisible one, and the verb would fall through to merging
+   a Grant instead of refusing.
+2. **A dependency moved** — some dependency's `plugin_runs.last_run_at` is newer
+   than `run_started_at`. The parked result was computed against inputs that
+   have since changed, so it is refused, the gate is discarded, and a `notice`
+   naming the plugin is written.
+3. **Expired** — the gate is older than the earlier of the plugin's `ttl_hours`
+   and 24 hours, measured from `run_completed_at`. Refused and discarded, with a
+   `notice`. **This is a state transition the approve verb makes, not something
+   a renderer infers**, which is what stops an approval and an expiry racing
+   into a double apply.
+4. **Otherwise applied.** The `gated` `plugin_runs` entry is overwritten in
+   place: `last_run_at` stays at `run_completed_at`, the status becomes the
+   result's real terminal status, and `last_output` carries the Output the run
+   already produced. `applied_at` is stamped on the gate.
+
+On either refusal the plugin's `plugin_runs` entry is deleted, which leaves it
+due on the next advance. The parked result was never accepted, so there is no
+accepted run to hold the work back; the `gated` entry existed to stop the
+effects re-firing during the hold, and the hold is over.
+
+The handler is never re-invoked. Its declared side effects fired at invocation,
+long before the supervision gate saw the result, so re-running would double
+effects that already happened. Downstream dependents run on the next advance
+under the normal guard chain, not from inside the CLI command.
 
 ### `last_output`
 

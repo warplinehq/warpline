@@ -1,5 +1,26 @@
 /**
- * `warpline approve` — grant a side-effect approval for this session.
+ * `warpline approve` — answer whichever gate is actually waiting.
+ *
+ * One word answers two different gates, and this file decides which:
+ *
+ *   1. **A parked result.** A supervised plugin ran, its side effects fired,
+ *      and its result was parked pending a human yes. Approving it RECORDS
+ *      that result. Nothing is re-invoked and no grant is written.
+ *   2. **A session Grant.** A side-effecting plugin has not been permitted to
+ *      run at all. Approving it merges a Grant, and the next advance runs it.
+ *
+ * **Gate-first, because the risk is asymmetric.** Merging a Grant when the
+ * operator meant "apply that parked result" leaves the plugin due, so it runs
+ * again and re-fires side effects that already fired — the handler runs before
+ * the supervision gate ever sees the result, so approval can never be
+ * permission to re-run. The reverse mistake leaves no Grant and records a skip
+ * on the next advance: annoying, not dangerous. The command prints which of the
+ * two it did, in both branches, so the operator never has to infer it.
+ *
+ * **The gate-apply branch reaches no symbol in `approval-gate.ts`.** That is
+ * what makes "an outcome review mints no side-effect authority" true by
+ * structure rather than by test. Keep it that way: an import added here for
+ * convenience would quietly turn a structural guarantee back into a hope.
  *
  * The order of operations in `run()` is the security property, not an
  * implementation detail: EVERY positional name is checked against the loaded
@@ -7,24 +28,31 @@
  * name aborts the whole command with nothing on disk. Validating as you go and
  * writing per name would leave a half-applied grant behind on a typo — the
  * operator would then believe they had granted three scopes and actually have
- * granted one, which is exactly the state a gate must never be in.
+ * granted one, which is exactly the state a gate must never be in. A mixed
+ * invocation — some names with a parked gate, some without — is refused whole
+ * for the same reason: there is no half-answer that is not a lie about one of
+ * the two gates.
  *
  * Blanket approval is reachable ONLY through an explicit `--all`. No positional
  * name is treated as a wildcard, so no plugin name, glob or shell expansion can
- * widen a grant past what the operator typed.
+ * widen a grant past what the operator typed. `--all` is unambiguously a Grant
+ * gesture and never applies a parked result.
  *
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { parseArgs } from 'node:util'
-import { loadPluginManifests } from '../runtime/engine.js'
+import { applyPendingGate, findPendingGate, loadPluginManifests } from '../runtime/engine.js'
 import { mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
-import { pluginsDir, sessionApprovalPath } from '../lib/paths.js'
+import { EngineStateInvalidError, readEngineState } from '../schemas/engine-state.js'
+import { engineStatePath, pluginsDir, sessionApprovalPath } from '../lib/paths.js'
 
 const USAGE = `Usage: warpline approve <plugin>... [options]
        warpline approve --all [options]
 
-Grant side-effecting plugins permission to run for this session. Grants are
-additive: approving 'b' after 'a' leaves both approved.
+Answers whichever gate is waiting. If the plugin has a parked result awaiting
+review, that result is recorded — nothing is re-run and no grant is written.
+Otherwise it grants side-effecting plugins permission to run for this session.
+Grants are additive: approving 'b' after 'a' leaves both approved.
 
 Options:
   --all        Approve every plugin (blanket). Prints its coverage first.
@@ -153,6 +181,77 @@ export async function run(argv: string[]): Promise<number> {
   const now = Date.now()
   const approvalPath = sessionApprovalPath()
 
+  // -- Gate-first dispatch -------------------------------------------------
+  // The write-capable read, on purpose: this command may go on to write. On an
+  // unusable state document it aborts BOTH branches rather than falling
+  // through, because it cannot prove no parked gate exists — and merging a
+  // Grant for a plugin whose result is already parked is the exact wrong-gesture
+  // mistake gate-first exists to prevent. A missing file yields defaults, so a
+  // fresh install still reaches the Grant path unchanged.
+  const statePath = engineStatePath()
+  if (!values.all) {
+    let state
+    try {
+      state = await readEngineState(statePath)
+    } catch (err) {
+      if (!(err instanceof EngineStateInvalidError)) throw err
+      process.stderr.write(
+        `Cannot read engine state: ${err.reason}\n` +
+          `Nothing was approved — with the state document unreadable there is no way to tell ` +
+          `whether a parked result is waiting, and granting one by mistake would let a plugin ` +
+          `re-run side effects that already fired.\n`,
+      )
+      return 1
+    }
+
+    const gated = positionals.filter((name) => findPendingGate(state, name) !== undefined)
+    if (gated.length > 0 && gated.length < positionals.length) {
+      const ungated = positionals.filter((n) => !gated.includes(n))
+      process.stderr.write(
+        `These plugins have a parked result awaiting review: ${gated.join(', ')}\n` +
+          `These have none and would need a session Grant: ${ungated.join(', ')}\n` +
+          `Approve them separately — one command cannot answer both gates without ` +
+          `doing the wrong thing to one of them. Nothing was written.\n`,
+      )
+      return 1
+    }
+
+    if (gated.length > 0) {
+      let failed = false
+      for (const name of gated) {
+        // Re-found each time: a preceding apply may have rewritten the array.
+        const gate = findPendingGate(state, name)
+        if (gate === undefined) continue
+        const manifest = manifests.get(name)
+        if (manifest === undefined) continue
+        const result = await applyPendingGate(state, gate, manifest, { statePath, now })
+
+        if (result.outcome === 'applied') {
+          process.stdout.write(
+            `Applied the parked result for ${name} from run ${result.run_id}: ${result.summary}\n` +
+              `Recorded at ${result.run_completed_at}, when the run finished. ` +
+              `Nothing was re-run and no grant was written.\n`,
+          )
+          continue
+        }
+        failed = true
+        if (result.outcome === 'already_applied') {
+          process.stderr.write(
+            `The parked result for ${name} was already applied at ${result.applied_at}. ` +
+              `Nothing changed — a result is recorded once.\n`,
+          )
+        } else {
+          process.stderr.write(
+            `Refused the parked result for ${name}: ${result.detail}\n` +
+              `The gate was discarded and ${name} is due again on the next advance. ` +
+              `No grant was written.\n`,
+          )
+        }
+      }
+      return failed ? 1 : 0
+    }
+  }
+
   if (values.all) {
     const gated = [...manifests.values()].filter((m) => m.side_effects.length > 0)
     const effects = gated.reduce((n, m) => n + m.side_effects.length, 0)
@@ -161,6 +260,9 @@ export async function run(argv: string[]): Promise<number> {
         `${plural(effects, 'side effect')} may now run them.\n`,
     )
   }
+
+  // Both branches say which gate they answered, so the operator never infers it.
+  process.stdout.write('Answering the Grant gate: merging a session Grant.\n')
 
   const result = await mergeGrant(
     values.all ? '*' : positionals,

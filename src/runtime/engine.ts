@@ -24,7 +24,7 @@ import {
   sessionApprovalPath,
   preferencesPath as defaultPreferencesPath,
   pluginsDir as pluginsDirDefault,
-  stateDir as stateDirDefault,
+  engineStatePath,
   runsDir as runsDirDefault,
 } from '../lib/paths.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
@@ -50,6 +50,7 @@ import {
   emitPluginFailed,
   emitPluginSkipped,
   emitPluginGated,
+  emitGateInvalidated,
 } from '../board/engine-events.js'
 import { readPreferences, isQuietHours } from '../lib/preferences.js'
 import { checkTaskLock as smCheckTaskLock } from '../board/state-manager.js'
@@ -1014,6 +1015,163 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
  * "Most recent" is the last element: `artifacts_produced` is written in the
  * order the handler produced them.
  */
+/**
+ * Absolute ceiling on how long a parked gate may be applied after its run
+ * finished. The effective ceiling is the EARLIER of this and the plugin's own
+ * `ttl_hours`: a plugin that considers its work stale after an hour cannot have
+ * a day-old result accepted on its behalf.
+ *
+ * A separate object from `MAX_GRANT_WINDOW_MS`, deliberately, even though both
+ * read 24 hours. That one bounds how long side-effect AUTHORITY lives; this one
+ * bounds how long an OBSERVED OUTCOME stays acceptable. Sharing the constant
+ * would tie two clocks that answer different questions, and the first time one
+ * needs to move the other would move with it silently.
+ */
+export const GATE_MAX_AGE_MS = 24 * 60 * 60 * 1000
+
+/** What {@link applyPendingGate} did, so the caller can print it and pick a code. */
+export type GateApplyOutcome =
+  | {
+      outcome: 'applied'
+      /** The FSM state the plugin reached. This is what finally makes `approved` reachable. */
+      fsm_state: Extract<PluginFsmState, 'approved'>
+      run_id: string
+      run_completed_at: string
+      summary: string
+    }
+  | { outcome: 'already_applied'; applied_at: string }
+  | { outcome: 'refused'; reason: 'dependency_moved' | 'expired'; detail: string }
+
+/**
+ * The most recent parked gate for a plugin, applied or not.
+ *
+ * An ALREADY-APPLIED gate is returned on purpose. If it were filtered out, a
+ * second `warpline approve` would find no gate and fall through to merging a
+ * Grant — writing the one file an outcome approval must never touch, in
+ * response to a gesture that should have been refused.
+ *
+ * Stub gates never reach here: they are discarded when the state document is
+ * read.
+ */
+export function findPendingGate(state: EngineState, plugin: string): PendingGate | undefined {
+  return state.pending_gates.filter((g) => g.plugin === plugin).at(-1)
+}
+
+/**
+ * Apply a parked gate: record the result the plugin already produced, and never
+ * re-invoke anything.
+ *
+ * Approval is acceptance of an observed outcome, never permission to re-run.
+ * The handler was invoked and its declared side effects fired long before the
+ * supervision gate saw the result, so re-running would double effects that
+ * already happened. Nothing in this function reaches `invokePlugin`.
+ *
+ * Nothing here reaches `approval-gate.ts` either. That is what makes "approving
+ * a parked result mints no Grant" true by structure rather than by test: there
+ * is no code path from here to a grant write.
+ *
+ * Three refusals, all checked BEFORE anything is written:
+ *
+ *   - **already applied** — the gate carries an `applied_at`. Nothing is
+ *     written at all, so a double `approve` cannot double-record.
+ *   - **a dependency moved** — some dependency's `last_run_at` is newer than
+ *     the gated run's start, so the parked result was computed against inputs
+ *     that have since changed.
+ *   - **expired** — the gate is older than the earlier of `ttl_hours` and
+ *     {@link GATE_MAX_AGE_MS} from its completion.
+ *
+ * Expiry is decided HERE, as a state transition this function makes, rather
+ * than inferred by whatever is rendering the gate. That is what stops an
+ * approval and an expiry racing into a double apply: there is one place that
+ * decides, and it decides while holding the state it is about to write.
+ *
+ * On either refusal the gate is discarded and the plugin's `plugin_runs` entry
+ * is deleted, which leaves the plugin due on the next advance. That is the
+ * point: the parked result was never accepted, so there is no accepted run to
+ * hold it back, and the work should happen again. The `gated` entry existed to
+ * stop the effects re-firing during the hold, and the hold is over.
+ *
+ * Downstream dependents are NOT run from here. They run on the next advance,
+ * under the normal guard chain — a CLI command that ran them would have
+ * bypassed every gate that chain applies.
+ */
+export async function applyPendingGate(
+  state: EngineState,
+  gate: PendingGate,
+  manifest: PluginManifest,
+  opts: { statePath: string; eventsPath?: string; now?: number } = { statePath: engineStatePath() },
+): Promise<GateApplyOutcome> {
+  const now = opts.now ?? Date.now()
+
+  if (gate.applied_at !== null) {
+    return { outcome: 'already_applied', applied_at: gate.applied_at }
+  }
+
+  // Narrowing, not a guard against real input: a gate reaching here has both
+  // clocks, because one without them is discarded at read time.
+  const { run_started_at: startedAt, run_completed_at: completedAt } = gate
+  if (startedAt === null || completedAt === null) {
+    return { outcome: 'refused', reason: 'expired', detail: 'the gate carries no record of when its run happened' }
+  }
+
+  const discard = async (
+    reason: 'dependency_moved' | 'expired',
+    detail: string,
+  ): Promise<GateApplyOutcome> => {
+    state.pending_gates = state.pending_gates.filter((g) => g !== gate)
+    delete state.plugin_runs[gate.plugin]
+    await writeEngineState(state, opts.statePath)
+    await emitGateInvalidated(gate.plugin, gate.run_id, reason, opts.eventsPath).catch(() => {
+      /* a discard notice that cannot be written must not undo the discard */
+    })
+    return { outcome: 'refused', reason, detail }
+  }
+
+  const startedMs = new Date(startedAt).getTime()
+  const moved = manifest.dependencies.filter((dep) => {
+    const last = state.plugin_runs[dep]?.last_run_at
+    return last !== undefined && new Date(last).getTime() > startedMs
+  })
+  if (moved.length > 0) {
+    return discard(
+      'dependency_moved',
+      `dependency ${moved.join(', ')} re-ran after this run started, so the parked result was computed against inputs that have moved`,
+    )
+  }
+
+  const ceilingMs = Math.min(manifest.ttl_hours * 60 * 60 * 1000, GATE_MAX_AGE_MS)
+  const ageMs = now - new Date(completedAt).getTime()
+  if (ageMs > ceilingMs) {
+    return discard(
+      'expired',
+      `the gate expired — it is ${Math.round(ageMs / 3_600_000)}h old, past the ${Math.round(ceilingMs / 3_600_000)}h ceiling for this plugin`,
+    )
+  }
+
+  // Overwrite the `gated` entry IN PLACE: same anchor, real terminal status,
+  // and the Output pointer the run already carried. `last_run_at` is the gate's
+  // completion, not `now` — a later approval must not move when the work
+  // happened.
+  state.plugin_runs[gate.plugin] = {
+    last_run_at: completedAt,
+    status: gate.plugin_result.status,
+    duration_ms: Math.max(0, new Date(completedAt).getTime() - startedMs),
+    ...lastOutputOf(gate.plugin_result),
+  }
+  // Marked, not deleted. A deleted gate is an invisible one, and the next
+  // `approve` would fall through to the Grant path instead of refusing.
+  gate.applied_at = new Date(now).toISOString()
+  await writeEngineState(state, opts.statePath)
+
+  return {
+    outcome: 'applied',
+    fsm_state: 'approved',
+    run_id: gate.run_id,
+    run_completed_at: completedAt,
+    summary: gate.plugin_result.summary,
+  }
+}
+
 function lastOutputOf(result: SkillResult): { last_output?: OutputRecord } {
   const last = result.artifacts_produced.at(-1)
   return last === undefined ? {} : { last_output: last }
@@ -1024,7 +1182,7 @@ function getDefaultPluginsDir(): string {
 }
 
 function getDefaultStatePath(): string {
-  return join(stateDirDefault(), 'engine-state.json')
+  return engineStatePath()
 }
 
 function getDefaultRunsDir(): string {
