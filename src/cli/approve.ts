@@ -48,9 +48,9 @@
 import { parseArgs } from 'node:util'
 import {
   applyPendingGate,
+  denialStanding,
   findPendingGate,
   loadPluginManifests,
-  proposalFingerprint,
 } from '../runtime/engine.js'
 import { mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { EngineStateInvalidError, readEngineState } from '../schemas/engine-state.js'
@@ -251,11 +251,9 @@ export async function run(argv: string[]): Promise<number> {
         // stale everywhere else, and refusing on it would strand the operator
         // behind an answer to a question that no longer exists.
         //
-        // `Object.hasOwn`, not `!== undefined`: a plain-object record answers
-        // `denials['toString']` with a function off the prototype, and an
-        // existence test that believes it would refuse an apply nobody denied.
-        const denial = Object.hasOwn(state.denials, name) ? state.denials[name] : undefined
-        if (denial !== undefined && denial.fingerprint === proposalFingerprint(state, name, manifest)) {
+        const standing = denialStanding(state, name, manifest)
+        if (standing.standing === 'live') {
+          const denial = standing.denial
           process.stderr.write(
             `${name} was denied at ${denial.denied_at} ('${denial.reason}') and that answer still ` +
               `matches this proposal. Nothing was applied and no grant was written — take the ` +
@@ -330,14 +328,13 @@ export async function run(argv: string[]): Promise<number> {
       // a denial that still matches is worth saying; a superseded one is
       // already stale everywhere else.
       const manifest = manifests.get(name)
-      const denial = Object.hasOwn(state.denials, name) ? state.denials[name] : undefined
-      if (
-        denial !== undefined &&
-        manifest !== undefined &&
-        denial.fingerprint === proposalFingerprint(state, name, manifest)
-      ) {
+      const standing =
+        manifest === undefined
+          ? ({ standing: 'none' } as const)
+          : denialStanding(state, name, manifest)
+      if (standing.standing === 'live') {
         process.stdout.write(
-          `Note: ${name} was denied at ${denial.denied_at} and that answer still matches its ` +
+          `Note: ${name} was denied at ${standing.denial.denied_at} and that answer still matches its ` +
             `proposal, so it will be skipped as denied on the next advance and this grant will ` +
             `not make it run. Take the denial back first: warpline deny --remove ${name}\n`,
         )

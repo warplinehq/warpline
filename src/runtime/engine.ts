@@ -36,7 +36,7 @@ import {
   readEngineState,
   writeEngineState,
 } from '../schemas/engine-state.js'
-import type { EngineState, PendingGate } from '../schemas/engine-state.js'
+import type { Denial, EngineState, PendingGate } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs } from '../schemas/run-log.js'
 import type { RunLog } from '../schemas/run-log.js'
 import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
@@ -254,6 +254,41 @@ export function proposalFingerprint(
 }
 
 /**
+ * Where a plugin stands with the denial record. THE one place that answers it:
+ * "is this plugin denied?" is two questions wearing one coat — is there a
+ * record, and does it still answer the proposal in front of us — and every
+ * caller needs a different pair of them. The evaluator suppresses on `live`
+ * and narrates `superseded`; `discard` re-stamps a `live` record and leaves a
+ * `superseded` one stale; `approve` refuses on `live` and ignores the rest.
+ *
+ * Spelled out at each site, the pair drifted: the lookup has to be an
+ * own-property one (`denials` is a plain object, so `denials['toString']`
+ * answers with an inherited function and an existence test believes it), and a
+ * caller that forgets the fingerprint comparison suppresses on an answer to a
+ * question that no longer exists. Both mistakes were live in this file. A
+ * caller added tomorrow meets the whole predicate or none of it.
+ *
+ * `denial` is the record itself, not a copy — `discard` re-binds its
+ * fingerprint through this reference.
+ */
+export type DenialStanding =
+  | { standing: 'none' }
+  | { standing: 'live'; denial: Denial }
+  | { standing: 'superseded'; denial: Denial }
+
+export function denialStanding(
+  state: EngineState,
+  plugin: string,
+  manifest: PluginManifest,
+): DenialStanding {
+  const denial = Object.hasOwn(state.denials, plugin) ? state.denials[plugin] : undefined
+  if (denial === undefined) return { standing: 'none' }
+  return denial.fingerprint === proposalFingerprint(state, plugin, manifest)
+    ? { standing: 'live', denial }
+    : { standing: 'superseded', denial }
+}
+
+/**
  * Why a plugin is not due. Structured codes, not display copy: the
  * run-log prose these guards used to inline is a run-log concern, and a
  * renderer that switched on prose would break the first time the wording
@@ -371,19 +406,12 @@ export async function evaluatePlugin(
   // returning one, and `supersededNote` below makes the difference visible
   // rather than letting it reappear looking new.
   //
-  // An own-property lookup: `denials` is a plain object, so `denials[name]`
-  // answers with an inherited member for any name off `Object.prototype`. The
-  // manifest schema refuses such a name, and this holds whether or not it does.
-  const denial = Object.hasOwn(ctx.state.denials, pluginName)
-    ? ctx.state.denials[pluginName]
-    : undefined
-  const currentProposal =
-    denial === undefined ? undefined : proposalFingerprint(ctx.state, pluginName, manifest)
-  if (denial !== undefined && denial.fingerprint === currentProposal) {
+  const standing = denialStanding(ctx.state, pluginName, manifest)
+  if (standing.standing === 'live') {
     return {
       due: false,
       reason: 'denied',
-      detail: `denied ${denial.denied_at}: ${denial.reason}`,
+      detail: `denied ${standing.denial.denied_at}: ${standing.denial.reason}`,
     }
   }
 
@@ -397,10 +425,10 @@ export async function evaluatePlugin(
    * and the operator is the only one who can retire it.
    */
   const supersededNote =
-    denial === undefined
-      ? ''
-      : `previously denied ${denial.denied_at} ('${denial.reason}') — the proposal has ` +
-        'changed since, so this is a returning question, not a new one. '
+    standing.standing === 'superseded'
+      ? `previously denied ${standing.denial.denied_at} ('${standing.denial.reason}') — the ` +
+        'proposal has changed since, so this is a returning question, not a new one. '
+      : ''
 
   // -- Side-effect approval gate ---------------------------------
   if (
@@ -1348,16 +1376,12 @@ export async function applyPendingGate(
     // Measured BEFORE the delete, and only carried when it still matched. A
     // denial that was already stale stays stale — re-stamping it would revive
     // an answer to a proposal that no longer exists.
-    const denial = Object.hasOwn(state.denials, gate.plugin)
-      ? state.denials[gate.plugin]
-      : undefined
-    const denialWasLive =
-      denial !== undefined &&
-      denial.fingerprint === proposalFingerprint(state, gate.plugin, manifest)
+    const standing = denialStanding(state, gate.plugin, manifest)
 
     state.pending_gates = state.pending_gates.filter((g) => g !== gate)
     delete state.plugin_runs[gate.plugin]
-    if (denial !== undefined && denialWasLive) {
+    if (standing.standing === 'live') {
+      const denial = standing.denial
       denial.fingerprint = proposalFingerprint(state, gate.plugin, manifest)
       // Say what the re-binding did, because it changed what the denial MEANS.
       // With `plugin_runs` gone the fingerprint is `hash(plugin, side_effects,

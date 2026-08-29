@@ -12,7 +12,7 @@
  * comparison pay for an engine setup.
  */
 import { describe, it, expect } from 'bun:test'
-import { denialFingerprint, proposalFingerprint } from '../engine.js'
+import { denialFingerprint, denialStanding, proposalFingerprint } from '../engine.js'
 import { defaultEngineState } from '../../schemas/engine-state.js'
 import type { OutputRecord } from '../../schemas/skill-result.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
@@ -235,5 +235,78 @@ describe('proposalFingerprint', () => {
     })
 
     expect(proposalFingerprint(state, 'x', manifest)).toBe(withoutGate)
+  })
+})
+
+describe('denialStanding', () => {
+  /**
+   * The three states, pinned together. This predicate used to be spelled out at
+   * four call sites and it drifted at two of them — one forgot the fingerprint
+   * comparison, one used an existence test where the record is a plain object.
+   * Both mistakes are shaped like a passing test, so they are asserted here
+   * rather than left to the callers that happen to exercise them.
+   */
+  const deny = (state: ReturnType<typeof defaultEngineState>, plugin: string, fp: string) => {
+    state.denials[plugin] = {
+      plugin,
+      reason: 'operator said no',
+      denied_at: '2026-08-29T10:00:00.000Z',
+      note: null,
+      fingerprint: fp,
+    }
+  }
+
+  it('reports none when no denial is on file', () => {
+    const state = defaultEngineState()
+    const manifest = makeManifest('x', ['fs_write'])
+    expect(denialStanding(state, 'x', manifest).standing).toBe('none')
+  })
+
+  it('reports live while the fingerprint still answers the proposal', () => {
+    const state = defaultEngineState()
+    const manifest = makeManifest('x', ['fs_write'])
+    deny(state, 'x', proposalFingerprint(state, 'x', manifest))
+
+    const standing = denialStanding(state, 'x', manifest)
+    expect(standing.standing).toBe('live')
+    if (standing.standing !== 'none') expect(standing.denial.reason).toBe('operator said no')
+  })
+
+  /**
+   * The half a caller forgets. A record on file is not a live answer: move the
+   * proposal and the same record must stop suppressing, or the operator is held
+   * behind an answer to a question that no longer exists.
+   */
+  it('reports superseded — and still hands back the record — once the proposal moves', () => {
+    const state = defaultEngineState()
+    const manifest = makeManifest('x', ['fs_write'])
+    deny(state, 'x', proposalFingerprint(state, 'x', manifest))
+
+    state.plugin_runs['x'] = {
+      last_run_at: '2026-08-29T11:00:00.000Z',
+      status: 'gated',
+      last_output: pathOutput('moved.md'),
+    }
+
+    const standing = denialStanding(state, 'x', manifest)
+    expect(standing.standing).toBe('superseded')
+    // Handed back, not dropped: the evaluator narrates a returning question
+    // from it, so 'superseded' cannot collapse into 'none'.
+    if (standing.standing !== 'none') expect(standing.denial.denied_at).toBe('2026-08-29T10:00:00.000Z')
+  })
+
+  /**
+   * The other half. `denials` is a plain object, so `denials['toString']`
+   * answers with an inherited function; an existence test believes it and
+   * suppresses a plugin nobody denied. Non-vacuous by construction — the same
+   * name reports `live` once genuinely denied, below.
+   */
+  it('does not mistake an Object.prototype member for a denial', () => {
+    const state = defaultEngineState()
+    const manifest = makeManifest('toString', [])
+    expect(denialStanding(state, 'toString', manifest).standing).toBe('none')
+
+    deny(state, 'toString', proposalFingerprint(state, 'toString', manifest))
+    expect(denialStanding(state, 'toString', manifest).standing).toBe('live')
   })
 })
