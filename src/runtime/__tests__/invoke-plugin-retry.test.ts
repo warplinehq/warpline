@@ -185,4 +185,36 @@ describe('invokePlugin — retry loop', () => {
     expect(calls[0]?.[1]).toBe(1) // attempt number (1-indexed)
     expect(calls[1]?.[1]).toBe(2)
   })
+
+  /**
+   * The linkage R4 exists to provide, on the path most likely to produce a
+   * retry notice. `warpline run` passes no `runId` — `run-plugin.ts` supplies
+   * `signal`, `maxRetriesOverride`, `persistArtifact` and `userInitiated`, and
+   * nothing else — so the notice used to carry `options.runId ?? null` and the
+   * board rendered it "no run", while the artifact it came from sat in the runs
+   * directory under the synthesized id that also stamped every Output.
+   */
+  it('a retry notice carries the id that names the run artifact, not null', async () => {
+    const runsDir = join(tmp, 'runs')
+    const { result } = await invokePlugin(
+      'retryable-fail-plugin',
+      {},
+      // Exactly what `warpline run` passes: no runId, persistArtifact true.
+      { pluginsDir: FIXTURES_DIR, maxRetriesOverride: 1, persistArtifact: true, runsDir },
+    )
+
+    const notified = emitAttemptFailedSpy.mock.calls[0]?.[3]
+    expect(notified).toBeTypeOf('string')
+    expect(notified).not.toBeNull()
+
+    // Not merely non-null: the SAME id the artifact was written under, which is
+    // the only thing that makes the notice resolvable.
+    const { readdirSync } = await import('node:fs')
+    const artifacts = readdirSync(runsDir).filter((f) => f.endsWith('.json'))
+    expect(artifacts).toContain(`${notified as string}.json`)
+
+    // …and the same id the Outputs were stamped with, if there were any, so a
+    // notice, an artifact and a provenance stamp cannot disagree.
+    for (const o of result.artifacts_produced) expect(o.run_id).toBe(notified as string)
+  })
 })

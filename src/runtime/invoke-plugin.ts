@@ -421,14 +421,20 @@ export async function invokePlugin(
     if (!shouldRetry) break
 
     // -- Emit an attempt_failed notice before sleeping again --
-    // `options.runId` is set by the engine advance and by `warpline run`
-    // alike; null only where a caller invoked a plugin outside either, which
-    // is exactly what a null run id means.
+    // `runId`, not `options.runId`. The id is minted above when the caller
+    // supplies none, and it is the id that stamps the Outputs and names the run
+    // artifact — so this is the only value that links the notice on the board
+    // back to the artifact it came from, which is the whole point of carrying
+    // one. The comment that used to sit here claimed `warpline run` supplies
+    // `options.runId`; it does not (`run-plugin.ts` passes `signal`,
+    // `maxRetriesOverride`, `persistArtifact` and `userInitiated`, and no run
+    // id). So every retried `warpline run` wrote its artifact under the
+    // synthesized id and rendered its retry notice as "no run".
     await emitAttemptFailed(
       pluginName,
       attempt + 1,
       firstError ?? 'unknown error',
-      options.runId ?? null,
+      runId,
       options.eventsPath,
     )
   }
