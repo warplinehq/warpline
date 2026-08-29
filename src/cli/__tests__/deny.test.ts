@@ -458,22 +458,46 @@ describe('warpline deny', () => {
     const DEFINER = join('runtime', 'approval-gate.ts')
     const srcRoot = fileURLToPath(new URL('../../', import.meta.url))
 
-    const closure = new Map<string, string>()
-    async function visit(file: string): Promise<void> {
-      if (closure.has(file)) return
-      const source = await readFile(file, 'utf-8')
-      closure.set(file, source)
-      for (const m of source.matchAll(/from\s+'(\.[^']+)'/g)) {
-        await visit(resolve(dirname(file), (m[1] as string).replace(/\.js$/, '.ts')))
+    // Both edge shapes: `from '…'` and `import('…')`, the latter covering the
+    // bare side-effect `import '…'` too. Matching only the static form left a
+    // hole a grant writer could hide in — `engine-state.ts` already uses
+    // `await import('../board/engine-events.js')`, so the shape the walker
+    // could not see was in the closure it was walking.
+    const RELATIVE_EDGE = /(?:from|import)\s*\(?\s*'(\.[^']+)'/g
+
+    async function walk(entry: string): Promise<Map<string, string>> {
+      const seen = new Map<string, string>()
+      async function visit(file: string): Promise<void> {
+        if (seen.has(file)) return
+        const source = await readFile(file, 'utf-8')
+        seen.set(file, source)
+        for (const m of source.matchAll(RELATIVE_EDGE)) {
+          await visit(resolve(dirname(file), (m[1] as string).replace(/\.js$/, '.ts')))
+        }
       }
+      await visit(entry)
+      return seen
     }
-    await visit(fileURLToPath(new URL('../deny.ts', import.meta.url)))
+
+    const closure = await walk(fileURLToPath(new URL('../deny.ts', import.meta.url)))
 
     // Vacuity guards. Without them a walker that resolved nothing would pass,
     // and so would one that never reached the module which made the original
     // claim false.
     expect(closure.size).toBeGreaterThan(5)
     expect([...closure.keys()].some((f) => f.endsWith(DEFINER))).toBe(true)
+
+    // …and the widening is load-bearing rather than cosmetic. `engine-state.ts`
+    // reaches `engine-events.ts` ONLY through a dynamic import — the comment
+    // there says so, and the import is dynamic on purpose so the board's event
+    // surface is not pulled into every consumer of the state schema. Rooted
+    // there, the old pattern found nothing.
+    const dynamicOnly = await walk(
+      fileURLToPath(new URL('../../schemas/engine-state.ts', import.meta.url)),
+    )
+    expect(
+      [...dynamicOnly.keys()].some((f) => f.endsWith(join('board', 'engine-events.ts'))),
+    ).toBe(true)
 
     const callers = [...closure.entries()]
       .filter(
