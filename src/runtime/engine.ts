@@ -164,15 +164,24 @@ function sha256(input: string): string {
 }
 
 /**
- * How one Output enters the fingerprint.
+ * How one Output enters the fingerprint: its semantic `type`, then its path or
+ * a hash of its inline body.
  *
  * A path enters by its path; an inline Output enters by a hash of its body,
  * which keeps the fingerprint 64 characters whatever the inline cap allows and
  * keeps the content of an Output out of the denials record entirely. The
  * prefixes stop a path and a body of the same text colliding.
+ *
+ * **`type` is hashed because R3 names it and because it is a change of
+ * proposal.** Without it a plugin that turned the file at `report.md` from a
+ * `draft` into a `report` produced a byte-identical fingerprint, so a denial
+ * recorded against the draft went on silently suppressing the report — an
+ * answer to a question the operator was never asked.
  */
 function outputFingerprintKey(output: OutputRecord): string {
-  return output.path !== undefined ? `path:${output.path}` : `body:${sha256(output.body ?? '')}`
+  const body =
+    output.path !== undefined ? `path:${output.path}` : `body:${sha256(output.body ?? '')}`
+  return `${output.type}|${body}`
 }
 
 /**

@@ -807,7 +807,10 @@ fleet-wide denial inexpressible — there is no key that means every plugin.
 
 **A denial is bound to a proposal, not to a plugin.** The fingerprint is hex
 sha256 over the plugin's name, its declared side effects, and the Outputs it
-produced. It is recomputed on every advance and compared: while it matches, the
+produced. Each Output enters as its semantic `type` plus either its path or a
+hash of its inline body — `type` included, because turning the file at
+`report.md` from a `draft` into a `report` is a change of proposal, and without
+it a denial recorded against the draft went on silently suppressing the report. It is recomputed on every advance and compared: while it matches, the
 plugin is not due and the question is not asked; when it moves, the plugin is
 due again and the answer that comes back says a denial existed and that the
 proposal changed. A denial that outlived what it was answering would suppress a

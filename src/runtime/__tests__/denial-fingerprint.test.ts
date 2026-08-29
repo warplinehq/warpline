@@ -50,6 +50,28 @@ describe('denialFingerprint', () => {
   })
 
   /**
+   * R3 names the Output's `type` as part of what enters the fingerprint, and it
+   * was not hashed: only the path or the body was. So a plugin that turned the
+   * file at `report.md` from a `draft` into a `report` produced a
+   * byte-identical value, and a denial recorded against the draft went on
+   * silently suppressing the report — an answer to a question never asked.
+   */
+  it('changes when an Output keeps its path but changes its semantic type', () => {
+    const draft: OutputRecord = { type: 'draft', format: 'markdown', path: 'report.md' }
+    const report: OutputRecord = { type: 'report', format: 'markdown', path: 'report.md' }
+
+    expect(denialFingerprint('x', [], [draft])).not.toBe(denialFingerprint('x', [], [report]))
+
+    // The same for an inline Output, where the body is identical and only the
+    // declared type moves — the body hash alone could not tell them apart.
+    const noteBody: OutputRecord = { type: 'brief', format: 'markdown', body: 'same words' }
+    const reportBody: OutputRecord = { type: 'report', format: 'markdown', body: 'same words' }
+    expect(denialFingerprint('x', [], [noteBody])).not.toBe(
+      denialFingerprint('x', [], [reportBody]),
+    )
+  })
+
+  /**
    * Declaration order in a manifest is an editing accident, not a proposal
    * change. Without the sort, moving one line in `manifest.ts` would re-raise
    * an Ask the operator already answered.
