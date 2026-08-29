@@ -20,6 +20,7 @@ import { stateDir } from '../lib/paths.js'
 import { readTasks, readEvents, readAcks, writeAcks, completeTask, deferTask } from '../board/state-manager.js'
 import type { BoardEvent, Acknowledgements } from '../schemas/board.js'
 import type { TaskDisplay } from '../schemas/engine-state.js'
+import { resolveRunRef, describeRunRef } from '../schemas/run-log.js'
 import { ApiBudgetTracker } from '../lib/api-budget.js'
 import type { BudgetSnapshot } from '../lib/api-budget.js'
 
@@ -64,6 +65,22 @@ function pad(s: string, w: number): string {
   return s.length > w ? s.slice(0, w - 1) + '…' : s.padEnd(w)
 }
 
+/**
+ * The run an event names, when it names one. A run id whose log has aged out
+ * says so rather than showing an id that resolves to nothing; an event emitted
+ * outside any run shows nothing at all, because there is nothing to show.
+ * Resolution goes through the shared helper so this rendering and any other
+ * cannot drift apart.
+ */
+function runNote(runId: string | null): string {
+  const ref = resolveRunRef(runId)
+  switch (ref.kind) {
+    case 'none': return ''
+    case 'retained': return `  (run ${shortId(ref.run_id)})`
+    case 'not_retained': return `  (${describeRunRef({ kind: 'not_retained', run_id: shortId(ref.run_id) })})`
+  }
+}
+
 // ── Commands ──
 
 async function status() {
@@ -95,7 +112,7 @@ async function status() {
       const type = pad(typeLabel(e.type), 8)
       const age = pad(timeAgo(e.timestamp), 8)
       const src = pad(e.source, 18)
-      console.log(`     ${pad(id, 10)} ${icon} ${type} ${age} ${src} ${e.summary}`)
+      console.log(`     ${pad(id, 10)} ${icon} ${type} ${age} ${src} ${e.summary}${runNote(e.run_id)}`)
     }
   }
 

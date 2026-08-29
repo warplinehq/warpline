@@ -145,3 +145,42 @@ export async function pruneRunLogs(baseDir: string = runsDir()): Promise<number>
 export function isRunLogRetained(runId: string, baseDir: string = runsDir()): boolean {
   return existsSync(join(baseDir, runLogFilename(runId)))
 }
+
+/**
+ * What a stored `run_id` resolves to. Three states, and the third is not the
+ * second: an event emitted outside any run was never part of one, while a
+ * pruned run's record aged out of a directory that used to hold it. Collapsing
+ * them loses the only signal that anything was ever there.
+ *
+ * `kind: 'none'` is the resolution of a null or absent id, so callers hand the
+ * field over as-is rather than branching on null before they get here — which
+ * is how two readers end up rendering the same fact two ways.
+ */
+export type RunRef =
+  | { kind: 'none' }
+  | { kind: 'retained'; run_id: string }
+  | { kind: 'not_retained'; run_id: string }
+
+/**
+ * Resolve a stored run id against the runs directory. Never throws: a missing
+ * directory, a missing file and a null id are all defined answers.
+ *
+ * One helper for every reader on purpose. A `BoardEvent.run_id` and a
+ * `plugin_runs[...].last_output.run_id` dangle for the same reason and must
+ * render the same way; a second copy of this branch is how they stop doing so.
+ */
+export function resolveRunRef(runId: string | null | undefined, baseDir: string = runsDir()): RunRef {
+  if (runId === null || runId === undefined || runId === '') return { kind: 'none' }
+  return isRunLogRetained(runId, baseDir)
+    ? { kind: 'retained', run_id: runId }
+    : { kind: 'not_retained', run_id: runId }
+}
+
+/** Single-line rendering of a `RunRef`, for any surface that shows a run id. */
+export function describeRunRef(ref: RunRef): string {
+  switch (ref.kind) {
+    case 'none': return 'no run'
+    case 'retained': return `run ${ref.run_id}`
+    case 'not_retained': return `run no longer retained (${ref.run_id})`
+  }
+}
