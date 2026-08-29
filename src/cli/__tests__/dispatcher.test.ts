@@ -11,7 +11,26 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { main } from '../warpline.js'
 
-const COMMANDS = ['plan', 'scaffold', 'run', 'approve', 'revoke'] as const
+const DISPATCHER_SOURCE = readFileSync(
+  fileURLToPath(new URL('../warpline.ts', import.meta.url)),
+  'utf-8',
+)
+
+/**
+ * The verbs, read out of the dispatcher's own `case` labels rather than typed
+ * here.
+ *
+ * A hand-kept list is a list that gets forgotten: this one said nothing about
+ * `deny` for two plans, so the verb's USAGE line could have been deleted or
+ * duplicated with the suite green. Deriving it means the next verb cannot be
+ * forgotten either.
+ *
+ * The flag arms (`--help`, `-h`) share the switch and are not commands, so
+ * they are dropped by their leading dash.
+ */
+const COMMANDS = [...DISPATCHER_SOURCE.matchAll(/^\s*case '([^']+)':/gm)]
+  .map((m) => m[1] as string)
+  .filter((label) => !label.startsWith('-'))
 
 /** Run main(argv) with stdout/stderr captured, always restoring the originals. */
 async function capture(
@@ -39,6 +58,14 @@ async function capture(
 }
 
 describe('warpline dispatcher', () => {
+  // Vacuity guard: a regex that stopped matching would make every assertion
+  // below pass over an empty list. Six verbs today, and this only has to say
+  // the derivation found a real switch.
+  test('the command list is derived from the dispatcher and is not empty', () => {
+    expect(COMMANDS.length).toBeGreaterThanOrEqual(6)
+    expect(COMMANDS).toContain('deny')
+  })
+
   test('--help exits 0 and lists every command exactly once on stdout', async () => {
     const { code, stdout, stderr } = await capture(['--help'])
 
@@ -83,7 +110,7 @@ describe('dispatcher error routing', () => {
    * be structural.
    */
   test('every dynamically imported subcommand is returned with await, so the catch can see its rejection', () => {
-    const source = readFileSync(fileURLToPath(new URL('../warpline.ts', import.meta.url)), 'utf-8')
+    const source = DISPATCHER_SOURCE
 
     const imported = new Set(
       [...source.matchAll(/const\s*\{([^}]+)\}\s*=\s*await import\(/g)].flatMap((m) =>
