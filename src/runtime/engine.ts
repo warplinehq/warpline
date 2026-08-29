@@ -254,6 +254,7 @@ export type NotDueReason =
   | 'headless_supervised'
   | 'manual'
   | 'fresh'
+  | 'denied'
   | 'task_locked'
   | 'unapproved'
 
@@ -349,6 +350,41 @@ export async function evaluatePlugin(
     return { due: false, reason: 'task_locked', detail: 'task locked — active on board' }
   }
 
+  // -- Denial: a human already said no to this exact proposal --------
+  // Ordered after the task lock and BEFORE the approval gate. A denied plugin
+  // is not asked about at all, so it must not first be reported as needing a
+  // Grant it does not need.
+  //
+  // The denial holds only while the fingerprint still matches. When it moves,
+  // the answer is stale and the plugin is asked again — but the question is a
+  // returning one, and `supersededNote` below makes the difference visible
+  // rather than letting it reappear looking new.
+  const denial = ctx.state.denials[pluginName]
+  const currentProposal =
+    denial === undefined ? undefined : proposalFingerprint(ctx.state, pluginName, manifest)
+  if (denial !== undefined && denial.fingerprint === currentProposal) {
+    return {
+      due: false,
+      reason: 'denied',
+      detail: `denied ${denial.denied_at}: ${denial.reason}`,
+    }
+  }
+
+  /**
+   * Prefix for whatever the operator sees next when a denial has been
+   * superseded. A returning Ask that says nothing looks like a first-time one,
+   * and the operator has no way to tell they already answered it.
+   *
+   * It keeps saying so until the denial is taken back. That is deliberate: the
+   * record is still there, still answering a proposal that no longer exists,
+   * and the operator is the only one who can retire it.
+   */
+  const supersededNote =
+    denial === undefined
+      ? ''
+      : `previously denied ${denial.denied_at} ('${denial.reason}') — the proposal has ` +
+        'changed since, so this is a returning question, not a new one. '
+
   // -- Side-effect approval gate ---------------------------------
   if (
     manifest.side_effects.length > 0 &&
@@ -357,7 +393,7 @@ export async function evaluatePlugin(
     return {
       due: false,
       reason: 'unapproved',
-      detail: 'skipped (unapproved): side effects require session approval',
+      detail: `${supersededNote}skipped (unapproved): side effects require session approval`,
     }
   }
 
@@ -698,6 +734,28 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             plugin_entries.push({
               plugin: pluginName,
               status: 'skipped',
+              started_at: entryStartedAt,
+              elapsed_ms: Date.now() - entryStart,
+              result_summary: ev.detail,
+              retried: false,
+            })
+            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+            return
+          }
+
+          // -- Denied: a human answered, and the answer still applies --
+          // The only arm here that does not write `status: 'skipped'`. A
+          // denial is an outcome of supervision, like `gated`, and filing it
+          // as a skip would put it in the same bucket as "no Grant" and
+          // "still fresh" — the log could then no longer tell an unanswered
+          // question from an answered one.
+          //
+          // No `plugin_runs` write: the plugin did not run. There are exactly
+          // two write sites for that record and this is not a third.
+          if (ev.reason === 'denied') {
+            plugin_entries.push({
+              plugin: pluginName,
+              status: 'denied',
               started_at: entryStartedAt,
               elapsed_ms: Date.now() - entryStart,
               result_summary: ev.detail,

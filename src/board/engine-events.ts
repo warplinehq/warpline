@@ -216,6 +216,34 @@ export const emitGateInvalidated = (
     eventsPath,
   )
 
+/**
+ * Emit a notice that an operator denied a plugin's proposal.
+ *
+ * Severity `info`, not `warning`: a recorded denial is the system working as
+ * intended — a human answered a question. The gate notices next door are
+ * `warning` because something the operator was waiting on was thrown away
+ * without an answer, which is a different kind of news.
+ *
+ * Rides `type: 'notice'` for the reason `emitGateInvalidated` states above:
+ * growing `BoardEventSchema.type` raises no compile error and a new member
+ * would be silently dropped from every board view by the hand-maintained
+ * `VISIBLE_TYPES` set. Any `notice` is already in that set, so the sub-type
+ * lives in `metadata_json` where a reader can match on it.
+ */
+export const emitDenialRecorded = (
+  plugin: string,
+  reason: string,
+  fingerprint: string,
+  eventsPath?: string,
+): Promise<void> =>
+  emitBoardEvent(
+    makeEvent('notice', plugin, `${plugin}: denied — ${reason}`, null, {
+      severity: 'info',
+      metadata_json: JSON.stringify({ event: 'denial_recorded', plugin, reason, fingerprint }),
+    }),
+    eventsPath,
+  )
+
 const GATE_DISCARD_PROSE: Record<'stub' | 'dependency_moved' | 'expired', string> = {
   stub: 'written by a build older than the one holding the real result, so there is no outcome to approve',
   dependency_moved: 'a dependency re-ran after the gated run started, so the result was computed against inputs that have moved',
