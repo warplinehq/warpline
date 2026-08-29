@@ -1047,4 +1047,118 @@ export async function handler(manifest, args) {
     expect(() => isRunLogRetained(runId, ctx.runsDir)).not.toThrow()
     expect(isRunLogRetained(runId, ctx.runsDir)).toBe(false)
   })
+
+  test('Test 34: the parked gate holds the real Output, not a fabricated partial', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await createOutputPlugin(
+      'gated-writer',
+      JSON.stringify([{ type: 'brief', format: 'markdown', path: 'brief.md' }]),
+      'supervised',
+    )
+
+    const approvalPath = join(ctx.root, '.session-approval-test34')
+    await grantApproval('gated-writer', 4 * 60 * 60 * 1000, approvalPath)
+
+    const result = await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+      approvalPath,
+    })
+
+    const state = JSON.parse(await readFile(statePath, 'utf-8'))
+    const gate = state.pending_gates.find((g: { plugin: string }) => g.plugin === 'gated-writer')
+    expect(gate).toBeDefined()
+    // The whole defect: the old map wrote `status: 'partial'` and an empty
+    // array, discarding what the plugin actually returned.
+    expect(gate.plugin_result.status).toBe('success')
+    expect(gate.plugin_result.artifacts_produced).toHaveLength(1)
+    expect(gate.plugin_result.artifacts_produced[0].path).toBe('brief.md')
+    // Provenance survives into the gate — plan 05 hashes exactly this.
+    expect(gate.plugin_result.artifacts_produced[0].run_id).toBe(result.run_id)
+    expect(gate.plugin_result.artifacts_produced[0].produced_at).toBeTruthy()
+  })
+
+  /**
+   * These two timestamps must be the SAME instant, not merely close: the
+   * approve verb anchors `plugin_runs.last_run_at` at the gate's recorded
+   * completion, so a disagreement here is a disagreement about when the work
+   * happened. Two `new Date()` calls a millisecond apart would pass a
+   * tolerance check and fail this one, which is the point.
+   */
+  test('Test 35: the gate records the gated run\'s start and completion, and completion matches plugin_runs', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await createOutputPlugin(
+      'gated-writer',
+      JSON.stringify([{ type: 'brief', format: 'markdown', path: 'brief.md' }]),
+      'supervised',
+    )
+
+    const approvalPath = join(ctx.root, '.session-approval-test35')
+    await grantApproval('gated-writer', 4 * 60 * 60 * 1000, approvalPath)
+
+    await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+      approvalPath,
+    })
+
+    const state = JSON.parse(await readFile(statePath, 'utf-8'))
+    const gate = state.pending_gates.find((g: { plugin: string }) => g.plugin === 'gated-writer')
+    expect(gate.run_completed_at).toBe(state.plugin_runs['gated-writer'].last_run_at)
+    expect(gate.run_started_at).toBeTruthy()
+    expect(new Date(gate.run_started_at).getTime()).toBeLessThanOrEqual(
+      new Date(gate.run_completed_at).getTime(),
+    )
+  })
+
+  /**
+   * D-22: a gate written by a pre-Phase-8 build carries a fabricated status and
+   * no Outputs. Applying it would record an outcome the plugin never produced,
+   * so it is thrown away at read time — loudly, with the plugin named — rather
+   * than migrated. This is the one place in the phase where existing runtime
+   * data is deliberately dropped.
+   */
+  test('Test 36: a pre-Phase-8 stub gate is discarded on read and the discard is logged', async () => {
+    const { readEngineState } = await import('../../schemas/engine-state.js')
+    const discardEvents = join(ctx.runsDir, 'discard-events.jsonl')
+
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: {},
+        pending_gates: [
+          {
+            plugin: 'legacy-plugin',
+            run_id: 'run-from-before',
+            created_at: '2026-08-01T10:00:00.000Z',
+            payload_summary: 'did something',
+            plugin_result: {
+              status: 'partial',
+              phases_completed: [],
+              phases_failed: [],
+              errors: [],
+              data_freshness: {},
+              summary: 'did something',
+              artifacts_produced: [],
+              schema_version: 1,
+            },
+          },
+        ],
+      }),
+    )
+
+    const state = await readEngineState(statePath, { eventsPath: discardEvents })
+
+    expect(state.pending_gates).toEqual([])
+    const lines = (await readFile(discardEvents, 'utf-8')).split('\n').filter((l) => l.length > 0)
+    expect(lines).toHaveLength(1)
+    const event = JSON.parse(lines[0] as string)
+    expect(event.summary).toContain('legacy-plugin')
+    expect(JSON.parse(event.metadata_json).event).toBe('gate_invalidated')
+  })
 })

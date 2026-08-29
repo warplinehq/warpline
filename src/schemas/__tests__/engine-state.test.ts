@@ -20,9 +20,11 @@ import { join } from 'node:path'
 import {
   ENGINE_STATE_MAX_SCHEMA_VERSION,
   EngineStateInvalidError,
+  PendingGateSchema,
   PluginRunSchema,
   TaskAgingSchema,
   defaultEngineState,
+  isStubGate,
   readEngineState,
   readEngineStateReadOnly,
   writeEngineState,
@@ -356,5 +358,106 @@ describe('TaskAgingSchema run linkage', () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
+  })
+})
+
+/**
+ * `PendingGateSchema` — the parked result, and telling a real one from a stub.
+ *
+ * A parked gate used to be a fabrication: `status: 'partial'`, an empty
+ * `artifacts_produced`, and no record of when the gated run started or ended.
+ * The real result the plugin returned was dropped on the floor. R8 needs the
+ * real thing — the approve verb anchors `plugin_runs.last_run_at` at the gated
+ * run's completion, refuses when a dependency moved since its start, and plan
+ * 05 hashes the Outputs — so the two clock fields and the real result are the
+ * whole point of these cases.
+ *
+ * The two clocks are also the stub discriminator, which is why the round-trip
+ * case below is load-bearing rather than a formality: it proves the recogniser
+ * does not misfire on a gate this build wrote.
+ */
+describe('PendingGateSchema', () => {
+  const realResult = {
+    status: 'success' as const,
+    phases_completed: ['render'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'rendered the weekly brief',
+    artifacts_produced: [
+      { type: 'brief', format: 'markdown' as const, path: 'brief.md', run_id: 'run-a', produced_at: '2026-08-29T10:00:00.000Z' },
+    ],
+    schema_version: 2,
+  }
+
+  const realGate = {
+    plugin: 'brief-writer',
+    run_id: 'run-a',
+    created_at: '2026-08-29T10:00:01.000Z',
+    payload_summary: 'rendered the weekly brief',
+    plugin_result: realResult,
+    run_started_at: '2026-08-29T09:59:58.000Z',
+    run_completed_at: '2026-08-29T10:00:00.000Z',
+  }
+
+  /** Exactly what `engine.ts` fabricated before this plan: no clocks, no Outputs. */
+  const stubGate = {
+    plugin: 'brief-writer',
+    run_id: 'run-a',
+    created_at: '2026-08-29T10:00:01.000Z',
+    payload_summary: 'rendered the weekly brief',
+    plugin_result: {
+      status: 'partial' as const,
+      phases_completed: [],
+      phases_failed: [],
+      errors: [],
+      data_freshness: {},
+      summary: 'rendered the weekly brief',
+      artifacts_produced: [],
+      schema_version: 1,
+    },
+  }
+
+  it('parses a gate carrying the real result and both clock fields', () => {
+    const parsed = PendingGateSchema.parse(realGate)
+    expect(parsed.run_started_at).toBe('2026-08-29T09:59:58.000Z')
+    expect(parsed.run_completed_at).toBe('2026-08-29T10:00:00.000Z')
+    expect(parsed.plugin_result.status).toBe('success')
+    expect(parsed.plugin_result.artifacts_produced[0]?.path).toBe('brief.md')
+    expect(parsed.applied_at).toBeNull()
+  })
+
+  it('survives a write and re-read through engine state with its Output intact', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'warpline-gate-'))
+    const statePath = join(dir, 'engine-state.json')
+    try {
+      const state = defaultEngineState()
+      state.pending_gates.push(PendingGateSchema.parse(realGate))
+      await writeEngineState(state, statePath)
+
+      const reread = await readEngineState(statePath)
+      const gate = reread.pending_gates[0]
+      expect(gate?.run_started_at).toBe('2026-08-29T09:59:58.000Z')
+      expect(gate?.run_completed_at).toBe('2026-08-29T10:00:00.000Z')
+      expect(gate?.plugin_result.artifacts_produced[0]?.run_id).toBe('run-a')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The discriminator gets a test of its own so it is a named predicate rather
+   * than an implicit heuristic buried in a filter. Both directions: a stub is
+   * recognised, and a gate this build wrote is not.
+   */
+  it('recognises a pre-Phase-8 stub gate by its missing clocks, and a real gate as not one', () => {
+    expect(isStubGate(PendingGateSchema.parse(stubGate))).toBe(true)
+    expect(isStubGate(PendingGateSchema.parse(realGate))).toBe(false)
+  })
+
+  it('reads a pre-Phase-8 gate with both clocks null rather than rejecting the file', () => {
+    const parsed = PendingGateSchema.parse(stubGate)
+    expect(parsed.run_started_at).toBeNull()
+    expect(parsed.run_completed_at).toBeNull()
   })
 })
