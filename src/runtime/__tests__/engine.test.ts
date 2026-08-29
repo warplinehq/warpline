@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { topoSort } from '../engine.js'
 import { grantApproval } from '../approval-gate.js'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
+import { _setHome } from '../../lib/paths.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 // -----------------------------------------------------------------------
@@ -1160,5 +1161,270 @@ export async function handler(manifest, args) {
     const event = JSON.parse(lines[0] as string)
     expect(event.summary).toContain('legacy-plugin')
     expect(JSON.parse(event.metadata_json).event).toBe('gate_invalidated')
+  })
+})
+
+/**
+ * Denial suppression on the evaluator seam.
+ *
+ * A denial answers a proposal, so these tests move the proposal and watch the
+ * answer stop applying. The check lives in `evaluatePlugin`, which is why
+ * `warpline plan` and an advance cannot disagree about it — the last test here
+ * asserts that directly rather than trusting the arrangement.
+ */
+describe('runAdvance denial suppression', () => {
+  let ctx: TestHome
+  let eventsPath: string
+  let statePath: string
+  let invocationLog: string
+
+  beforeEach(async () => {
+    ctx = await createTestHome()
+    _setHome(ctx.root)
+    eventsPath = join(ctx.runsDir, 'events.jsonl')
+    statePath = join(ctx.stateDir, 'engine-state.json')
+    invocationLog = join(ctx.root, 'invocations.log')
+  })
+
+  afterEach(async () => {
+    _setHome(null)
+    await ctx.cleanup()
+  })
+
+  /**
+   * A supervised, side-effecting plugin whose handler records that it ran.
+   *
+   * `ttl_hours` is near-zero so a seeded past run never makes the plugin fresh
+   * — freshness is checked before the denial, and a fresh plugin would be
+   * not-due for a reason that has nothing to do with this change.
+   */
+  async function createDeniablePlugin(name: string, sideEffects: string[]): Promise<void> {
+    const dir = join(ctx.pluginsDir, name)
+    await mkdir(dir, { recursive: true })
+    await writeFile(
+      join(dir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify({
+        name,
+        version: '1.0.0',
+        description: `${name} deniable fixture`,
+        inputs: {},
+        outputs: {},
+        capabilities: [],
+        schedule: 'on_run',
+        autonomy_level: 'supervised',
+        side_effects: sideEffects,
+        ttl_hours: 0.001,
+        dependencies: [],
+        timeout_ms: 5000,
+        max_parallelism: 1,
+        min_tier: 'normal',
+      })}`,
+    )
+    await writeFile(
+      join(dir, 'handler.ts'),
+      `
+import { appendFileSync } from 'node:fs'
+
+export async function handler(manifest, args) {
+  appendFileSync(${JSON.stringify(invocationLog)}, 'invoked\\n')
+  return {
+    status: 'success',
+    phases_completed: ['${name}'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: '${name} did the thing',
+    artifacts_produced: [{ type: 'brief', format: 'markdown', path: 'brief.md' }],
+    schema_version: 2,
+  }
+}
+`,
+    )
+  }
+
+  const LAST_HOUR = new Date(Date.now() - 60 * 60_000).toISOString()
+
+  /** Seed a stale prior run plus, optionally, a denial bound to a fingerprint. */
+  async function seedState(
+    plugin: string,
+    opts: { lastOutput?: Record<string, unknown>; fingerprint?: string } = {},
+  ): Promise<void> {
+    const run: Record<string, unknown> = { last_run_at: LAST_HOUR, status: 'gated' }
+    if (opts.lastOutput !== undefined) run.last_output = opts.lastOutput
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: { [plugin]: run },
+        denials:
+          opts.fingerprint === undefined
+            ? {}
+            : {
+                [plugin]: {
+                  plugin,
+                  reason: 'the operator declined this proposal',
+                  denied_at: '2026-08-29T09:00:00.000Z',
+                  note: null,
+                  fingerprint: opts.fingerprint,
+                },
+              },
+      }),
+    )
+  }
+
+  async function advance(): Promise<void> {
+    const { runAdvance } = await import('../engine.js')
+    await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+      approvalPath: join(ctx.root, '.session-approval'),
+    })
+  }
+
+  async function invocations(): Promise<number> {
+    try {
+      return (await readFile(invocationLog, 'utf-8')).split('\n').filter((l) => l.length > 0).length
+    } catch {
+      return 0
+    }
+  }
+
+  /** The most recent run log's entry for this plugin. */
+  async function logEntry(plugin: string): Promise<{ status: string; result_summary: string }> {
+    const { readdir } = await import('node:fs/promises')
+    const files = (await readdir(ctx.runsDir)).filter((f) => f.endsWith('.json')).sort()
+    const log = JSON.parse(await readFile(join(ctx.runsDir, files.at(-1) as string), 'utf-8'))
+    return log.plugin_entries.find((e: { plugin: string }) => e.plugin === plugin)
+  }
+
+  const brief = { type: 'brief', format: 'markdown', path: 'brief.md' }
+
+  async function fingerprintFor(plugin: string, sideEffects: string[], output?: unknown) {
+    const { denialFingerprint } = await import('../engine.js')
+    return denialFingerprint(plugin, sideEffects, output === undefined ? [] : [output as never])
+  }
+
+  test('Test 37: a live denial makes the plugin not due, and its handler is not invoked', async () => {
+    await createDeniablePlugin('mailer', ['sends_email'])
+    await seedState('mailer', {
+      lastOutput: brief,
+      fingerprint: await fingerprintFor('mailer', ['sends_email'], brief),
+    })
+
+    await advance()
+
+    expect(await invocations()).toBe(0)
+    const entry = await logEntry('mailer')
+    expect(entry.status).toBe('denied')
+    expect(entry.result_summary).toContain('denied')
+    // No grant exists, and the plugin declares a side effect — so this also
+    // pins the ordering: the denial answers first, before the approval gate.
+    expect(entry.result_summary).not.toContain('unapproved')
+  })
+
+  test('Test 38: changing a declared side effect re-raises the plugin — it runs again', async () => {
+    await createDeniablePlugin('mailer', ['sends_email', 'writes_db'])
+    await seedState('mailer', {
+      lastOutput: brief,
+      // Denied when it declared one effect. It now declares two.
+      fingerprint: await fingerprintFor('mailer', ['sends_email'], brief),
+    })
+    await grantApproval('mailer', 4 * 60 * 60 * 1000, join(ctx.root, '.session-approval'))
+
+    await advance()
+
+    expect(await invocations()).toBe(1)
+    expect((await logEntry('mailer')).status).toBe('gated')
+  })
+
+  test('Test 39: changing the produced Output re-raises the plugin the same way', async () => {
+    await createDeniablePlugin('mailer', ['sends_email'])
+    await seedState('mailer', {
+      lastOutput: { type: 'brief', format: 'markdown', path: 'revised.md' },
+      // Denied against the earlier Output.
+      fingerprint: await fingerprintFor('mailer', ['sends_email'], brief),
+    })
+    await grantApproval('mailer', 4 * 60 * 60 * 1000, join(ctx.root, '.session-approval'))
+
+    await advance()
+
+    expect(await invocations()).toBe(1)
+    expect((await logEntry('mailer')).status).toBe('gated')
+  })
+
+  /**
+   * The truthfulness obligation. An Ask that silently reappears looks like a
+   * new question, and the operator has no way to tell they already answered
+   * it. The text has to say a denial existed AND that the proposal moved —
+   * either half alone is misleading.
+   */
+  test('Test 40: a returning Ask says a denial existed and that the proposal changed', async () => {
+    await createDeniablePlugin('mailer', ['sends_email', 'writes_db'])
+    await seedState('mailer', {
+      lastOutput: brief,
+      fingerprint: await fingerprintFor('mailer', ['sends_email'], brief),
+    })
+
+    const { buildPlanModel } = await import('../../cli/plan.js')
+    const model = await buildPlanModel(Date.now())
+    const entry = model.notDue.find((e) => e.plugin === 'mailer')
+
+    expect(entry?.reason).toBe('unapproved')
+    expect(entry?.detail).toContain('denied')
+    expect(entry?.detail).toContain('changed')
+    expect(entry?.detail).toContain('2026-08-29T09:00:00.000Z')
+  })
+
+  test('Test 41: removing the denial re-raises the plugin on the next advance', async () => {
+    await createDeniablePlugin('mailer', ['sends_email'])
+    await seedState('mailer', {
+      lastOutput: brief,
+      fingerprint: await fingerprintFor('mailer', ['sends_email'], brief),
+    })
+    await grantApproval('mailer', 4 * 60 * 60 * 1000, join(ctx.root, '.session-approval'))
+
+    await advance()
+    expect(await invocations()).toBe(0)
+
+    // Take the denial back, changing nothing else.
+    const state = JSON.parse(await readFile(statePath, 'utf-8'))
+    delete state.denials['mailer']
+    await writeFile(statePath, JSON.stringify(state))
+
+    await advance()
+    expect(await invocations()).toBe(1)
+  })
+
+  /**
+   * `plan` and an advance read the same evaluator, so this asserts a property
+   * rather than a coincidence: the preview's verdict for the plugin and the
+   * run log the advance writes have to agree, and the preview has to name the
+   * reason rather than say nothing.
+   */
+  test('Test 42: warpline plan renders the denied reason and agrees with the advance', async () => {
+    await createDeniablePlugin('mailer', ['sends_email'])
+    await seedState('mailer', {
+      lastOutput: brief,
+      fingerprint: await fingerprintFor('mailer', ['sends_email'], brief),
+    })
+
+    const { buildPlanModel } = await import('../../cli/plan.js')
+    const { renderPlan } = await import('../../cli/plan-render.js')
+    const now = Date.now()
+    const model = await buildPlanModel(now)
+
+    const previewed = model.notDue.find((e) => e.plugin === 'mailer')
+    expect(previewed?.reason).toBe('denied')
+    expect(model.due.map((e) => e.plugin)).not.toContain('mailer')
+
+    const rendered = renderPlan(model, now)
+    expect(rendered).toContain('mailer')
+    expect(rendered).toContain('denied')
+
+    await advance()
+    expect((await logEntry('mailer')).status).toBe('denied')
+    expect(await invocations()).toBe(0)
   })
 })
