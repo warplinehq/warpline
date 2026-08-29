@@ -351,6 +351,7 @@ async function readStateFile(
   statePath: string,
   policy: ReadPolicy,
   eventsPath?: string,
+  announceDiscards = true,
 ): Promise<EngineState> {
   let parsed: unknown
   try {
@@ -382,7 +383,7 @@ async function readStateFile(
     )
   }
 
-  return discardStubGates(result.data, policy, eventsPath)
+  return discardStubGates(result.data, policy, eventsPath, announceDiscards)
 }
 
 /**
@@ -409,11 +410,12 @@ async function discardStubGates(
   state: EngineState,
   policy: ReadPolicy,
   eventsPath?: string,
+  announceDiscards = true,
 ): Promise<EngineState> {
   const stubs = state.pending_gates.filter(isStubGate)
   if (stubs.length === 0) return state
 
-  if (policy === 'fail-closed') {
+  if (policy === 'fail-closed' && announceDiscards) {
     try {
       // Dynamic import: `engine-events` is not otherwise on this module's
       // dependency graph, and a static one would pull the board's event
@@ -451,12 +453,27 @@ let tolerantReads = false
  * rather than defaulted at the emitter so a caller that already redirected its
  * own event log — every engine test does — does not have one notice escape to
  * a different file than the rest of the run's.
+ *
+ * `opts.announceDiscards: false` keeps the fail-closed policy and suppresses
+ * that notice. It exists because the two are separate questions and this
+ * function used to answer both with one flag: a caller that will NOT persist
+ * the discard re-emits the same notice on every read, forever, since nothing
+ * ever writes the stub away. `readEngineStateReadOnly` is not the answer for
+ * such a caller — it is tolerant, so an unusable document would come back as
+ * defaults, and `deny --list` would print "No denials" over a file that holds
+ * some. Silently telling an operator nothing is denied is a worse failure than
+ * a repeated notice.
  */
 export async function readEngineState(
   statePath: string,
-  opts: { eventsPath?: string } = {},
+  opts: { eventsPath?: string; announceDiscards?: boolean } = {},
 ): Promise<EngineState> {
-  return readStateFile(statePath, tolerantReads ? 'tolerant' : 'fail-closed', opts.eventsPath)
+  return readStateFile(
+    statePath,
+    tolerantReads ? 'tolerant' : 'fail-closed',
+    opts.eventsPath,
+    opts.announceDiscards ?? true,
+  )
 }
 
 /**

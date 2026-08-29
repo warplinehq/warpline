@@ -170,6 +170,55 @@ describe('warpline deny', () => {
     expect(await rawState()).toBe(before)
   })
 
+  test('5b: repeated `--list` over a stub gate does not re-emit the discard notice', async () => {
+    // The discard happens on every read and is never persisted by `--list`, so
+    // the notice fired again on the next `--list`, and the next, for as long as
+    // the stub sat there. `deny.test.ts` compared only the state file, so it
+    // did not see the growing event log.
+    //
+    // The policy stays fail-closed. `readEngineStateReadOnly` would suppress
+    // the notice too, and would also turn an unusable document into "No
+    // denials" — silently telling an operator nothing is denied is a worse
+    // failure than a repeated notice.
+    const eventsPath = join(root, 'state', 'events.jsonl')
+    await mkdir(join(root, 'state'), { recursive: true })
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: {},
+        denials: {},
+        // Neither clock: the pre-Phase-8 shape `isStubGate` recognises.
+        pending_gates: [
+          {
+            plugin: 'render-issue',
+            run_id: 'run-old',
+            created_at: '2026-08-01T00:00:00.000Z',
+            payload_summary: 'a gate from an older build',
+            plugin_result: {
+              status: 'success',
+              phases_completed: [],
+              phases_failed: [],
+              errors: [],
+              data_freshness: {},
+              summary: 'a gate from an older build',
+              artifacts_produced: [],
+              schema_version: 2,
+            },
+            run_started_at: null,
+            run_completed_at: null,
+            applied_at: null,
+          },
+        ],
+      }),
+    )
+
+    for (let i = 0; i < 3; i += 1) expect((await capture(['--list'])).code).toBe(0)
+
+    const lines = await readFile(eventsPath, 'utf-8').catch(() => '')
+    expect(lines).toBe('')
+  })
+
   test('6: `--list` with no denials says so rather than printing an empty block', async () => {
     const { code, stdout } = await capture(['--list'])
     expect(code).toBe(0)

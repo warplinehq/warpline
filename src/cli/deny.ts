@@ -80,9 +80,19 @@ Options:
  * operator would conclude they had never denied anything and deny it again,
  * against a file that is about to be overwritten.
  */
-async function loadState(statePath: string): Promise<EngineState | null> {
+/**
+ * `announceDiscards: false` on a read that will not write. `--list` discards
+ * stub gates like every other read, but it never persists the discard — so the
+ * notice it emitted was re-emitted on the next `--list`, and the next, until
+ * something else wrote state. The policy stays fail-closed: an unusable
+ * document must stop this command, not come back as "No denials".
+ */
+async function loadState(
+  statePath: string,
+  opts: { announceDiscards?: boolean } = {},
+): Promise<EngineState | null> {
   try {
-    return await readEngineState(statePath)
+    return await readEngineState(statePath, opts)
   } catch (err) {
     if (!(err instanceof EngineStateInvalidError)) throw err
     process.stderr.write(
@@ -136,7 +146,7 @@ export async function run(argv: string[]): Promise<number> {
 
   // -- List: read, print, write nothing -----------------------------------
   if (values.list) {
-    const state = await loadState(statePath)
+    const state = await loadState(statePath, { announceDiscards: false })
     if (state === null) return 1
     const denials = Object.values(state.denials)
     if (denials.length === 0) {
