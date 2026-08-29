@@ -11,6 +11,7 @@
  *   emitPluginFailed()  — plugin lifecycle: failed
  *   emitPluginSkipped() — plugin lifecycle: skipped
  *   emitPluginGated()   — plugin lifecycle: gated (awaiting approval)
+ *   emitGateInvalidated() — a parked gate was discarded rather than applied
  *
  * Design:
  *   The engine emits a structured event for every plugin lifecycle transition;
@@ -174,6 +175,52 @@ export const emitAttemptFailed = (
     }),
     eventsPath,
   )
+
+/**
+ * Emit a notice that a parked gate was thrown away rather than applied.
+ *
+ * `reason` says which of the three discards happened: a pre-Phase-8 stub found
+ * at read time, a dependency that moved since the gated run started, or an
+ * expiry. All three leave the plugin due again on the next advance.
+ *
+ * Rides `type: 'notice'` for the same reason `emitAttemptFailed` does, and the
+ * reason is worth stating in print rather than rediscovering: growing
+ * `BoardEventSchema.type` raises NO compile error — `typeLabel` in
+ * `board-cli.ts` has a default arm — while `VISIBLE_TYPES` is a hand-maintained
+ * Set, so a new member would be silently dropped from every board view. Any
+ * `notice` is already in that Set. The sub-type therefore lives in
+ * `metadata_json`, machine-readable, rather than in the enum.
+ */
+export const emitGateInvalidated = (
+  plugin: string,
+  runId: string | null,
+  reason: 'stub' | 'dependency_moved' | 'expired',
+  eventsPath?: string,
+): Promise<void> =>
+  emitBoardEvent(
+    makeEvent(
+      'notice',
+      plugin,
+      `${plugin}: parked gate discarded — ${GATE_DISCARD_PROSE[reason]}`,
+      runId,
+      {
+        severity: 'warning',
+        metadata_json: JSON.stringify({
+          event: reason === 'expired' ? 'gate_expired' : 'gate_invalidated',
+          plugin,
+          run_id: runId,
+          reason,
+        }),
+      },
+    ),
+    eventsPath,
+  )
+
+const GATE_DISCARD_PROSE: Record<'stub' | 'dependency_moved' | 'expired', string> = {
+  stub: 'written by a build older than the one holding the real result, so there is no outcome to approve',
+  dependency_moved: 'a dependency re-ran after the gated run started, so the result was computed against inputs that have moved',
+  expired: 'older than the earlier of the plugin TTL and 24 hours',
+}
 
 /**
  * Emit plugin_result event indicating supervised plugin is awaiting human approval.

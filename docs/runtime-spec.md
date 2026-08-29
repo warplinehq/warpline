@@ -604,6 +604,41 @@ The status set is closed. Adding a member fans out into this document, and
 into every operator state file written afterwards, which is why it is not
 extended casually.
 
+### `pending_gates`
+
+A supervised plugin's result parked pending a human answer. One entry per
+plugin gated by the most recent advance.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `plugin` | string | The gated plugin |
+| `run_id` | string | The advance that parked it |
+| `created_at` | ISO 8601 string | When the gate was written |
+| `payload_summary` | string | The result's summary, for a one-line render |
+| `plugin_result` | Skill result | The REAL result the handler returned, Outputs and all |
+| `run_started_at` | ISO 8601 string or null | When the gated run started |
+| `run_completed_at` | ISO 8601 string or null | When the gated run ended |
+| `applied_at` | ISO 8601 string or null | When the gate was applied; null while live |
+
+`plugin_result` is the result the plugin actually returned. Earlier builds
+stored a fabrication here — `status: 'partial'`, an empty `artifacts_produced`
+— and dropped the real thing. Approval is acceptance of an observed outcome, so
+a gate that does not carry the outcome cannot be approved in any meaningful
+sense.
+
+`run_completed_at` is written from the same string as the `plugin_runs` entry
+the engine writes on the same branch, not from a second clock read. The two
+must not disagree by a millisecond: the approve verb anchors
+`plugin_runs.last_run_at` at the gate's copy.
+
+**Both clocks null means the gate is unusable.** A gate written by a build
+older than this one carries neither, and no real result behind them. Such a
+gate is discarded when the state document is read — on the write-capable read,
+with a `notice` naming the plugin appended to `events.jsonl`; on the read-only
+read, silently, because a command contracted to write nothing may not append to
+a log. It is never applied. This is the one deliberate data drop in the format:
+there is nothing to migrate, because the real result was never recorded.
+
 ### `last_output`
 
 A pointer to the most recent Output a plugin produced, so a reader can name it

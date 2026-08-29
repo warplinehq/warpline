@@ -36,7 +36,7 @@ import {
   readEngineState,
   writeEngineState,
 } from '../schemas/engine-state.js'
-import type { EngineState } from '../schemas/engine-state.js'
+import type { EngineState, PendingGate } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs } from '../schemas/run-log.js'
 import type { RunLog } from '../schemas/run-log.js'
 import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
@@ -391,7 +391,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   const started_at = new Date().toISOString()
 
   // 2. Read v2 state
-  const state = await readEngineState(stateDir)
+  // `eventsPath` is threaded so a stub-gate discard notice lands in this run's
+  // event log rather than escaping to the default one.
+  const state = await readEngineState(stateDir, { eventsPath })
 
   // 2a. Compute degradation tier — from PREVIOUS last_interaction_at (before we update it)
   const previousLastInteraction = state.last_interaction_at
@@ -464,6 +466,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   }
 
   const gated_plugins: string[] = []
+  /**
+   * The gates parked by this advance, assembled inside the gated arm where the
+   * plugin's real `SkillResult` is still in scope.
+   */
+  const parked_gates: PendingGate[] = []
   const plugin_entries: RunLog['plugin_entries'] = []
 
   let engineStatus: AdvanceResult['status'] = 'complete'
@@ -713,14 +720,38 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // Anchored at the gate's completion time, which is when the run
             // ended. A later approval is a separate event and must not
             // retroactively move when the work happened.
+            //
+            // ONE string, used twice. The parked gate below records the same
+            // instant, and the approve verb anchors `plugin_runs.last_run_at`
+            // at the gate's copy when it applies — so two `new Date()` calls
+            // here would let the two disagree by a millisecond and make that
+            // anchoring a lie.
+            const completedAt = new Date().toISOString()
             state.plugin_runs[pluginName] = {
-              last_run_at: new Date().toISOString(),
+              last_run_at: completedAt,
               status: 'gated',
               duration_ms: Date.now() - entryStart,
               // last_output: written here as well as on the autonomous path. A
               // gated run produced its Outputs before the gate saw them.
               ...lastOutputOf(result),
             }
+
+            // -- Park the REAL result ------------------------------------
+            // Built here, where `result` is in scope, rather than
+            // reconstructed from `plugin_entries` after the level loop. The
+            // reconstruction is what fabricated a partial with an empty
+            // artifacts array: by then the only thing left of the run was its
+            // summary string, so a summary string is all the gate could hold.
+            parked_gates.push({
+              plugin: pluginName,
+              run_id,
+              created_at: completedAt,
+              payload_summary: result.summary,
+              plugin_result: result,
+              run_started_at: entryStartedAt,
+              run_completed_at: completedAt,
+              applied_at: null,
+            })
           }
           return
         }
@@ -803,31 +834,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     last_run_at: new Date().toISOString(),
   }
 
-  // Add pending_gates to state for gated plugins
-  if (gated_plugins.length > 0) {
-    const gates = gated_plugins.map(pluginName => {
-      const entry = plugin_entries.find(e => e.plugin === pluginName)
-      return {
-        plugin: pluginName,
-        run_id,
-        created_at: new Date().toISOString(),
-        payload_summary: entry?.result_summary ?? '',
-        plugin_result: {
-          status: 'partial' as const,
-          phases_completed: [],
-          phases_failed: [],
-          errors: [],
-          data_freshness: {},
-          summary: entry?.result_summary ?? '',
-          artifacts_produced: [],
-          schema_version: 1,
-        } satisfies SkillResult,
-      }
-    })
-    ;(updatedState as Record<string, unknown>)['pending_gates'] = gates
-  } else {
-    ;(updatedState as Record<string, unknown>)['pending_gates'] = []
-  }
+  // Add pending_gates to state for gated plugins. Assembled in the gated arm
+  // above, where the plugin's real result is still in hand.
+  ;(updatedState as Record<string, unknown>)['pending_gates'] = parked_gates
 
   await writeEngineState(updatedState as EngineState, stateDir)
 

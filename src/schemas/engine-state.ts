@@ -133,15 +133,76 @@ export const PluginRunSchema = z.object({
 })
 export type PluginRun = z.infer<typeof PluginRunSchema>
 
-/** A supervised plugin's result parked pending human approval of its side effects. */
+/**
+ * A supervised plugin's result parked pending human approval of its side
+ * effects.
+ *
+ * `plugin_result` is the REAL result the handler returned, Outputs and all.
+ * Earlier builds fabricated it — `status: 'partial'`, an empty
+ * `artifacts_produced` — and the thing the plugin actually produced was
+ * dropped. Approval is acceptance of an observed outcome, so a gate that does
+ * not carry the outcome cannot be approved in any meaningful sense.
+ */
 export const PendingGateSchema = z.object({
   plugin: z.string(),
   run_id: z.string(),
   created_at: z.string(),
   payload_summary: z.string(),
   plugin_result: SkillResultSchema,
+  /**
+   * When the gated run STARTED. The dependency-staleness refusal compares each
+   * dependency's `last_run_at` against this: a dependency that moved after the
+   * gated run began means the parked result was computed against inputs that
+   * have since changed.
+   *
+   * Nullable with a null default, following `TaskAgingSchema.first_run_id` —
+   * a gate written by an earlier build carries neither clock, and the engine's own
+   * state document must not fail validation over it. **Null here is not a
+   * missing field to backfill: it is the marker of a gate this build refuses
+   * to apply.** See {@link isStubGate}. That is a deliberate data drop, the
+   * only one in this phase — a pre-Phase-8 gate has no real result to migrate,
+   * so there is nothing to carry forward and applying it would record an
+   * outcome the plugin never produced.
+   */
+  run_started_at: z.string().nullable().default(null),
+  /**
+   * When the gated run ENDED. Two things anchor on it: gate expiry counts from
+   * here, and on apply `plugin_runs.last_run_at` is set to it rather than to
+   * the time the operator said yes. A later approval is a separate event and
+   * must not retroactively move when the work happened.
+   *
+   * It is written from the same string as the `plugin_runs` entry the engine
+   * writes on the same branch, not from a second `new Date()` — the two must
+   * not disagree by a millisecond.
+   */
+  run_completed_at: z.string().nullable().default(null),
+  /**
+   * When this gate was applied, or null while it is still live.
+   *
+   * The gate is marked rather than deleted so a second `warpline approve` sees
+   * an already-applied gate and refuses. Deleting it would leave no gate to
+   * find, and the verb would fall through to merging a Grant — writing the one
+   * file an outcome approval must never touch.
+   */
+  applied_at: z.string().nullable().default(null),
 })
 export type PendingGate = z.infer<typeof PendingGateSchema>
+
+/**
+ * Is this a gate written by an older build — a fabricated partial with no real
+ * result behind it?
+ *
+ * The discriminator is the clock fields, because they are the fields a
+ * pre-Phase-8 build could not have written and a gate this build writes always
+ * has. Discriminating on `status === 'partial'` instead would misfire on a
+ * genuine partial result, which is a real outcome a plugin may return.
+ *
+ * A named predicate rather than an inline filter so the recogniser is testable
+ * on its own, in both directions.
+ */
+export function isStubGate(gate: PendingGate): boolean {
+  return gate.run_started_at === null || gate.run_completed_at === null
+}
 
 /**
  * The newest schema version this build understands. A file at or below it
@@ -239,7 +300,11 @@ type ReadPolicy = 'fail-closed' | 'tolerant'
  * A missing file is not an unusable one: ENOENT yields defaults under both
  * policies, so a fresh install still works.
  */
-async function readStateFile(statePath: string, policy: ReadPolicy): Promise<EngineState> {
+async function readStateFile(
+  statePath: string,
+  policy: ReadPolicy,
+  eventsPath?: string,
+): Promise<EngineState> {
   let parsed: unknown
   try {
     parsed = JSON.parse(await readFile(statePath, 'utf-8'))
@@ -270,7 +335,52 @@ async function readStateFile(statePath: string, policy: ReadPolicy): Promise<Eng
     )
   }
 
-  return result.data
+  return discardStubGates(result.data, policy, eventsPath)
+}
+
+/**
+ * Throw away any pre-Phase-8 parked gate, naming the plugin in the event log.
+ *
+ * A stub gate carries a fabricated status and no Outputs, so applying it
+ * would record an outcome the plugin never produced. There is nothing to
+ * migrate — the real result was never written — so the only honest thing to do
+ * is drop it and say so.
+ *
+ * **The notice is emitted on the write-capable read only.** The tolerant read
+ * still discards, silently. `warpline plan` is contracted to write nothing at
+ * all, and `plan-prohibition.test.ts` snapshots the entire warpline home to
+ * prove it — an append to `events.jsonl` from a read path fails that test as
+ * loudly as a state rewrite, and rightly so. `withoutStateBackups` forces the
+ * tolerant policy across `plan`'s indirect reads too, so this one comparison
+ * covers every path it reaches.
+ *
+ * Emission is awaited, not fired and forgotten: a caller that reads the event
+ * log straight after the state read must see the notice. It is still
+ * best-effort — a log that cannot be written must not stop a state read.
+ */
+async function discardStubGates(
+  state: EngineState,
+  policy: ReadPolicy,
+  eventsPath?: string,
+): Promise<EngineState> {
+  const stubs = state.pending_gates.filter(isStubGate)
+  if (stubs.length === 0) return state
+
+  if (policy === 'fail-closed') {
+    try {
+      // Dynamic import: `engine-events` is not otherwise on this module's
+      // dependency graph, and a static one would pull the board's event
+      // surface into every consumer of the state schema.
+      const { emitGateInvalidated } = await import('../board/engine-events.js')
+      await Promise.all(
+        stubs.map((g) => emitGateInvalidated(g.plugin, g.run_id, 'stub', eventsPath)),
+      )
+    } catch {
+      /* a discard notice that cannot be written must not fail the read */
+    }
+  }
+
+  return { ...state, pending_gates: state.pending_gates.filter((g) => !isStubGate(g)) }
 }
 
 /** First issue, path-qualified. The reason a human acts on, not a dump. */
@@ -289,9 +399,17 @@ let tolerantReads = false
  * Missing file → defaults. Unusable file → `EngineStateInvalidError`, with the
  * document left exactly as it was on disk. Callers return a non-zero code and
  * surface the message; only `src/bin/warpline.ts` exits.
+ *
+ * `opts.eventsPath` redirects the stub-gate discard notice. It is threaded
+ * rather than defaulted at the emitter so a caller that already redirected its
+ * own event log — every engine test does — does not have one notice escape to
+ * a different file than the rest of the run's.
  */
-export async function readEngineState(statePath: string): Promise<EngineState> {
-  return readStateFile(statePath, tolerantReads ? 'tolerant' : 'fail-closed')
+export async function readEngineState(
+  statePath: string,
+  opts: { eventsPath?: string } = {},
+): Promise<EngineState> {
+  return readStateFile(statePath, tolerantReads ? 'tolerant' : 'fail-closed', opts.eventsPath)
 }
 
 /**

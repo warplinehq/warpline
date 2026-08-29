@@ -288,8 +288,32 @@ objects that do not exist.
    live Grant re-firing its declared side effects on every advance: the handler
    runs before the gate ever sees the result, so an unrecorded parked run meant
    the effects fired again on the next pass, and the one after that, for the
-   whole grant window. The approve verb on a `gated` Ask still needs a defined
-   effect before the Board can offer it.
+   whole grant window.
+
+   The parked result is the real one. A gate carries the `SkillResult` the
+   handler returned — its Outputs, with the provenance the runtime stamped —
+   plus the gated run's start and completion times. It used to carry a
+   fabrication: a `partial` status and an empty artifacts array, with the real
+   result discarded. Nothing could be approved from that, because the outcome
+   the operator would have been accepting was not in it.
+
+   The two clocks are not decoration. The start time is what a dependency's
+   `last_run_at` is compared against, so a result computed against inputs that
+   have since moved is refused rather than applied. The completion time is what
+   expiry counts from, and what `plugin_runs.last_run_at` is anchored to when
+   the gate is applied.
+
+   **A gate written by an older build is discarded, not applied.** It carries
+   neither clock and no real result, so applying it would record an outcome the
+   plugin never produced. It is dropped when the state document is read, and a
+   `notice` naming the plugin is written to `events.jsonl`. This is the one
+   place where existing runtime data is deliberately thrown away rather than
+   migrated — there is nothing to migrate, because the real result was never
+   written down. Gates are short-lived by construction, so the window in which
+   this can happen is at most a day.
+
+   The approve verb on a `gated` Ask still needs a defined effect before the
+   Board can offer it.
 
 ## 8. Schema references
 

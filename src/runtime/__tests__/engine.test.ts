@@ -1116,7 +1116,7 @@ export async function handler(manifest, args) {
   })
 
   /**
-   * D-22: a gate written by a pre-Phase-8 build carries a fabricated status and
+   * A gate written by an older build carries a fabricated status and
    * no Outputs. Applying it would record an outcome the plugin never produced,
    * so it is thrown away at read time — loudly, with the plugin named — rather
    * than migrated. This is the one place in the phase where existing runtime
