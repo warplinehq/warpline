@@ -696,6 +696,72 @@ export async function handler() {
     expect(state.denials['gated-writer'].fingerprint).toBe(stale)
   })
 
+  test('20: granting a plugin that is denied says the grant will not make it run', async () => {
+    // No parked gate, so this falls straight through to the Grant path — the
+    // exact hole the denial guard inside the gated branch does not cover. The
+    // denial check in `evaluatePlugin` sits BEFORE the approval gate, so the
+    // plugin is skipped as `denied` on the next advance regardless.
+    await mkdir(join(root, 'state'), { recursive: true })
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: {},
+        pending_gates: [],
+        denials: {
+          'db-writer': {
+            plugin: 'db-writer',
+            reason: 'the operator declined this proposal',
+            denied_at: '2026-08-29T11:00:00.000Z',
+            note: null,
+            fingerprint: denialFingerprint('db-writer', ['writes_db'], []),
+          },
+        },
+      }),
+    )
+
+    const { code, stdout } = await capture('approve', ['db-writer'])
+
+    // Not refused: pre-staging a Grant for when the denial is taken back is a
+    // legitimate gesture. Silence about it was not.
+    expect(code).toBe(0)
+    expect(stdout).toContain('denied at 2026-08-29T11:00:00.000Z')
+    expect(stdout).toContain('will not make it run')
+    expect(stdout).toContain('warpline deny --remove db-writer')
+    expect((await readGrant()).scopes).toEqual(['db-writer'])
+  })
+
+  test('20b: a superseded denial is not narrated, because it no longer answers anything', async () => {
+    // Non-vacuity for 20: same path, same record, and the only difference is
+    // whether the fingerprint still matches the live proposal. A stale denial
+    // is stale everywhere else, and warning on it would send the operator to
+    // undo an answer they had already outgrown.
+    await mkdir(join(root, 'state'), { recursive: true })
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: {},
+        pending_gates: [],
+        denials: {
+          'db-writer': {
+            plugin: 'db-writer',
+            reason: 'the operator declined this proposal',
+            denied_at: '2026-08-29T11:00:00.000Z',
+            note: null,
+            fingerprint: denialFingerprint('db-writer', ['sends_email'], []),
+          },
+        },
+      }),
+    )
+
+    const { code, stdout } = await capture('approve', ['db-writer'])
+
+    expect(code).toBe(0)
+    expect(stdout).not.toContain('denied at')
+    expect((await readGrant()).scopes).toEqual(['db-writer'])
+  })
+
   test('17: with no parked gate the command merges a Grant exactly as it always did', async () => {
     const { code, stdout, stderr } = await capture('approve', ['render-issue'])
 

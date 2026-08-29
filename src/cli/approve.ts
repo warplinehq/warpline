@@ -268,18 +268,43 @@ export async function run(argv: string[]): Promise<number> {
       return failed ? 1 : 0
     }
 
-    // Falling through to the Grant path with a spent marker on file. Say so:
-    // the operator typed the same words that applied a result a moment ago and
-    // is getting a different answer, and an unexplained change of behaviour on
-    // an unchanged gesture is exactly what a gate must never do. Narrating
-    // beats refusing — a refusal here is what CR-01 was.
+    // Falling through to the Grant path. Two things the operator cannot see
+    // from here would otherwise make this command's exit 0 a lie about what it
+    // achieved, so both are narrated. Narrating rather than refusing is the
+    // deliberate choice in each case: pre-staging a Grant is a legitimate
+    // gesture, and a refusal here is what locked the verb out.
     for (const name of positionals) {
+      // A spent marker on file. The operator typed the same words that applied
+      // a result a moment ago and is getting a different answer, and an
+      // unexplained change of behaviour on an unchanged gesture is exactly what
+      // a gate must never do.
       const spent = findPendingGate(state, name)
       if (spent?.applied_at != null) {
         process.stdout.write(
           `Note: ${name}'s parked result from run ${spent.run_id} was already applied at ` +
             `${spent.applied_at}. This grants ${name} permission to run again — it does not ` +
             `re-record that result.\n`,
+        )
+      }
+
+      // A live denial. The denial check in `evaluatePlugin` sits BEFORE the
+      // approval gate, so the plugin is skipped as `denied` on the next advance
+      // no matter what is granted here. Without this the operator was told,
+      // with exit 0 and no qualification, that they had approved something that
+      // will not run — and side-effect authority was widened for nothing. Only
+      // a denial that still matches is worth saying; a superseded one is
+      // already stale everywhere else.
+      const manifest = manifests.get(name)
+      const denial = Object.hasOwn(state.denials, name) ? state.denials[name] : undefined
+      if (
+        denial !== undefined &&
+        manifest !== undefined &&
+        denial.fingerprint === proposalFingerprint(state, name, manifest)
+      ) {
+        process.stdout.write(
+          `Note: ${name} was denied at ${denial.denied_at} and that answer still matches its ` +
+            `proposal, so it will be skipped as denied on the next advance and this grant will ` +
+            `not make it run. Take the denial back first: warpline deny --remove ${name}\n`,
         )
       }
     }

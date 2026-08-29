@@ -760,6 +760,18 @@ long before the supervision gate saw the result, so re-running would double
 effects that already happened. Downstream dependents run on the next advance
 under the normal guard chain, not from inside the CLI command.
 
+#### Granting a plugin that is denied
+
+Step 0 above refuses an *apply* on a live denial. The **Grant** path narrates
+one instead of refusing it: pre-staging a Grant for when the proposal moves is a
+legitimate gesture, so `approve` writes the grant, exits 0, and says that the
+plugin will still be skipped as `denied` on the next advance because the denial
+check in `evaluatePlugin` sits *before* the approval gate. The note names the
+denial's timestamp and gives `warpline deny --remove <plugin>`. Silence here
+told the operator, with exit 0 and no qualification, that they had approved
+something that would not run, and widened side-effect authority for nothing.
+A superseded denial is not narrated — it is already stale everywhere else.
+
 ### `denials`
 
 Where a human's "no" lands, so the next advance reads it instead of asking
