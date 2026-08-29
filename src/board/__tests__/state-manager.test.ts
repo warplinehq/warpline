@@ -318,3 +318,104 @@ describe('readAcks / writeAcks', () => {
     expect(read['e1'].action_taken).toBe('acknowledge')
   })
 })
+
+// ── Run reference resolution ─────────────────────────────────────
+
+/**
+ * A run id outlives the run log it names: `pruneRunLogs` deletes on mtime past
+ * 30 days, and nothing rewrites the identifiers pointing at what it deleted.
+ * Deleting a dangling pointer to dodge the case would lose the only record
+ * that the run ever happened, so the readers resolve through one helper that
+ * names the three states instead.
+ */
+describe('run reference resolution', () => {
+  let runsBase: string
+
+  beforeEach(async () => {
+    runsBase = join(tmpDir, 'runs')
+    await mkdir(runsBase, { recursive: true })
+  })
+
+  async function seedRunLog(runId: string): Promise<void> {
+    const { RunLogSchema, writeRunLog } = await import('../../schemas/run-log.js')
+    await writeRunLog(
+      RunLogSchema.parse({
+        run_id: runId,
+        started_at: '2026-08-01T10:00:00Z',
+        completed_at: '2026-08-01T10:00:05Z',
+        status: 'complete',
+        modes_run: [],
+        summary: 'seeded',
+      }),
+      runsBase,
+    )
+  }
+
+  test('an event whose run log is on disk resolves to that run', async () => {
+    const { resolveRunRef } = await import('../../schemas/run-log.js')
+    await writeV2State()
+    await seedRunLog('run-live')
+    await appendEvent({
+      event_id: 'e-live', type: 'notice' as const, timestamp: '2026-08-01T10:00:01Z',
+      source: 'engine', summary: 'live', severity: 'info' as const,
+      task_id: null, run_id: 'run-live', metadata_json: null,
+    })
+
+    const [event] = await readEvents()
+    const ref = resolveRunRef(event!.run_id, runsBase)
+    expect(ref).toEqual({ kind: 'retained', run_id: 'run-live' })
+  })
+
+  test('an event whose run log has been pruned resolves to not-retained, and says so', async () => {
+    const { resolveRunRef, describeRunRef } = await import('../../schemas/run-log.js')
+    await writeV2State()
+    await seedRunLog('run-aged')
+    await appendEvent({
+      event_id: 'e-aged', type: 'notice' as const, timestamp: '2026-08-01T10:00:01Z',
+      source: 'engine', summary: 'aged', severity: 'info' as const,
+      task_id: null, run_id: 'run-aged', metadata_json: null,
+    })
+    await unlink(join(runsBase, 'run-aged.json'))
+
+    const [event] = await readEvents()
+    let ref!: ReturnType<typeof resolveRunRef>
+    expect(() => { ref = resolveRunRef(event!.run_id, runsBase) }).not.toThrow()
+    expect(ref.kind).toBe('not_retained')
+
+    const rendered = describeRunRef(ref)
+    expect(rendered).not.toBe('')
+    expect(rendered).toContain('no longer retained')
+  })
+
+  test('an event carrying no run id renders as no run — not as not-retained', async () => {
+    const { resolveRunRef, describeRunRef } = await import('../../schemas/run-log.js')
+    await writeV2State()
+    await appendEvent({
+      event_id: 'e-null', type: 'notice' as const, timestamp: '2026-08-01T10:00:01Z',
+      source: 'engine', summary: 'outside any run', severity: 'info' as const,
+      task_id: null, run_id: null, metadata_json: null,
+    })
+
+    const [event] = await readEvents()
+    const ref = resolveRunRef(event!.run_id, runsBase)
+    expect(ref).toEqual({ kind: 'none' })
+    // The two absences are different facts: never part of a run, versus a run
+    // whose record aged out. Collapsing them loses the second one.
+    expect(describeRunRef(ref)).not.toContain('no longer retained')
+    expect(describeRunRef(ref)).not.toBe(describeRunRef({ kind: 'not_retained', run_id: 'x' }))
+  })
+
+  test('the same helper resolves a last_output pointer whose producing run is gone', async () => {
+    const { resolveRunRef } = await import('../../schemas/run-log.js')
+    await seedRunLog('run-output')
+
+    // The shape plan 02 writes into plugin_runs — a pointer carrying the run
+    // that produced it. It dangles exactly the way an event's run_id does, and
+    // resolves through the same symbol so the two renderings cannot drift.
+    const lastOutput = { type: 'brief', format: 'markdown', path: 'brief.md', run_id: 'run-output' }
+    expect(resolveRunRef(lastOutput.run_id, runsBase).kind).toBe('retained')
+
+    await unlink(join(runsBase, 'run-output.json'))
+    expect(resolveRunRef(lastOutput.run_id, runsBase).kind).toBe('not_retained')
+  })
+})
