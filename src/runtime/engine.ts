@@ -770,8 +770,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // run log and then emitting `plugin: skipped — denied …` next door
           // left the two logs disagreeing about the same advance.
           //
-          // No `plugin_runs` write: the plugin did not run. There are exactly
-          // two write sites for that record and this is not a third.
+          // No `plugin_runs` write: the plugin did not run. `runAdvance` has
+          // exactly two write sites for that record — the gated arm and the
+          // autonomous arm below — and this is not a third. (`applyPendingGate`
+          // holds the only other one, plus the delete in its discard closure;
+          // both are outside this function and answer a parked gate rather than
+          // an advance.)
           if (ev.reason === 'denied') {
             plugin_entries.push({
               plugin: pluginName,
