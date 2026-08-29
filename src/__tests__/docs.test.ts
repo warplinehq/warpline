@@ -947,3 +947,125 @@ describe('contributor expectations', () => {
     expect(offenders).toEqual([])
   })
 })
+
+// ── The README's opening still carries the positioning it was built for ──
+//
+// The launch work shaped the README around four promises (POS-01, POS-03,
+// POS-04) and verified each by reading. Reading does not survive a rewrite: the
+// later voice pass reflowed this exact prose, and the six workload names now
+// wrap across line breaks that were not there when they were checked. Nothing was
+// lost that time. Nothing here notices if something is lost the next time.
+//
+// Every check below flattens whitespace before it looks. A hard wrap is a
+// rendering detail — `competitor\nmonitoring` is the same phrase to a reader
+// and to GitHub, and a check that disagrees would fail on a reflow that broke
+// nothing. That is the opposite of what these are for.
+
+describe('the README opening keeps its positioning promises', () => {
+  /** Everything above the first `##` — what a reader sees before scrolling. */
+  const opening = () => {
+    const readme = read('README.md')
+    const firstHeading = readme.indexOf('\n## ')
+    return firstHeading === -1 ? readme : readme.slice(0, firstHeading)
+  }
+  const flatten = (s: string) => s.replace(/\s+/g, ' ').toLowerCase()
+
+  // POS-01's own words: these six, "rather than an abstract category". The
+  // list is written out here because the requirement that owns it lives in
+  // `.planning/`, which is gitignored and never ships — so there is no file to
+  // derive it from. This test is the shipped copy of that contract.
+  const WORKLOADS = [
+    'outbound sequencing',
+    'market research pulls',
+    'content pipelines',
+    'competitor monitoring',
+    'lead qualification',
+    'report generation',
+  ]
+
+  test('all six workloads are named concretely, each exactly once', () => {
+    const flat = flatten(opening())
+    const offenders = WORKLOADS.flatMap((w) => {
+      const n = flat.split(w).length - 1
+      if (n === 1) return []
+      return [
+        n === 0
+          ? `README.md: the opening no longer names \`${w}\`. POS-01 requires the work be named concretely rather than as an abstract category — restore it, or change POS-01 first.`
+          : `README.md: \`${w}\` appears ${n} times in the opening. Naming it twice reads as padding; keep one.`,
+      ]
+    })
+    expect(offenders).toEqual([])
+  })
+
+  // The gate is the product's central claim, so the README must state it in the
+  // form that cannot be read as conditional. Both halves matter: that a
+  // declared side effect does not run unapproved, AND that `autonomous` is no
+  // exception. The launch review recorded the second half as the one readers
+  // get wrong.
+  test('the gate appears in its non-bypassable form, autonomous included', () => {
+    const flat = flatten(opening())
+    const required: [string, string][] = [
+      [
+        "doesn't run without explicit human session approval",
+        'the gate itself — a declared side effect does not execute unapproved',
+      ],
+      [
+        'that includes at `autonomous`',
+        'the exception readers assume exists; POS-01 wants it closed in the opening, not in the FAQ',
+      ],
+    ]
+    const offenders = required
+      .filter(([literal]) => !flat.includes(literal))
+      .map(
+        ([literal, why]) =>
+          `README.md: the opening no longer states \`${literal}\` — ${why}. Reword the surrounding prose freely, but keep this claim intact above the first heading.`,
+      )
+    expect(offenders).toEqual([])
+  })
+
+  // Issue #5 settled on 3-5. Fewer reads as unproven, more reads as a wall —
+  // and every badge is a standing promise that some external surface is green,
+  // so the count is a maintenance budget, not decoration.
+  test('the badge row carries between three and five badges', () => {
+    const badges = [...opening().matchAll(/\[!\[[^\]]*\]\(([^)]+)\)\]\(([^)]+)\)/g)]
+    const offenders: string[] = []
+
+    if (badges.length < 3 || badges.length > 5) {
+      offenders.push(
+        `README.md: the opening carries ${badges.length} badges. POS-04 fixes the range at 3-5 — fewer reads as unproven, more as a wall.`,
+      )
+    }
+    // A badge whose image is not fetched over https renders as a broken box to
+    // exactly the logged-out reader the badges exist to convince.
+    for (const [, img] of badges) {
+      if (!img.startsWith('https://')) {
+        offenders.push(
+          `README.md: badge image \`${img}\` is not an https URL. It will render broken for a logged-out reader.`,
+        )
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  // POS-03 is a wording requirement, not a fact requirement: the provenance is
+  // true either way, but naming the company is what makes it unpublishable.
+  // The private-terms guard catches a name; this catches the claim going
+  // missing or being restated a second time in different words.
+  test('the provenance claim is stated once, in the public-safe wording', () => {
+    const flat = flatten(read('README.md'))
+    const claim = "one company's marketing operations since early 2026"
+    const n = flat.split(claim).length - 1
+    const offenders: string[] = []
+
+    if (n === 0) {
+      offenders.push(
+        `README.md: the provenance claim is gone. POS-03 requires stating that the runtime has run ${claim} — in that public-safe form, which is what keeps the company unnamed.`,
+      )
+    } else if (n > 1) {
+      offenders.push(
+        `README.md: the provenance claim appears ${n} times. One line, per POS-03 — a second copy is where the wording drifts and a name gets in.`,
+      )
+    }
+    expect(offenders).toEqual([])
+  })
+})
