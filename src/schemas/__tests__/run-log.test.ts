@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   RunLogSchema,
   ModeRunSchema,
+  PluginLogEntrySchema,
   runLogFilename,
   ensureRunDir,
   writeRunLog,
@@ -118,6 +119,32 @@ describe('ModeRunSchema', () => {
     }
     const result = ModeRunSchema.safeParse(mode)
     expect(result.success).toBe(true)
+  })
+})
+
+describe('PluginLogEntrySchema', () => {
+  const entry = {
+    plugin: 'digest-sender',
+    status: 'completed' as const,
+    started_at: '2026-04-03T12:00:00Z',
+    elapsed_ms: 120,
+    result_summary: 'sent the digest',
+  }
+
+  /**
+   * `denied` is an outcome of supervision, exactly as `gated` is. Recording a
+   * denial as `skipped` instead would put it in the same bucket as "no Grant"
+   * and "already fresh", which is the conflation a denied outcome exists to
+   * remove — the log would no longer say whether a human answered.
+   */
+  it('accepts every status including the denied outcome', () => {
+    for (const status of ['completed', 'failed', 'skipped', 'gated', 'denied'] as const) {
+      expect(PluginLogEntrySchema.safeParse({ ...entry, status }).success).toBe(true)
+    }
+  })
+
+  it('still rejects a status outside the set', () => {
+    expect(PluginLogEntrySchema.safeParse({ ...entry, status: 'refused' }).success).toBe(false)
   })
 })
 

@@ -18,6 +18,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+  DenialSchema,
   ENGINE_STATE_MAX_SCHEMA_VERSION,
   EngineStateInvalidError,
   PendingGateSchema,
@@ -459,5 +460,78 @@ describe('PendingGateSchema', () => {
     const parsed = PendingGateSchema.parse(stubGate)
     expect(parsed.run_started_at).toBeNull()
     expect(parsed.run_completed_at).toBeNull()
+  })
+})
+
+/**
+ * The denials record.
+ *
+ * Keyed by plugin name rather than held as an array, and that shape is the
+ * whole idempotency story: a second denial for the same plugin lands on the
+ * same key, so re-denying cannot accumulate duplicates and there is no de-dupe
+ * scan to get wrong. It also makes a fleet-wide denial inexpressible — there is
+ * no key that means every plugin.
+ */
+describe('DenialSchema and the denials record', () => {
+  const denial = {
+    plugin: 'digest-sender',
+    reason: 'operator declined the parked result',
+    denied_at: '2026-08-29T10:00:00.000Z',
+    fingerprint: 'a'.repeat(64),
+  }
+
+  it('parses a denial and defaults the optional note to null', () => {
+    const parsed = DenialSchema.parse(denial)
+    expect(parsed.plugin).toBe('digest-sender')
+    expect(parsed.fingerprint).toBe('a'.repeat(64))
+    expect(parsed.note).toBeNull()
+  })
+
+  it('survives a write and re-read through engine state with the entry intact', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'warpline-denial-'))
+    const statePath = join(dir, 'engine-state.json')
+    try {
+      const state = defaultEngineState()
+      state.denials['digest-sender'] = DenialSchema.parse({ ...denial, note: 'too chatty' })
+      await writeEngineState(state, statePath)
+
+      const reread = await readEngineState(statePath)
+      expect(reread.denials['digest-sender']?.fingerprint).toBe('a'.repeat(64))
+      expect(reread.denials['digest-sender']?.note).toBe('too chatty')
+      expect(Object.keys(reread.denials)).toEqual(['digest-sender'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('reads a state document written before denials existed as an empty record', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'warpline-denial-'))
+    const statePath = join(dir, 'engine-state.json')
+    try {
+      await writeFile(statePath, JSON.stringify({ schema_version: 1, plugin_runs: {} }))
+      const state = await readEngineState(statePath)
+      expect(state.denials).toEqual({})
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The structural half of "denying twice is a no-op": the record's key does
+   * it, not a scan. The other half — that a second deny with an UNCHANGED
+   * fingerprint writes nothing at all — is asserted in `deny.test.ts`, where
+   * the verb decides it.
+   */
+  it('replaces rather than accumulates when the same plugin is denied again', () => {
+    const state = defaultEngineState()
+    state.denials['digest-sender'] = DenialSchema.parse(denial)
+    state.denials['digest-sender'] = DenialSchema.parse({
+      ...denial,
+      fingerprint: 'b'.repeat(64),
+      denied_at: '2026-08-29T11:00:00.000Z',
+    })
+
+    expect(Object.keys(state.denials)).toEqual(['digest-sender'])
+    expect(state.denials['digest-sender']?.fingerprint).toBe('b'.repeat(64))
   })
 })
