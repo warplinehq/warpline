@@ -84,10 +84,14 @@ open ──expiry──▶ expired         (approval kind only; see below)
 
 Rules that follow from the runtime, not from taste:
 
-- **An approval Ask expires with the Grant ceiling.** Grants live at most
-  24 hours from first issue unless `--long` is passed
+- **An approval Ask expires with the Grant ceiling — once a Grant exists.**
+  Grants live at most 24 hours from first issue unless `--long` is passed
   (`MAX_GRANT_WINDOW_MS`). The Ask shows `expires_at`; **defer options that
-  would outlive it are not offered.**
+  would outlive it are not offered.** An approval Ask that has never been
+  granted has no expiry to cap holds against: the ceiling anchors on
+  `first_granted_at`, which does not exist before a grant, so defer options for
+  such an Ask are not capped at all. The cap is a property of a live Grant, not
+  of the approval kind.
 - **Answering an expired Ask is refused and said.** If the operator opened
   the Ask before expiry and answers after, the Board reports "this expired
   at *t*" and does nothing. It never silently re-raises.

@@ -268,58 +268,77 @@ async function showBudget() {
 
 const [cmd, ...args] = process.argv.slice(2)
 
-switch (cmd) {
-  case 'status':
-  case undefined:
-    await status()
-    if (args.includes('--budget')) await showBudget()
-    break
-  case 'ack':
-    if (!args[0]) { console.log('Usage: warpline ack <event-id-prefix>'); process.exit(1) }
-    await ack(args[0])
-    break
-  case 'ack-all':
-    await ackAll()
-    break
-  case 'defer':
-    if (!args[0] || !args[1]) { console.log('Usage: warpline defer <event-id-prefix> <1h|4h|1d|1w>'); process.exit(1) }
-    await defer(args[0], args[1])
-    break
-  case 'tasks':
-    await showTasks()
-    break
-  case 'done':
-    if (!args[0]) { console.log('Usage: warpline done <task-id-prefix>'); process.exit(1) }
-    await markDone(args[0])
-    break
-  case 'budget':
-    await showBudget()
-    break
-  case 'auto-ack-poll': {
-    // Acknowledge all poll-type notices (stage changes, comments) from prior runs.
-    // Only acks 'notice' type events from 'poll' sources. Tasks and errors persist.
-    const events = await readEvents()
-    const acks = await readAcks()
-    let ackCount = 0
-    const newAcks = { ...acks }
-    for (const event of events) {
-      if (newAcks[event.event_id]) continue // already acked
-      if (event.source.includes('poll') && event.type === 'notice') {
-        newAcks[event.event_id] = {
-          acknowledged_at: new Date().toISOString(),
-          action_taken: 'acknowledge',
+/**
+ * This file is not dispatcher-routed — it is its own process entry and exits
+ * on its own — so it needs its own mapping for an unusable engine-state
+ * document. `readEngineState` throws `EngineStateInvalidError` rather than
+ * handing back defaults a later write would persist over the task board, and
+ * `readTasks` is a write-capable read, so every command below can raise it.
+ *
+ * Duck-typed on `err.name` for the same reason `src/cli/warpline.ts` is:
+ * catching it by name needs no import at all.
+ */
+try {
+  switch (cmd) {
+    case 'status':
+    case undefined:
+      await status()
+      if (args.includes('--budget')) await showBudget()
+      break
+    case 'ack':
+      if (!args[0]) { console.log('Usage: warpline ack <event-id-prefix>'); process.exit(1) }
+      await ack(args[0])
+      break
+    case 'ack-all':
+      await ackAll()
+      break
+    case 'defer':
+      if (!args[0] || !args[1]) { console.log('Usage: warpline defer <event-id-prefix> <1h|4h|1d|1w>'); process.exit(1) }
+      await defer(args[0], args[1])
+      break
+    case 'tasks':
+      await showTasks()
+      break
+    case 'done':
+      if (!args[0]) { console.log('Usage: warpline done <task-id-prefix>'); process.exit(1) }
+      await markDone(args[0])
+      break
+    case 'budget':
+      await showBudget()
+      break
+    case 'auto-ack-poll': {
+      // Acknowledge all poll-type notices (stage changes, comments) from prior runs.
+      // Only acks 'notice' type events from 'poll' sources. Tasks and errors persist.
+      const events = await readEvents()
+      const acks = await readAcks()
+      let ackCount = 0
+      const newAcks = { ...acks }
+      for (const event of events) {
+        if (newAcks[event.event_id]) continue // already acked
+        if (event.source.includes('poll') && event.type === 'notice') {
+          newAcks[event.event_id] = {
+            acknowledged_at: new Date().toISOString(),
+            action_taken: 'acknowledge',
+          }
+          ackCount++
         }
-        ackCount++
       }
+      if (ackCount > 0) {
+        await writeAcks(newAcks)
+        console.log(`Auto-acked ${ackCount} poll notices`)
+      }
+      break
     }
-    if (ackCount > 0) {
-      await writeAcks(newAcks)
-      console.log(`Auto-acked ${ackCount} poll notices`)
-    }
-    break
+    default:
+      console.log(`Unknown command: ${cmd}`)
+      console.log('Commands: status [--budget], ack <id>, ack-all, defer <id> <duration>, tasks, done <id>, budget, auto-ack-poll')
+      process.exit(1)
   }
-  default:
-    console.log(`Unknown command: ${cmd}`)
-    console.log('Commands: status [--budget], ack <id>, ack-all, defer <id> <duration>, tasks, done <id>, budget, auto-ack-poll')
+} catch (err: unknown) {
+  if (err instanceof Error && err.name === 'EngineStateInvalidError') {
+    // Surface the message, not a stack — the convention at plan.ts:198.
+    console.error(err.message)
     process.exit(1)
+  }
+  throw err
 }

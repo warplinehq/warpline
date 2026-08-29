@@ -7,7 +7,7 @@
  * strict, so a typo'd one still fails validation loudly.
  */
 import { z } from 'zod'
-import { copyFile, readFile, rename, writeFile } from 'node:fs/promises'
+import { readFile, rename, writeFile } from 'node:fs/promises'
 import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 import { SkillResultSchema } from './skill-result.js'
@@ -97,8 +97,32 @@ export const PendingGateSchema = z.object({
 })
 export type PendingGate = z.infer<typeof PendingGateSchema>
 
+/**
+ * The newest schema version this build understands. A file at or below it
+ * loads; one above it is refused by `readStateFile`, with a reason that says
+ * the build is behind rather than that the file is broken.
+ */
+export const ENGINE_STATE_MAX_SCHEMA_VERSION = 1
+
+/**
+ * `.catchall(z.unknown())` is on this object so unknown top-level keys survive
+ * a read-then-write round trip instead of being stripped — rolling back to an
+ * older build must not silently delete the fields a newer one wrote.
+ *
+ * The accepted cost, recorded so it is not a surprise later: a typo'd
+ * top-level key — `plugin_run` for `plugin_runs` — now round-trips silently
+ * where it used to fail validation loudly. The named fields are still strict,
+ * so the typo surfaces as a missing value rather than as a rejected file.
+ */
 export const EngineStateSchema = z.object({
-  schema_version: z.literal(1),
+  /**
+   * Read tolerantly on purpose: an older build must still load a file it
+   * wrote, and a version it has never heard of is a separate, explicit check
+   * in `readStateFile` rather than a validation failure. A non-integer or
+   * negative value is not a version at all, so it fails here and lands on the
+   * ordinary invalid-content refusal.
+   */
+  schema_version: z.number().int().nonnegative().default(1),
   last_run_id: z.string().nullable().default(null),
   last_run_at: z.string().nullable().default(null),
   /**
@@ -113,7 +137,7 @@ export const EngineStateSchema = z.object({
   pending_gates: z.array(PendingGateSchema).default([]),
   /** Host extension bag for anything the engine itself does not read. */
   extensions: z.record(z.string(), z.unknown()).default({}),
-})
+}).catchall(z.unknown())
 export type EngineState = z.infer<typeof EngineStateSchema>
 
 export function defaultEngineState(): EngineState {
@@ -123,80 +147,148 @@ export function defaultEngineState(): EngineState {
 // ── Persistence ───────────────────────────────────────────────────────────
 
 /**
- * The one read implementation. `backup` decides whether a corrupt or
- * unreadable file is copied aside before defaults are returned; both public
- * entry points route through here so the two cannot drift by a comparison.
+ * Raised when a state document exists but cannot be used. Carries the `path`
+ * and the `reason` separately so a caller can surface either without
+ * re-parsing the message.
+ *
+ * `name` is assigned the literal in the constructor and that is load-bearing:
+ * it is how `src/cli/warpline.ts` catches this without importing this module.
+ * Both that dispatcher and `src/bin/warpline.ts` forbid static imports — the
+ * whole point is that `--help` never loads zod — so the catch is duck-typed on
+ * the name. Renaming the class without renaming the string breaks the mapping
+ * silently.
  */
-async function readStateFile(statePath: string, backup: boolean): Promise<EngineState> {
-  try {
-    const raw = JSON.parse(await readFile(statePath, 'utf-8'))
-    const result = EngineStateSchema.safeParse(raw)
-    if (result.success) return result.data
-    if (backup) {
-      await copyFile(statePath, `${statePath}.corrupt`)
-      console.warn(`engine state failed validation, backed up to ${statePath}.corrupt. Using defaults.`)
-    }
-    return defaultEngineState()
-  } catch (err: unknown) {
-    const isNotFound = err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT'
-    if (backup && !isNotFound) {
-      try {
-        await copyFile(statePath, `${statePath}.corrupt`)
-        console.warn(`engine state unreadable, backed up to ${statePath}.corrupt. Using defaults.`)
-      } catch {
-        // best-effort backup
-      }
-    }
-    return defaultEngineState()
+export class EngineStateInvalidError extends Error {
+  readonly path: string
+  readonly reason: string
+
+  constructor(path: string, reason: string) {
+    super(`engine state at ${path} is unusable: ${reason}`)
+    this.name = 'EngineStateInvalidError'
+    this.path = path
+    this.reason = reason
   }
 }
 
-let backupsSuppressed = false
+/** What a read does with a document it cannot validate. */
+type ReadPolicy = 'fail-closed' | 'tolerant'
 
 /**
- * Read engine state, falling back to defaults on missing or corrupt files.
- * Corrupt files are backed up to `{path}.corrupt` before defaults are
- * returned — prevents crash loops without silently destroying evidence.
+ * The one read implementation. `policy` decides what an unusable document
+ * does; both public entry points route through here so the two cannot drift by
+ * a comparison.
+ *
+ * `fail-closed` throws and touches nothing. That is the whole point: the read
+ * used to return `defaultEngineState()`, and the next engine write persisted
+ * that reset over the operator's `task_aging`, `deferrals` and
+ * `completed_tasks`. A file we cannot read is a file we must not overwrite.
+ *
+ * `tolerant` returns defaults, for the read-only callers that are contracted
+ * never to fail — `warpline plan` above all. It writes nothing either.
+ *
+ * Nothing here copies the file aside any more. The old `{path}.corrupt` backup
+ * was a write on a read path, and it only existed to preserve evidence before
+ * defaults destroyed it; failing closed preserves the original in place.
+ *
+ * A missing file is not an unusable one: ENOENT yields defaults under both
+ * policies, so a fresh install still works.
+ */
+async function readStateFile(statePath: string, policy: ReadPolicy): Promise<EngineState> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(await readFile(statePath, 'utf-8'))
+  } catch (err: unknown) {
+    const isNotFound = err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT'
+    if (isNotFound) return defaultEngineState()
+    if (policy === 'tolerant') return defaultEngineState()
+    throw new EngineStateInvalidError(statePath, err instanceof Error ? err.message : String(err))
+  }
+
+  const result = EngineStateSchema.safeParse(parsed)
+  if (!result.success) {
+    if (policy === 'tolerant') return defaultEngineState()
+    throw new EngineStateInvalidError(statePath, describeIssues(result.error))
+  }
+
+  // Checked after a successful parse, not inside the schema: a version we have
+  // never heard of is a different problem from a broken document, and the
+  // operator's fix is different too. Refusing it is what stops an older build
+  // from round-tripping a newer file down to the fields it happens to know.
+  if (result.data.schema_version > ENGINE_STATE_MAX_SCHEMA_VERSION) {
+    if (policy === 'tolerant') return defaultEngineState()
+    throw new EngineStateInvalidError(
+      statePath,
+      `schema_version ${result.data.schema_version} is newer than this build understands ` +
+        `(highest known: ${ENGINE_STATE_MAX_SCHEMA_VERSION}) — your build is older than this file, ` +
+        `so upgrade warpline rather than letting this build rewrite it`,
+    )
+  }
+
+  return result.data
+}
+
+/** First issue, path-qualified. The reason a human acts on, not a dump. */
+function describeIssues(error: z.ZodError): string {
+  const issue = error.issues[0]
+  if (!issue) return 'failed schema validation'
+  const where = issue.path.length > 0 ? issue.path.join('.') : '(root)'
+  return `${where}: ${issue.message}`
+}
+
+let tolerantReads = false
+
+/**
+ * Read engine state on a path that may go on to write it.
+ *
+ * Missing file → defaults. Unusable file → `EngineStateInvalidError`, with the
+ * document left exactly as it was on disk. Callers return a non-zero code and
+ * surface the message; only `src/bin/warpline.ts` exits.
  */
 export async function readEngineState(statePath: string): Promise<EngineState> {
-  return readStateFile(statePath, !backupsSuppressed)
+  return readStateFile(statePath, tolerantReads ? 'tolerant' : 'fail-closed')
 }
 
 /**
- * Read engine state with the corrupt-file backup suppressed.
+ * Read engine state for a command that will not write.
  *
- * The backup is a WRITE on a read path, which `warpline plan` cannot afford:
- * `plan` is a preview, and an operator whose state file is corrupt must not
- * discover that a read-only command wrote a `.corrupt` copy into their home.
- * This is a product decision, not a test convenience — guaranteeing a valid
- * fixture state file would make the prohibition test pass and leave the
- * shipped claim false.
+ * Always tolerant: an unusable document yields defaults rather than stopping
+ * the caller. `warpline plan` is a preview and is contracted never to fail, so
+ * a corrupt state file must degrade the preview, not end it. This is a product
+ * decision, not a test convenience — guaranteeing a valid fixture state file
+ * would make the prohibition test pass and leave the shipped claim false.
  */
 export async function readEngineStateReadOnly(statePath: string): Promise<EngineState> {
-  return readStateFile(statePath, false)
+  return readStateFile(statePath, 'tolerant')
 }
 
 /**
- * Suppress corrupt-state backups for the duration of `fn`.
+ * Read tolerantly for the duration of `fn`.
+ *
+ * The name is older than the meaning: it once suppressed a `{path}.corrupt`
+ * backup write, and that backup no longer exists. What it does now is force
+ * the tolerant policy — which is the same job it was always really doing,
+ * namely keeping a read-only command out of the write-capable path.
  *
  * `readEngineStateReadOnly` covers the reads a caller makes directly. This
  * covers the ones it cannot see: `state-manager.checkTaskLock` reads state
- * through `readEngineState` off a module global and takes no options, so a
- * read-only command reaching the task-lock guard would still write a backup.
- * One guard in the shared read is a smaller and safer change than a variant
- * threaded through every intermediate caller.
+ * through `readEngineState` off a module global and takes no options, and
+ * `evaluatePlugin` calls it, so `warpline plan` reaches the write-capable read
+ * indirectly no matter how carefully its own call sites are written. Without
+ * this, the one command contracted never to fail throws on the exact input it
+ * was hardened against. One guard in the shared read is a smaller and safer
+ * change than a variant threaded through every intermediate caller.
  *
  * ponytail: process-global, restored in a `finally`. Fine for a one-shot CLI
  * command; if two concurrent callers ever need different answers, make it an
  * AsyncLocalStorage context.
  */
 export async function withoutStateBackups<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = backupsSuppressed
-  backupsSuppressed = true
+  const previous = tolerantReads
+  tolerantReads = true
   try {
     return await fn()
   } finally {
-    backupsSuppressed = previous
+    tolerantReads = previous
   }
 }
 

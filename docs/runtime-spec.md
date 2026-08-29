@@ -419,3 +419,59 @@ function the engine calls — opens it read-only, and the write path
 `runAdvance`. That is a property of the call graph, verifiable by inspection,
 and a test pins it: a full advance over side-effecting plugins leaves the file
 byte- and mtime-identical.
+
+---
+
+## 10. Engine state
+
+`~/.warpline/state/engine-state.json` is the single JSON document the engine
+persists between runs. It is operator-owned and hand-editable, which is the
+whole reason the read policy below is written down rather than inferred.
+
+### Read policy
+
+There are two reads and they behave differently on purpose.
+
+| Read | Used by | Missing file | Unusable file |
+|------|---------|--------------|---------------|
+| Write-capable | Anything that may go on to write state — an advance, the task board | Defaults | Refuses: names the path and the reason, exits non-zero, changes nothing on disk |
+| Read-only | Commands contracted never to write, `warpline plan` above all | Defaults | Defaults |
+
+The write-capable read fails closed because the alternative is worse than a
+failure. Returning defaults from an unreadable document means the next write
+persists those defaults, and the operator's task history, deferrals and
+completed tasks are gone with nothing to recover them from. A document we
+cannot read is a document we must not overwrite.
+
+Nothing on either read path writes. There is no `{path}.corrupt` copy any
+more — that backup existed only to preserve evidence before defaults destroyed
+it, and refusing preserves the original in place instead. A read-only command
+that hits an unusable document degrades its output; it does not leave a file
+behind in the operator's home.
+
+A missing file is not an unusable one. A fresh install has no state document
+and both reads return defaults, so failing closed does not break first run.
+
+### `schema_version`
+
+Read tolerantly: any non-negative integer parses, so a build reading a file
+one version behind still loads it.
+
+One version is refused. A `schema_version` above the newest this build knows
+is reported as *your build is older than this file* — a distinct message from
+the corrupt-document one, because the operator's fix is different. Upgrade
+warpline rather than letting an older build rewrite a newer document down to
+the fields it happens to understand.
+
+A `schema_version` that is not a non-negative integer — a fraction, a negative
+number — is not a version at all and is refused as an unreadable document, never
+treated as an older one to load tolerantly.
+
+### Unknown top-level keys
+
+Unknown top-level keys round-trip. A field a newer build wrote survives being
+read and rewritten by an older one, so a rollback does not silently delete it.
+
+The accepted cost: a typo'd top-level key round-trips silently instead of
+failing validation loudly. The named fields stay strict, so a typo surfaces as
+a missing value rather than as a rejected file.
