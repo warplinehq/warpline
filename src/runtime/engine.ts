@@ -630,7 +630,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         // -- Invoke plugin --
         let invocationResult: Awaited<ReturnType<typeof invokePlugin>>
         try {
-          invocationResult = await invokePlugin(pluginName, {}, { pluginsDir })
+          // `runId` is threaded so the Outputs this handler returns are stamped
+          // with the advance that produced them, not with a per-invocation id
+          // nothing else knows. `persistArtifact` stays off deliberately — see
+          // the rationale in invoke-plugin.ts; an advance writes a RunLog, not
+          // a RunArtifact.
+          invocationResult = await invokePlugin(pluginName, {}, { pluginsDir, runId: run_id })
         } catch (err) {
           plugin_states.set(pluginName, 'failed')
           const errMsg = err instanceof Error ? err.message : String(err)

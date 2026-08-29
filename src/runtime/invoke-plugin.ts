@@ -163,6 +163,29 @@ export function deriveRunStatus(inv: {
   return 'failed'
 }
 
+/**
+ * Stamp run provenance onto every Output a result carries.
+ *
+ * The runtime says which run produced an Output and when — never the plugin.
+ * The assignment is unconditional and overwrites whatever the handler put
+ * there: a plugin that could stamp its own `run_id` could claim a run it did
+ * not come from, so `output.run_id ?? runId` would be the bug, not the fix.
+ *
+ * Nothing is synthesized. A result that produced no Output gets no Output.
+ */
+export function stampOutputs(result: SkillResult, runId: string): SkillResult {
+  if (result.artifacts_produced.length === 0) return result
+  const producedAt = new Date().toISOString()
+  return {
+    ...result,
+    artifacts_produced: result.artifacts_produced.map((o) => ({
+      ...o,
+      run_id: runId,
+      produced_at: producedAt,
+    })),
+  }
+}
+
 // -------------------------------------------------------------------------
 // invokePlugin
 // -------------------------------------------------------------------------
@@ -182,6 +205,10 @@ export async function invokePlugin(
   const dir = options.pluginsDir ?? getDefaultPluginsDir()
   const start = Date.now()
   const startedAt = new Date(start).toISOString()
+  // One id for this invocation, shared by the Output provenance stamp below and
+  // by the run artifact further down. They used to be able to disagree because
+  // the artifact minted its own.
+  const runId = options.runId ?? crypto.randomUUID()
 
   // -- Load handler and manifest modules --
   // import() needs file:// URLs, not bare absolute paths.
@@ -316,24 +343,30 @@ export async function invokePlugin(
     }
 
     // -- Validate shape --
+    // The parse boundary is also the provenance boundary: bare-string artifacts
+    // normalize to Outputs here, and the runtime stamps them here, so every
+    // caller downstream sees one shape carrying a run it can trust.
     const parsed = SkillResultSchema.safeParse(rawResult)
-    const thisResult: SkillResult = parsed.success
-      ? parsed.data
-      : {
-          status: 'failed',
-          phases_completed: [],
-          phases_failed: [pluginName],
-          errors: [
-            makeSkillError(
-              'parse_error',
-              `Plugin '${pluginName}' returned invalid SkillResult: ${parsed.error?.message?.slice(0, 300) ?? 'parse error'}`,
-            ),
-          ],
-          data_freshness: {},
-          summary: `${pluginName}: invalid handler output`,
-          artifacts_produced: [],
-          schema_version: 1,
-        }
+    const thisResult: SkillResult = stampOutputs(
+      parsed.success
+        ? parsed.data
+        : {
+            status: 'failed',
+            phases_completed: [],
+            phases_failed: [pluginName],
+            errors: [
+              makeSkillError(
+                'parse_error',
+                `Plugin '${pluginName}' returned invalid SkillResult: ${parsed.error?.message?.slice(0, 300) ?? 'parse error'}`,
+              ),
+            ],
+            data_freshness: {},
+            summary: `${pluginName}: invalid handler output`,
+            artifacts_produced: [],
+            schema_version: 1,
+          },
+      runId,
+    )
 
     const elapsed = Date.now() - attemptStart
     const firstError = thisResult.errors?.[0]?.message ?? null
@@ -407,7 +440,6 @@ export async function invokePlugin(
   // skip there by leaving `persistArtifact` undefined.
   // -------------------------------------------------------------------
   if (options.persistArtifact) {
-    const runId = options.runId ?? crypto.randomUUID()
     const artifactStatus = deriveRunStatus({
       cancelled,
       timed_out: timedOut,

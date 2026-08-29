@@ -815,3 +815,132 @@ export async function handler(manifest, args) {
     expect(state.plugin_runs['gated-emailer']).toBeUndefined()
   })
 })
+
+// -----------------------------------------------------------------------
+// runAdvance Output handling (R5, R7)
+// -----------------------------------------------------------------------
+
+describe('runAdvance Output handling', () => {
+  let ctx: TestHome
+  // The events log must be redirected here too — runAdvance's eventsPath
+  // DEFAULTS to the real live events.jsonl, and omitting it once appended
+  // thousands of fixture events to live state (2026-08-18).
+  let eventsPath: string
+  let statePath: string
+
+  beforeEach(async () => {
+    ctx = await createTestHome()
+    eventsPath = join(ctx.runsDir, 'events.jsonl')
+    statePath = join(ctx.stateDir, 'engine-state.json')
+  })
+
+  afterEach(async () => {
+    await ctx.cleanup()
+  })
+
+  /**
+   * An autonomous plugin returning whatever `artifacts_produced` literal the
+   * caller passes, so a test can say "produced an Output" or "produced none"
+   * without a second fixture.
+   */
+  async function createOutputPlugin(name: string, artifactsLiteral: string): Promise<void> {
+    const pluginDir = join(ctx.pluginsDir, name)
+    await mkdir(pluginDir, { recursive: true })
+
+    const manifest = {
+      name,
+      version: '1.0.0',
+      description: `${name} output fixture`,
+      inputs: {},
+      outputs: {},
+      capabilities: [],
+      schedule: 'on_run',
+      autonomy_level: 'autonomous',
+      side_effects: [],
+      ttl_hours: 0.001,
+      dependencies: [],
+      timeout_ms: 5000,
+      max_parallelism: 1,
+    }
+
+    await writeFile(
+      join(pluginDir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify(manifest)}`,
+    )
+
+    await writeFile(
+      join(pluginDir, 'handler.ts'),
+      `
+export async function handler(manifest, args) {
+  return {
+    status: 'success',
+    phases_completed: ['${name}'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: '${name} produced a brief',
+    artifacts_produced: ${artifactsLiteral},
+    schema_version: 2,
+  }
+}
+`,
+    )
+  }
+
+  // The sentinel is deliberately nothing like the summary: if the assertion is
+  // to discriminate, the text it hunts for must not be text the event log is
+  // supposed to carry.
+  const BODY_SENTINEL = 'ZZ-OUTPUT-BODY-SENTINEL-must-never-be-logged-ZZ'
+
+  test('Test 28: an inline Output body never reaches events.jsonl', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await createOutputPlugin(
+      'brief-writer',
+      JSON.stringify([{ type: 'brief', format: 'markdown', body: `# heading\n${BODY_SENTINEL}\n` }]),
+    )
+
+    await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+    })
+
+    const raw = await readFile(eventsPath, 'utf-8')
+    const lines = raw.split('\n').filter((l) => l.length > 0)
+    // The run did happen — otherwise "the body is absent" passes vacuously.
+    expect(lines.length).toBeGreaterThan(0)
+    expect(lines.some((l) => l.includes('brief-writer'))).toBe(true)
+    for (const line of lines) expect(line).not.toContain(BODY_SENTINEL)
+  })
+
+  test('Test 29: the runtime stamps run_id and produced_at on every Output', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await createOutputPlugin(
+      'stamped',
+      // The handler claims a run it never came from. The runtime must overwrite
+      // it, not defer to it — an Output that can self-attest is spoofable.
+      JSON.stringify([{ type: 'brief', body: 'hi', run_id: 'a-run-that-never-happened' }]),
+    )
+
+    const result = await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+    })
+
+    const log = JSON.parse(await readFile(join(ctx.runsDir, `${result.run_id}.json`), 'utf-8'))
+    expect(log.run_id).toBe(result.run_id)
+
+    const { invokePlugin } = await import('../invoke-plugin.js')
+    const invoked = await invokePlugin('stamped', {}, {
+      pluginsDir: ctx.pluginsDir,
+      runId: 'run-under-test',
+    })
+    const output = invoked.result.artifacts_produced[0]
+    expect(output).toBeDefined()
+    expect(output?.run_id).toBe('run-under-test')
+    expect(typeof output?.produced_at).toBe('string')
+  })
+})

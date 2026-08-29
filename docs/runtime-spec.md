@@ -233,6 +233,54 @@ Log file:
 Cancelled runs persist with `status: 'cancelled'` and partial attempts; the
 log captures whatever the handler emitted before abort.
 
+### Output records
+
+`SkillResult.artifacts_produced` is an array of Output records — a thing the
+plugin produced that an operator will read and take away. `SkillResult.schema_version`
+defaults to `2` to mark the change.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `type` | string | yes | Semantic kind, chosen by the plugin — `report`, `brief`, `artifact` |
+| `format` | `markdown` \| `json` \| `html` \| `text` | no, defaults `markdown` | Rendering key |
+| `run_id` | string | stamped | The run that produced it |
+| `produced_at` | ISO 8601 | stamped | When the producing run accepted it |
+| `body` | string | exactly one of | Inline content, capped at 16384 UTF-8 bytes |
+| `path` | string | exactly one of | Filesystem path to the content |
+
+Exactly one of `body` and `path`. Declaring both fails validation and declaring
+neither fails validation, so a reader never has to decide which one wins.
+
+The inline cap is **16384 UTF-8 bytes**, and the unit is the point. It is
+enforced with `Buffer.byteLength`, not with a string length: a string length
+counts UTF-16 code units, so `'😀'.repeat(5)` measures 10 against a limit of 10
+while costing 20 bytes on disk. The constraint being bounded is not the number
+of characters an operator typed, it is the size of `engine-state.json`, which is
+reparsed and rewritten whole on every advance and every `warpline plan` — an
+inline body sits inside a parked gate in that document.
+
+`run_id` and `produced_at` are stamped by the runtime at the point it accepts a
+result, never by the plugin. A plugin that could stamp its own provenance could
+claim a run it did not come from, so whatever a handler puts in those two fields
+is overwritten rather than preferred. Both are optional in the schema for
+exactly that reason: a handler must be able to return an Output without them.
+
+`format` is a closed enum. An unrecognised value fails validation rather than
+being dropped; an undeclared one reads `markdown`. A format the renderer does
+not understand is shown as preformatted text, never hidden.
+
+An Output record is persisted only for an attempt that actually produced one.
+Nothing synthesizes an empty Output for a run that produced none.
+
+The runtime never deletes a path Output's target, but nothing stops the operator
+or the producing plugin from doing so. A path that no longer resolves is a
+defined missing state that renders as such — not an error.
+
+The pre-0.2 bare-string form still validates. A string normalizes at the parse
+boundary to `{type: 'artifact', format: 'markdown', path: <the string>}`, so
+nothing downstream branches on which form an entry arrived through. The string
+form stays valid until 1.0 and is removed then with an announcement.
+
 ## 6. Retention
 
 Last 20 artifacts per plugin. On every invocation that completes with

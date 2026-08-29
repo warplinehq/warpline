@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'bun:test'
-import { SkillResultSchema, SkillErrorSchema } from '../skill-result.js'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import {
+  SkillResultSchema,
+  SkillErrorSchema,
+  OutputRecordSchema,
+  OUTPUT_BODY_CAP_BYTES,
+  resolveOutput,
+} from '../skill-result.js'
 
 describe('SkillResultSchema', () => {
   const validResult = {
@@ -49,12 +58,25 @@ describe('SkillResultSchema', () => {
     }
   })
 
-  it('includes artifacts_produced as string[]', () => {
+  it('normalizes a bare-string artifacts_produced entry to a path Output', () => {
     const result = SkillResultSchema.safeParse(validResult)
     expect(result.success).toBe(true)
     if (result.success) {
-      expect(result.data.artifacts_produced).toEqual(['.warpline/intel/reports/weekly/2026-W14.md'])
+      expect(result.data.artifacts_produced).toEqual([
+        {
+          type: 'artifact',
+          format: 'markdown',
+          path: '.warpline/intel/reports/weekly/2026-W14.md',
+        },
+      ])
     }
+  })
+
+  it('defaults schema_version to 2', () => {
+    // validResult declares no schema_version — the default is what is under test.
+    const result = SkillResultSchema.safeParse(validResult)
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.schema_version).toBe(2)
   })
 
   it('does not have a duration_ms field', () => {
@@ -103,5 +125,130 @@ describe('SkillErrorSchema', () => {
       impact: 'CRITICAL',
     })
     expect(result.success).toBe(false)
+  })
+})
+
+// ── Output records (R5) ──────────────────────────────────────────────────
+
+describe('OutputRecordSchema', () => {
+  it('defaults an omitted format to markdown', () => {
+    const result = OutputRecordSchema.safeParse({ type: 'report', path: 'report.md' })
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.format).toBe('markdown')
+  })
+
+  it('rejects an unrecognised format rather than dropping it', () => {
+    const result = OutputRecordSchema.safeParse({
+      type: 'report',
+      format: 'pdf',
+      path: 'report.pdf',
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects a record declaring both body and path', () => {
+    const result = OutputRecordSchema.safeParse({
+      type: 'report',
+      body: '# hello',
+      path: 'report.md',
+    })
+    expect(result.success).toBe(false)
+  })
+
+  it('rejects a record declaring neither body nor path', () => {
+    const result = OutputRecordSchema.safeParse({ type: 'report' })
+    expect(result.success).toBe(false)
+  })
+
+  // The cap is measured in UTF-8 BYTES, not characters. These three fixtures
+  // are multi-byte on purpose: an ASCII-only cap test passes against a
+  // `.length`-based (UTF-16 code unit) implementation and proves nothing.
+  // '日' is 3 UTF-8 bytes; 5461 * 3 = 16383, so + 'a' is exactly the cap.
+  describe('the inline body cap, measured in UTF-8 bytes', () => {
+    const atCap = '日'.repeat(5461) + 'a'
+    const overCap = '日'.repeat(5461) + 'ab'
+
+    it('has fixtures whose byte length is exactly the cap and one over', () => {
+      expect(OUTPUT_BODY_CAP_BYTES).toBe(16_384)
+      expect(Buffer.byteLength(atCap, 'utf8')).toBe(OUTPUT_BODY_CAP_BYTES)
+      expect(Buffer.byteLength(overCap, 'utf8')).toBe(OUTPUT_BODY_CAP_BYTES + 1)
+      // The trap this test exists for: both fixtures are UNDER the cap when
+      // measured in UTF-16 code units, so a `.max()` implementation accepts both.
+      expect(atCap.length).toBeLessThan(OUTPUT_BODY_CAP_BYTES)
+      expect(overCap.length).toBeLessThan(OUTPUT_BODY_CAP_BYTES)
+    })
+
+    it('accepts a body of exactly the cap in UTF-8 bytes', () => {
+      expect(OutputRecordSchema.safeParse({ type: 'brief', body: atCap }).success).toBe(true)
+    })
+
+    it('rejects a body one UTF-8 byte over the cap', () => {
+      expect(OutputRecordSchema.safeParse({ type: 'brief', body: overCap }).success).toBe(false)
+    })
+  })
+})
+
+describe('artifacts_produced as Outputs', () => {
+  const base = {
+    status: 'success',
+    phases_completed: [],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'done',
+  }
+
+  it('validates an empty array and yields zero Outputs', () => {
+    const result = SkillResultSchema.safeParse({ ...base, artifacts_produced: [] })
+    expect(result.success).toBe(true)
+    if (result.success) expect(result.data.artifacts_produced).toHaveLength(0)
+  })
+
+  it('accepts a mixed array and normalizes every entry to one shape', () => {
+    const result = SkillResultSchema.safeParse({
+      ...base,
+      artifacts_produced: ['report.md', { type: 'brief', body: '# hi', format: 'markdown' }],
+    })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data.artifacts_produced).toEqual([
+        { type: 'artifact', format: 'markdown', path: 'report.md' },
+        { type: 'brief', format: 'markdown', body: '# hi' },
+      ])
+    }
+  })
+
+  it('rejects the whole result when an Output declares both body and path', () => {
+    const result = SkillResultSchema.safeParse({
+      ...base,
+      artifacts_produced: [{ type: 'brief', body: 'x', path: 'y.md' }],
+    })
+    expect(result.success).toBe(false)
+  })
+})
+
+describe('resolveOutput', () => {
+  it('resolves an inline body without touching the filesystem', () => {
+    const out = OutputRecordSchema.parse({ type: 'brief', body: '# hi' })
+    expect(resolveOutput(out)).toEqual({ state: 'inline', body: '# hi' })
+  })
+
+  it('resolves a path that exists to a present state', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'warpline-output-'))
+    try {
+      const file = join(dir, 'report.md')
+      await writeFile(file, '# report')
+      const out = OutputRecordSchema.parse({ type: 'report', path: file })
+      expect(resolveOutput(out)).toEqual({ state: 'present', path: file })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('resolves a path that no longer exists to a missing state rather than throwing', () => {
+    const gone = join(tmpdir(), 'warpline-output-does-not-exist', 'report.md')
+    const out = OutputRecordSchema.parse({ type: 'report', path: gone })
+    expect(() => resolveOutput(out)).not.toThrow()
+    expect(resolveOutput(out)).toEqual({ state: 'missing', path: gone })
   })
 })

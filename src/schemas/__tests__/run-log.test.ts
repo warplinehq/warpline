@@ -31,7 +31,12 @@ const validRunLog: RunLog = {
             errors: [],
             data_freshness: { gsc: '2026-04-03' },
             summary: 'All checks passed',
-            artifacts_produced: ['.warpline/runs/report.md'],
+            // The bare-string form still validates at the parse boundary; this
+            // fixture is typed `RunLog`, so it carries the normalized shape a
+            // reader sees after parsing rather than the shape an author writes.
+            artifacts_produced: [
+              { type: 'artifact', format: 'markdown', path: '.warpline/runs/report.md' },
+            ],
             schema_version: 1,
           },
         },
