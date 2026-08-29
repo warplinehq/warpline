@@ -15,13 +15,19 @@
  * proposal changed. A denial that outlived what it answered would suppress a
  * question nobody has answered.
  *
- * **This module reaches no symbol that can write the session grant file.** It
- * names none, and it imports the grant module neither directly nor through
- * anything it does import: the only route into `../runtime/engine.js` used here
- * is the manifest loader, the gate lookup and the fingerprint. Saying no to an
- * outcome must not move side-effect authority in either direction, and the
- * cleanest way to keep that true is to have no path to it. The whole-home
- * snapshot in `deny.test.ts` is the backstop, not the guarantee.
+ * **No module on this path calls anything that writes the session grant file.**
+ * That is the claim, and it is narrower than the one this comment used to make.
+ * The grant module IS in the transitive graph: the route into
+ * `../runtime/engine.js` used here is the manifest loader, the gate lookup and
+ * the fingerprint, but `engine.ts` statically imports the approval gate for its
+ * READER, and a static import evaluates the whole module. So the writers are
+ * loaded. What nothing on the path does is call one.
+ *
+ * Saying no to an outcome must not move side-effect authority in either
+ * direction. A test walks the whole import closure to hold that, because the
+ * grep of this one file it replaced would not have seen a call added two
+ * modules down — the prohibition would have gone false with every test green.
+ * The whole-home snapshot in `deny.test.ts` is the backstop, not the guarantee.
  *
  * **No gesture mutes the fleet.** There is no `--all` and no wildcard: two
  * independent controls make one impossible. `parseArgs({strict: true})` rejects

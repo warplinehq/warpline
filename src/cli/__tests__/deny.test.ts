@@ -14,7 +14,8 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { _setHome, engineStatePath, sessionApprovalPath } from '../../lib/paths.js'
 import { mergeGrant } from '../../runtime/approval-gate.js'
@@ -296,10 +297,51 @@ describe('warpline deny', () => {
     expect(await readFile(sessionApprovalPath(), 'utf-8')).toBe(grantBefore)
   })
 
-  test('14: the module names no symbol from the approval gate', async () => {
-    const source = await readFile(new URL('../deny.ts', import.meta.url), 'utf-8')
-    expect(source).not.toContain('approval-gate')
-    expect(source).not.toContain('mergeGrant')
-    expect(source).not.toContain('sessionApprovalPath')
+  /**
+   * The transitive version of the prohibition, replacing a grep of `deny.ts`
+   * alone.
+   *
+   * The single-file grep asserted something that was already false: `deny.ts`
+   * imports `../runtime/engine.js`, which statically imports the approval gate
+   * for its reader, so the writers live in the graph. Worse, it gated nothing
+   * that matters — a grant write added to a helper inside `engine.ts` would
+   * have broken the prohibition with this test still green.
+   *
+   * What is scanned is CALL shape, not mere mention: `suggest.ts` names a
+   * writer in a comment explaining why it exists, and a comment is not a call.
+   * The module that DEFINES the writers is skipped for the same reason it is in
+   * the closure at all — being reachable is not the defect, being called is.
+   */
+  test('14: no module on the denial path calls anything that writes the grant file', async () => {
+    const GRANT_WRITERS = ['mergeGrant', 'grantApproval', 'revokeApproval']
+    const DEFINER = join('runtime', 'approval-gate.ts')
+    const srcRoot = fileURLToPath(new URL('../../', import.meta.url))
+
+    const closure = new Map<string, string>()
+    async function visit(file: string): Promise<void> {
+      if (closure.has(file)) return
+      const source = await readFile(file, 'utf-8')
+      closure.set(file, source)
+      for (const m of source.matchAll(/from\s+'(\.[^']+)'/g)) {
+        await visit(resolve(dirname(file), (m[1] as string).replace(/\.js$/, '.ts')))
+      }
+    }
+    await visit(fileURLToPath(new URL('../deny.ts', import.meta.url)))
+
+    // Vacuity guards. Without them a walker that resolved nothing would pass,
+    // and so would one that never reached the module which made the original
+    // claim false.
+    expect(closure.size).toBeGreaterThan(5)
+    expect([...closure.keys()].some((f) => f.endsWith(DEFINER))).toBe(true)
+
+    const callers = [...closure.entries()]
+      .filter(
+        ([file, source]) =>
+          !file.endsWith(DEFINER) &&
+          GRANT_WRITERS.some((w) => new RegExp(`\\b${w}\\s*\\(`).test(source)),
+      )
+      .map(([file]) => relative(srcRoot, file))
+
+    expect(callers).toEqual([])
   })
 })
