@@ -64,7 +64,7 @@ authoring. Dynamic lineage is a hypothesis until a flow needs it.
 
 | Kind | Raised when | Answer verbs | What the answer does |
 |---|---|---|---|
-| `approval` | A plugin with declared side effects was recorded `skipped` for want of a Grant, or a supervised plugin ran and was `gated`. | **approve** · **deny** | approve answers whichever gate is waiting — see below. deny = record the answer; no Grant; the plugin stays skipped until raised again. |
+| `approval` | A plugin with declared side effects was recorded `skipped` for want of a Grant, or a supervised plugin ran and was `gated`. | **approve** · **deny** | approve answers whichever gate is waiting — see below. deny records the answer against the proposal, so the question stops being asked; no Grant is written or cleared. |
 | `decision` | A guided task (`action_type: 'guided'`) offers options. | **choose** | Runs the option's handler; the task completes. |
 | `notice` | An event the operator should see and need not act on. | **seen** | Acknowledged: leaves the open list, kept in history. |
 | `chore` | A self-directed task (`action_type: 'self_directed'`): work done outside warpline. | **done** | Asserts the outside work happened; the task completes. |
@@ -107,6 +107,34 @@ The gate clock and the Grant clock are separate objects. Both happen to read 24
 hours; one bounds how long side-effect authority lives, the other how long an
 observed outcome stays acceptable. Applying a parked result never touches the
 Grant or its expiry.
+
+**deny records a no, and the record answers a proposal.** `warpline deny
+<plugin>...` writes a denial bound to a fingerprint of what the plugin
+proposed. While that fingerprint still matches, the plugin is not due and the
+Ask is not raised. When it moves, the plugin is due again and the returning Ask
+says a denial existed and that the proposal changed — a returning question must
+not be able to pass itself off as a new one.
+
+Listing and taking back are flags on the same verb: `warpline deny --list`
+prints the live denials and writes nothing, and `warpline deny --remove
+<plugin>` takes one back, after which the plugin is asked about again on the
+next advance. `--note <text>` records why in the operator's own words.
+`--remove` is validated against the denials themselves rather than against
+installed plugins, so a denial survives its plugin being uninstalled and stays
+removable.
+
+**There is no blanket denial.** A Grant can carry `scopes: '*'`; a denial has no
+equivalent, and two independent controls keep it that way — argument parsing
+rejects an undeclared all-plugins flag before anything is written, and the
+denials record is keyed by plugin name, which leaves no key that could mean
+every plugin. Denying is also never a way to move side-effect authority: the
+verb reaches nothing that can write the session approval file, in either
+direction.
+
+Denying the same plugin twice against an unchanged proposal writes nothing at
+all. The record is keyed by plugin, so there is one live denial per plugin by
+construction, and the command says the answer already stands rather than
+restamping its clock.
 
 ### 2.2 Ask lifecycle
 
@@ -320,6 +348,14 @@ objects that do not exist.
 
    A denial never touches the session approval file. Saying no to an outcome
    must not move side-effect authority in either direction.
+
+   **The verb is `warpline deny`**, with listing and removal as flags on it
+   rather than as further verbs: `warpline deny --list` prints the live denials
+   and writes nothing, `warpline deny --remove <plugin>` takes one back, and
+   `--note <text>` records why. Every named plugin is validated before anything
+   is written, so one unknown name aborts the whole command with nothing on
+   disk — a half-applied denial would leave the operator believing they had
+   silenced three plugins when they had silenced one.
 2. **Run linkage on Asks.** *Landed.* `BoardEvent` carries `run_id` as a
    first-class field beside `task_id`, and task aging carries `first_run_id`
    (the run that raised the task) and `last_flagged_run_id` (the most recent

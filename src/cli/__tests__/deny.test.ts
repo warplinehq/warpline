@@ -277,9 +277,14 @@ describe('warpline deny', () => {
 
     expect(existsSync(sessionApprovalPath())).toBe(false)
     const after = await snapshot(root)
-    const added = Object.keys(after).filter((f) => !(f in before))
-    // Only the state document is new.
-    expect(added.map((f) => f.split('/').at(-1))).toEqual(['engine-state.json'])
+    const added = Object.keys(after)
+      .filter((f) => !(f in before))
+      .map((f) => f.split('/').at(-1))
+      .sort()
+    // The state document and the denial notice, and nothing else. Listing what
+    // IS allowed rather than asserting the grant file is absent: a new write
+    // the operator did not ask for fails this, whatever it is called.
+    expect(added).toEqual(['engine-state.json', 'events.jsonl'])
   })
 
   test('13: denying touches a session approval file that already exists', async () => {

@@ -1,0 +1,259 @@
+/**
+ * `warpline deny` — record that a human said no, so the next advance stops
+ * asking.
+ *
+ * Without this there is nowhere for "no" to land. A plugin is skipped for want
+ * of a Grant or parked for supervision, and both re-raise on every advance, so
+ * the only way to stop being asked is to grant something — which is the
+ * opposite of the answer the operator wanted to give.
+ *
+ * **A denial answers a proposal, not a plugin.** The record carries a
+ * fingerprint of what was proposed — the plugin's name, its declared side
+ * effects and the Output it produced — and the evaluator recomputes it on every
+ * advance. While it matches, the question is not asked. When it moves, the
+ * plugin is due again and the returning Ask says a denial existed and the
+ * proposal changed. A denial that outlived what it answered would suppress a
+ * question nobody has answered.
+ *
+ * **This module reaches no symbol that can write the session grant file.** It
+ * names none, and it imports the grant module neither directly nor through
+ * anything it does import: the only route into `../runtime/engine.js` used here
+ * is the manifest loader, the gate lookup and the fingerprint. Saying no to an
+ * outcome must not move side-effect authority in either direction, and the
+ * cleanest way to keep that true is to have no path to it. The whole-home
+ * snapshot in `deny.test.ts` is the backstop, not the guarantee.
+ *
+ * **No gesture mutes the fleet.** There is no `--all` and no wildcard: two
+ * independent controls make one impossible. `parseArgs({strict: true})` rejects
+ * an undeclared flag before any code here runs, and the denials record is keyed
+ * by plugin name, so there is no key that could mean every plugin.
+ *
+ * The order of operations mirrors `approve.ts`, and for the same reason: EVERY
+ * positional is validated before anything is written, and one unknown name
+ * aborts the whole command with nothing on disk. A half-applied denial would
+ * leave the operator believing they had silenced three plugins when they had
+ * silenced one.
+ *
+ * Never terminates the process — it returns a code to the dispatcher.
+ */
+import { parseArgs } from 'node:util'
+import { findPendingGate, loadPluginManifests, proposalFingerprint } from '../runtime/engine.js'
+import { emitDenialRecorded } from '../board/engine-events.js'
+import {
+  DenialSchema,
+  EngineStateInvalidError,
+  readEngineState,
+  writeEngineState,
+} from '../schemas/engine-state.js'
+import type { Denial, EngineState } from '../schemas/engine-state.js'
+import { engineStatePath, eventsJsonlPath, pluginsDir } from '../lib/paths.js'
+import { suggest } from './suggest.js'
+
+const USAGE = `Usage: warpline deny <plugin>... [options]
+       warpline deny --list
+       warpline deny --remove <plugin>...
+
+Records that you said no to what a plugin proposed, so the next advance stops
+asking. The answer is bound to the proposal: change the plugin's declared side
+effects or the Output it produces and the question comes back, saying it was
+denied before and that the proposal moved.
+
+There is no blanket denial. A denial covers exactly the plugins you name.
+
+Options:
+  --list          Show the live denials and exit.
+  --remove        Take the denial back for each named plugin.
+  --note <text>   Record why, in your own words.
+`
+
+/**
+ * Read the state document, or explain why not.
+ *
+ * Fail-closed on every path, `--list` included. The tolerant read would render
+ * an unusable document as "no denials", which is the one wrong answer here: the
+ * operator would conclude they had never denied anything and deny it again,
+ * against a file that is about to be overwritten.
+ */
+async function loadState(statePath: string): Promise<EngineState | null> {
+  try {
+    return await readEngineState(statePath)
+  } catch (err) {
+    if (!(err instanceof EngineStateInvalidError)) throw err
+    process.stderr.write(
+      `Cannot read engine state: ${err.reason}\n` +
+        `Nothing was written — with the document unreadable there is no way to tell what is ` +
+        `already denied, and rewriting it would destroy whatever else it holds.\n`,
+    )
+    return null
+  }
+}
+
+function describe(denial: Denial): string {
+  const note = denial.note === null ? '' : `\n    note: ${denial.note}`
+  return `  ${denial.plugin} — denied ${denial.denied_at}\n    ${denial.reason}${note}`
+}
+
+export async function run(argv: string[]): Promise<number> {
+  let values: { list?: boolean; remove?: boolean; note?: string }
+  let positionals: string[]
+  try {
+    // strict: true rejects an undeclared flag — an all-plugins wildcard among
+    // them — and a missing or dash-leading --note value, with no hand-rolled
+    // scan. The prohibition is delivered by the parser, not by a check of ours.
+    const parsed = parseArgs({
+      args: argv,
+      options: {
+        list: { type: 'boolean' },
+        remove: { type: 'boolean' },
+        note: { type: 'string' },
+      },
+      allowPositionals: true,
+      strict: true,
+    })
+    values = parsed.values
+    positionals = parsed.positionals
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`)
+    return 1
+  }
+
+  if (values.list && (values.remove || positionals.length > 0)) {
+    process.stderr.write('--list shows the denials and changes nothing; do not combine it.\n')
+    return 1
+  }
+  if (!values.list && positionals.length === 0) {
+    process.stderr.write(USAGE)
+    return 1
+  }
+
+  const statePath = engineStatePath()
+
+  // -- List: read, print, write nothing -----------------------------------
+  if (values.list) {
+    const state = await loadState(statePath)
+    if (state === null) return 1
+    const denials = Object.values(state.denials)
+    if (denials.length === 0) {
+      process.stdout.write('No denials — every plugin will be asked about normally.\n')
+      return 0
+    }
+    process.stdout.write(`${denials.length === 1 ? '1 denial' : `${denials.length} denials`}:\n`)
+    for (const denial of denials.sort((a, b) => (a.plugin < b.plugin ? -1 : 1))) {
+      process.stdout.write(`${describe(denial)}\n`)
+    }
+    return 0
+  }
+
+  // -- Remove: validated against the denials record, not the manifests -----
+  // A plugin uninstalled after it was denied must still be removable, or its
+  // record would be unreachable from the CLI for good.
+  if (values.remove) {
+    const state = await loadState(statePath)
+    if (state === null) return 1
+
+    const missing = positionals.filter((name) => state.denials[name] === undefined)
+    if (missing.length > 0) {
+      for (const name of missing) {
+        process.stderr.write(`No denial recorded for ${name}.\n`)
+      }
+      process.stderr.write('Nothing was removed.\n')
+      return 1
+    }
+
+    for (const name of positionals) delete state.denials[name]
+    await writeEngineState(state, statePath)
+    process.stdout.write(
+      `Removed the denial for ${positionals.join(', ')}. ` +
+        `${positionals.length === 1 ? 'It' : 'They'} will be asked about again on the next advance.\n`,
+    )
+    return 0
+  }
+
+  // -- Deny --------------------------------------------------------------
+  const { manifests, failures } = await loadPluginManifests(pluginsDir())
+
+  // Name validation, all of it, before any write.
+  const known = [...manifests.keys()]
+  const unknown = positionals.filter((name) => !manifests.has(name))
+  if (unknown.length > 0) {
+    for (const name of unknown) {
+      const broken = failures.find((f) => f.plugin === name)
+      if (broken) {
+        process.stderr.write(
+          `Plugin '${name}' exists but its manifest failed to load: ${broken.error}\n`,
+        )
+        continue
+      }
+      const hint = suggest(name, known)
+      process.stderr.write(
+        hint
+          ? `Unknown plugin: ${name} — did you mean '${hint}'?\n`
+          : `Unknown plugin: ${name}. Known plugins: ${known.sort().join(', ') || '(none)'}\n`,
+      )
+    }
+    process.stderr.write('Nothing was denied.\n')
+    return 1
+  }
+
+  const state = await loadState(statePath)
+  if (state === null) return 1
+
+  const denied_at = new Date().toISOString()
+  const recorded: Denial[] = []
+
+  for (const plugin of positionals) {
+    const fingerprint = proposalFingerprint(state, plugin, manifests.get(plugin)!)
+    const existing = state.denials[plugin]
+
+    // Denying twice against an unchanged proposal is a no-op, and observably
+    // so: nothing is written, so the state document is byte-identical. The
+    // record's key makes duplicates impossible; this makes re-answering
+    // visible instead of silently restamping the clock.
+    if (existing !== undefined && existing.fingerprint === fingerprint) {
+      process.stdout.write(
+        `${plugin} is already denied (${existing.denied_at}) and its proposal has not changed. ` +
+          `Nothing was written.\n`,
+      )
+      continue
+    }
+
+    // A parked result is what a denial most often answers, so the reason says
+    // which run it was. Without one, the operator is answering the standing
+    // proposal rather than a specific outcome, and the reason says that.
+    const gate = findPendingGate(state, plugin)
+    const reason =
+      gate === undefined
+        ? 'the operator declined this proposal'
+        : `the operator declined the parked result from run ${gate.run_id}`
+
+    const denial = DenialSchema.parse({
+      plugin,
+      reason,
+      denied_at,
+      note: values.note ?? null,
+      fingerprint,
+    })
+    state.denials[plugin] = denial
+    recorded.push(denial)
+  }
+
+  if (recorded.length === 0) return 0
+
+  await writeEngineState(state, statePath)
+
+  const eventsPath = eventsJsonlPath()
+  for (const denial of recorded) {
+    // Best-effort: a notice that cannot be written must not fail a denial that
+    // is already on disk.
+    await emitDenialRecorded(denial.plugin, denial.reason, denial.fingerprint, eventsPath).catch(
+      () => {},
+    )
+    process.stdout.write(
+      `Denied ${denial.plugin}: ${denial.reason}\n` +
+        `It will not be asked about again while it proposes the same thing. ` +
+        `No grant was written or cleared.\n`,
+    )
+  }
+
+  return 0
+}

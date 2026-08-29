@@ -45,6 +45,7 @@ import { applyPendingGate, findPendingGate, loadPluginManifests } from '../runti
 import { mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { EngineStateInvalidError, readEngineState } from '../schemas/engine-state.js'
 import { engineStatePath, pluginsDir, sessionApprovalPath } from '../lib/paths.js'
+import { suggest } from './suggest.js'
 
 const USAGE = `Usage: warpline approve <plugin>... [options]
        warpline approve --all [options]
@@ -74,37 +75,6 @@ function parseDuration(input: string): number | null {
 }
 
 const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
-
-/** Levenshtein distance — only ever called on a typo, so the O(nm) is free. */
-function distance(a: string, b: string): number {
-  let prev = Array.from({ length: b.length + 1 }, (_, i) => i)
-  for (let i = 1; i <= a.length; i++) {
-    const row = [i]
-    for (let j = 1; j <= b.length; j++) {
-      row[j] = Math.min(
-        prev[j] + 1,
-        row[j - 1] + 1,
-        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
-      )
-    }
-    prev = row
-  }
-  return prev[b.length]
-}
-
-/** The closest known name, or null when nothing is close enough to suggest. */
-function suggest(name: string, known: string[]): string | null {
-  let best: string | null = null
-  let bestScore = Infinity
-  for (const candidate of known) {
-    const d = distance(name, candidate)
-    if (d < bestScore) {
-      bestScore = d
-      best = candidate
-    }
-  }
-  return best !== null && bestScore <= Math.max(2, Math.floor(name.length / 3)) ? best : null
-}
 
 export async function run(argv: string[]): Promise<number> {
   let values: { all?: boolean; ttl?: string; replace?: boolean; long?: boolean }

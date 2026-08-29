@@ -39,6 +39,7 @@ Commands:
   scaffold   Generate a new plugin directory from the template
   run        Invoke a single plugin handler directly
   approve    Grant a side-effect approval for this session
+  deny       Record a no, so the next advance stops asking
   revoke     Clear the current session approval
 
   --help     Show this message
@@ -92,6 +93,11 @@ export async function main(argv: string[]): Promise<number> {
 
       case 'approve': {
         const { run } = await import('./approve.js')
+        return await run(rest)
+      }
+
+      case 'deny': {
+        const { run } = await import('./deny.js')
         return await run(rest)
       }
 
