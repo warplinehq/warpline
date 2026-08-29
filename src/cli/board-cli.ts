@@ -11,6 +11,7 @@
  *   bun run src/cli/board-cli.ts tasks         — show task board
  *   bun run src/cli/board-cli.ts done <id>     — mark task done
  *   bun run src/cli/board-cli.ts budget        — show API budget table
+ *   bun run src/cli/board-cli.ts auto-ack-poll — ack prior-run poll notices
  *
  * Reads the state files the engine writes, and nothing else — there is no
  * second store for a board to fall out of sync with.
