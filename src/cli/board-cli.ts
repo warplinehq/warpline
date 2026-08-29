@@ -87,8 +87,14 @@ function runNote(runId: string | null): string {
 async function status() {
   const [events, tasks, acks] = await Promise.all([readEvents(), readTasks(), readAcks()])
 
+  // `Object.hasOwn`, not `in`: `acks` is a plain object, so `in` walks the
+  // prototype chain and an `event_id` of `toString` or `constructor` would read
+  // as already acknowledged and be hidden from the board forever. Not reachable
+  // while `event_id` is `crypto.randomUUID()`, and it is the same class the
+  // `denials` and `plugin_runs` records were converted for — leaving one record
+  // on the old shape is how the next one gets written that way.
   const active = events
-    .filter(e => VISIBLE_TYPES.has(e.type) && !(e.event_id in acks))
+    .filter(e => VISIBLE_TYPES.has(e.type) && !Object.hasOwn(acks, e.event_id))
     .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
 
   const pendingTasks = tasks.filter((t: TaskDisplay) => t.state === 'pending' || t.state === 'active')
@@ -161,7 +167,7 @@ async function ack(id: string) {
 
 async function ackAll() {
   const [events, acks] = await Promise.all([readEvents(), readAcks()])
-  const active = events.filter(e => VISIBLE_TYPES.has(e.type) && !(e.event_id in acks))
+  const active = events.filter(e => VISIBLE_TYPES.has(e.type) && !Object.hasOwn(acks, e.event_id))
   if (active.length === 0) {
     console.log('No pending notices to acknowledge.')
     return
@@ -332,7 +338,7 @@ try {
       let ackCount = 0
       const newAcks = { ...acks }
       for (const event of events) {
-        if (newAcks[event.event_id]) continue // already acked
+        if (Object.hasOwn(newAcks, event.event_id)) continue // already acked
         if (event.source.includes('poll') && event.type === 'notice') {
           newAcks[event.event_id] = {
             acknowledged_at: new Date().toISOString(),
