@@ -295,6 +295,25 @@ serialised string, never a nested object. Both are schema facts the Board
 relies on: a list row renders one line, and anything richer is opened, not
 inlined.
 
+**`BoardEventSchema.type` is a closed enum, so sub-types live in
+`metadata_json`.** Growing the enum raises no compile error — `typeLabel` in
+`board-cli.ts` has a default arm — while `VISIBLE_TYPES` is a hand-maintained
+set, so a new member would be silently dropped from every board view. Any
+`notice` is already in that set. Readers match on `metadata_json.event`:
+
+| `metadata_json.event` | Emitted when |
+|---|---|
+| `gate_invalidated` | a parked gate was discarded as a stub or because a dependency moved |
+| `gate_expired` | a parked gate was discarded as past the earlier of its TTL and 24 hours |
+| `denial_recorded` | the operator ran `warpline deny` and a denial was written |
+| `plugin_denied` | an advance skipped a plugin because a live denial answered it |
+
+`plugin_denied` is a `notice`, not a `plugin_result` skip. The run log
+distinguishes `denied` from `skipped` so an answered question cannot be read as
+an unanswered one, and the event log has to carry the same distinction or the
+two disagree about the same advance. `attempt_failed` also rides `notice`, with
+its sub-type in `summary` rather than in `metadata_json`.
+
 ## 6. Guardrails (implemented today)
 
 Stored in `<home>/preferences.json`, validated by `PreferencesSchema`. There is

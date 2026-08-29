@@ -1435,6 +1435,38 @@ export async function handler(manifest, args) {
     expect(entry.result_summary).not.toContain('unapproved')
   })
 
+  test('Test 37b: the board event for a denied plugin is a notice, not a skip', async () => {
+    // The run log's `denied` vs `skipped` distinction exists so an answered
+    // question cannot be read as an unanswered one. The event log has to carry
+    // it too, or the two logs disagree about the same advance — and they did:
+    // this arm emitted `plugin: skipped — denied …`, bucketing a denial with
+    // "no Grant" and "still fresh".
+    await createDeniablePlugin('mailer', ['sends_email'])
+    await seedState('mailer', {
+      lastOutput: brief,
+      fingerprint: await fingerprintFor('mailer', ['sends_email'], brief),
+    })
+
+    await advance()
+
+    const events = (await readFile(eventsPath, 'utf-8'))
+      .split('\n')
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l) as { type: string; summary: string; metadata_json?: string })
+    const denied = events.filter(
+      (e) => JSON.parse(e.metadata_json ?? '{}').event === 'plugin_denied',
+    )
+
+    expect(denied).toHaveLength(1)
+    expect(denied[0]?.type).toBe('notice')
+    expect(JSON.parse(denied[0]?.metadata_json as string).plugin).toBe('mailer')
+
+    // Non-vacuity, and the actual defect: nothing in this advance filed the
+    // denial as a skip. `mailer` declares a side effect and has no Grant, so a
+    // regression that dropped the denial check would produce exactly that line.
+    expect(events.some((e) => e.summary.includes('mailer: skipped'))).toBe(false)
+  })
+
   test('Test 38: changing a declared side effect re-raises the plugin — it runs again', async () => {
     await createDeniablePlugin('mailer', ['sends_email', 'writes_db'])
     await seedState('mailer', {

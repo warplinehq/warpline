@@ -244,6 +244,34 @@ export const emitDenialRecorded = (
     eventsPath,
   )
 
+/**
+ * Emit a notice that a plugin was skipped because a live denial answered it.
+ *
+ * NOT `emitPluginSkipped`. The run log distinguishes `denied` from `skipped`
+ * precisely so an answered question cannot be read as an unanswered one, and
+ * filing the event as a skip put a denial in the same board bucket as "no
+ * Grant" and "still fresh" — so the two logs disagreed about the same advance.
+ *
+ * Rides `type: 'notice'` with a `metadata_json` discriminator for the reason
+ * `emitGateInvalidated` states above: growing `BoardEventSchema.type` raises no
+ * compile error and a new member would be silently dropped from every board
+ * view by the hand-maintained `VISIBLE_TYPES` set. Severity `info`, matching
+ * `emitDenialRecorded` — the denial being honoured is the system working.
+ */
+export const emitPluginDenied = (
+  plugin: string,
+  reason: string,
+  runId: string | null,
+  eventsPath?: string,
+): Promise<void> =>
+  emitBoardEvent(
+    makeEvent('notice', plugin, `${plugin}: denied — ${reason}`, runId, {
+      severity: 'info',
+      metadata_json: JSON.stringify({ event: 'plugin_denied', plugin, run_id: runId, reason }),
+    }),
+    eventsPath,
+  )
+
 const GATE_DISCARD_PROSE: Record<'stub' | 'dependency_moved' | 'expired', string> = {
   stub: 'written by a build older than the one holding the real result, so there is no outcome to approve',
   dependency_moved: 'a dependency re-ran after the gated run started, so the result was computed against inputs that have moved',

@@ -51,6 +51,7 @@ import {
   emitPluginSkipped,
   emitPluginGated,
   emitGateInvalidated,
+  emitPluginDenied,
 } from '../board/engine-events.js'
 import { readPreferences, isQuietHours } from '../lib/preferences.js'
 import { checkTaskLock as smCheckTaskLock } from '../board/state-manager.js'
@@ -755,7 +756,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // denial is an outcome of supervision, like `gated`, and filing it
           // as a skip would put it in the same bucket as "no Grant" and
           // "still fresh" — the log could then no longer tell an unanswered
-          // question from an answered one.
+          // question from an answered one. The BOARD event carries the same
+          // distinction, via `emitPluginDenied`: making that argument about the
+          // run log and then emitting `plugin: skipped — denied …` next door
+          // left the two logs disagreeing about the same advance.
           //
           // No `plugin_runs` write: the plugin did not run. There are exactly
           // two write sites for that record and this is not a third.
@@ -768,7 +772,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               result_summary: ev.detail,
               retried: false,
             })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+            await emitPluginDenied(pluginName, ev.detail, run_id, eventsPath)
             return
           }
 
