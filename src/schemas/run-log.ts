@@ -23,7 +23,14 @@ export const ModeRunSchema = z.object({
 
 export const PluginLogEntrySchema = z.object({
   plugin: z.string(),
-  status: z.enum(['completed', 'failed', 'skipped', 'gated']),
+  /**
+   * `denied` sits beside `gated` as the other outcome of supervision: a human
+   * was asked and said no, and the log says so. Recording it as `skipped`
+   * instead would put it in the same bucket as "no session Grant" and "still
+   * fresh", so the log could no longer tell an unanswered question from an
+   * answered one — the conflation a denied outcome exists to remove.
+   */
+  status: z.enum(['completed', 'failed', 'skipped', 'gated', 'denied']),
   started_at: z.string(),
   elapsed_ms: z.number().int(),
   result_summary: z.string(),

@@ -295,10 +295,31 @@ Each of these is a contract change and lands with its own spec edit in the
 same commit (CLAUDE.md rule 1). Listed here so the Board is not built on
 objects that do not exist.
 
-1. **A `denied` outcome.** Today a plugin entry is `skipped` (no Grant) or
-   `gated` (supervised) and nothing records a human saying no. The `deny`
-   verb needs somewhere to land — an engine-state record the next advance
-   reads, so a denied plugin is not re-raised every run.
+1. **A `denied` outcome.** A plugin entry used to be `skipped` (no Grant) or
+   `gated` (supervised) and nothing recorded a human saying no. `denied` now
+   sits beside `gated` on the run log's status set as the other outcome of
+   supervision, and a denial lands in `denials` in engine state — a record
+   keyed by plugin name that the next advance reads, so a denied plugin is not
+   re-raised every run.
+
+   **A denial answers a proposal, not a plugin.** It carries a hex sha256
+   fingerprint of what was proposed: the plugin's name, its declared side
+   effects, and the Output it produced. The evaluator recomputes that value on
+   every advance. While it matches, the plugin is not due and the Ask is
+   suppressed. When it moves — a new side effect declared, a different Output
+   produced — the plugin is due again, and the returning Ask says a denial
+   existed and that the proposal changed rather than presenting itself as a
+   first-time question. An operator who cannot tell a returning Ask from a new
+   one has no way to know they already answered it.
+
+   **One plugin's no cannot mute another, and no gesture mutes the fleet.** The
+   plugin name is inside the hashed object as well as being the record key, so
+   two plugins with identical payloads do not share a fingerprint. The record
+   is keyed by plugin name, which leaves no key that could mean every plugin —
+   there is no wildcard denial the way a Grant carries `scopes: '*'`.
+
+   A denial never touches the session approval file. Saying no to an outcome
+   must not move side-effect authority in either direction.
 2. **Run linkage on Asks.** *Landed.* `BoardEvent` carries `run_id` as a
    first-class field beside `task_id`, and task aging carries `first_run_id`
    (the run that raised the task) and `last_flagged_run_id` (the most recent

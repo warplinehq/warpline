@@ -34,6 +34,7 @@ function makeState(pluginRuns: Record<string, { last_run_at: string; status: 'su
     last_run_at: null,
     last_interaction_at: null,
     deferrals: [],
+    denials: {},
     task_aging: [],
     plugin_runs: pluginRuns,
     completed_tasks: [],

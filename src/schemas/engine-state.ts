@@ -22,6 +22,32 @@ export const DeferralSchema = z.object({
 })
 export type Deferral = z.infer<typeof DeferralSchema>
 
+/**
+ * A human's "no" to what a plugin proposed, recorded so the next advance reads
+ * it instead of asking again.
+ *
+ * Bound to a `fingerprint` of the proposal, not to the plugin alone. A denial
+ * that outlived what it was answering would suppress a question nobody has
+ * answered — so the fingerprint is recomputed on every advance and a proposal
+ * that has materially moved is asked again. See `proposalFingerprint` in
+ * `src/runtime/engine.ts` for what the value covers.
+ *
+ * `plugin` is stored as a field as well as being the record key. The key is how
+ * the record is looked up; the field is what survives being read out of the
+ * record on its own, and it costs one string.
+ */
+export const DenialSchema = z.object({
+  plugin: z.string(),
+  /** Why the engine is not asking — rendered to the operator on the next plan. */
+  reason: z.string(),
+  denied_at: z.string(),
+  /** The operator's own words, if they gave any. Null rather than absent so a reader has one shape. */
+  note: z.string().nullable().default(null),
+  /** Hex sha256 of the proposal this answered, whole and untruncated. */
+  fingerprint: z.string(),
+})
+export type Denial = z.infer<typeof DenialSchema>
+
 export const TaskAgingSchema = z.object({
   task_id: z.string(),
   first_flagged: z.string(),
@@ -239,6 +265,20 @@ export const EngineStateSchema = z.object({
   last_interaction_at: z.string().nullable().default(null),
   plugin_runs: z.record(z.string(), PluginRunSchema).default({}),
   deferrals: z.array(DeferralSchema).default([]),
+  /**
+   * Live denials, keyed by plugin name.
+   *
+   * A record and not an array, which is the whole idempotency story: one live
+   * denial per plugin by construction, so re-denying lands on the same key
+   * rather than accumulating, and there is no de-dupe scan to get wrong. It
+   * also makes a fleet-wide denial inexpressible — no key means every plugin.
+   * `deferrals` stays an array because a task can carry several; a denial
+   * cannot.
+   *
+   * `.default({})` so a state document written before denials existed still
+   * loads and reads as none.
+   */
+  denials: z.record(z.string(), DenialSchema).default({}),
   task_aging: z.array(TaskAgingSchema).default([]),
   completed_tasks: z.array(CompletedTaskSchema).default([]),
   pending_gates: z.array(PendingGateSchema).default([]),

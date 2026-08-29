@@ -18,7 +18,7 @@ import { mkdir } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { checkApproval } from './approval-gate.js'
 import {
   sessionApprovalPath,
@@ -152,6 +152,95 @@ export interface AdvanceResult {
 // -----------------------------------------------------------------------
 // evaluatePlugin — the guard chain, without the writes
 // -----------------------------------------------------------------------
+
+// -----------------------------------------------------------------------
+// Denials — what a "no" is bound to
+// -----------------------------------------------------------------------
+
+/** Hex sha256 of a UTF-8 string. Whole, never truncated. */
+function sha256(input: string): string {
+  return createHash('sha256').update(input, 'utf8').digest('hex')
+}
+
+/**
+ * How one Output enters the fingerprint.
+ *
+ * A path enters by its path; an inline Output enters by a hash of its body,
+ * which keeps the fingerprint 64 characters whatever the inline cap allows and
+ * keeps the content of an Output out of the denials record entirely. The
+ * prefixes stop a path and a body of the same text colliding.
+ */
+function outputFingerprintKey(output: OutputRecord): string {
+  return output.path !== undefined ? `path:${output.path}` : `body:${sha256(output.body ?? '')}`
+}
+
+/**
+ * The fingerprint a denial binds to: hex sha256 over the plugin's name, its
+ * declared side effects and the Outputs it produced.
+ *
+ * **Both sets are sorted before hashing.** Declaration order in a manifest is
+ * an editing accident, not a change of proposal, and without the sort moving
+ * one line would re-raise an Ask the operator already answered.
+ *
+ * **The plugin name is inside the hashed object**, not merely the record key.
+ * Two plugins with byte-identical payloads therefore produce different values,
+ * so no denial can be made to answer for another plugin's proposal.
+ *
+ * A plugin with no side effects and no Outputs hashes the empty sets. That is
+ * a stable value scoped by its name, not an error: it is denied by name.
+ *
+ * This is a non-secret integrity fingerprint — not a MAC, not a password hash,
+ * not a key derivation. No salt, no HMAC, no constant-time comparison. Key
+ * order in the hashed object is fixed by the literal and both arrays are
+ * sorted, so no canonical-JSON library is involved.
+ */
+export function denialFingerprint(
+  plugin: string,
+  sideEffects: readonly string[],
+  outputs: readonly OutputRecord[],
+): string {
+  return sha256(
+    JSON.stringify({
+      plugin,
+      side_effects: [...sideEffects].sort(),
+      outputs: outputs.map(outputFingerprintKey).sort(),
+    }),
+  )
+}
+
+/**
+ * The fingerprint of what this plugin is proposing right now.
+ *
+ * The one entry point: the evaluator recomputes it on every advance and the
+ * deny verb records it, so the value written when the operator said no and the
+ * value checked on the next advance cannot be produced by two different pieces
+ * of arithmetic.
+ *
+ * The Outputs come from `plugin_runs[plugin].last_output` and deliberately NOT
+ * from a parked gate. A gate is destroyed by the next advance — `pending_gates`
+ * is assigned wholesale — so a fingerprint drawing on one would change the day
+ * after it was recorded and re-raise an answered question for a reason the
+ * operator could not see. `plugin_runs` survives, and it is written on the same
+ * branch that parks the gate, so it holds the same run's Output.
+ *
+ * The narrowing that buys: `last_output` is the LAST Output of the run
+ * (`lastOutputOf` takes `.at(-1)`), so a change confined to an earlier Output
+ * of a multi-Output result does not re-raise. Durability was worth more than
+ * that edge, because the alternative fails in the common case rather than a
+ * rare one.
+ */
+export function proposalFingerprint(
+  state: EngineState,
+  plugin: string,
+  manifest: PluginManifest,
+): string {
+  const lastOutput = state.plugin_runs[plugin]?.last_output
+  return denialFingerprint(
+    plugin,
+    manifest.side_effects,
+    lastOutput === undefined ? [] : [lastOutput],
+  )
+}
 
 /**
  * Why a plugin is not due. Structured codes, not display copy: the

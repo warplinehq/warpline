@@ -264,6 +264,27 @@ Log file:
 Cancelled runs persist with `status: 'cancelled'` and partial attempts; the
 log captures whatever the handler emitted before abort.
 
+### Plugin entry status
+
+Each entry in `plugin_entries` records how one plugin ended in that run. The
+set is closed — an unlisted value fails validation rather than being dropped.
+
+| Status | Meaning |
+|--------|---------|
+| `completed` | The handler ran and returned a result the engine accepted |
+| `failed` | The handler threw, or returned a failed result |
+| `skipped` | The plugin was not due — fresh, filtered, locked, or without a session Grant |
+| `gated` | Supervised: the handler ran and its result was parked pending a human answer |
+| `denied` | A human answered no, and the answer still applies to what is being proposed |
+
+`gated` and `denied` are the two outcomes of supervision, which is why they sit
+together and apart from `skipped`. A denial recorded as `skipped` would land in
+the same bucket as "no Grant" and "still fresh", and the log could no longer
+tell an unanswered question from an answered one.
+
+Adding a member fans out into this table and into every run log written
+afterwards, so the set is not extended casually.
+
 ### Output records
 
 `SkillResult.artifacts_produced` is an array of Output records — a thing the
@@ -684,6 +705,54 @@ The handler is never re-invoked. Its declared side effects fired at invocation,
 long before the supervision gate saw the result, so re-running would double
 effects that already happened. Downstream dependents run on the next advance
 under the normal guard chain, not from inside the CLI command.
+
+### `denials`
+
+Where a human's "no" lands, so the next advance reads it instead of asking
+again. A record keyed by plugin name, sibling to `plugin_runs`.
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `plugin` | string | The denied plugin, stored as a field as well as being the key |
+| `reason` | string | Why the engine is not asking, rendered on the next plan |
+| `denied_at` | ISO 8601 string | When the answer was given |
+| `note` | string or null | The operator's own words, if they gave any |
+| `fingerprint` | hex sha256 string | The proposal this answered, whole and untruncated |
+
+**A record, not an array.** That gives one live denial per plugin by
+construction: denying the same plugin again lands on the same key, so there is
+nothing to accumulate and no de-dupe scan to get wrong. It also makes a
+fleet-wide denial inexpressible — there is no key that means every plugin.
+`deferrals` is an array because a task can carry several; a denial cannot.
+
+**A denial is bound to a proposal, not to a plugin.** The fingerprint is hex
+sha256 over the plugin's name, its declared side effects, and the Outputs it
+produced. It is recomputed on every advance and compared: while it matches, the
+plugin is not due and the question is not asked; when it moves, the plugin is
+due again and the answer that comes back says a denial existed and that the
+proposal changed. A denial that outlived what it was answering would suppress a
+question nobody has answered.
+
+Both hashed sets are sorted before hashing, so reordering the `side_effects`
+array in a manifest — an editing accident, not a change of proposal — does not
+re-raise an answered Ask. The plugin name is inside the hashed object as well
+as being the record key, so two plugins with byte-identical payloads produce
+different values and no denial can answer for another plugin's proposal. An
+inline Output enters by a hash of its body rather than by the body itself,
+which bounds the fingerprint whatever the inline cap allows and keeps Output
+content out of the record.
+
+The Outputs hashed are the ones in `plugin_runs[plugin].last_output`, not the
+ones in a parked gate. `pending_gates` is assigned wholesale on every advance,
+so a gate does not survive the next one, and a fingerprint drawing on one would
+change a day later and re-raise an answered question for a reason the operator
+could not see. The narrowing that buys: `last_output` is the last Output of the
+run, so a change confined to an earlier Output of a multi-Output result does not
+re-raise.
+
+A plugin with no declared side effects and no recorded Output hashes the empty
+sets. That is a stable value scoped by its name — it is denied by name — not an
+error.
 
 ### `last_output`
 
