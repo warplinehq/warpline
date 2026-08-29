@@ -57,7 +57,13 @@ export async function main(argv: string[]): Promise<number> {
 
       case 'plan': {
         const { run } = await import('./plan.js')
-        return run(rest)
+        // `return await`, not `return`. Inside a `try`, a bare `return
+        // somePromise` adopts the promise AFTER the try scope has exited, so
+        // its rejection never reaches the catch below and escapes as an
+        // unhandled one, with a stack. The `await` is what routes it. Every
+        // arm that returns a subcommand's promise needs it; a test reads this
+        // file to make sure none loses it.
+        return await run(rest)
       }
 
       case 'scaffold': {
@@ -86,12 +92,12 @@ export async function main(argv: string[]): Promise<number> {
 
       case 'approve': {
         const { run } = await import('./approve.js')
-        return run(rest)
+        return await run(rest)
       }
 
       case 'revoke': {
         const { run } = await import('./revoke.js')
-        return run(rest)
+        return await run(rest)
       }
 
       default:

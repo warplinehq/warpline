@@ -7,6 +7,8 @@
  * (the `warpline run` SIGINT case); do not spend it here.
  */
 import { describe, test, expect } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { main } from '../warpline.js'
 
 const COMMANDS = ['plan', 'scaffold', 'run', 'approve', 'revoke'] as const
@@ -64,5 +66,37 @@ describe('warpline dispatcher', () => {
     for (const cmd of COMMANDS) {
       expect(stderr).toContain(cmd)
     }
+  })
+})
+
+describe('dispatcher error routing', () => {
+  /**
+   * `main()` catches `EngineStateInvalidError` and turns it into a message and
+   * code 1. That catch only sees a rejection it awaited: inside a `try`, a
+   * bare `return somePromise` adopts the promise after the try scope has
+   * exited, so the rejection escapes unhandled, with a stack — the exact
+   * opposite of the contract.
+   *
+   * This reads the source rather than exercising it because no dispatcher arm
+   * reaches the write-capable engine-state read yet. Nothing behavioural goes
+   * red when the `await` is dropped, which is precisely why the guard has to
+   * be structural.
+   */
+  test('every dynamically imported subcommand is returned with await, so the catch can see its rejection', () => {
+    const source = readFileSync(fileURLToPath(new URL('../warpline.ts', import.meta.url)), 'utf-8')
+
+    const imported = new Set(
+      [...source.matchAll(/const\s*\{([^}]+)\}\s*=\s*await import\(/g)].flatMap((m) =>
+        (m[1] as string).split(',').map((name) => name.trim()),
+      ),
+    )
+    // Guards the regex itself: an empty set would make the assertion vacuous.
+    expect(imported.size).toBeGreaterThan(0)
+
+    const unawaited = [...source.matchAll(/return\s+([A-Za-z_$][\w$]*)\(/g)]
+      .map((m) => m[1] as string)
+      .filter((name) => imported.has(name))
+
+    expect(unawaited).toEqual([])
   })
 })
