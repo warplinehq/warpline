@@ -709,34 +709,60 @@ export async function handler() {
     return readState()
   }
 
-  test('19: a refusal carries a live denial across the plugin_runs delete instead of stranding it', async () => {
-    // The denial is live at the moment of the discard, so it must end up
-    // answering the Output-less proposal. Left alone it would stop matching the
-    // instant plugin_runs went, the plugin would be due on the next advance,
-    // and the side effects the operator said no to would fire again — silently
-    // under a live Grant, since the superseded note only rides the unapproved
-    // arm.
+  /**
+   * Driven through `applyPendingGate` directly, and that is the point rather
+   * than a shortcut. `approve` refuses on a live denial before it ever reaches
+   * this call, so no CLI gesture can arrive here with one standing — which is
+   * exactly why the protection has to live in the function and not in its
+   * caller. What is asserted is a property of `applyPendingGate` for whoever
+   * calls it next.
+   */
+  test('19: a discard leaves plugin_runs alone while a denial is live, so the answer stays bound to the real proposal', async () => {
     const state = await expireThroughApply('gated-writer', deniedGateSeed('gated-writer'))
 
-    expect(state.plugin_runs['gated-writer']).toBeUndefined()
-    expect(state.denials['gated-writer'].fingerprint).toBe(
-      denialFingerprint('gated-writer', ['sends_email'], []),
-    )
-    // `denied_at` is untouched: this re-binds an answer, it does not record a
-    // new one, and the operator gave that answer when they gave it.
-    expect(state.denials['gated-writer'].denied_at).toBe('2026-08-29T11:00:00.000Z')
+    // The entry survives. Deleting it is what moves the fingerprint the denial
+    // is bound to — the answer would stop matching, the plugin would be due on
+    // the next advance, and the side effects the operator refused would fire
+    // again, silently under a live Grant. The delete exists to make a plugin
+    // due again after its inputs moved, which is meaningless for one that
+    // cannot run.
+    expect(state.plugin_runs['gated-writer']).toBeDefined()
+    expect(state.plugin_runs['gated-writer'].last_output).toEqual(RESULT.artifacts_produced[0])
 
-    // The reason must say what the re-binding DID. run-a's parked result no
-    // longer exists — this discard threw it away — and with `plugin_runs` gone
-    // the fingerprint can only stop matching if the manifest's side effects
-    // change, because the plugin is suppressed before the approval gate and can
-    // never produce a new Output. The denial is permanent by name, and the old
-    // string said only that a run the operator can no longer see was declined.
-    const reason = state.denials['gated-writer'].reason
-    expect(reason).toContain('run run-a')
-    expect(reason).toContain('discarded')
-    expect(reason).toContain('denied by name')
-    expect(reason).toContain('warpline deny --remove gated-writer')
+    // Untouched, all of it. Nothing was re-bound, so there is nothing to
+    // re-narrate: the denial still answers the proposal it was given for.
+    const denial = state.denials['gated-writer']
+    expect(denial.fingerprint).toBe(
+      denialFingerprint('gated-writer', ['sends_email'], [RESULT.artifacts_produced[0]]),
+    )
+    expect(denial.denied_at).toBe('2026-08-29T11:00:00.000Z')
+    expect(denial.reason).toBe('the operator declined the parked result from run run-a')
+
+    // The consequence, stated as the evaluator sees it: still suppressed.
+    const { denialStanding } = await import('../../runtime/engine.js')
+    const standing = denialStanding(
+      state as never,
+      'gated-writer',
+      { ...makeManifest('gated-writer', ['sends_email']), ttl_hours: 48 },
+    )
+    expect(standing.standing).toBe('live')
+
+    // Still permanent-free: because the binding holds, a genuine re-run with a
+    // different Output lapses the denial on its own, which a name-bound one
+    // could never do.
+    const moved = { ...state, plugin_runs: { 'gated-writer': {
+      ...state.plugin_runs['gated-writer'],
+      last_output: { type: 'brief', format: 'markdown', path: 'moved.md' },
+    } } }
+    expect(
+      denialStanding(moved as never, 'gated-writer', {
+        ...makeManifest('gated-writer', ['sends_email']),
+        ttl_hours: 48,
+      }).standing,
+    ).toBe('superseded')
+
+    // The GATE is still discarded — that half is unchanged.
+    expect(state.pending_gates).toEqual([])
   })
 
   test('19b: a denial that was already stale is left exactly as it was', async () => {
@@ -752,10 +778,13 @@ export async function handler() {
       },
     })
 
-    // Re-stamping this would revive an answer to a proposal that no longer
-    // exists — the operator would be silently re-denied by a record they had
-    // already outgrown. Non-vacuity for 19: same path, same discard, and the
-    // only difference is whether the answer still matched.
+    // Non-vacuity for 19: same path, same discard, and the only difference is
+    // whether the answer still matched. A stale denial protects nothing — it is
+    // already superseded, so the plugin becoming due again is the correct
+    // outcome and the delete goes ahead.
+    expect(state.plugin_runs['gated-writer']).toBeUndefined()
+    // And it is left exactly as it was. Re-stamping it would revive an answer
+    // to a proposal that no longer exists.
     expect(state.denials['gated-writer'].fingerprint).toBe(stale)
   })
 

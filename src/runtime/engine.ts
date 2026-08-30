@@ -1386,42 +1386,42 @@ export async function applyPendingGate(
     reason: 'dependency_moved' | 'expired',
     detail: string,
   ): Promise<GateApplyOutcome> => {
-    // Carry a live denial across the delete below. The denial was recorded
-    // against the proposal as it stood WITH this run's Output, and
-    // `proposalFingerprint` reads that Output out of `plugin_runs` — so
-    // deleting the entry moves the live fingerprint, the answer stops
-    // matching, and the plugin runs again on the next advance, re-firing the
-    // side effects the operator said no to. Silently, under a live Grant: the
-    // superseded-denial note only rides the `unapproved` arm.
+    // The `plugin_runs` delete is what makes the plugin due again: its parked
+    // result was computed against inputs that have moved, so it should re-run.
     //
-    // Measured BEFORE the delete, and only carried when it still matched. A
-    // denial that was already stale stays stale — re-stamping it would revive
-    // an answer to a proposal that no longer exists.
+    // **Not while a denial is live.** `proposalFingerprint` reads that entry's
+    // Output, so deleting it moves the fingerprint the denial was bound to; the
+    // answer stops matching, and the plugin runs again on the next advance,
+    // re-firing the side effects the operator said no to. Silently, under a live
+    // Grant — the superseded-denial note only rides the `unapproved` arm, which
+    // a denied plugin never reaches.
+    //
+    // The delete is also pointless in exactly that case. A denied plugin does
+    // not run, so making it due achieves nothing; the only thing the delete
+    // accomplishes is breaking the binding.
+    //
+    // Leaving the entry in place is the structural fix, and it is what the
+    // earlier re-fingerprint compensated for. That one re-bound the denial to
+    // `hash(plugin, side_effects, [])`, which nothing can move — the plugin is
+    // suppressed before the approval gate, so it can never produce a new Output
+    // — making the denial permanent by name. Keeping the entry means the denial
+    // stays bound to the REAL proposal and lapses on its own if the plugin ever
+    // genuinely re-runs with a different Output, which is what a
+    // proposal-bound answer is supposed to do.
+    //
+    // Structural rather than guarded, deliberately. The re-fingerprint was
+    // unreachable from the CLI once `approve` began refusing on a live denial,
+    // so it protected nothing a caller could reach while still being the thing
+    // a future second caller would depend on. This holds wherever
+    // `applyPendingGate` is called from.
+    //
+    // A superseded denial does not protect the entry: it is already stale, and
+    // the plugin being due again is the correct outcome.
     const standing = denialStanding(state, gate.plugin, manifest)
 
     state.pending_gates = state.pending_gates.filter((g) => g !== gate)
-    delete state.plugin_runs[gate.plugin]
-    if (standing.standing === 'live') {
-      const denial = standing.denial
-      denial.fingerprint = proposalFingerprint(state, gate.plugin, manifest)
-      // Say what the re-binding did, because it changed what the denial MEANS.
-      // With `plugin_runs` gone the fingerprint is `hash(plugin, side_effects,
-      // [])`, which can only stop matching if the manifest's side effects
-      // change: the plugin is suppressed at the denial check, which sits before
-      // the approval gate, so it never runs and can never produce a new Output
-      // to move the proposal. The denial is now permanent by name. That is the
-      // right call — the alternative is re-firing side effects the operator
-      // said no to — but the old reason names a parked result this discard just
-      // threw away, and that sentence is what `deny --list` prints, what the
-      // `denial_recorded` notice carries, and what the evaluator quotes on
-      // every suppressed advance. Nothing else narrates the transition:
-      // `emitGateInvalidated` below reports the GATE discard, and the
-      // superseded note only rides the `unapproved` arm, which a denied plugin
-      // never reaches.
-      denial.reason =
-        `the operator declined the parked result from run ${gate.run_id}, which was then ` +
-        `discarded (${reason}) — ${gate.plugin} is denied by name until the denial is taken ` +
-        `back with warpline deny --remove ${gate.plugin}`
+    if (standing.standing !== 'live') {
+      delete state.plugin_runs[gate.plugin]
     }
     await writeEngineState(state, opts.statePath)
     await emitGateInvalidated(gate.plugin, gate.run_id, reason, opts.eventsPath).catch(() => {

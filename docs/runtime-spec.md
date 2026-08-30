@@ -764,19 +764,33 @@ Output-less proposal: it is denied by name until the operator takes it back.
 A denial that was already stale is left alone — re-stamping it would revive an
 answer to a proposal that no longer exists.
 
-**"Denied by name" means permanently, and the record now says so.** With
-`plugin_runs` deleted the fingerprint is `hash(plugin, side_effects, [])`, and
-that value can only stop matching if the manifest's declared side effects
-change: the denial check sits *before* the approval gate, so the plugin never
-runs and can never produce a new Output to move its own proposal. Choosing
-permanent suppression over re-firing side effects the operator refused is the
-intended trade. Making it silently was not — so the denial's `reason` is
-rewritten at the same moment as its fingerprint, naming the run whose result was
-declined, the fact that the result was then discarded, and
-`warpline deny --remove <plugin>` as the only thing that lifts it. Nothing else
-narrates the transition: the `gate_invalidated` notice reports the *gate*
-discard, and the superseded-denial note only rides the `unapproved` arm, which a
-denied plugin never reaches.
+**The `plugin_runs` entry is kept while a denial is live, and the denial is left
+exactly as it was.** Deleting the entry is what makes a plugin due again after
+its inputs moved, and `proposalFingerprint` reads that entry's Output — so the
+delete moves the fingerprint the denial is bound to, the answer stops matching,
+and the plugin runs again on the next advance, re-firing the side effects the
+operator refused. Silently, under a live Grant: the superseded-denial note only
+rides the `unapproved` arm, which a denied plugin never reaches.
+
+The delete is also pointless in that case. A denied plugin does not run, so
+making it due achieves nothing; breaking the binding is the only thing it does.
+
+Keeping the entry means the denial stays bound to the **real** proposal. It
+lapses on its own if the plugin ever genuinely re-runs with a different Output,
+which is what a proposal-bound answer is for. An earlier design re-bound the
+denial to `hash(plugin, side_effects, [])` instead — a value nothing can move,
+since a suppressed plugin can never produce a new Output — which made the denial
+permanent by name and required rewriting its `reason` to say so. Neither the
+permanence nor the rewrite is needed once the entry survives.
+
+The protection lives in `applyPendingGate` rather than in its caller,
+deliberately. `approve` refuses on a live denial before reaching that call, so
+no CLI gesture arrives here with one standing — which is precisely why a guard
+placed in the caller would protect nothing today while being the thing a second
+caller tomorrow silently depends on.
+
+A **superseded** denial does not hold the entry. It is already stale, so the
+plugin becoming due again is the correct outcome and the delete goes ahead.
 
 #### Denying a parked result discards it
 
