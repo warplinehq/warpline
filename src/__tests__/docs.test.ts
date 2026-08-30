@@ -110,6 +110,31 @@ describe('CLI surface', () => {
     const out = execFileSync('node', ['dist/bin/warpline.js', '--help'], { cwd: REPO_ROOT, encoding: 'utf8' })
     for (const cmd of dispatchedCommands()) expect(out).toContain(cmd)
   })
+
+  /**
+   * The README is the FOURTH description of the surface, and it was the one
+   * that went stale: `deny` shipped and the README went on listing five
+   * subcommands and naming none of them `deny`. The dispatcher and `--help`
+   * agreed with each other the whole time, because nothing tied the README to
+   * either.
+   *
+   * A hand-counted total is the same defect one step further out, so the count
+   * is derived here too rather than trusted.
+   */
+  const WORD_FOR = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'] as const
+
+  test('the README shows every command the dispatcher routes', () => {
+    const readme = read('README.md')
+    const missing = [...dispatchedCommands()].filter((c) => !readme.includes(`npx warpline ${c}`))
+    expect(missing).toEqual([])
+  })
+
+  test('the README states the number of subcommands there actually are', () => {
+    const readme = read('README.md')
+    const n = dispatchedCommands().size
+    // The sentence is the claim; the count inside it is what goes stale.
+    expect(readme).toContain(`Those ${WORD_FOR[n] ?? n} subcommands are the whole CLI surface`)
+  })
 })
 
 // ── Documented commands must exist ───────────────────────────────────────

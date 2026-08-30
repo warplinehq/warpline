@@ -126,12 +126,19 @@ npx warpline plan
 # Invoke one plugin handler directly
 npx warpline run my-plugin default
 
-# Grant / clear a side-effect approval for this session
+# Answer whichever gate is waiting — record a parked result, or grant a
+# side-effecting plugin permission to run for this session
 npx warpline approve my-plugin
+
+# Say no to what a plugin proposed. The answer is bound to the proposal, so
+# the question comes back if what it proposes changes.
+npx warpline deny my-plugin
+
+# Clear the session approval
 npx warpline revoke
 ```
 
-Those five subcommands are the whole CLI surface at 0.1. Running everything
+Those six subcommands are the whole CLI surface. Running everything
 that's due on a schedule is a library call, not a command. It's `runAdvance()`
 from the package root:
 
