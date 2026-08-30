@@ -873,6 +873,91 @@ export async function handler() {
     expect((await readGrant()).scopes).toEqual(['db-writer'])
   })
 
+  test('21: --all narrates a denied plugin and grants the rest', async () => {
+    await mkdir(join(root, 'state'), { recursive: true })
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: {},
+        pending_gates: [],
+        denials: {
+          'db-writer': {
+            plugin: 'db-writer',
+            reason: 'the operator declined this proposal',
+            denied_at: '2026-08-29T11:00:00.000Z',
+            note: null,
+            fingerprint: denialFingerprint('db-writer', ['writes_db'], []),
+          },
+        },
+      }),
+    )
+
+    const { code, stdout } = await capture('approve', ['--all'])
+
+    // Granted, not refused: --all is a breadth gesture and the operator did not
+    // name the denied plugin, so refusing the whole command answers a question
+    // they did not ask.
+    expect(code).toBe(0)
+    expect((await readGrant()).scopes).toBe('*')
+    expect(stdout).toContain('stays denied')
+    expect(stdout).toContain('warpline deny --remove db-writer')
+    // The count is what can actually run. render-issue + digest-sender remain
+    // of the three side-effecting fixtures; db-writer is suppressed.
+    expect(stdout).toContain('Blanket approval: 2 plugins')
+  })
+
+  test('21b: --all with no denials counts every side-effecting plugin', async () => {
+    // Non-vacuity for 21: same command, same fixtures, no denial record.
+    const { code, stdout } = await capture('approve', ['--all'])
+
+    expect(code).toBe(0)
+    expect(stdout).toContain('Blanket approval: 3 plugins')
+    expect(stdout).not.toContain('stays denied')
+  })
+
+  test('21c: --all still grants when the state document is unreadable', async () => {
+    // The note is advisory, so a failed read costs a sentence and not the
+    // command. --all cannot park a result, so an unreadable document is not
+    // the wrong-gesture hazard it is on the named path.
+    await mkdir(join(root, 'state'), { recursive: true })
+    await writeFile(statePath, '{ this is not json')
+
+    const { code, stdout } = await capture('approve', ['--all'])
+
+    expect(code).toBe(0)
+    expect((await readGrant()).scopes).toBe('*')
+    expect(stdout).not.toContain('stays denied')
+  })
+
+  test('22: grant-clock flags are reported as ignored when a parked result is applied', async () => {
+    await writeGatedPlugin('gated-writer')
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
+
+    const { code, stderr } = await capture('approve', ['gated-writer', '--ttl', '2h', '--long'])
+
+    expect(code).toBe(0)
+    // Named individually: the operator typed specific flags and should see
+    // those flags, not a generic "some options were ignored".
+    expect(stderr).toContain('--ttl')
+    expect(stderr).toContain('--long')
+    expect(stderr).not.toContain('--replace')
+    expect(stderr).toContain('no grant clock to set')
+    // Still no grant file — the note describes what happened, it does not change it.
+    expect(existsSync(approvalPath)).toBe(false)
+  })
+
+  test('22b: an apply with no grant flags says nothing about them', async () => {
+    // Non-vacuity for 22: same path, same apply, no flags typed.
+    await writeGatedPlugin('gated-writer')
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
+
+    const { code, stderr } = await capture('approve', ['gated-writer'])
+
+    expect(code).toBe(0)
+    expect(stderr).not.toContain('ignored')
+  })
+
   test('17: with no parked gate the command merges a Grant exactly as it always did', async () => {
     const { code, stdout, stderr } = await capture('approve', ['render-issue'])
 

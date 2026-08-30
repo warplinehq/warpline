@@ -150,6 +150,8 @@ Rules that follow from the runtime, not from taste:
 
 - **An approval Ask expires with the Grant ceiling — once a Grant exists.**
   Grants live at most 23 hours from first issue unless `--long` is passed
+  (a blanket `--all` grant still does not reach a denied plugin; `approve`
+  names any that stay denied)
   (`MAX_GRANT_WINDOW_MS`). The Ask shows `expires_at`; **defer options that
   would outlive it are not offered.** An approval Ask that has never been
   granted has no expiry to cap holds against: the ceiling anchors on

@@ -835,9 +835,24 @@ A superseded denial does not refuse — it is already stale everywhere else, and
 refusing on it would strand the operator behind a question that no longer
 exists.
 
-`--all` is out of scope for this check: the blanket path does not read the
-engine state, so it cannot see the denial record. A denied plugin stays
-suppressed under a blanket grant exactly as it does under a named one.
+`--all` **narrates rather than refuses.** It is a breadth gesture — the operator
+did not name the denied plugin — so refusing the whole command over one denial
+would answer a question they did not ask. The blanket grant is written, the
+coverage line counts only plugins that can actually run, and a note names each
+plugin that stays denied along with `warpline deny --remove`.
+
+That check takes a READ-ONLY, tolerant read of the engine state, unlike the
+write-capable read on the named path. `--all` cannot park a result, so an
+unreadable state document is not the wrong-gesture hazard it is there. The note
+is advisory: a read that fails costs a sentence, not the command, and `--all`
+grants exactly as it did before.
+
+#### Grant-clock flags on an apply
+
+`--ttl`, `--replace` and `--long` set a Grant clock. Applying a parked result
+records an outcome and writes no grant, so there is no clock for them to set.
+They are reported as ignored, named individually, on stderr. Nothing about the
+apply changes — the note describes what happened rather than altering it.
 
 ### `denials`
 

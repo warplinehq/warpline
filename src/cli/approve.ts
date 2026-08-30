@@ -56,7 +56,11 @@ import {
   loadPluginManifests,
 } from '../runtime/engine.js'
 import { DEFAULT_TTL_MS, mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
-import { EngineStateInvalidError, readEngineState } from '../schemas/engine-state.js'
+import {
+  EngineStateInvalidError,
+  readEngineState,
+  readEngineStateReadOnly,
+} from '../schemas/engine-state.js'
 import { engineStatePath, pluginsDir, sessionApprovalPath } from '../lib/paths.js'
 import { suggest } from './suggest.js'
 
@@ -234,6 +238,28 @@ export async function run(argv: string[]): Promise<number> {
       // whole command with nothing on disk" is a claim about NAME VALIDATION,
       // which happens before any write; it does not extend to this loop, and
       // the summary below is what stops a reader assuming it does.
+      // The Grant-clock flags do nothing here, and vanishing silently let the
+      // operator believe a window they asked for is open. Applying a parked
+      // result writes no grant at all, so there is no clock for `--ttl`,
+      // `--replace` or `--long` to set. Named, not summarised: the operator
+      // typed a specific flag and should see that specific flag reported.
+      //
+      // Read off `values` rather than a list, so a flag added to parseArgs
+      // later cannot quietly join the set of things that disappear. `--ttl`
+      // tests the raw value because its default is applied downstream.
+      const ignoredFlags = [
+        values.ttl !== undefined ? '--ttl' : null,
+        values.replace ? '--replace' : null,
+        values.long ? '--long' : null,
+      ].filter((f): f is string => f !== null)
+      if (ignoredFlags.length > 0) {
+        process.stderr.write(
+          `Note: ${ignoredFlags.join(', ')} ${ignoredFlags.length === 1 ? 'was' : 'were'} ignored. ` +
+            `Applying a parked result records an outcome and writes no grant, so there is no ` +
+            `grant clock to set.\n`,
+        )
+      }
+
       const applied: string[] = []
       const refused: string[] = []
       for (const name of gated) {
@@ -378,11 +404,44 @@ export async function run(argv: string[]): Promise<number> {
 
   if (values.all) {
     const gated = [...manifests.values()].filter((m) => m.side_effects.length > 0)
-    const effects = gated.reduce((n, m) => n + m.side_effects.length, 0)
+
+    // Denials suppress a plugin before the approval gate is consulted, so a
+    // blanket grant does not reach one. Saying "4 plugins may now run them"
+    // when one of them cannot is the same false success the named path was
+    // refusing — it just cannot be fixed the same way. `--all` is a BREADTH
+    // gesture: the operator did not name the denied plugin, so refusing the
+    // whole command over it would answer a question they did not ask. It
+    // narrates instead, and grants the rest.
+    //
+    // Read-only, and tolerant. `--all` deliberately does not take the
+    // write-capable read above — it cannot park a result, so an unreadable
+    // state document is not the wrong-gesture hazard it is on the named path.
+    // The note is advisory, so a read that fails costs a sentence, not the
+    // command, and `--all`'s existing guarantee is unchanged.
+    let suppressed: string[] = []
+    try {
+      const state = await readEngineStateReadOnly(engineStatePath())
+      suppressed = gated
+        .filter((m) => denialStanding(state, m.name, m).standing === 'live')
+        .map((m) => m.name)
+    } catch {
+      // Unreadable or absent: say nothing rather than guess. A fresh install
+      // has no denials, and a broken document is not this command's to report.
+    }
+
+    const reachable = gated.filter((m) => !suppressed.includes(m.name))
+    const effects = reachable.reduce((n, m) => n + m.side_effects.length, 0)
     process.stdout.write(
-      `Blanket approval: ${plural(gated.length, 'plugin')} declaring ` +
+      `Blanket approval: ${plural(reachable.length, 'plugin')} declaring ` +
         `${plural(effects, 'side effect')} may now run them.\n`,
     )
+    if (suppressed.length > 0) {
+      process.stdout.write(
+        `Note: ${suppressed.join(', ')} ${suppressed.length === 1 ? 'stays' : 'stay'} denied and ` +
+          `will not run under this grant. Take the ${suppressed.length === 1 ? 'denial' : 'denials'} ` +
+          `back first: warpline deny --remove ${suppressed.join(' ')}\n`,
+      )
+    }
   }
 
   // Both branches say which gate they answered, so the operator never infers it.
