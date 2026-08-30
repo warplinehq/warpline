@@ -44,7 +44,7 @@
  */
 import { parseArgs } from 'node:util'
 import { findPendingGate, loadPluginManifests, proposalFingerprint } from '../runtime/engine.js'
-import { emitDenialRecorded } from '../board/engine-events.js'
+import { emitDenialRecorded, emitGateInvalidated } from '../board/engine-events.js'
 import {
   DenialSchema,
   EngineStateInvalidError,
@@ -223,7 +223,7 @@ export async function run(argv: string[]): Promise<number> {
 
   const denied_at = new Date().toISOString()
   const recorded: Denial[] = []
-  const discarded: string[] = []
+  const discarded: { plugin: string; runId: string }[] = []
 
   for (const plugin of positionals) {
     const fingerprint = proposalFingerprint(state, plugin, manifests.get(plugin)!)
@@ -284,7 +284,7 @@ export async function run(argv: string[]): Promise<number> {
     // stops a second `approve` re-recording an applied result.
     if (live) {
       state.pending_gates = state.pending_gates.filter((g) => g !== gate)
-      discarded.push(plugin)
+      discarded.push({ plugin, runId: gate.run_id })
     }
 
     const denial = DenialSchema.parse({
@@ -309,11 +309,19 @@ export async function run(argv: string[]): Promise<number> {
     await emitDenialRecorded(denial.plugin, denial.reason, denial.fingerprint, eventsPath).catch(
       () => {},
     )
+    // The gate discard is its own event, not an implication of the denial one.
+    // Every other discard path emits it, and a parked result that vanishes with
+    // no board trace is a state change only whoever was watching stdout can
+    // know about — the operator tomorrow reads the board.
+    const gone = discarded.find((d) => d.plugin === denial.plugin)
+    if (gone !== undefined) {
+      await emitGateInvalidated(gone.plugin, gone.runId, 'denied', eventsPath).catch(() => {})
+    }
     // Say that the result is gone, because it is. The operator declined a
     // specific run and that run is no longer applyable by any gesture — a
     // consequence they cannot see from the state file and should not discover
     // later from a `deny --remove` that hands back nothing.
-    const dropped = discarded.includes(denial.plugin)
+    const dropped = discarded.some((d) => d.plugin === denial.plugin)
       ? `The parked result was discarded — taking the denial back will let ${denial.plugin} be ` +
         `asked fresh, not re-offer that run. `
       : ''

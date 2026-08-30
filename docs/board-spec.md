@@ -305,9 +305,10 @@ set, so a new member would be silently dropped from every board view. Any
 
 | `metadata_json.event` | Emitted when |
 |---|---|
-| `gate_invalidated` | a parked gate was discarded as a stub or because a dependency moved |
+| `gate_invalidated` | a parked gate was discarded as a stub, because a dependency moved, or because the operator denied it (`metadata_json.reason` distinguishes: `stub`, `dependency_moved`, `denied`) |
 | `gate_expired` | a parked gate was discarded as past the earlier of its TTL and 23 hours |
 | `denial_recorded` | the operator ran `warpline deny` and a denial was written |
+| | A `deny` against a live parked gate emits BOTH: `denial_recorded` for the answer, and `gate_invalidated` with `reason: denied` for the result it dequeued. They are separate events because they are separate facts — a reader tracking parked work must not have to infer the discard from the denial. |
 | `plugin_denied` | an advance skipped a plugin because a live denial answered it |
 
 `plugin_denied` is a `notice`, not a `plugin_result` skip. The run log

@@ -25,6 +25,12 @@ import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 let root: string
 let statePath: string
 
+/** Board events written under the test home. Absent file → no events yet. */
+const readEvents = async (): Promise<{ metadata_json?: string; run_id: string | null }[]> => {
+  const raw = await readFile(join(root, 'state', 'events.jsonl'), 'utf-8').catch(() => '')
+  return raw.split('\n').filter((l) => l.length > 0).map((l) => JSON.parse(l))
+}
+
 function makeManifest(name: string, sideEffects: string[]): PluginManifest {
   return {
     name,
@@ -376,6 +382,17 @@ describe('warpline deny', () => {
     // had not happened.
     expect((await readState()).pending_gates).toEqual([])
     expect(stdout).toContain('The parked result was discarded')
+
+    // The board hears about it too. Every other discard path emits this; a
+    // parked result that vanishes with no trace is a state change only whoever
+    // was watching stdout can know about.
+    const events = await readEvents()
+    const discard = events.find(
+      (e) => JSON.parse(e.metadata_json ?? '{}').event === 'gate_invalidated',
+    )
+    expect(discard).toBeDefined()
+    expect(JSON.parse(discard!.metadata_json!).reason).toBe('denied')
+    expect(discard!.run_id).toBe('run-a')
     // The path that used to reach it. Taking the denial back must re-open the
     // question, not hand back the answer the operator already refused.
     expect((await readState()).denials['render-issue']).toBeDefined()
@@ -396,6 +413,11 @@ describe('warpline deny', () => {
     expect(gates).toHaveLength(1)
     expect(gates[0].applied_at).toBe(appliedAt)
     expect(stdout).not.toContain('The parked result was discarded')
+    // Nothing was discarded, so nothing is reported as discarded.
+    const events = await readEvents()
+    expect(
+      events.some((e) => JSON.parse(e.metadata_json ?? '{}').event === 'gate_invalidated'),
+    ).toBe(false)
   })
 
   test('10: denying the same plugin twice against an unchanged proposal writes nothing the second time', async () => {

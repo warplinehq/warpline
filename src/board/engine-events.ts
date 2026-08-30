@@ -29,6 +29,18 @@ import { eventsJsonlPath } from '../lib/paths.js'
 import type { BoardEvent } from '../schemas/board.js'
 
 /**
+ * Why a parked gate stopped existing. Every discard is one of these, and every
+ * one of them emits — a parked result that vanishes with no board trace is a
+ * state change only the operator who happened to be watching stdout can know
+ * about.
+ *
+ * `denied` is the operator's own answer rather than a staleness verdict, which
+ * is why it is a member and not folded into `expired`: the board reader wants
+ * to know a human decided, not that a clock ran out.
+ */
+export type GateDiscardReason = 'stub' | 'dependency_moved' | 'expired' | 'denied'
+
+/**
  * Size cap for events.jsonl (2026-08-19, operator decision).
  *
  * The log is append-only and had grown to 74k lines (56% test-fixture noise
@@ -194,7 +206,7 @@ export const emitAttemptFailed = (
 export const emitGateInvalidated = (
   plugin: string,
   runId: string | null,
-  reason: 'stub' | 'dependency_moved' | 'expired',
+  reason: GateDiscardReason,
   eventsPath?: string,
 ): Promise<void> =>
   emitBoardEvent(
@@ -272,7 +284,7 @@ export const emitPluginDenied = (
     eventsPath,
   )
 
-const GATE_DISCARD_PROSE: Record<'stub' | 'dependency_moved' | 'expired', string> = {
+const GATE_DISCARD_PROSE: Record<GateDiscardReason, string> = {
   stub: 'written by a build older than the one holding the real result, so there is no outcome to approve',
   dependency_moved: 'a dependency re-ran after the gated run started, so the result was computed against inputs that have moved',
   // The hour figure is a literal on purpose: importing GATE_MAX_AGE_MS from
@@ -280,6 +292,7 @@ const GATE_DISCARD_PROSE: Record<'stub' | 'dependency_moved' | 'expired', string
   // and this const is built at module init, so the binding would be in TDZ and
   // throw. Pinned against the constant by engine-events.test.ts instead.
   expired: 'older than the earlier of the plugin TTL and 23 hours',
+  denied: 'the operator declined it, so the result was dequeued rather than left applyable',
 }
 
 /**
