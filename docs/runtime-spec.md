@@ -720,11 +720,20 @@ does, in order, all decided before anything is written:
    renew by name, with only the far wider `--all` still working.
 
    The gate is marked rather than deleted so the note has a run to name and so
-   `deny` can tell an accepted result from a pending one. **An applied gate
-   survives the next advance**: the marker lives inside `pending_gates`, and
-   overwriting the array wholesale destroyed it. An applied marker is dropped
-   when it passes the 23-hour gate ceiling, or when the plugin gates again and
-   the new parked gate supersedes it.
+   `deny` can tell an accepted result from a pending one. **A gate survives the
+   next advance, applied or not**, and is dropped only when it passes the
+   23-hour gate ceiling or when the plugin gates again and the new parked gate
+   supersedes it. One rule covers the whole array; the clock differs because the
+   question does. A marker ages from `applied_at`, the moment the result was
+   accepted. An unapplied gate ages from `run_completed_at`, the moment the run
+   produced it — the same clock the expiry check uses. A gate carrying no
+   `run_completed_at` never survives, since it is refused at apply time anyway.
+
+   Both halves were once overwritten wholesale, and the split that replaced it
+   kept markers while still discarding parked results. Nothing chose that: a
+   daily engine destroyed the previous day's proposal before anyone could review
+   it, and the 23-hour ceiling was unreachable in live operation — a limit only
+   a seeded clock could observe.
 2. **A dependency moved** — some dependency's `plugin_runs.last_run_at` is newer
    than `run_started_at`. The parked result was computed against inputs that
    have since changed, so it is refused, the gate is discarded, and a `notice`
@@ -842,10 +851,12 @@ which bounds the fingerprint whatever the inline cap allows and keeps Output
 content out of the record.
 
 The Outputs hashed are the ones in `plugin_runs[plugin].last_output`, not the
-ones in a parked gate. `pending_gates` is overwritten on every advance and only
-an applied gate survives it, so an unapplied gate does not outlive the advance
-that follows it, and a fingerprint drawing on one would change a day later and
-re-raise an answered question for a reason the operator could not see. The narrowing that buys: `last_output` is the last Output of the
+ones in a parked gate. A gate now outlives the advance that parked it, so the
+original reason — that one would vanish a day later — no longer holds as
+stated; the choice does. A gate is still the shorter-lived record of the two:
+it is discarded on apply, on denial, when superseded, and at the ceiling, while
+`plugin_runs` outlives all four. Binding an answer to the longer-lived record is
+what keeps a denial from expiring for a reason the operator never sees. The narrowing that buys: `last_output` is the last Output of the
 run, so a change confined to an earlier Output of a multi-Output result does not
 re-raise.
 

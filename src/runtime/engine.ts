@@ -227,12 +227,16 @@ export function denialFingerprint(
  * of arithmetic.
  *
  * The Outputs come from `plugin_runs[plugin].last_output` and deliberately NOT
- * from a parked gate. An unapplied gate is destroyed by the next advance —
- * `pending_gates` is overwritten, and only an APPLIED gate survives, as a
- * marker — so a fingerprint drawing on one would change the day after it was
- * recorded and re-raise an answered question for a reason the operator could
- * not see. `plugin_runs` survives, and it is written on the same branch that
- * parks the gate, so it holds the same run's Output.
+ * from a parked gate. `plugin_runs` survives, and it is written on the same
+ * branch that parks the gate, so it holds the same run's Output.
+ *
+ * A gate now outlives the advance that parked it, up to the gate ceiling, so
+ * the original argument — that a fingerprint drawn on one would change the day
+ * after it was recorded — no longer holds as stated. The choice does. A gate is
+ * still the shorter-lived object of the two: it is discarded on apply, on
+ * denial, when superseded, and at the ceiling, while `plugin_runs` outlives all
+ * four. Binding an answer to the longer-lived record is what keeps a denial
+ * from expiring for a reason the operator never sees.
  *
  * The narrowing that buys: `last_output` is the LAST Output of the run
  * (`lastOutputOf` takes `.at(-1)`), so a change confined to an earlier Output
@@ -1050,19 +1054,30 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // marker: the new parked gate is the live answer and the old marker has
   // nothing left to refuse.
   //
-  // UNAPPLIED gates are still overwritten wholesale. That limitation is the
-  // phase's recorded deferred item and is deliberately not what this changes —
-  // `proposalFingerprint` reads `plugin_runs` rather than a gate BECAUSE an
-  // unapplied gate does not outlive the next advance.
+  // **An UNAPPLIED gate survives too, under the same ceiling.** It did not,
+  // and the split was never chosen: markers lived a full ceiling while a
+  // parked result lived zero advances, so a daily engine destroyed Monday's
+  // proposal on Tuesday morning before anyone could review it. The ceiling
+  // itself was unreachable in live operation — a limit the spec states and
+  // only seeded-clock tests could ever observe.
+  //
+  // One rule for the whole array now: a gate survives while it is younger than
+  // the ceiling and has not been superseded by a fresh gate for its plugin.
+  // The clock differs because the question does — a marker ages from when the
+  // result was ACCEPTED, a parked gate from when the run PRODUCED it, which is
+  // the clock `applyPendingGate` already expires against.
+  //
+  // A gate missing `run_completed_at` does not survive. Such a gate is refused
+  // at apply time anyway ("carries no record of when its run happened"), so
+  // keeping it would only park something that can never be answered.
   const gateFloorMs = Date.now() - GATE_MAX_AGE_MS
-  const appliedSurvivors = state.pending_gates.filter(
-    (g) =>
-      g.applied_at !== null &&
-      new Date(g.applied_at).getTime() > gateFloorMs &&
-      !parked_gates.some((p) => p.plugin === g.plugin),
-  )
+  const survivors = state.pending_gates.filter((g) => {
+    if (parked_gates.some((p) => p.plugin === g.plugin)) return false
+    const clock = g.applied_at ?? g.run_completed_at
+    return clock !== null && new Date(clock).getTime() > gateFloorMs
+  })
   ;(updatedState as Record<string, unknown>)['pending_gates'] = [
-    ...appliedSurvivors,
+    ...survivors,
     ...parked_gates,
   ]
 

@@ -1273,6 +1273,102 @@ export async function handler(manifest, args) {
     const state = JSON.parse(await readFile(statePath, 'utf-8'))
     expect(state.pending_gates.map((g: { plugin: string }) => g.plugin)).toEqual(['live-marker'])
   })
+
+  /**
+   * The other half of Test 43, and the one that was missing. An APPLIED gate
+   * survived the advance; an UNAPPLIED one did not, and nothing had chosen that
+   * split. A daily engine therefore destroyed Monday's parked proposal on
+   * Tuesday morning, before anyone could review it — and the gate ceiling was
+   * unreachable in live operation, a limit the spec states that only a seeded
+   * clock could ever observe.
+   */
+  test('Test 45: an unapplied gate survives an advance that parks nothing for it', async () => {
+    const { runAdvance, findPendingGate } = await import('../engine.js')
+    const { readEngineState } = await import('../../schemas/engine-state.js')
+    await createOutputPlugin(
+      'gated-writer',
+      JSON.stringify([{ type: 'brief', format: 'markdown', path: 'brief.md' }]),
+      'supervised',
+    )
+
+    const approvalPath = join(ctx.root, '.session-approval-test45')
+    await grantApproval('gated-writer', 4 * 60 * 60 * 1000, approvalPath)
+    const advance = () =>
+      runAdvance({
+        pluginsDir: ctx.pluginsDir,
+        stateDir: statePath,
+        runsDir: ctx.runsDir,
+        eventsPath,
+        approvalPath,
+      })
+
+    await advance()
+    const parked = findPendingGate(await readEngineState(statePath), 'gated-writer')
+    expect(parked).toBeDefined()
+    expect((parked as NonNullable<typeof parked>).applied_at).toBeNull()
+    const runId = (parked as NonNullable<typeof parked>).run_id
+
+    // The plugin is inside its TTL, so this advance runs nothing and parks
+    // nothing — exactly the quiet day that used to wipe the array.
+    await advance()
+
+    const survivor = findPendingGate(await readEngineState(statePath), 'gated-writer')
+    expect(survivor).toBeDefined()
+    // The SAME parked run, still unapplied and still reviewable.
+    expect((survivor as NonNullable<typeof survivor>).run_id).toBe(runId)
+    expect((survivor as NonNullable<typeof survivor>).applied_at).toBeNull()
+  })
+
+  test('Test 46: an unapplied gate past the ceiling is dropped, and one missing its clock never survives', async () => {
+    const { runAdvance, GATE_MAX_AGE_MS } = await import('../engine.js')
+    await createOutputPlugin('quiet-writer', '[]')
+
+    const gate = (plugin: string, completedAgoMs: number | null) => ({
+      plugin,
+      run_id: `run-${plugin}`,
+      created_at: new Date(Date.now() - (completedAgoMs ?? 0)).toISOString(),
+      payload_summary: 'done',
+      plugin_result: {
+        status: 'success',
+        phases_completed: [plugin],
+        phases_failed: [],
+        errors: [],
+        data_freshness: {},
+        summary: 'done',
+        artifacts_produced: [],
+        schema_version: 2,
+      },
+      run_started_at: completedAgoMs === null ? null : new Date(Date.now() - completedAgoMs).toISOString(),
+      run_completed_at: completedAgoMs === null ? null : new Date(Date.now() - completedAgoMs).toISOString(),
+      applied_at: null,
+    })
+
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: {},
+        pending_gates: [
+          gate('stale-gate', GATE_MAX_AGE_MS + 60_000),
+          gate('live-gate', 60_000),
+          // No clock at all. `applyPendingGate` refuses this one as expired, so
+          // keeping it would park something that can never be answered.
+          gate('clockless-gate', null),
+        ],
+      }),
+    )
+
+    await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+      approvalPath: join(ctx.root, '.session-approval-test46'),
+    })
+
+    const state = JSON.parse(await readFile(statePath, 'utf-8'))
+    expect(state.pending_gates.map((g: { plugin: string }) => g.plugin)).toEqual(['live-gate'])
+  })
 })
 
 /**
