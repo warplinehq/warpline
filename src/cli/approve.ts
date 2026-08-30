@@ -55,10 +55,17 @@ import {
   findPendingGate,
   loadPluginManifests,
 } from '../runtime/engine.js'
-import { mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
+import { DEFAULT_TTL_MS, mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { EngineStateInvalidError, readEngineState } from '../schemas/engine-state.js'
 import { engineStatePath, pluginsDir, sessionApprovalPath } from '../lib/paths.js'
 import { suggest } from './suggest.js'
+
+// Both hour figures are derived, not typed. The `--long` line read a literal
+// `24h` while the constant moved to 23, and docs.test.ts guards the DOCS
+// against the constant but nothing guarded this string — the one the operator
+// actually reads. Same lesson as the dispatcher's command list.
+const CEILING_H = MAX_GRANT_WINDOW_MS / (60 * 60 * 1000)
+const DEFAULT_TTL_H = DEFAULT_TTL_MS / (60 * 60 * 1000)
 
 const USAGE = `Usage: warpline approve <plugin>... [options]
        warpline approve --all [options]
@@ -70,9 +77,9 @@ Grants are additive: approving 'b' after 'a' leaves both approved.
 
 Options:
   --all        Approve every plugin (blanket). Prints its coverage first.
-  --ttl <dur>  Requested lifetime, e.g. 30m, 4h, 3d. Default 4h.
+  --ttl <dur>  Requested lifetime, e.g. 30m, 4h, 3d. Default ${DEFAULT_TTL_H}h.
   --replace    Overwrite the current scope list instead of adding to it.
-  --long       Permit an expiry past 24h from the first grant.
+  --long       Permit an expiry past ${CEILING_H}h from the first grant.
 `
 
 const MINUTE = 60 * 1000

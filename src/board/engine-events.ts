@@ -275,7 +275,11 @@ export const emitPluginDenied = (
 const GATE_DISCARD_PROSE: Record<'stub' | 'dependency_moved' | 'expired', string> = {
   stub: 'written by a build older than the one holding the real result, so there is no outcome to approve',
   dependency_moved: 'a dependency re-ran after the gated run started, so the result was computed against inputs that have moved',
-  expired: 'older than the earlier of the plugin TTL and 24 hours',
+  // The hour figure is a literal on purpose: importing GATE_MAX_AGE_MS from
+  // engine.ts would close an import cycle (engine → engine-events → engine)
+  // and this const is built at module init, so the binding would be in TDZ and
+  // throw. Pinned against the constant by engine-events.test.ts instead.
+  expired: 'older than the earlier of the plugin TTL and 23 hours',
 }
 
 /**

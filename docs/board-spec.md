@@ -98,7 +98,7 @@ A parked result is applied **once**. A second approve is refused and says when
 the first one landed. A gate is also refused, and thrown away, in two other
 cases: when a dependency re-ran after the gated run started — the result was
 computed against inputs that have moved — and when the gate is older than the
-earlier of the plugin's `ttl_hours` and 24 hours. Both leave the plugin due on
+earlier of the plugin's `ttl_hours` and 23 hours. Both leave the plugin due on
 the next advance and write a `notice` naming it. **Expiry is a state transition
 the approve verb makes, not something the Board infers**, which is what stops an
 approval and an expiry racing into a double apply.
@@ -149,7 +149,7 @@ open ──expiry──▶ expired         (approval kind only; see below)
 Rules that follow from the runtime, not from taste:
 
 - **An approval Ask expires with the Grant ceiling — once a Grant exists.**
-  Grants live at most 24 hours from first issue unless `--long` is passed
+  Grants live at most 23 hours from first issue unless `--long` is passed
   (`MAX_GRANT_WINDOW_MS`). The Ask shows `expires_at`; **defer options that
   would outlive it are not offered.** An approval Ask that has never been
   granted has no expiry to cap holds against: the ceiling anchors on
@@ -304,7 +304,7 @@ set, so a new member would be silently dropped from every board view. Any
 | `metadata_json.event` | Emitted when |
 |---|---|
 | `gate_invalidated` | a parked gate was discarded as a stub or because a dependency moved |
-| `gate_expired` | a parked gate was discarded as past the earlier of its TTL and 24 hours |
+| `gate_expired` | a parked gate was discarded as past the earlier of its TTL and 23 hours |
 | `denial_recorded` | the operator ran `warpline deny` and a denial was written |
 | `plugin_denied` | an advance skipped a plugin because a live denial answered it |
 

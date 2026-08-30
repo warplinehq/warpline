@@ -6,6 +6,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, rm, readFile, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { grantApproval } from '../../runtime/approval-gate.js'
@@ -521,5 +522,25 @@ describe('run linkage on emitted events', () => {
     expect(read).toHaveLength(1)
     expect(read[0]!.event_id).toBe('evt-historical')
     expect(read[0]!.run_id).toBeNull()
+  })
+})
+
+describe('gate-discard prose stays tied to the constant it quotes', () => {
+  /**
+   * `GATE_DISCARD_PROSE.expired` names an hour figure that only
+   * `GATE_MAX_AGE_MS` decides. It cannot import that constant — engine.ts
+   * already imports this module, so the binding would be in TDZ at init — so
+   * the tie is asserted here rather than expressed in the source. Without it
+   * the board would keep telling operators "23 hours" after someone moved the
+   * ceiling, which is the drift class docs.test.ts exists to catch one level
+   * out.
+   */
+  test('quotes the hours GATE_MAX_AGE_MS actually enforces', async () => {
+    const { GATE_MAX_AGE_MS } = await import('../../runtime/engine.js')
+    const hours = GATE_MAX_AGE_MS / (60 * 60 * 1000)
+    const source = readFileSync(join(import.meta.dir, '../engine-events.ts'), 'utf8')
+    const line = source.match(/expired: '([^']+)'/)?.[1]
+    expect(line).toBeDefined()
+    expect(line).toContain(`${hours} hours`)
   })
 })

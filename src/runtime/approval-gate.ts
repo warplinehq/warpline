@@ -35,8 +35,16 @@ export const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000
  * and a "4-hour" grant would in practice never expire. Every system that
  * permits renewal pairs it with a second absolute clock fixed at first issue
  * (Kerberos `renew_till`, Vault `max_ttl`); this is that clock.
+ *
+ * 23 hours, not 24, and the hour is the point. An engine advancing on a daily
+ * cadence would meet a 24-hour ceiling at exactly the moment the next advance
+ * runs — the grant and the run race, and which wins depends on scheduler jitter
+ * rather than on anything the operator decided. At 23 the ceiling has always
+ * lapsed before the next daily advance, so authority never straddles two runs
+ * by accident. A daily operator re-authorises daily, deliberately, which is the
+ * property a session grant is for.
  */
-export const MAX_GRANT_WINDOW_MS = 24 * 60 * 60 * 1000
+export const MAX_GRANT_WINDOW_MS = 23 * 60 * 60 * 1000
 
 interface ApprovalFile {
   /** ISO 8601 timestamp when approval was granted */

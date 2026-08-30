@@ -81,11 +81,11 @@ And it expires. The default lifetime of a grant is four hours. Grants are
 additive, so renewing one is ordinary. But a clock that resets on every renewal
 isn't a clock, so there's a second one. It's absolute, and it's anchored at the
 *first* grant in the window, not the most recent. That's the same shape Kerberos
-calls `renew_till` and Vault calls `max_ttl`, and it puts a 24-hour ceiling on
+calls `renew_till` and Vault calls `max_ttl`, and it puts a 23-hour ceiling on
 how long a single window can run.
 
-The ceiling isn't unliftable. `approve.ts:33` is the line of the CLI's own help
-text offering `--long`, "Permit an expiry past 24h from the first grant." I state
+The ceiling isn't unliftable. `warpline approve --help` offers `--long`, and
+says so itself: "Permit an expiry past 23h from the first grant." I state
 it that way round because a document claiming an absolute ceiling would be
 contradicted by the program's own `--help` output, and a safety claim a reader
 can falsify in one command is worse than no claim at all.
@@ -309,12 +309,15 @@ grants itself anything" is tied below to the search that established it. Run
 
 4. "it expires" — the two constants, quoted from the module that defines them:
      28:export const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000
-     39:export const MAX_GRANT_WINDOW_MS = 24 * 60 * 60 * 1000
+     47:export const MAX_GRANT_WINDOW_MS = 23 * 60 * 60 * 1000
    The second carries the docstring "Anchored at FIRST issue, not at the latest
    grant", which is why re-granting cannot walk the window forward.
 
-5. "the ceiling is liftable" — the CLI's own help text, at approve.ts:33:
-     33:  --long       Permit an expiry past 24h from the first grant.
+5. "the ceiling is liftable" — the CLI's own help text, as `warpline approve
+   --help` prints it:
+       --long       Permit an expiry past 23h from the first grant.
+   The source builds that hour from MAX_GRANT_WINDOW_MS rather than typing it
+   (approve.ts, CEILING_H), so the help text cannot drift from the constant.
    This is why no sentence above calls the ceiling absolute.
 
 6. "records that plugin skipped and carries on" vs "recorded gated, and the run

@@ -479,7 +479,7 @@ JSON file; there is no daemon, no keyring and no server.
 | Field              | Type               | Meaning |
 |--------------------|--------------------|---------|
 | `granted_at`       | ISO 8601 string    | When the most recent grant was written. |
-| `first_granted_at` | ISO 8601 string    | When the FIRST grant in this window was written — the anchor for the 24-hour ceiling below. Optional on read, always written. |
+| `first_granted_at` | ISO 8601 string    | When the FIRST grant in this window was written — the anchor for the 23-hour ceiling below. Optional on read, always written. |
 | `expires_at`       | ISO 8601 string    | When the grant stops being honoured. |
 | `scopes`           | `"*"` or `string[]` | `"*"` approves every plugin. An array approves exactly the plugin **directory** names it lists — the same key the engine passes to the gate, not `manifest.name`. Always written sorted, so both the file and its diff are stable. |
 
@@ -501,7 +501,7 @@ its expiry, not its mtime. The gate-apply path reaches no symbol in the module
 that owns this file, so there is no code path from an outcome review to a grant
 write.
 
-The two clocks stay separate for that reason. The 24-hour ceiling below bounds
+The two clocks stay separate for that reason. The 23-hour ceiling below bounds
 how long side-effect AUTHORITY lives, anchored at `first_granted_at`. The gate
 ceiling in § 10 bounds how long an OBSERVED OUTCOME stays acceptable, anchored
 at the gated run's completion. They read the same number and answer different
@@ -539,9 +539,9 @@ later one is the failure this behaviour exists to prevent.
 |------|-----------|
 | Scopes | Unioned with the live grant and written sorted. A `"*"` on either side absorbs the other. |
 | `expires_at` | **Preserved** from the live grant. An explicit `--ttl` may extend it, never shorten it. |
-| Ceiling | `expires_at` is capped at `first_granted_at + 24h`. A capped grant reports the cap on stdout. |
+| Ceiling | `expires_at` is capped at `first_granted_at + 23h`. A capped grant reports the cap on stdout. |
 | `--long` | Permits an expiry past the ceiling, and prints that it did. |
-| Prior `--long` grant | The ceiling never shortens time already held. `mergeGrant` caps at `max(first_granted_at + 24h, live expires_at)`, so a window opened by an earlier `--long` survives every later plain `approve` unchanged, and `capped` is false. Revoke to close it early. |
+| Prior `--long` grant | The ceiling never shortens time already held. `mergeGrant` caps at `max(first_granted_at + 23h, live expires_at)`, so a window opened by an earlier `--long` survives every later plain `approve` unchanged, and `capped` is false. Revoke to close it early. |
 | `--replace` | Overwrites the scope list and resets `expires_at`; `first_granted_at` is preserved. |
 | Expired grant | Not merged onto. The window has closed; the next grant restarts it, with a new `first_granted_at`. |
 | Default TTL | 4 hours. |
@@ -550,12 +550,12 @@ later one is the failure this behaviour exists to prevent.
 | Zero duration | Rejected before anything is written. `--ttl` takes a positive integer followed by `m`, `h` or `d`; a bare `0` fails the grammar and `0h` fails the positive-value check. The command exits 1 and the file is untouched. |
 | Empty scope list | Reachable only from the library path, which writes an empty `scopes` array. It approves nothing — an empty list is not a synonym for `"*"`. The command cannot produce one: `approve` with no plugin name and no `--all` prints usage and exits 1. |
 
-The 24-hour ceiling belongs to the merge path, not to the file. `mergeGrant`,
+The 23-hour ceiling belongs to the merge path, not to the file. `mergeGrant`,
 behind `warpline approve`, is the only code that computes it; `grantApproval`,
 the programmatic pre-grant, writes the lifetime it was handed with no ceiling
 logic in it at all. An embedder calling the library directly can therefore hold
-a grant well past 24 hours, and a grant file's expiry is not evidence that any
-ceiling was ever applied. Read "capped at 24h" as a property of the command,
+a grant well past 23 hours, and a grant file's expiry is not evidence that any
+ceiling was ever applied. Read "capped at 23h" as a property of the command,
 never of the format.
 
 An unknown plugin name aborts the whole command, writes nothing, and exits 1 —
@@ -715,7 +715,7 @@ does, in order, all decided before anything is written:
 
    The branch is chosen on "is there a live gate", not "is there a gate".
    Branching on mere existence locked the Grant verb out for as long as the
-   marker lived — up to 24 hours — so an operator whose Grant expired after an
+   marker lived — up to 23 hours — so an operator whose Grant expired after an
    apply saw the plugin skipped as `unapproved` on every advance and could not
    renew by name, with only the far wider `--all` still working.
 
@@ -723,14 +723,14 @@ does, in order, all decided before anything is written:
    `deny` can tell an accepted result from a pending one. **An applied gate
    survives the next advance**: the marker lives inside `pending_gates`, and
    overwriting the array wholesale destroyed it. An applied marker is dropped
-   when it passes the 24-hour gate ceiling, or when the plugin gates again and
+   when it passes the 23-hour gate ceiling, or when the plugin gates again and
    the new parked gate supersedes it.
 2. **A dependency moved** — some dependency's `plugin_runs.last_run_at` is newer
    than `run_started_at`. The parked result was computed against inputs that
    have since changed, so it is refused, the gate is discarded, and a `notice`
    naming the plugin is written.
 3. **Expired** — the gate is older than the earlier of the plugin's `ttl_hours`
-   and 24 hours, measured from `run_completed_at`. Refused and discarded, with a
+   and 23 hours, measured from `run_completed_at`. Refused and discarded, with a
    `notice`. **This is a state transition the approve verb makes, not something
    a renderer infers**, which is what stops an approval and an expiry racing
    into a double apply.

@@ -1262,12 +1262,18 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
  * a day-old result accepted on its behalf.
  *
  * A separate object from `MAX_GRANT_WINDOW_MS`, deliberately, even though both
- * read 24 hours. That one bounds how long side-effect AUTHORITY lives; this one
+ * read 23 hours. That one bounds how long side-effect AUTHORITY lives; this one
  * bounds how long an OBSERVED OUTCOME stays acceptable. Sharing the constant
  * would tie two clocks that answer different questions, and the first time one
  * needs to move the other would move with it silently.
+ *
+ * 23 rather than 24 for the same reason the grant ceiling is: on a daily
+ * cadence a 24-hour window expires exactly as the next advance runs, so whether
+ * a parked result is still reviewable depends on scheduler jitter. At 23 the
+ * operator gets one whole daily cycle to answer, and a result they did not
+ * answer is definitively stale before the next one is parked.
  */
-export const GATE_MAX_AGE_MS = 24 * 60 * 60 * 1000
+export const GATE_MAX_AGE_MS = 23 * 60 * 60 * 1000
 
 /** What {@link applyPendingGate} did, so the caller can print it and pick a code. */
 export type GateApplyOutcome =

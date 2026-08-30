@@ -14,9 +14,9 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { _setHome, sessionApprovalPath } from '../../lib/paths.js'
-import { checkApproval, mergeGrant } from '../../runtime/approval-gate.js'
+import { checkApproval, mergeGrant, MAX_GRANT_WINDOW_MS } from '../../runtime/approval-gate.js'
 import { invokePlugin } from '../../runtime/invoke-plugin.js'
-import { applyPendingGate, denialFingerprint, findPendingGate } from '../../runtime/engine.js'
+import { applyPendingGate, denialFingerprint, findPendingGate, GATE_MAX_AGE_MS } from '../../runtime/engine.js'
 import { readEngineState } from '../../schemas/engine-state.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
@@ -169,7 +169,9 @@ describe('warpline approve', () => {
 
     expect(code).toBe(0)
     const expiresAt = new Date((await readGrant()).expires_at).getTime()
-    expect(expiresAt).toBe(firstGrantedAt + 24 * 60 * 60 * 1000)
+    // Derived, not typed: a literal here passed for the wrong reason the day
+    // the constant moved, and this assertion is the one that decides the cap.
+    expect(expiresAt).toBe(firstGrantedAt + MAX_GRANT_WINDOW_MS)
     expect(stdout.toLowerCase()).toContain('capped')
   })
 
@@ -181,7 +183,7 @@ describe('warpline approve', () => {
     expect(code).toBe(0)
     expect(stdout.toLowerCase()).toContain('beyond')
     const raw = await readGrant()
-    const ceiling = new Date(raw.first_granted_at).getTime() + 24 * 60 * 60 * 1000
+    const ceiling = new Date(raw.first_granted_at).getTime() + MAX_GRANT_WINDOW_MS
     expect(new Date(raw.expires_at).getTime()).toBeGreaterThan(ceiling)
   })
 
@@ -450,7 +452,7 @@ export async function handler() {
 
     // The same words a second time. Before this fix the verb refused with exit
     // 1 and wrote nothing, so an operator whose Grant expired after an apply
-    // could not renew it by name for up to 24 hours.
+    // could not renew it by name for as long as the gate ceiling ran.
     const { code, stdout, stderr } = await capture('approve', ['gated-writer'])
 
     expect(code).toBe(0)
@@ -547,11 +549,17 @@ export async function handler() {
     expect(existsSync(approvalPath)).toBe(false)
   })
 
-  test('15: a gate older than min(ttl_hours, 24h) is expired and refused, on seeded clocks', async () => {
+  test('15: a gate older than min(ttl_hours, the gate ceiling) is expired and refused, on seeded clocks', async () => {
     const HOUR = 60 * 60 * 1000
-    // ttl_hours 48 so the 24h ceiling — not the TTL — is what expires it.
+    // ttl_hours 48 so the gate ceiling — not the TTL — is what expires it, and
+    // the seed is measured FROM that ceiling so this keeps testing the ceiling
+    // if it ever moves. A fixed 25h seed would have gone on passing against a
+    // 12h ceiling while no longer pinning the boundary it names.
     await writeGatedPlugin('gated-writer', { ttl_hours: 48 })
-    await seedGate('gated-writer', { startedAgoMs: 26 * HOUR, completedAgoMs: 25 * HOUR })
+    await seedGate('gated-writer', {
+      startedAgoMs: GATE_MAX_AGE_MS + 2 * HOUR,
+      completedAgoMs: GATE_MAX_AGE_MS + HOUR,
+    })
 
     const { code, stderr } = await capture('approve', ['gated-writer'])
 

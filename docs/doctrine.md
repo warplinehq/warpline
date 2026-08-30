@@ -76,7 +76,7 @@ Grants are additive and bounded. A human typing `approve b` after `approve a`
 is re-authorizing: they are present, they know what they asked for, and losing
 the earlier grant to the later one would be the surprise. The hazard is the
 other case — a background process extending a window nobody is watching. So the
-24-hour ceiling is anchored at **first issue**, not at the latest grant.
+23-hour ceiling is anchored at **first issue**, not at the latest grant.
 Anchored at the latest, a loop calling `approve --ttl 4h` every hour would walk
 the window forward forever and a "4-hour" approval would never expire. A second
 absolute clock fixed at first issue is what every renewable-credential system
@@ -103,7 +103,7 @@ granted up front and left unattended.
 What that costs you is a clock. The default expiry is four hours, which is the
 shape of a working session — approve, watch the first cycle, get on with
 something else. Renewing does not buy an unbounded window: every
-`warpline approve` is capped at the 24-hour ceiling measured from the first
+`warpline approve` is capped at the 23-hour ceiling measured from the first
 grant, unless a live grant already runs past it — the ceiling refuses to hand
 out more time, it never takes back time you hold, so one earlier `--long` window
 survives every later plain approve until it expires or you revoke.

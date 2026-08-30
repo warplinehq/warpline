@@ -371,3 +371,40 @@ describe('grant file permissions', () => {
     expect(await mode(approvalPath)).toBe(0o600)
   })
 })
+
+describe('the two 23-hour ceilings are a decision, not a coincidence', () => {
+  /**
+   * Both bound something to just under a day, and 23 rather than 24 is the
+   * whole point: on a daily cadence a 24-hour window lapses at exactly the
+   * moment the next advance runs, so whether authority (or a parked result)
+   * survives into the next run comes down to scheduler jitter. At 23 it has
+   * always lapsed first.
+   *
+   * Pinned because nothing else would notice the hour drifting back. They are
+   * asserted separately, and deliberately not derived from one another — one
+   * bounds side-effect AUTHORITY, the other bounds how long an OBSERVED
+   * OUTCOME stays acceptable, and tying them would move both the first time
+   * either needed to change.
+   */
+  const HOUR = 60 * 60 * 1000
+
+  test('a session grant is bounded at 23 hours from first issue', async () => {
+    const { MAX_GRANT_WINDOW_MS } = await import('../approval-gate.js')
+    expect(MAX_GRANT_WINDOW_MS).toBe(23 * HOUR)
+  })
+
+  test('a parked gate is bounded at 23 hours from its run', async () => {
+    const { GATE_MAX_AGE_MS } = await import('../engine.js')
+    expect(GATE_MAX_AGE_MS).toBe(23 * HOUR)
+  })
+
+  test('both clear a daily cadence with an hour to spare', async () => {
+    const { MAX_GRANT_WINDOW_MS } = await import('../approval-gate.js')
+    const { GATE_MAX_AGE_MS } = await import('../engine.js')
+    const DAY = 24 * HOUR
+    // The property the number exists for, stated as the property rather than
+    // as the number: neither window may reach a daily advance.
+    expect(MAX_GRANT_WINDOW_MS).toBeLessThan(DAY)
+    expect(GATE_MAX_AGE_MS).toBeLessThan(DAY)
+  })
+})
