@@ -223,6 +223,7 @@ export async function run(argv: string[]): Promise<number> {
 
   const denied_at = new Date().toISOString()
   const recorded: Denial[] = []
+  const discarded: string[] = []
 
   for (const plugin of positionals) {
     const fingerprint = proposalFingerprint(state, plugin, manifests.get(plugin)!)
@@ -252,12 +253,39 @@ export async function run(argv: string[]): Promise<number> {
     // Recording that they declined it puts a false sentence somewhere it is
     // read back — `deny --list` prints it, `emitDenialRecorded` writes it into
     // `events.jsonl`, and the evaluator quotes it on every suppressed advance.
-    // A marker now lives up to 24 hours, so the window is not a corner.
+    // A marker now lives up to the gate ceiling, so the window is not a corner.
     const gate = findPendingGate(state, plugin)
-    const reason =
-      gate !== undefined && gate.applied_at === null
-        ? `the operator declined the parked result from run ${gate.run_id}`
-        : 'the operator declined this proposal'
+    const live = gate !== undefined && gate.applied_at === null
+    const reason = live
+      ? `the operator declined the parked result from run ${gate.run_id}`
+      : 'the operator declined this proposal'
+
+    // **The denied gate is discarded, not merely outranked.** Answering a
+    // parked result is what dequeues it, exactly as applying one does — the
+    // sentence above says the operator declined that run, and leaving the run
+    // sitting in `pending_gates` made that sentence describe something that had
+    // not happened.
+    //
+    // It also cannot legitimately be applied afterwards. While the denial
+    // holds, both `approve` arms refuse it. Once the denial is superseded the
+    // proposal has moved, which means `plugin_runs.last_output` changed, which
+    // means the plugin ran again and a newer gate exists — so the old one
+    // answers a question nobody is asking. The only path that ever reached it
+    // was `deny --remove`, which would hand back a stale result the operator
+    // had already declined, in answer to a question they thought they were
+    // re-opening.
+    //
+    // Nothing durable is lost: the run artifact holds the full SkillResult
+    // (`RunLog.result`). The gate is the review queue, not the record.
+    //
+    // Only a LIVE gate. A marker is the trace of a result the operator
+    // ACCEPTED, and a denial recorded later answers the standing proposal
+    // rather than that outcome — discarding it would erase the one thing that
+    // stops a second `approve` re-recording an applied result.
+    if (live) {
+      state.pending_gates = state.pending_gates.filter((g) => g !== gate)
+      discarded.push(plugin)
+    }
 
     const denial = DenialSchema.parse({
       plugin,
@@ -281,10 +309,18 @@ export async function run(argv: string[]): Promise<number> {
     await emitDenialRecorded(denial.plugin, denial.reason, denial.fingerprint, eventsPath).catch(
       () => {},
     )
+    // Say that the result is gone, because it is. The operator declined a
+    // specific run and that run is no longer applyable by any gesture — a
+    // consequence they cannot see from the state file and should not discover
+    // later from a `deny --remove` that hands back nothing.
+    const dropped = discarded.includes(denial.plugin)
+      ? `The parked result was discarded — taking the denial back will let ${denial.plugin} be ` +
+        `asked fresh, not re-offer that run. `
+      : ''
     process.stdout.write(
       `Denied ${denial.plugin}: ${denial.reason}\n` +
         `It will not be asked about again while it proposes the same thing. ` +
-        `No grant was written or cleared.\n`,
+        `${dropped}No grant was written or cleared.\n`,
     )
   }
 

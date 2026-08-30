@@ -303,8 +303,8 @@ describe('warpline deny', () => {
    * `denial_recorded` notice in `events.jsonl`, and the skip detail the
    * evaluator writes on every suppressed advance — so a false one is not
    * cosmetic. `findPendingGate` returns already-applied markers on purpose, and
-   * a marker means the operator ACCEPTED that result. Markers now live up to 24
-   * hours, so this window is not a corner.
+   * a marker means the operator ACCEPTED that result. Markers now live up to
+   * the gate ceiling, so this window is not a corner.
    */
   async function seedGateFor(plugin: string, appliedAt: string | null): Promise<void> {
     const at = new Date(Date.now() - 30_000).toISOString()
@@ -363,6 +363,39 @@ describe('warpline deny', () => {
     expect((await readState()).denials['render-issue'].reason).toBe(
       'the operator declined the parked result from run run-a',
     )
+  })
+
+  test('9e: denying a live parked gate discards it, so no gesture can apply that run', async () => {
+    await seedGateFor('render-issue', null)
+
+    const { code, stdout } = await capture(['render-issue'])
+
+    expect(code).toBe(0)
+    // Dequeued, not merely outranked. The reason says the operator declined
+    // that run; leaving it parked made that sentence describe something that
+    // had not happened.
+    expect((await readState()).pending_gates).toEqual([])
+    expect(stdout).toContain('The parked result was discarded')
+    // The path that used to reach it. Taking the denial back must re-open the
+    // question, not hand back the answer the operator already refused.
+    expect((await readState()).denials['render-issue']).toBeDefined()
+  })
+
+  test('9f: denying against a spent marker leaves the marker alone', async () => {
+    // Non-vacuity for 9e: same seed shape, same verb, and the only difference
+    // is `applied_at`. A marker is the trace of a result that WAS applied, and
+    // it is the only thing stopping a second approve re-recording it — so a
+    // later denial of the standing proposal must not erase it.
+    const appliedAt = new Date(Date.now() - 10_000).toISOString()
+    await seedGateFor('render-issue', appliedAt)
+
+    const { code, stdout } = await capture(['render-issue'])
+
+    expect(code).toBe(0)
+    const gates = (await readState()).pending_gates
+    expect(gates).toHaveLength(1)
+    expect(gates[0].applied_at).toBe(appliedAt)
+    expect(stdout).not.toContain('The parked result was discarded')
   })
 
   test('10: denying the same plugin twice against an unchanged proposal writes nothing the second time', async () => {

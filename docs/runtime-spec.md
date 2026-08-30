@@ -778,6 +778,34 @@ narrates the transition: the `gate_invalidated` notice reports the *gate*
 discard, and the superseded-denial note only rides the `unapproved` arm, which a
 denied plugin never reaches.
 
+#### Denying a parked result discards it
+
+`warpline deny <plugin>` discards the plugin's **live** parked gate as it
+records the denial. Answering a parked result is what dequeues it, exactly as
+applying one does. The denial's `reason` says the operator declined that run, and
+leaving the run in `pending_gates` made that sentence describe something that had
+not happened.
+
+It could not legitimately be applied afterwards either. While the denial holds,
+both `approve` arms refuse it. Once the denial is superseded the proposal has
+moved — which means `plugin_runs.last_output` changed, which means the plugin ran
+again and a newer gate exists — so the old one answers a question nobody is
+asking. The only path that ever reached it was `deny --remove`, which would hand
+back a stale result the operator had already declined, in answer to a question
+they believed they were re-opening.
+
+Nothing durable is lost. The run artifact holds the full `SkillResult` in
+`RunLog.result`; `pending_gates` is the review queue, not the record.
+
+An **applied marker** is left alone. It is the trace of a result the operator
+accepted, and it is the only thing stopping a second `approve` from re-recording
+that result — so a later denial, which answers the standing proposal rather than
+that outcome, must not erase it.
+
+`deny` says so on stdout, because the consequence is not visible in the state
+file: taking the denial back re-opens the question rather than re-offering the
+run.
+
 The handler is never re-invoked. Its declared side effects fired at invocation,
 long before the supervision gate saw the result, so re-running would double
 effects that already happened. Downstream dependents run on the next advance
