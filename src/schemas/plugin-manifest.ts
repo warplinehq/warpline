@@ -75,8 +75,36 @@ export const PluginManifestSchema = z.object({
   inputs: z.record(
     z.string(),
     z.object({
-      type: z.string(),
+      /**
+       * The shape of the value this input carries.
+       *
+       * A closed set. A value outside it fails `.parse()` rather than mapping
+       * leniently at invoke time, and manifests are parsed at import time, so
+       * a misspelled type name stops the plugin instead of running
+       * unvalidated forever — the same bargain `outputs.temporality` makes
+       * below.
+       *
+       * Narrowing this from a free string is a breaking change for a manifest
+       * outside this repo declaring a name that is not here. That is
+       * permitted by the pre-1.0 contract promise in § Contract stability of
+       * `docs/runtime-spec.md`, and it is the accepted cost of the field
+       * meaning anything at all. `array` and `object` are not admitted
+       * because nothing declares them; adding a member later is additive.
+       */
+      type: z.enum(['string', 'number', 'boolean']),
       required: z.boolean().default(true),
+      /**
+       * The value this input takes when nobody supplies one.
+       *
+       * Optional, so the whole edit stays additive. This is the LOWEST tier of
+       * the resolution order in `plugin-config.ts`: a declared default, then
+       * `<home>/config/<plugin>.json`, then per-invocation args.
+       *
+       * Declared data rather than a sentence in `description`, which no
+       * resolver can read. A default that lives only in prose is one the
+       * handler has to re-implement, and the two drift.
+       */
+      default: z.unknown().optional(),
       description: z.string().optional(),
     }),
   ).default({}),

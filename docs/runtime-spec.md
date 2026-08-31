@@ -74,6 +74,40 @@ at 10 and `retry_delay_ms` at 60s; the backoff that uses them is described in
 §2. `actions` is an optional registry that only surfaces in a host UI when
 non-empty.
 
+### `inputs`
+
+Each entry in `inputs` declares one parameter the plugin expects to receive as
+an argument at invoke time, and it is a declaration the runtime enforces rather
+than documentation nobody reads.
+
+`inputs[].type` is a closed set — `string`, `number` or `boolean`. A value
+outside it is a hard `.parse()` failure, not a fall back: manifests are parsed
+at import time, so a misspelled type name stops the plugin rather than letting
+it run unvalidated. `array` and `object` are deliberately absent because nothing
+declares them; the set can grow additively if something does.
+
+`inputs[].default` is optional and holds the value the input takes when nobody
+supplies one. It is the LOWEST of three precedence tiers, resolved inside
+`invokePlugin`:
+
+| Tier | Source | Beats |
+|---|---|---|
+| 1 (lowest) | `inputs[].default` in the manifest | — |
+| 2 | `<home>/config/<plugin>.json` | the declared default |
+| 3 (highest) | per-invocation arguments | both |
+
+A missing config file is an empty config, not an error. A config file that
+exists but is unparseable or the wrong shape is a `parse_error` that fails once
+and never enters the retry loop; its message names the file and the offending
+input key and the shape expected of it, and never the value it read.
+
+A default declared here is data a resolver can act on. A default stated only in
+a `description` is one the handler has to re-implement, and the two drift.
+
+Both fields are nested inside the `inputs` record value, so neither appears in
+the generated table above — that table lists top-level manifest fields only.
+This prose is the documentation for them.
+
 ### `outputs.temporality`
 
 Each entry in `outputs` also declares `temporality`, which says what a re-run
@@ -118,10 +152,16 @@ reading a manifest written for a newer one ignores what it does not know.
 
 Removing or narrowing something is the case that can break you, and what limits
 it is a convention that already exists rather than a promise invented here:
-closed enums stay closed. Four sets are closed — the side-effect type, the
-autonomy level, the schedule and the minimum tier — and an addition to any of
-them fans out into exhaustive switches and into this document, which is why they
-are not extended casually.
+closed enums stay closed. Five sets are closed — the side-effect type, the
+autonomy level, the schedule, the minimum tier and `inputs[].type` — and an
+addition to any of them fans out into exhaustive switches and into this
+document, which is why they are not extended casually.
+
+`inputs[].type` is the one of the five that was narrowed rather than born
+closed. It accepted any string before 0.2, so a manifest outside this repo
+declaring a name that is not in the set now fails at import time. That is a
+breaking change, permitted by the pre-1.0 promise above and taken deliberately:
+a type field nothing validates is a field that means nothing.
 
 Pin the version you tested against, and read the release notes for the version
 you move to. The release notes are the record of what changed between two

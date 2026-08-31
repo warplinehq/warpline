@@ -55,6 +55,7 @@ export type PluginConfigSource = (typeof PLUGIN_CONFIG_PRECEDENCE)[number]
 export interface DeclaredInput {
   type?: string
   required?: boolean
+  default?: unknown
   description?: string
 }
 
@@ -96,6 +97,7 @@ export function resolvePluginArgs(
   // re-attaches Object.prototype to the result.
   const merged: Record<string, unknown> = Object.assign(
     Object.create(null) as Record<string, unknown>,
+    declaredDefaults(declared),
     fileConfig,
     callerArgs,
   )
@@ -115,4 +117,17 @@ export function resolvePluginArgs(
   }
 
   return problems.length > 0 ? { ok: false, problems } : { ok: true, args: merged }
+}
+
+/**
+ * The lowest precedence tier: what each input declares for itself.
+ *
+ * Split out so the merge above reads as `PLUGIN_CONFIG_PRECEDENCE` in order.
+ */
+function declaredDefaults(declared: Record<string, DeclaredInput>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [key, input] of Object.entries(declared)) {
+    if (input.default !== undefined) out[key] = input.default
+  }
+  return out
 }
