@@ -44,6 +44,16 @@ const MANIFEST_DEFAULT_REPO = 'warplinehq/warpline'
 /** What an operator writes into the config file to retarget the example. */
 const CONFIGURED_REPO = 'acme/widgets'
 
+/** The unguessable half of the sentinel — what a leak would leave in the log. */
+const SENTINEL_SECRET = 'do-not-echo-4b1e7c'
+/**
+ * A sentinel repo in valid owner/name form, so it PASSES the handler's input
+ * guard and reaches the success arm. A sentinel that fails that regex can only
+ * ever prove something about the invalid-input arm, which is how the leak below
+ * shipped with a green suite.
+ */
+const SENTINEL_REPO = `sentinel-owner/${SENTINEL_SECRET}`
+
 /** Two issues and one pull request — the PR is filtered, so the count is 2. */
 const ISSUES_PAYLOAD = [
   { title: 'first', labels: [{ name: 'bug' }] },
@@ -177,6 +187,32 @@ describe('github-poll under runAdvance', () => {
       expect(urls).toHaveLength(1)
       expect(urls[0]).toContain(CONFIGURED_REPO)
       expect(urls[0]).not.toContain(MANIFEST_DEFAULT_REPO)
+    })
+  })
+
+  test('a configured repo reaches the request and never the run log, on the success path', async () => {
+    await grantApproval('github-poll', 4 * 60 * 60 * 1000, approvalPath)
+    await mkdir(join(ctx.root, 'config'), { recursive: true })
+    await writeFile(
+      join(ctx.root, 'config', 'github-poll.json'),
+      JSON.stringify({ repo: SENTINEL_REPO }),
+    )
+
+    await withStubbedFetch(async (urls) => {
+      const result = await advance()
+
+      // Ordered so a failure here reads as a leak and not as a setup miss. The
+      // value really flowed, and the run really succeeded — this is the normal
+      // path, not an error edge.
+      expect(urls[0]).toContain(SENTINEL_SECRET)
+      expect(await pluginRun('github-poll')).toMatchObject({ status: 'success' })
+
+      // The raw file text, not one parsed field: `errors[].message` lands in the
+      // same document, and so does whatever a later edit adds beside it. The run
+      // log is the artifact people paste into issues, so the file is what has to
+      // be clean — not the in-memory result.
+      const runLog = await readFile(result.run_log_path, 'utf-8')
+      expect(runLog).not.toContain(SENTINEL_SECRET)
     })
   })
 
