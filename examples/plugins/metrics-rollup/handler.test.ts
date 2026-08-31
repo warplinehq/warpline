@@ -190,3 +190,47 @@ describe('metrics-rollup handler input guard', () => {
     expect(result.errors[0]?.message).toContain('positive number')
   })
 })
+
+/**
+ * `metrics_path` arrives from the same config file as `retention_days` above,
+ * and both fs arms below quote it back — one directly, one via a Node fs error
+ * message, which embeds the full path. Both reach the run log through
+ * `result_summary`, so both are the same disclosure the block above closes for
+ * the input guard.
+ *
+ * A path-shaped sentinel reaches two arms at once: one that does not exist
+ * reaches ENOENT, and one that names a real directory reaches the fs-error arm.
+ */
+describe('metrics-rollup config value disclosure', () => {
+  const SENTINEL = 'do-not-echo-3c4d5e'
+
+  test('a missing metrics file reports nothing to roll up without naming the path', async () => {
+    await withHome(async () => {
+      const result = await handler(
+        {} as PluginManifest,
+        { metrics_path: join(tmpdir(), SENTINEL, 'metrics.json') },
+        new AbortController().signal,
+      )
+
+      expect(result.status).toBe('success')
+      expect(result.summary).toContain('nothing to roll up')
+      expect(JSON.stringify(result)).not.toContain(SENTINEL)
+    })
+  })
+
+  test('an unreadable metrics file names the input key, not the path or the OS error', async () => {
+    await withHome(async () => {
+      const dir = await mkdtemp(join(tmpdir(), `${SENTINEL}-`))
+      const result = await handler(
+        {} as PluginManifest,
+        { metrics_path: dir },
+        new AbortController().signal,
+      )
+
+      expect(result.status).toBe('failed')
+      expect(result.errors[0]?.code).toBe('parse_error')
+      expect(JSON.stringify(result)).not.toContain(SENTINEL)
+      expect(result.errors[0]?.message).toContain('metrics_path')
+    })
+  })
+})

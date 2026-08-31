@@ -221,3 +221,98 @@ describe('anomaly-issue handler ledger', () => {
     }
   })
 })
+
+/**
+ * `repo` and `anomalies_path` both arrive from `<home>/config/anomaly-issue.json`,
+ * and every `SkillResult` field this handler returns is written to a run log —
+ * `engine.ts` copies `summary` into `plugin_entries[].result_summary` on every
+ * run, success included. So an arm that quotes the value it was handed is a
+ * disclosure path from the operator's config file to a document that gets
+ * pasted into issues.
+ *
+ * Each sentinel below is shaped to PASS the guard above the arm it targets.
+ * A sentinel that stops at the first input check proves nothing about the arms
+ * beneath it, which is exactly how the success-path leak shipped green.
+ */
+describe('anomaly-issue config value disclosure', () => {
+  const SENTINEL = 'do-not-echo-a1b2c3'
+  const sentinelRepo = `sentinel-owner/${SENTINEL}`
+
+  /** Sets GITHUB_TOKEN so the arms below the token check are reachable. */
+  async function withToken<T>(fn: () => Promise<T>): Promise<T> {
+    const real = process.env.GITHUB_TOKEN
+    process.env.GITHUB_TOKEN = 'tok-123'
+    try {
+      return await fn()
+    } finally {
+      if (real === undefined) delete process.env.GITHUB_TOKEN
+      else process.env.GITHUB_TOKEN = real
+    }
+  }
+
+  test('an invalid repo is rejected without the value appearing anywhere in the result', async () => {
+    const result = await handler(
+      {} as PluginManifest,
+      { repo: SENTINEL },
+      new AbortController().signal,
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.errors[0]?.code).toBe('parse_error')
+    // The whole result, not one field: summary and errors[].message both reach
+    // the run log, and so does whatever a later edit adds beside them.
+    expect(JSON.stringify(result)).not.toContain(SENTINEL)
+    expect(result.errors[0]?.message).toContain('repo')
+    expect(result.errors[0]?.message).toContain('owner/name')
+  })
+
+  test('a missing anomalies file reports nothing to file without naming the path', async () => {
+    await withToken(async () => {
+      const result = await handler(
+        {} as PluginManifest,
+        { repo: sentinelRepo, anomalies_path: join(tmpdir(), SENTINEL, 'anomalies.json') },
+        new AbortController().signal,
+      )
+
+      expect(result.status).toBe('success')
+      expect(JSON.stringify(result)).not.toContain(SENTINEL)
+    })
+  })
+
+  test('an unreadable anomalies file names the input key, not the path or the OS error', async () => {
+    await withToken(async () => {
+      // A directory reaches the non-ENOENT arm; a Node fs error embeds the full
+      // path, so forwarding its message re-opens the leak the key naming closes.
+      const dir = await mkdtemp(join(tmpdir(), `${SENTINEL}-`))
+      const result = await handler(
+        {} as PluginManifest,
+        { repo: sentinelRepo, anomalies_path: dir },
+        new AbortController().signal,
+      )
+
+      expect(result.status).toBe('failed')
+      expect(result.errors[0]?.code).toBe('parse_error')
+      expect(JSON.stringify(result)).not.toContain(SENTINEL)
+      expect(result.errors[0]?.message).toContain('anomalies_path')
+    })
+  })
+
+  test('a filing failure names the anomaly and the status, not the repo', async () => {
+    const { impl } = fakeFetch([{ ok: false, status: 500 }])
+    const out = await fileIssues(sentinelRepo, [errors], 'tok-123', impl, new AbortController().signal)
+
+    expect(out.error?.code).toBe('dependency_unavailable')
+    expect(JSON.stringify(out)).not.toContain(SENTINEL)
+    expect(out.error?.message).toContain('500')
+    expect(out.error?.message).toContain('errors')
+  })
+
+  test('a created issue with no html_url records a placeholder, not a repo URL', async () => {
+    // This url reaches `undo_instruction`, a SkillResult field, and the ledger.
+    const { impl } = fakeFetch([{ ok: true, status: 201 }])
+    const out = await fileIssues(sentinelRepo, [errors], 'tok-123', impl, new AbortController().signal)
+
+    expect(out.created).toHaveLength(1)
+    expect(JSON.stringify(out.created)).not.toContain(SENTINEL)
+  })
+})
