@@ -70,9 +70,29 @@ describe('loadPluginConfig', () => {
     await expect(loadPluginConfig(configPath)).rejects.toBeInstanceOf(PluginConfigError)
   })
 
-  test('the rejection message never echoes a config value', async () => {
-    const secret = 'sk-live-do-not-print-me'
-    await writeFile(configPath, `{"toString": "${secret}"`)
+  // The fixture is WELL FORMED on purpose. An unbalanced brace short circuits at
+  // `JSON.parse` and returns a fixed string, so the assertion would pass without
+  // ever reaching `describeIssues` — the arm that walks a `ZodError`, the arm
+  // whose docstring justifies not forwarding `issue.message`, and the only one a
+  // zod upgrade that starts quoting received values could silently change.
+  test('the schema rejection message never echoes a config value', async () => {
+    const secret = 'sk-live-do-not-echo-b52e7d'
+    await writeFile(configPath, JSON.stringify({ toString: secret }))
+    const err = await loadPluginConfig(configPath).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(PluginConfigError)
+    expect((err as PluginConfigError).message).not.toContain(secret)
+  })
+
+  // The other arm still needs its own assertion. `JSON.parse`'s SyntaxError
+  // quotes the offending source text, and the offending source text is the
+  // config file — forwarding it would leak exactly what the class above refuses
+  // to. Covering one arm is not covering the other.
+  test('the unparseable-JSON rejection message never echoes a config value', async () => {
+    const secret = 'sk-live-do-not-echo-b52e7d'
+    await writeFile(configPath, `{"target": "${secret}"`)
     const err = await loadPluginConfig(configPath).then(
       () => null,
       (e: unknown) => e,
