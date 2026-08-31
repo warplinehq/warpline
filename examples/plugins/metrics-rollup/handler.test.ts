@@ -167,3 +167,26 @@ describe('metrics-rollup shape guards', () => {
     })
   })
 })
+
+/**
+ * Same reasoning as github-poll's input guard: `retention_days` can arrive
+ * from `<home>/config/metrics-rollup.json`, and whatever this handler puts in
+ * a SkillResult is written to a run log. The guard names the key and the shape
+ * it wanted and says nothing about what it got.
+ */
+describe('metrics-rollup handler input guard', () => {
+  test('an invalid retention_days is rejected without the value appearing anywhere in the result', async () => {
+    const sentinel = 'sk-do-not-echo-me-71c4be'
+    const result = await handler(
+      {} as PluginManifest,
+      { retention_days: sentinel },
+      new AbortController().signal,
+    )
+
+    expect(result.status).toBe('failed')
+    expect(result.errors[0]?.code).toBe('parse_error')
+    expect(JSON.stringify(result)).not.toContain(sentinel)
+    expect(result.errors[0]?.message).toContain('retention_days')
+    expect(result.errors[0]?.message).toContain('positive number')
+  })
+})
