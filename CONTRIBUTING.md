@@ -12,6 +12,9 @@ bun test                   # fine bare — do NOT add --timeout. The 20s default
                            # ignored and bun's own 5s flakes under contention
 bun run typecheck          # bun green ≠ tsc green: bun transpiles WITHOUT
                            # typechecking, so run both before calling done
+bun run verify:tarball     # packs, installs into a throwaway prefix and
+                           # scaffolds a plugin — the six things a checkout
+                           # cannot prove. Slow. See "Release gates" below
 ```
 
 `bun test` needs `dist/` to exist — the example plugins import `warpline/*`
@@ -41,6 +44,33 @@ for you.
   check that can't fetch, a store nobody writes, a skipped mode — each must
   LOOK different from "checked and fine". This is the project's founding
   operational lesson; new surfaces are reviewed against it.
+
+## Release gates
+
+Two gates run in `.github/workflows/release.yml` before `npm publish`, and both
+live in a script rather than inline so the same logic can be exercised without
+cutting a release. A guard nobody has watched fail is not a guard.
+
+- **`bash scripts/verify-tarball.sh`**, or `bun run verify:tarball` — packs the
+  tarball, installs it into a throwaway prefix and scaffolds a plugin from the
+  installed bin. The scaffold defects it catches do not reproduce from a
+  checkout, where warpline's own source is always reachable.
+- **`bash scripts/scan-public-surfaces.sh`** — reads text on stdin and exits
+  non-zero if it names the closed deployment this runtime was extracted from.
+  The workflow pipes the Release title and body through it, because neither is
+  reachable from `git ls-files` and so the guard in
+  `src/__tests__/no-private-planning-refs.test.ts` cannot see them. Commit
+  messages are the third such surface, and that test now scans them directly.
+
+**A `npm deprecate` message goes through the scanner before it is sent.** It is
+published prose with no review step, so it is the one remaining surface with no
+gate of its own:
+
+```bash
+MESSAGE='deprecated: see https://github.com/warplinehq/warpline/releases'
+printf '%s\n' "$MESSAGE" | bash scripts/scan-public-surfaces.sh \
+  && npm deprecate warpline@0.0.0 "$MESSAGE"
+```
 
 ## Voice
 

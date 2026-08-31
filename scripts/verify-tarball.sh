@@ -24,9 +24,14 @@
 # *.test.ts because the repository budgets itself to exactly one spawning
 # test file, and a Node-version test must spawn.
 #
-# Plans 02-10 and 02-12 reuse this script rather than re-deriving the checks;
-# 02-12's publish gate reads its exit status as evidence, so every assertion
-# here is a hard failure and never a warning. Exits non-zero on the first one.
+# Two things run this, so it is not a gate anybody has to remember. The release
+# workflow runs it after the whitelist check and before `npm publish`, which is
+# the last point at which a broken install is still correctable. On a developer
+# machine it is `bun run verify:tarball`.
+#
+# Its exit status is read as evidence by the release workflow, so every
+# assertion here is a hard failure and never a warning. Exits non-zero on the
+# first one.
 
 set -euo pipefail
 

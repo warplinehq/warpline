@@ -76,11 +76,39 @@ jobs:
       # retried.
       - run: bun run build
 
+      # The Release title and body are public the moment the release is
+      # published, and neither is reachable from `git ls-files` — so the guard
+      # in the test suite has never seen either one. This run is the only place
+      # that holds them, and the check has to happen before the upload, because
+      # the upload is what makes the version permanent.
+      #
+      # Read from the environment, never interpolated into the shell by the
+      # workflow expression syntax, for the same reason the tag is two steps
+      # above: a release body is attacker-influenced text on a job that mints a
+      # registry credential.
+      #
+      # No `gh` and no network: the release event payload carries both fields.
+      - name: check the release title and body name nothing private
+        env:
+          RELEASE_TITLE: ${{ github.event.release.name }}
+          RELEASE_BODY: ${{ github.event.release.body }}
+        run: printf '%s\n%s\n' "$RELEASE_TITLE" "$RELEASE_BODY" | bash scripts/scan-public-surfaces.sh
+
       # The same two-directional gate ci.yml runs on every push, run once more
       # against the bytes that are about to leave this repository forever.
       # Cheap, and the last chance to catch a `files` regression.
       - name: check the artifact against the whitelist
         run: bash scripts/assert-pack-whitelist.sh
+
+      # The end-to-end verifier, which until now nothing ran. Its own header
+      # claimed a publish gate read its exit status, and no such gate existed —
+      # so the six things a checkout cannot prove were proved only when somebody
+      # remembered. This step is that gate. It packs, installs into a throwaway
+      # prefix and scaffolds a plugin, which is slower than every other step
+      # here and is the point: it is the last chance to catch a broken install
+      # before the version is permanent.
+      - name: verify the packaged artifact end to end
+        run: bash scripts/verify-tarball.sh
 
       # No auth environment variable on this step: the OIDC exchange replaces
       # the registry token entirely, and a stale one here produces a confusing

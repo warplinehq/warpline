@@ -40,7 +40,8 @@
     "typecheck": "bun run build && tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "prepack": "tsc -p tsconfig.build.json",
-    "docs:generate": "bun run scripts/gen-manifest-table.ts --write"
+    "docs:generate": "bun run scripts/gen-manifest-table.ts --write",
+    "verify:tarball": "bash scripts/verify-tarball.sh"
   },
   "dependencies": {
     "zod": "^4.3.6"
