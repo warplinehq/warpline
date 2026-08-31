@@ -51,7 +51,7 @@ export async function handler(
       status: 'failed',
       phases_completed: [],
       phases_failed: ['github-poll'],
-      errors: [makeSkillError('dependency_unavailable', `GitHub API ${res.status} for ${repo}`, { impact: 'MEDIUM', retryable })],
+      errors: [makeSkillError('dependency_unavailable', `GitHub API ${res.status} for the configured repo`, { impact: 'MEDIUM', retryable })],
       data_freshness: {},
       summary: `github-poll: GitHub API returned ${res.status}`,
       artifacts_produced: [],
@@ -71,7 +71,7 @@ export async function handler(
     phases_failed: [],
     errors: [],
     data_freshness: { github_issues: new Date().toISOString() },
-    summary: `${repo}: ${total} open issues${top ? ` (${top})` : ''}`,
+    summary: `github-poll: ${total} open issues${top ? ` (${top})` : ''}`,
     artifacts_produced: [],
     schema_version: 1,
   }
