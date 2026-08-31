@@ -97,6 +97,84 @@ Rules the runtime holds you to:
   `status: 'skipped'` with a `[needs-llm] ...` summary. The runtime records it
   as `delegated` and never retries it.
 
+### Where args come from
+
+Your handler receives `args`. Your manifest declares `inputs`. This is the
+channel between them, and it is the one part of a plugin that lives outside the
+plugin directory: an operator configures one plugin by writing one file under
+the warpline home.
+
+```
+<home>/config/<plugin>.json
+```
+
+A flat JSON object of input names to values:
+
+```json
+{ "repo": "oven-sh/bun" }
+```
+
+One file per plugin rather than one document for all of them, so a single bad
+edit fails a single plugin instead of every plugin in the same advance.
+
+Three tiers resolve every declared input, lowest precedence first:
+
+| Tier | Source | Beats |
+|---|---|---|
+| 1 (lowest) | `inputs[].default` in your manifest | — |
+| 2 | `<home>/config/<plugin>.json` | the declared default |
+| 3 (highest) | per-invocation arguments | both |
+
+The merge happens inside the runtime before your handler is called, so by the
+time you hold `args` it is already done. § 1 of
+[runtime-spec.md](runtime-spec.md) is the contract; this section is how to
+write against it.
+
+The bundled `github-poll` example is the worked case. Its manifest declares
+`repo` as required *and* gives it a default, which is not the contradiction it
+looks like: the default satisfies the requirement at tier 1. There is no
+first-run setup step and no configuration wizard, so a fresh install has
+nothing at tier 2 — a declared default is the only place a value can come from,
+and without one the example would fail on every advance. An operator retargets
+it by writing the file above. Declare a default for every input that has a
+sensible one.
+
+**A missing file is not an error.** It resolves to an empty config and every
+input falls through to its declared default. A file that exists but is
+unparseable, or leaves a required input with no value anywhere, or holds a
+value of the wrong declared type, is a single `parse_error`: the run fails once
+and is never retried, because a config an operator mistyped reads the same way
+on the second attempt. The message names the file path and the offending input
+key.
+
+**Never put a resolved config value into a `SkillResult`.** Not in an error
+message, not in a `summary`, not in anything that reaches a run log — a config
+file is where an operator keeps an API token, and a run log is a file people
+paste into issues. Name the key and the shape you expected instead:
+
+```typescript
+// good: names the key and the shape, and could be read aloud in public
+"input 'repo' must be a string in owner/name form, e.g. oven-sh/bun"
+// bad: the run log now holds whatever the operator configured
+'invalid repo: ' + args.repo
+```
+
+Omit the value; do not mask it. A masking heuristic is a list of things that
+look like secrets, and it leaks the first one it fails to recognise.
+
+**The name `action` is taken.** `warpline run` passes a mandatory `action`
+positional as a per-invocation argument, which is tier 3 and beats both tiers
+below it. An input you declare under that name therefore resolves to whatever
+the operator typed on the command line, never to your default and never to the
+config file. Pick another name.
+
+**There is no environment-variable tier**, today. The file is the only channel
+an input has, so an input carrying a secret is a secret sitting on disk under
+the operator's home. That is a known limitation rather than an oversight, and
+it is stated here so you meet it before you design around it: if a value has to
+come from the environment, read it inside your handler, where it is yours and
+never passes through the runtime.
+
 ## Runtime constraints
 
 Your manifest and handler are TypeScript that warpline imports **at runtime**.

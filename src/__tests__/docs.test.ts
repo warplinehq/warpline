@@ -1132,4 +1132,22 @@ describe('hand-written manifest prose', () => {
     expect(doc.toLowerCase()).not.toContain('four sets are closed')
     expect(doc.toLowerCase()).toContain('five sets are closed')
   })
+
+  // `plugin-authoring.md` is the only place an author is told where `args` come
+  // from. Nothing generates that section and no other check reads it, so it can
+  // be deleted or half-edited with the entire suite green — the same hazard as
+  // the runtime-spec prose above, one document further out.
+  //
+  // The last expectation is not redundant with the first. An earlier draft of
+  // this channel put every plugin's settings in one shared document; the
+  // runtime never read one, and naming it here would send authors to a file
+  // that does not exist.
+  test('plugin-authoring names the config path, all three tiers and parse_error', () => {
+    const doc = read('docs/plugin-authoring.md')
+    expect(doc).toContain('<home>/config/<plugin>.json')
+    expect(doc).toContain('inputs[].default')
+    expect(doc).toContain('per-invocation arguments')
+    expect(doc).toContain('parse_error')
+    expect(doc).not.toContain('plugin-config.json')
+  })
 })
