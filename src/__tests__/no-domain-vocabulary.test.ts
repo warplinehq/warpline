@@ -73,14 +73,45 @@ const TERMS = [
 ]
 
 /**
- * A term is a LITERAL, not a pattern. Escaping first stops a stray character
- * from either throwing at construction or binding looser than the boundaries;
- * anchoring is what keeps `mode` out of `model` and `moderate`. Case-insensitive
- * so a renamed casing is not a way through.
+ * An identifier's SEGMENTS, case-folded: split on runs of non-alphanumeric
+ * characters and on lower-to-upper camel-case boundaries.
+ *
+ * `_` is a word character in JavaScript regex, so the `\b`-anchored pattern
+ * this replaces never fell between `trial` and `ends`, and `\b` never falls
+ * between `Run` and `Schema` either. Splitting removes the dependency on `\b`
+ * entirely, and folding each piece is what keeps matching case-insensitive
+ * without a regex flag.
  */
-const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-const vocabulary = (terms: string[]) =>
-  new RegExp(`\\b(?:${terms.map(esc).join('|')})\\b`, 'i')
+const segments = (s: string): string[] =>
+  s
+    .split(/[^A-Za-z0-9]+|(?<=[a-z0-9])(?=[A-Z])/)
+    .filter(Boolean)
+    .map((piece) => piece.toLowerCase())
+
+/**
+ * A term is a LITERAL, and it matches when some CONTIGUOUS run of an
+ * identifier's segments EQUALS the term's own segment join.
+ *
+ * Equality on a run, never containment of the whole joined string: with `mode`
+ * on the list, `'model'.includes('mode')` is true, and a guard that reddens
+ * `model`, `moderation` and `Model` gets an ignore comment bolted to it and
+ * stops protecting anything. Anchoring is gone; the segment boundary does the
+ * work anchoring used to do, and does it where `\b` would not.
+ */
+const vocabulary = (terms: string[]) => {
+  const wanted = new Set(terms.map((term) => segments(term).join('_')))
+  return {
+    test(name: string): boolean {
+      const segs = segments(name)
+      for (let i = 0; i < segs.length; i++) {
+        for (let j = i; j < segs.length; j++) {
+          if (wanted.has(segs.slice(i, j + 1).join('_'))) return true
+        }
+      }
+      return false
+    },
+  }
+}
 
 /** Every tracked file matching a pathspec, from git rather than a glob list. */
 function tracked(root: string, pathspec: string): string[] {
@@ -150,7 +181,7 @@ function exportedTypeNames(source: string): string[] {
  */
 async function domainVocabulary(root: string, terms: string[] = TERMS): Promise<string[]> {
   if (terms.length === 0) throw new Error('blind: the vocabulary term list is empty')
-  const re = vocabulary(terms)
+  const vocab = vocabulary(terms)
 
   const identifiers: { file: string; name: string }[] = []
   for (const file of publishedModules(root)) {
@@ -169,7 +200,7 @@ async function domainVocabulary(root: string, terms: string[] = TERMS): Promise<
 
   const offenders = new Set<string>()
   for (const { file, name } of identifiers) {
-    if (re.test(name)) offenders.add(`${file}: ${name}`)
+    if (vocab.test(name)) offenders.add(`${file}: ${name}`)
   }
   return [...offenders].sort()
 }
