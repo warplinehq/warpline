@@ -200,6 +200,23 @@ const SWEEP_BACKLOG = new Set<string>([
 ])
 
 /**
+ * The two commits that spell out the deployment specifics in the act of
+ * removing them. History is immutable here — CLAUDE.md rule 5 forbids a
+ * force-push to main — so neither message can ever be corrected, and a scan
+ * over the whole history has to exempt them by SHA or be red forever.
+ *
+ * By SHA, and exactly these two, rather than a range: a range would also
+ * exempt every commit that happens to sit between them. The staleness test
+ * below is what stops the ratchet outliving its cause. Like SWEEP_BACKLOG this
+ * set exists to record a finished cleanup, never to admit a new reference — a
+ * hit outside it is a finding to report, not an entry to add.
+ */
+const SCRUB_COMMITS = new Set<string>([
+  '596599793c0ac3fc050670fbc25679bbe661c85a',
+  '4a6aca3a6f49b58ba824bc6aaab4f43305490dbe',
+])
+
+/**
  * A failing assertion prints its offenders, and CI logs are public — so a local
  * term must never reach the message. Reporting `file:line` with the term masked
  * still tells whoever holds `.private-terms` exactly where to look.
@@ -272,8 +289,74 @@ function scan(): Map<string, string[]> {
   return hits
 }
 
+/**
+ * Every commit reachable from HEAD, as `{ sha, message }` pairs.
+ *
+ * A NUL field separator rather than a line-based format: a commit body carries
+ * newlines and blank lines of its own, so any newline-delimited format
+ * re-splits the very message it is trying to deliver.
+ *
+ * A shallow clone THROWS. `git log` in a depth-1 checkout reports one commit
+ * and exits 0, so the scan would report clean over history it never saw —
+ * "did not look" rendering as "clean", which is the one property a guard in
+ * this repository must not have. CI checks this repo out with `fetch-depth: 0`
+ * for exactly this reason.
+ */
+function readCommits(): { sha: string; message: string }[] {
+  const shallow = execFileSync('git', ['rev-parse', '--is-shallow-repository'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  }).trim()
+  if (shallow !== 'false') {
+    throw new Error(
+      'shallow clone: the commit-message scan would report clean over history it cannot see. Run `git fetch --unshallow`, or check out with fetch-depth: 0.',
+    )
+  }
+
+  const raw = execFileSync('git', ['log', '--format=%H%x00%B%x00'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  })
+
+  const parts = raw.split('\0')
+  const commits: { sha: string; message: string }[] = []
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    // git separates records with a newline, so every field after the first
+    // arrives with it attached.
+    const sha = (parts[i] ?? '').trim()
+    if (sha !== '') commits.push({ sha, message: parts[i + 1] ?? '' })
+  }
+  return commits
+}
+
+/**
+ * Offenders as `<short sha>:<line number>` and NOTHING else. A commit message
+ * may contain anything and CI logs are public, so no content reaches the
+ * output — the same rule the gitignored-draft test follows one level down.
+ *
+ * PLANNING_REF is deliberately NOT applied here. It matches a bare phase
+ * number, and 18 commit messages in this repository carry one, so applying it
+ * would be a guaranteed false red. A guard that is red on arrival trains its
+ * reader to ignore it, which is worse than no guard — the failure mode the
+ * launch-draft test's own docstring already names.
+ *
+ * Takes the commits rather than reading them, so a synthetic message goes
+ * through the identical code path the real scan uses.
+ */
+function commitMessageOffenders(commits: { sha: string; message: string }[]): string[] {
+  return commits.flatMap(({ sha, message }) =>
+    message
+      .split('\n')
+      .flatMap((line, i) =>
+        PRIVATE_NAME.test(line) || LOCAL_NAME?.test(line) ? [`${sha.slice(0, 7)}:${i + 1}`] : [],
+      ),
+  )
+}
+
 describe('no private planning or deployment references', () => {
   const hits = scan()
+  const commits = readCommits()
 
   test('no file outside the sweep backlog carries a planning reference', () => {
     const offenders = [...hits].filter(([file]) => !SWEEP_BACKLOG.has(file)).flatMap(([, lines]) => lines)
@@ -398,5 +481,47 @@ describe('no private planning or deployment references', () => {
   test('the sweep backlog has no stale entries', () => {
     const stale = [...SWEEP_BACKLOG].filter((file) => !hits.has(file))
     expect(stale).toEqual([])
+  })
+
+  /**
+   * Commit messages are published the moment they are pushed and `git ls-files`
+   * cannot reach them, so `scan()` above has never seen one. This is the first
+   * of the three surfaces 09-05's prohibition text names and nothing detected.
+   */
+  test('no commit message outside the scrub commits names the deployment', () => {
+    const offenders = commitMessageOffenders(commits.filter((c) => !SCRUB_COMMITS.has(c.sha)))
+    expect(offenders).toEqual([])
+  })
+
+  /**
+   * The test above is green because the history is clean, and a helper that
+   * never looked would be green in exactly the same way. This is the half that
+   * tells the two apart. The sample is taken from the committed list rather
+   * than written out here, so the proof moves with the list.
+   */
+  test('the commit-message helper reports a message that does name it', () => {
+    const plain = PRIVATE_NAME_PATTERNS.find((p) => /^[a-z][a-z-]*$/.test(p))
+    expect(plain).toBeDefined()
+    const synthetic = [{ sha: '0'.repeat(40), message: `chore: a synthetic subject naming ${plain}` }]
+    expect(commitMessageOffenders(synthetic)).toEqual(['0000000:1'])
+  })
+
+  test('the scrub-commit exemption has no stale entries', () => {
+    const stale = [...SCRUB_COMMITS].filter((sha) => {
+      const commit = commits.find((c) => c.sha === sha)
+      return commit === undefined || commitMessageOffenders([commit]).length === 0
+    })
+    expect(stale).toEqual([])
+  })
+
+  /**
+   * Release notes are written to be pasted into a GitHub Release, so they are
+   * as publication-bound as any launch draft and live under the same
+   * gitignored root. Asserted on the name rather than on a file that may not
+   * exist yet: the next version's notes must be covered before they are
+   * written, not after.
+   */
+  test('a release-notes draft is inside the gitignored-draft scan', () => {
+    expect(LAUNCH_DRAFT.test('09-05-RELEASE-NOTES.md')).toBe(true)
   })
 })
