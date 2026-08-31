@@ -101,10 +101,15 @@ function advance() {
  * Swap `globalThis.fetch` for a recorder returning a fixed issues payload, run
  * `body`, and restore the real one whatever happens.
  *
- * The recorded URLs are the whole assertion surface for precedence: the
- * resolved `repo` never appears in a `SkillResult` — the handler names the key
- * and not the value on purpose — so the request it built is where the value is
- * observable.
+ * The recorded URLs are the assertion surface for precedence: the summary the
+ * handler returns names the plugin and the count, never the repo, so the
+ * request it built is the only place the resolved value is observable at all.
+ *
+ * That the value went nowhere else is a separate assertion with its own case
+ * below, and it reads the raw text of the run-log file rather than any field of
+ * the in-memory result — the engine writes `result.summary` into
+ * `plugin_entries[].result_summary` on every run, and that file is what people
+ * paste into issues.
  */
 async function withStubbedFetch(body: (urls: string[]) => Promise<void>): Promise<void> {
   const realFetch = globalThis.fetch
