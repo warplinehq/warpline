@@ -1110,4 +1110,26 @@ describe('hand-written manifest prose', () => {
   test('runtime-spec § 1 documents outputs.temporality, which the generator cannot', () => {
     expect(read('docs/runtime-spec.md')).toContain('temporality')
   })
+
+  // `inputs.type` and `inputs.default` sit one level down inside the `inputs`
+  // record value, exactly where the generator stops looking. Narrowing `type`
+  // to a closed enum is a breaking change for any manifest outside this repo
+  // using an unlisted name, and it renders as the same `object` row it always
+  // did — so `bun run docs:generate` produces no diff and CI reports nothing.
+  // These three are the only detector the prose has.
+  test('runtime-spec § 1 documents inputs.type and inputs.default', () => {
+    const doc = read('docs/runtime-spec.md')
+    expect(doc).toContain('### `inputs`')
+    expect(doc).toContain('inputs[].type')
+    expect(doc).toContain('inputs[].default')
+  })
+
+  // The contract-stability section counts the closed enums by hand. That count
+  // is prose no schema change can update, so adding a fifth closed set without
+  // touching it leaves the document confidently wrong.
+  test('the contract-stability closed-set count includes inputs[].type', () => {
+    const doc = read('docs/runtime-spec.md')
+    expect(doc.toLowerCase()).not.toContain('four sets are closed')
+    expect(doc.toLowerCase()).toContain('five sets are closed')
+  })
 })

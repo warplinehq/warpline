@@ -163,3 +163,49 @@ describe('outputs.temporality', () => {
     expect(threw).toBe(true)
   })
 })
+
+/**
+ * `inputs.type` and `inputs.default`.
+ *
+ * The type set is closed for the same reason `outputs.temporality` is: a value
+ * outside it fails `.parse()` rather than falling back, and manifests are
+ * parsed at import time, so a misspelled type name stops the plugin instead of
+ * running unvalidated forever.
+ */
+describe('inputs.type and inputs.default', () => {
+  const withInputs = (inputs: Record<string, unknown>) => ({ ...validManifest, inputs })
+
+  test('a manifest declaring inputs: {} parses and yields {}', () => {
+    expect(PluginManifestSchema.parse(withInputs({})).inputs).toEqual({})
+  })
+
+  test("declaring 'boolean' parses", () => {
+    const parsed = PluginManifestSchema.parse(withInputs({ dry_run: { type: 'boolean' } }))
+    expect(parsed.inputs['dry_run']?.type).toBe('boolean')
+  })
+
+  test('an unsupported type fails .parse() and the message names the field', () => {
+    let threw = false
+    try {
+      PluginManifestSchema.parse(withInputs({ site_url: { type: 'strng' } }))
+    } catch (e) {
+      threw = true
+      expect((e as z.ZodError).issues[0]?.path).toEqual(['inputs', 'site_url', 'type'])
+      expect((e as z.ZodError).message).toContain('site_url')
+    }
+    expect(threw).toBe(true)
+  })
+
+  test('a declared default round-trips through .parse()', () => {
+    const parsed = PluginManifestSchema.parse(
+      withInputs({ retention_days: { type: 'number', required: false, default: 90 } }),
+    )
+    expect(parsed.inputs['retention_days']?.default).toBe(90)
+  })
+
+  test('an input omitting default reads undefined, so the field stays additive', () => {
+    const parsed = PluginManifestSchema.parse(withInputs({ site_url: { type: 'string' } }))
+    expect(parsed.inputs['site_url']?.default).toBeUndefined()
+    expect(parsed.inputs['site_url']?.required).toBe(true)
+  })
+})
