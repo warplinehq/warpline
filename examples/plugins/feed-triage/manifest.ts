@@ -23,7 +23,7 @@ export const manifest = PluginManifestSchema.parse({
     entries_path: {
       type: 'string',
       required: false,
-      description: 'Path to a feed-entries JSON file (default: <home>/state/feed-entries.json)',
+      description: 'Path to a feed-entries JSON file; when absent, the handler computes it from the warpline home, as state/feed-entries.json',
     },
   },
   outputs: {

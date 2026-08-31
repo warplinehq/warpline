@@ -44,7 +44,7 @@ export const manifest = PluginManifestSchema.parse({
     anomalies_path: {
       type: 'string',
       required: false,
-      description: 'Path to an anomalies JSON file (default: <home>/state/anomalies.json)',
+      description: 'Path to an anomalies JSON file; when absent, the handler computes it from the warpline home, as state/anomalies.json',
     },
   },
   outputs: {

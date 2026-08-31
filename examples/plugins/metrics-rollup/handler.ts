@@ -128,12 +128,15 @@ export async function handler(
     ? args.metrics_path
     : join(warplineHome(), 'state', 'metrics.json')
   const retentionDays = args.retention_days === undefined ? 90 : args.retention_days
+  // Names the key and the shape expected of it, never the value it was handed:
+  // this message lands in a run log, and the value can arrive from the
+  // operator's config file.
   if (typeof retentionDays !== 'number' || !(retentionDays > 0)) {
     return {
       status: 'failed',
       phases_completed: [],
       phases_failed: ['metrics-rollup'],
-      errors: [makeSkillError('parse_error', `retention_days must be a positive number, got: ${String(retentionDays)}`, { impact: 'HIGH', retryable: false })],
+      errors: [makeSkillError('parse_error', "input 'retention_days' must be a positive number", { impact: 'HIGH', retryable: false })],
       data_freshness: {},
       summary: 'metrics-rollup: invalid retention_days input',
       artifacts_produced: [],

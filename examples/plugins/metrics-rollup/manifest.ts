@@ -28,12 +28,13 @@ export const manifest = PluginManifestSchema.parse({
     metrics_path: {
       type: 'string',
       required: false,
-      description: 'Path to a metrics JSON file (default: <home>/state/metrics.json)',
+      description: 'Path to a metrics JSON file; when absent, the handler computes it from the warpline home, as state/metrics.json',
     },
     retention_days: {
       type: 'number',
       required: false,
-      description: 'Rows older than this many days are retired into weekly rollups (default: 90)',
+      default: 90,
+      description: 'Rows older than this many days are retired into weekly rollups',
     },
   },
   outputs: {

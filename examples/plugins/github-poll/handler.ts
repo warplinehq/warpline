@@ -23,12 +23,15 @@ export async function handler(
   signal: AbortSignal,
 ): Promise<SkillResult> {
   const repo = args.repo
+  // Names the key and the shape expected of it, never the value it was handed:
+  // this message lands in a run log, and the value can arrive from the
+  // operator's config file.
   if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
     return {
       status: 'failed',
       phases_completed: [],
       phases_failed: ['github-poll'],
-      errors: [makeSkillError('parse_error', `repo must be owner/name, got: ${String(repo)}`, { impact: 'HIGH', retryable: false })],
+      errors: [makeSkillError('parse_error', "input 'repo' must be a string in owner/name form, e.g. oven-sh/bun", { impact: 'HIGH', retryable: false })],
       data_freshness: {},
       summary: 'github-poll: invalid repo input',
       artifacts_produced: [],
