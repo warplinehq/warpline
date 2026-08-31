@@ -1086,13 +1086,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     started_at,
     completed_at,
     status: engineStatus === 'complete' ? 'complete' : engineStatus === 'partial' ? 'partial' : 'interrupted',
-    modes_run: [],
     resumed_from: null,
     summary: `Engine run ${run_id}: ${plugin_entries.length} plugins processed`,
-    tasks_surfaced: [],
-    tasks_resolved: [],
-    deferrals_active: 0,
-    verification_results: [],
     plugin_entries,
   }
 

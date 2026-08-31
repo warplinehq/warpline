@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   RunLogSchema,
-  ModeRunSchema,
   PluginLogEntrySchema,
   runLogFilename,
   ensureRunDir,
@@ -18,39 +17,9 @@ const validRunLog: RunLog = {
   started_at: '2026-04-03T12:00:00Z',
   completed_at: '2026-04-03T12:05:00Z',
   status: 'complete',
-  modes_run: [
-    {
-      mode: 'health',
-      status: 'pass',
-      skills_invoked: [
-        {
-          skill: 'technical-seo-checker',
-          result: {
-            status: 'success',
-            phases_completed: ['crawl', 'analyze'],
-            phases_failed: [],
-            errors: [],
-            data_freshness: { gsc: '2026-04-03' },
-            summary: 'All checks passed',
-            // The bare-string form still validates at the parse boundary; this
-            // fixture is typed `RunLog`, so it carries the normalized shape a
-            // reader sees after parsing rather than the shape an author writes.
-            artifacts_produced: [
-              { type: 'artifact', format: 'markdown', path: '.warpline/runs/report.md' },
-            ],
-            schema_version: 1,
-          },
-        },
-      ],
-    },
-  ],
   resumed_from: null,
   summary: 'Health check complete',
-  tasks_surfaced: [],
-  tasks_resolved: [],
-  deferrals_active: 0,
   plugin_entries: [],
-  verification_results: [],
 }
 
 describe('RunLogSchema', () => {
@@ -87,38 +56,36 @@ describe('RunLogSchema', () => {
     const result = RunLogSchema.safeParse(log)
     expect(result.success).toBe(false)
   })
-})
 
-describe('ModeRunSchema', () => {
-  it('accepts mode status values: pass, partial, fail, skipped', () => {
-    for (const status of ['pass', 'partial', 'fail', 'skipped'] as const) {
-      const mode = { mode: 'health', status, skills_invoked: [] }
-      const result = ModeRunSchema.safeParse(mode)
-      expect(result.success).toBe(true)
+  /**
+   * A log already on disk, written by 0.1.2, carries six keys this schema no
+   * longer declares. Zod strips unknown keys rather than rejecting them, which
+   * is the whole reason the removal needed no migration, no defaulted
+   * placeholder and no read-compatibility shim. That claim is only worth making
+   * if something asserts it.
+   */
+  it('strips the pre-0.2 keys from a stored log rather than rejecting it', () => {
+    const stored = {
+      ...validRunLog,
+      modes_run: [{ mode: 'health', status: 'pass', skills_invoked: [] }],
+      tasks_surfaced: [{ task_id: 't-1', severity: 'warning', status: 'new' }],
+      tasks_resolved: ['t-0'],
+      deferrals_active: 2,
+      verification_results: [{ task_id: 't-1', status: 'pass', method: 'recheck' }],
+      metrics_summary: { computed_at: '2026-04-03T12:05:00Z' },
     }
-  })
-
-  it('validates nested SkillResultSchema within skills_invoked', () => {
-    const mode = {
-      mode: 'intelligence',
-      status: 'pass' as const,
-      skills_invoked: [
-        {
-          skill: 'competitor-analysis',
-          result: {
-            status: 'partial',
-            phases_completed: ['scan'],
-            phases_failed: ['deep-dive'],
-            errors: [{ code: 'timeout', message: 'API timed out', impact: 'MEDIUM' }],
-            data_freshness: { competitors: '2026-04-01' },
-            summary: 'Partial scan completed',
-            artifacts_produced: [],
-          },
-        },
-      ],
-    }
-    const result = ModeRunSchema.safeParse(mode)
+    const result = RunLogSchema.safeParse(stored)
     expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(Object.keys(result.data).sort()).toEqual([
+      'completed_at',
+      'plugin_entries',
+      'resumed_from',
+      'run_id',
+      'started_at',
+      'status',
+      'summary',
+    ])
   })
 })
 

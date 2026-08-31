@@ -344,8 +344,7 @@ describe('run reference resolution', () => {
         started_at: '2026-08-01T10:00:00Z',
         completed_at: '2026-08-01T10:00:05Z',
         status: 'complete',
-        modes_run: [],
-        summary: 'seeded',
+          summary: 'seeded',
       }),
       runsBase,
     )

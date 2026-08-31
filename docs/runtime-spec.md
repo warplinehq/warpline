@@ -266,11 +266,25 @@ External abort sources:
    via the same controller.
 3. Per-attempt timeout - internal, handled inside `invokePlugin`.
 
-## 5. Run Artifact Shape
+## 5. Run Artifact and Run Log Shapes
 
-Each run writes two sibling files under `<home>/runs/`:
+Two different documents live under `<home>/runs/`, both named `<run_id>.json`,
+written by two different paths. They are not the same shape, and reading one as
+the other is the mistake this section used to make.
 
-- `<run_id>.json` - structured summary.
+| Written by | Document | Files |
+|---|---|---|
+| `warpline run <plugin>` — one plugin, invoked directly | `RunArtifact` | `<run_id>.json` and a `<run_id>.log` transcript |
+| an engine advance — every due plugin in one pass | `RunLog` | `<run_id>.json` |
+
+§ 6 turns on that distinction: the 20-newest trim only ever sees a
+`RunArtifact`, and only `pruneRunLogs` deletes an advance's `RunLog`.
+
+### The run artifact
+
+One plugin, invoked directly, writes two sibling files:
+
+- `<run_id>.json` - structured summary, including every retry attempt.
 - `<run_id>.log` - captured stdout + stderr, with `=== Attempt N ===`
   delimiters between retries.
 
@@ -304,8 +318,7 @@ JSON schema:
   "final_error": null,
   "cancelled": false,
   "timed_out": false,
-  "retried": true,
-  "plugin_entries": []
+  "retried": true
 }
 ```
 
@@ -320,6 +333,49 @@ Log file:
 
 Cancelled runs persist with `status: 'cancelled'` and partial attempts; the
 log captures whatever the handler emitted before abort.
+
+A `RunArtifact` also carries an optional `plugin_entries`, kept only for
+backward compatibility with an older combined engine-run shape. Nothing writes
+it. The `plugin_entries` an advance fills belongs to the run log below, and the
+two are unrelated.
+
+### The run log
+
+An engine advance writes one `RunLog` for the whole pass, and no `.log`
+sibling — the transcript file belongs to the direct-invocation path.
+
+```json
+{
+  "run_id": "<run-id>",
+  "started_at": "<iso>",
+  "completed_at": "<iso>",
+  "status": "complete | partial | failed | interrupted",
+  "resumed_from": null,
+  "summary": "Engine run <run-id>: 3 plugins processed",
+  "plugin_entries": []
+}
+```
+
+`completed_at` is null for a run that was interrupted. `resumed_from` names the
+run this one continued, and is null for a fresh advance.
+
+`plugin_entries` is the only accumulated field, and it is deliberately the only
+one. **A host that wants run telemetry derives it from the per-plugin entries.**
+The runtime does not compute aggregates, does not store them, and does not
+define what an aggregate should mean for a host whose plugins it has never
+seen — the same "derive, don't store" rule the rest of this runtime follows.
+
+Before 0.2 this document also declared six fields nothing here ever wrote and no
+document ever described: an optional aggregate metrics object, a per-mode array
+with its own two sibling schemas, and four task-board counters that were written
+as literal constants and read by nothing. They came across with the extraction
+and were public API through `warpline/schemas/*` from 0.1.0. All six were
+removed in 0.2, along with the two stranded schemas and their inferred types.
+
+A run log written by 0.1.x still parses against the current schema: unknown keys
+are stripped rather than rejected, so no migration exists and none is needed.
+The break is compile-time only, for a consumer that named one of the removed
+types.
 
 ### Plugin entry status
 

@@ -136,7 +136,6 @@ describe('RunLogSchema plugin_entries', () => {
       started_at: new Date().toISOString(),
       completed_at: new Date().toISOString(),
       status: 'complete',
-      modes_run: [],
       summary: 'test run',
       plugin_entries: [
         {
@@ -166,7 +165,6 @@ describe('RunLogSchema plugin_entries', () => {
       started_at: new Date().toISOString(),
       completed_at: null,
       status: 'failed',
-      modes_run: [],
       summary: 'test run',
     })
     expect(result.success).toBe(true)
