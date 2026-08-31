@@ -18,7 +18,20 @@ export const manifest = PluginManifestSchema.parse({
   schedule: 'daily',
   timeout_ms: 30_000,
   inputs: {
-    repo: { type: 'string', required: true, description: 'owner/name, e.g. oven-sh/bun' },
+    // Required AND defaulted, which is not a contradiction: the default
+    // satisfies the requirement at the lowest precedence tier. There is no
+    // first-run setup verb, so a clean install has no config file, and a
+    // declared default is the only place the value can come from — without one
+    // the bundled quickstart fails on every advance, forever. An operator
+    // retargets it by writing the plugin's own file under the home's `config`
+    // directory. The repository it polls is the one this package ships from,
+    // so the example demonstrates the config channel instead of demanding it.
+    repo: {
+      type: 'string',
+      required: true,
+      default: 'warplinehq/warpline',
+      description: 'owner/name, e.g. oven-sh/bun',
+    },
   },
   outputs: {
     open_count: { type: 'number', description: 'Open issue count' },
