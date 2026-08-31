@@ -116,10 +116,35 @@ Format and exact merge rules: `docs/runtime-spec.md` § 9.
 
 ## Why the plugin hands off instead of calling a model
 
+- **The seam narrows the prompt-injection blast radius.** Plugins process
+  untrusted input — feeds, mail, scraped pages. A model inside an unattended
+  plugin is an injection surface holding that plugin's privileges: hostile
+  content becomes instructions becomes action, on a schedule, with nobody
+  watching. The handoff removes models from the unattended path entirely.
+  Something still has to read the hostile text, and it is a model — that
+  exposure is real and does not vanish. What the seam does is bound it: the
+  scanner reads only in-home paths, and every warpline-mediated side effect
+  still passes the approval gate, so the worst injection can achieve through
+  warpline is a bad judgment file. What warpline cannot bound is the
+  consumer session's own authority — that belongs to the harness it runs in.
+  Run automated consumers least-privilege: read the home, write judgment
+  files, nothing else. The claim is *relocates and narrows*, never
+  *prevents*.
+- **Determinism keeps the retry contract sound.** A delegated handoff is
+  never retried; re-running the plugin re-derives it if the work is still
+  outstanding. That is only safe because a re-run reproduces the same dedup
+  keys, the same cadence math, the same item list. A model inside the plugin
+  makes every re-run derive different work, and parked-work reconciliation
+  quietly stops meaning anything.
 - **Auditability** — deterministic plugins produce identical output for
   identical input; the judgment work is quarantined where it can be reviewed.
-- **Economics** — the LLM half rides an operator's existing Claude Code
-  session/subscription instead of metered API calls inside a cron job.
 - **The boundary stays inspectable** — a plugin with no `llm_required`
   capability cannot quietly grow a model dependency; the handoff is visible in
   every run artifact.
+- **The consumer is whoever you have.** The contract names a status and a
+  payload path. Anything that reads them can consume the handoff: an
+  interactive Claude Code session, a headless invocation under cron, an
+  API-billed worker, another harness entirely. The runtime itself carries no
+  model dependency, so the judgment half rides whatever the operator already
+  pays for — a subscription session happens to be the cheapest for a solo
+  operator, and nothing in the design assumes it.
