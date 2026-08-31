@@ -234,14 +234,32 @@ describe('no published identifier carries the source runtime vocabulary', () => 
 
   /**
    * The scan is only as good as its pattern, and a pattern that matched nothing
-   * would pass this file vacuously forever. Two identifiers that must hit, two
-   * ordinary words that must not — `mode` is a substring of both misses, which
-   * is precisely the over-match that would make this guard unobeyable.
+   * would pass this file vacuously forever. Identifiers that must hit, ordinary
+   * words that must not — `mode` is a substring of every miss, which is
+   * precisely the over-match that would make this guard unobeyable.
+   *
+   * `ModeRunSchema` and `trial_ends_at` are here because both were measured
+   * false against the word-boundary regex this file shipped with. `_` is a word
+   * character in JavaScript regex, so `\b` never falls between `trial` and
+   * `ends`, and it never falls between `Run` and `Schema` either. The first one
+   * is self-proving: `ModeRunSchema` was a live export of
+   * `src/schemas/run-log.ts` at commit `2d15f58` — the very commit where this
+   * guard was watched failing — and the transcript names only `ModeRun`,
+   * `mode`, `modes_run`. The guard looked straight at `ModeRunSchema` and
+   * called the tree clean, while its own docstring claims those terms are what
+   * stops the stranded types coming back.
+   *
+   * `Model` joins the must-miss side because the widening that fixes the miss
+   * is case-folded, so the over-match it risks is case-folded too. Both halves
+   * share one assertion on purpose: neither can be satisfied by weakening the
+   * other.
    */
   test('the pattern matches identifiers and not the words that contain them', () => {
     const re = vocabulary(TERMS)
-    const misses = ['modes_run', 'demo_booked'].filter((s) => !re.test(s))
-    const overMatches = ['model', 'moderation'].filter((s) => re.test(s))
+    const misses = ['modes_run', 'demo_booked', 'ModeRunSchema', 'trial_ends_at'].filter(
+      (s) => !re.test(s),
+    )
+    const overMatches = ['model', 'moderation', 'Model'].filter((s) => re.test(s))
     expect([...misses, ...overMatches]).toEqual([])
   })
 
