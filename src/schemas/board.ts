@@ -85,7 +85,7 @@ export const BoardEventSchema = z.object({
    *
    * null means the event was emitted outside any run, which is a fact rather
    * than a gap. Distinct from a run id whose log has since been pruned, which
-   * resolves through `resolveRunRef` in `schemas/run-log.ts`.
+   * resolves through `resolveRunRef` in `runtime/run-log-store.ts`.
    *
    * `.default(null)` is a read-compat shim and nothing else. `state-manager.ts`
    * safeParses each events.jsonl line on its own and pushes only on success, so

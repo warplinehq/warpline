@@ -337,7 +337,8 @@ describe('run reference resolution', () => {
   })
 
   async function seedRunLog(runId: string): Promise<void> {
-    const { RunLogSchema, writeRunLog } = await import('../../schemas/run-log.js')
+    const { RunLogSchema } = await import('../../schemas/run-log.js')
+    const { writeRunLog } = await import('../../runtime/run-log-store.js')
     await writeRunLog(
       RunLogSchema.parse({
         run_id: runId,
@@ -351,7 +352,7 @@ describe('run reference resolution', () => {
   }
 
   test('an event whose run log is on disk resolves to that run', async () => {
-    const { resolveRunRef } = await import('../../schemas/run-log.js')
+    const { resolveRunRef } = await import('../../runtime/run-log-store.js')
     await writeV2State()
     await seedRunLog('run-live')
     await appendEvent({
@@ -366,7 +367,7 @@ describe('run reference resolution', () => {
   })
 
   test('an event whose run log has been pruned resolves to not-retained, and says so', async () => {
-    const { resolveRunRef, describeRunRef } = await import('../../schemas/run-log.js')
+    const { resolveRunRef, describeRunRef } = await import('../../runtime/run-log-store.js')
     await writeV2State()
     await seedRunLog('run-aged')
     await appendEvent({
@@ -387,7 +388,7 @@ describe('run reference resolution', () => {
   })
 
   test('an event carrying no run id renders as no run — not as not-retained', async () => {
-    const { resolveRunRef, describeRunRef } = await import('../../schemas/run-log.js')
+    const { resolveRunRef, describeRunRef } = await import('../../runtime/run-log-store.js')
     await writeV2State()
     await appendEvent({
       event_id: 'e-null', type: 'notice' as const, timestamp: '2026-08-01T10:00:01Z',
@@ -405,7 +406,7 @@ describe('run reference resolution', () => {
   })
 
   test('the same helper resolves a last_output pointer whose producing run is gone', async () => {
-    const { resolveRunRef } = await import('../../schemas/run-log.js')
+    const { resolveRunRef } = await import('../../runtime/run-log-store.js')
     await seedRunLog('run-output')
 
     // The shape plan 02 writes into plugin_runs — a pointer carrying the run

@@ -22,7 +22,7 @@ import { stateDir } from '../lib/paths.js'
 import { readTasks, readEvents, readAcks, writeAcks, completeTask, deferTask } from '../board/state-manager.js'
 import type { BoardEvent, Acknowledgements } from '../schemas/board.js'
 import type { TaskDisplay } from '../schemas/engine-state.js'
-import { resolveRunRef, describeRunRef } from '../schemas/run-log.js'
+import { resolveRunRef, describeRunRef } from '../runtime/run-log-store.js'
 import { ApiBudgetTracker } from '../lib/api-budget.js'
 import type { BudgetSnapshot } from '../lib/api-budget.js'
 

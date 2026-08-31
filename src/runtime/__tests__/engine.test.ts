@@ -1017,7 +1017,7 @@ export async function handler(manifest, args) {
   })
 
   test('Test 33: a last_output naming a pruned run resolves to not-retained rather than throwing', async () => {
-    const { isRunLogRetained } = await import('../../schemas/run-log.js')
+    const { isRunLogRetained } = await import('../run-log-store.js')
     const { runAdvance } = await import('../engine.js')
     await createOutputPlugin(
       'brief-writer',

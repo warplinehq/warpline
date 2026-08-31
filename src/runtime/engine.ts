@@ -37,7 +37,7 @@ import {
   writeEngineState,
 } from '../schemas/engine-state.js'
 import type { Denial, EngineState, PendingGate } from '../schemas/engine-state.js'
-import { writeRunLog, pruneRunLogs } from '../schemas/run-log.js'
+import { writeRunLog, pruneRunLogs } from './run-log-store.js'
 import type { RunLog } from '../schemas/run-log.js'
 import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
 import {

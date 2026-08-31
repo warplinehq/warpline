@@ -42,6 +42,13 @@
  * provable rather than assumed. Fixture roots live under `tmpdir()` and are
  * removed in a `finally` — tests never write inside the repository.
  *
+ * A second assertion lives here rather than in a file of its own because it
+ * asks about the same surface for the same reason: no module under
+ * `src/schemas/` may import the Node filesystem or path built-ins. A field with
+ * no owner and a `writeFile` behind a specifier named `schemas` are the same
+ * failure — a wildcard export turning whatever gets written into public API
+ * before anyone looks at it.
+ *
  * Why a test rather than a lint script: `bun test` is the command CI runs and
  * the one CONTRIBUTING names, so the check cannot be skipped by forgetting a
  * second command.
@@ -69,6 +76,34 @@ const DEFERRED = new Set<string>([
   // check are a board-model decision, not a schema-hygiene one.
   'src/schemas/engine-state.ts: origin_check',
 ])
+
+/**
+ * Ratchet for the no-filesystem assertion below. Separate from `DEFERRED`
+ * because it holds a different predicate; sharing one set would let an entry
+ * excused for one guard silence the other. Same rules: an inline citation per
+ * entry, and a companion assertion that fails when an entry stops being an
+ * offender.
+ */
+const DEFERRED_FS = new Set<string>([
+  // Found during 09-05, not caused by it. `readEngineState`,
+  // `readEngineStateReadOnly` and `writeEngineState` are the state store, ~200
+  // lines of it, and every caller in the runtime and the board imports them
+  // from here. Splitting them is a breaking change to a published subpath that
+  // needs its own plan, its own release-notes entry and its own tarball probe —
+  // the same treatment `schemas/run-log` got here.
+  'src/schemas/engine-state.ts',
+  // Found during 09-05, not caused by it. One `existsSync` inside
+  // `resolveOutput`, which is small enough to look free and is not: moving it
+  // breaks `warpline/schemas/skill-result` for anyone resolving an Output, so
+  // it travels with the same plan as the entry above rather than sideways here.
+  'src/schemas/skill-result.ts',
+])
+
+/**
+ * Node built-ins that make a module a filesystem client. Matched on the import
+ * specifier, so a subpath (`node:fs/promises`) and the bare form both hit.
+ */
+const FS_BUILTIN = /from\s+['"]node:(fs|path)(\/[^'"]*)?['"]|import\s*\(\s*['"]node:(fs|path)(\/[^'"]*)?['"]/
 
 /** A term is a literal; `\b` anchors it so a substring of another word misses. */
 const bounded = (t: string) => new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
@@ -127,6 +162,52 @@ function publishedModules(root: string): string[] {
     }
   }
   return [...modules].sort()
+}
+
+/**
+ * Every schema module that imports the Node filesystem or path built-ins.
+ *
+ * `./schemas/*` is a **wildcard** entry in the `exports` map, so a file placed
+ * under `src/schemas/` is public API the moment it is written, with no review
+ * step between writing it and shipping it. That is how `warpline/schemas/
+ * run-log` came to publish `mkdir`, `writeFile` and `unlink` behind a specifier
+ * whose name promises declarative shapes. One assertion does two jobs: it
+ * proves the 09-05 split landed, and it stops the next schema module from
+ * re-committing the same mistake — which was not hypothetical, since the config
+ * schema module added earlier in that phase sits under the same wildcard.
+ *
+ * `__tests__` is excluded, and the exclusion is the point rather than a
+ * loophole: `tsconfig.build.json` excludes `src/**​/__tests__/**`, so no test
+ * file is compiled into `dist/` and none is reachable through the wildcard.
+ * Including them would force a ratchet entry for every fixture that writes to a
+ * tmpdir — `engine-state.test.ts` cannot test a state store without importing
+ * the filesystem — and a ratchet full of non-offenders is how a ratchet becomes
+ * an ignore list.
+ *
+ * Throws rather than returning `[]` when no schema module can be enumerated:
+ * zero files is silently, perfectly green.
+ */
+function filesystemInSchemas(root: string): string[] {
+  const modules = tracked(root, 'src/schemas').filter(
+    (f) => f.endsWith('.ts') && !f.includes('__tests__'),
+  )
+  if (modules.length === 0) {
+    throw new Error(`blind: no schema modules enumerated under ${root}`)
+  }
+  const offenders: string[] = []
+  for (const file of modules) {
+    let text: string
+    try {
+      text = readFileSync(join(root, file), 'utf8')
+    } catch (err) {
+      // `git ls-files` reports the INDEX, so a path mid-rebase has nothing to
+      // read. Anything else is a broken input and must not read as clean.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw err
+    }
+    if (FS_BUILTIN.test(text)) offenders.push(file)
+  }
+  return offenders.sort()
 }
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})/
@@ -309,6 +390,56 @@ describe('every published schema field has a writer and a doc', () => {
   })
 })
 
+describe('no published schema module imports the filesystem', () => {
+  test('the real repository is clean outside the ratchet', () => {
+    expect(filesystemInSchemas(REPO_ROOT).filter((f) => !DEFERRED_FS.has(f))).toEqual([])
+  })
+
+  test('the filesystem ratchet has no stale entries', () => {
+    const offenders = new Set(filesystemInSchemas(REPO_ROOT))
+    expect([...DEFERRED_FS].filter((e) => !offenders.has(e))).toEqual([])
+  })
+
+  test('a schema module importing the filesystem is reported', () => {
+    const root = fixture({
+      'package.json': PKG,
+      'src/schemas/thing.ts': "import { existsSync } from 'node:fs'\n" + SCHEMA,
+    })
+    try {
+      expect(filesystemInSchemas(root)).toEqual(['src/schemas/thing.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('the subpath and dynamic forms are caught too', () => {
+    const root = fixture({
+      'package.json': PKG,
+      'src/schemas/a.ts': "import { mkdir } from 'node:fs/promises'\n" + SCHEMA,
+      'src/schemas/b.ts': "const { join } = await import('node:path')\n" + SCHEMA,
+      'src/schemas/c.ts': SCHEMA,
+    })
+    try {
+      expect(filesystemInSchemas(root)).toEqual(['src/schemas/a.ts', 'src/schemas/b.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a test fixture under the schemas directory is not an offender', () => {
+    const root = fixture({
+      'package.json': PKG,
+      'src/schemas/thing.ts': SCHEMA,
+      'src/schemas/__tests__/thing.test.ts': "import { mkdir } from 'node:fs/promises'\n",
+    })
+    try {
+      expect(filesystemInSchemas(root)).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
 /**
  * A guard that cannot observe its inputs must go red, never green. "Looked and
  * found nothing" and "did not look" are indistinguishable from the outside, and
@@ -343,6 +474,15 @@ describe('the guard fails when it cannot see', () => {
     })
     try {
       await expect(orphanFields(root)).rejects.toThrow(/blind: npm packs no markdown/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('zero enumerated schema modules is red, not "nothing imports fs"', () => {
+    const root = fixture({ 'package.json': PKG, 'src/other.ts': 'export const x = 1\n' })
+    try {
+      expect(() => filesystemInSchemas(root)).toThrow(/blind: no schema modules enumerated/)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
