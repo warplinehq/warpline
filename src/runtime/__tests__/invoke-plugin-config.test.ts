@@ -25,6 +25,7 @@ let eventsPath: string
 interface FixtureInput {
   type: string
   required?: boolean
+  default?: unknown
   description?: string
 }
 
@@ -201,7 +202,97 @@ describe('invokePlugin config resolution', () => {
     // max_retries is 3 on the fixture — an attempt_count above 1 would mean the
     // failure arm landed inside the retry loop instead of above it.
     expect(res.attempt_count).toBe(1)
+    expect(res.attempts).toHaveLength(1)
     expect(res.retried).toBe(false)
     expect(res.result.errors?.[0]?.message).toContain(configPath)
+  })
+
+  // ── The invalid-config failure matrix ────────────────────────────────
+  //
+  // Every case below asserts `attempt_count === 1` AND `attempts.length === 1`.
+  // Those two numbers are the observable proof that the failure arm sits ABOVE
+  // the retry loop rather than breaking out of it: the fixtures declare
+  // `max_retries: 3`, so an implementation that entered the loop and broke on
+  // a non-retryable error would still have recorded the attempt it made inside
+  // it, and a second recorded attempt would be the tell.
+
+  test('a present-but-wrong-typed value fails as parse_error and never reaches the handler', async () => {
+    // The handler returns success unconditionally. A `failed` result therefore
+    // proves the handler was not called, not merely that it disagreed.
+    await writePlugin(
+      'cfg-wrongtype',
+      { retention_days: { type: 'number', required: true } },
+      `() => true`,
+    )
+    // The STRING "90", not the number. A resolver that coerced would find a
+    // perfectly good retention window here and the plugin would run against a
+    // value its manifest says is not the type it declared.
+    await writeConfig('cfg-wrongtype', JSON.stringify({ retention_days: '90' }))
+
+    const res = await run('cfg-wrongtype')
+    expect(res.result.status).toBe('failed')
+    expect(res.result.errors).toHaveLength(1)
+    expect(res.result.errors?.[0]?.code).toBe('parse_error')
+    expect(res.result.errors?.[0]?.retryable).toBe(false)
+    expect(res.result.phases_failed).toEqual(['cfg-wrongtype'])
+    expect(res.attempt_count).toBe(1)
+    expect(res.attempts).toHaveLength(1)
+    expect(res.retried).toBe(false)
+  })
+
+  test('a declared default is not substituted for a present-but-invalid value', async () => {
+    // The handler succeeds ONLY on the declared default. So if resolution had
+    // fallen back to that default after rejecting the config file's value,
+    // this run would be green — which is exactly the failure mode a fallback
+    // produces: a plugin running happily against a number the operator never
+    // asked for, on a board that says everything is fine.
+    await writePlugin(
+      'cfg-default-not-fallback',
+      { retention_days: { type: 'number', required: false, default: 90 } },
+      `(a) => a.retention_days === 90`,
+    )
+    await writeConfig('cfg-default-not-fallback', JSON.stringify({ retention_days: 'ninety' }))
+
+    const res = await run('cfg-default-not-fallback')
+    expect(res.result.status).toBe('failed')
+    expect(res.result.errors).toHaveLength(1)
+    expect(res.result.errors?.[0]?.code).toBe('parse_error')
+    expect(res.result.errors?.[0]?.retryable).toBe(false)
+    expect(res.attempt_count).toBe(1)
+    expect(res.attempts).toHaveLength(1)
+    expect(res.retried).toBe(false)
+  })
+
+  test('an absent config file with every input satisfiable is a success', async () => {
+    // Absent is not malformed. Nothing here is wrong, so nothing here fails:
+    // the optional input stays undefined and the declared default arrives.
+    await writePlugin(
+      'cfg-satisfiable',
+      {
+        since: { type: 'string', required: false },
+        retention_days: { type: 'number', required: false, default: 90 },
+      },
+      `(a) => a.since === undefined && a.retention_days === 90`,
+    )
+
+    const res = await run('cfg-satisfiable')
+    expect(res.result.status).toBe('success')
+    expect(res.result.errors).toHaveLength(0)
+  })
+
+  test("a declared input named `action` loses to the CLI's mandatory positional", async () => {
+    // `warpline run <plugin> <action>` passes `action` per invocation, and a
+    // plugin is free to declare an input by that name. Per-invocation args are
+    // the top precedence tier, so the operator's typed positional wins over
+    // whatever the config file happens to hold for the same key.
+    await writePlugin(
+      'cfg-action-collision',
+      { action: { type: 'string', required: true } },
+      `(a) => a.action === 'from-cli'`,
+    )
+    await writeConfig('cfg-action-collision', JSON.stringify({ action: 'from-config' }))
+
+    const res = await run('cfg-action-collision', { action: 'from-cli' })
+    expect(res.result.status).toBe('success')
   })
 })
