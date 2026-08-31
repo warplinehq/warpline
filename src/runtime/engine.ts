@@ -449,10 +449,6 @@ export async function evaluatePlugin(
   return { due: true }
 }
 
-// (Extraction note: the source engine attached a domain metrics_summary to
-// each run. Cut from core — hosts that want run telemetry derive it from the
-// run log's plugin_entries.)
-
 // -----------------------------------------------------------------------
 // topoSort — Kahn's algorithm
 // -----------------------------------------------------------------------
