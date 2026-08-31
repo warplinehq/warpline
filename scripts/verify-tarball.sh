@@ -8,7 +8,8 @@
 #   1. the `files` whitelist shipped no source, tests or planning artifacts
 #   2. `warpline --help` runs under Node with the tarball's bytes
 #   3. the `exports` map resolves every published specifier — under Node AND
-#      Bun — exposes exactly one path accessor, and REFUSES an unmapped
+#      Bun — exposes exactly one path accessor, ships no filesystem helper and
+#      no removed field behind `schemas/run-log`, and REFUSES an unmapped
 #      subpath (ERR_PACKAGE_PATH_NOT_EXPORTED)
 #   4. the bin's Node floor gate prints required-vs-found and exits 1 without
 #      an ERR_UNKNOWN_FILE_EXTENSION trace
@@ -111,6 +112,53 @@ if (!PluginManifestSchema) { console.error('PluginManifestSchema missing'); proc
 
 const { SkillResultSchema } = await import('warpline/schemas/skill-result')
 if (!SkillResultSchema) { console.error('SkillResultSchema missing'); process.exit(1) }
+
+// `warpline/schemas/run-log` ships shapes and nothing else from 0.2.0. Six
+// fields left it — nothing wrote them and no document described them — and
+// seven filesystem helpers left with them, because `./schemas/*` is a wildcard
+// export and a helper under that directory is public API for disk I/O by
+// accident. Nothing verified what this subpath exported before this probe,
+// which is how both survived a release.
+const runLog = await import('warpline/schemas/run-log')
+
+// Defined BEFORE shape, and the ordering is the whole assertion: enumerating
+// keys off an undefined export finds none of the removed names and reports
+// success. That vacuous pass is what this probe exists to refuse.
+for (const name of ['RunLogSchema', 'PluginLogEntrySchema']) {
+  if (!(name in runLog) || !runLog[name]) {
+    console.error('warpline/schemas/run-log did not export ' + name)
+    process.exit(1)
+  }
+}
+
+const shape = runLog.RunLogSchema.shape
+if (!shape || Object.keys(shape).length === 0) {
+  console.error('warpline/schemas/run-log: RunLogSchema exposes no shape to enumerate')
+  process.exit(1)
+}
+
+const REMOVED = [
+  'metrics_summary', 'modes_run', 'tasks_surfaced',
+  'tasks_resolved', 'deferrals_active', 'verification_results',
+]
+const stillShipped = REMOVED.filter((f) => f in shape)
+if (stillShipped.length) {
+  console.error('warpline/schemas/run-log still ships removed fields: ' + stillShipped.join(', '))
+  process.exit(1)
+}
+
+// The subpath resolves, so this is not the allowlist-refusal shape: the module
+// is there and the names must not be on it.
+const MOVED = [
+  'ensureRunDir', 'runLogFilename', 'writeRunLog', 'pruneRunLogs',
+  'isRunLogRetained', 'resolveRunRef', 'describeRunRef',
+]
+const reachable = MOVED.filter((n) => n in runLog)
+if (reachable.length) {
+  console.error('warpline/schemas/run-log still reaches filesystem helpers: ' + reachable.join(', '))
+  process.exit(1)
+}
+console.log('   warpline/schemas/run-log: ' + Object.keys(shape).length + ' fields, no removed name, no helper')
 
 // Exactly one path accessor is public contract at 0.1.0. A wider export
 // list here means something internal acquired a semver obligation by accident.
