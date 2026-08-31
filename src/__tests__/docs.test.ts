@@ -1150,4 +1150,21 @@ describe('hand-written manifest prose', () => {
     expect(doc).toContain('parse_error')
     expect(doc).not.toContain('plugin-config.json')
   })
+
+  // Two dispositions from the 09 verification live only in this section's
+  // prose. The first is the single carve-out from the never-echo rule above it
+  // — delete the paragraph and the rule reads as absolute again while
+  // `feed-triage` keeps violating it. The second is an operator instruction the
+  // runtime cannot enforce, because warpline never writes that file: nothing in
+  // this codebase can be asserted against it, so the sentence itself is the
+  // only artifact there is to pin.
+  test('plugin-authoring carries the handoff carve-out and the atomic-write instruction', () => {
+    const doc = read('docs/plugin-authoring.md')
+    expect(doc).toContain('One exception, and it is one field wide')
+    expect(doc).toContain('needs-llm-contract.md')
+    expect(doc).toContain('feed-triage')
+    expect(doc).toContain('rename it over the target')
+    expect(doc).toContain('never writes it')
+    expect(doc).not.toContain('plugin-config.json')
+  })
 })

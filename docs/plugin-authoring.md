@@ -117,6 +117,14 @@ A flat JSON object of input names to values:
 One file per plugin rather than one document for all of them, so a single bad
 edit fails a single plugin instead of every plugin in the same advance.
 
+**Warpline reads that file and never writes it.** There is no `warpline config
+set` command today, so nothing in the runtime can make your edit atomic on your
+behalf — that part is the operator's own responsibility. Write a temporary file
+in the same directory and rename it over the target. A rename within one
+filesystem is atomic, so an advance that reads the file mid-edit sees the old
+contents rather than half the new ones; editing the target in place hands a
+concurrent run a torn document instead.
+
 Three tiers resolve every declared input, lowest precedence first:
 
 | Tier | Source | Beats |
@@ -161,6 +169,20 @@ paste into issues. Name the key and the shape you expected instead:
 
 Omit the value; do not mask it. A masking heuristic is a list of things that
 look like secrets, and it leaks the first one it fails to recognise.
+
+**One exception, and it is one field wide.** A `[needs-llm]` handoff summary
+names a payload PATH after `Context:`, because
+[needs-llm-contract.md](needs-llm-contract.md) defines that field as a path the
+scanner resolves and reads — a key name there would leave the scanner nothing to
+open, and the handoff would stop being consumable at all. A plugin that resolves
+its payload path from a declared input therefore writes that input's value into
+the run log by design. The bound comes from the same contract: the scanner only
+reads paths that resolve inside the warpline home, so an input used this way
+must name a payload file under the home, and must never be an input that carries
+a secret. The bundled `feed-triage` is the worked case. Its other two summaries
+name the key like every other example, and its test splits the handoff summary
+on `Context: ` to assert the half a human reads is value-free — which is what
+keeps the exception this one field wide instead of a precedent.
 
 **The name `action` is taken.** `warpline run` passes a mandatory `action`
 positional as a per-invocation argument, which is tier 3 and beats both tiers
