@@ -23,7 +23,7 @@ export const manifest = PluginManifestSchema.parse({
     entries_path: {
       type: 'string',
       required: false,
-      description: 'Path to a feed-entries JSON file; when absent, the handler computes it from the warpline home, as state/feed-entries.json',
+      description: 'Path to a feed-entries JSON file; when absent, the handler computes it from the warpline home, as state/feed-entries.json. This value is written into the [needs-llm] handoff summary after Context: and therefore reaches the run log, so it must name a payload file under the warpline home and never a path that is itself sensitive',
     },
   },
   outputs: {

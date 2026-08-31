@@ -48,7 +48,7 @@ export async function handler(
       phases_failed: [],
       errors: [],
       data_freshness: {},
-      summary: `no feed state at ${path} — nothing to triage`,
+      summary: 'feed-triage: no feed state at the configured path — nothing to triage',
       artifacts_produced: [],
       schema_version: 1,
     }
@@ -61,7 +61,7 @@ export async function handler(
       phases_failed: [],
       errors: [],
       data_freshness: { feed_entries: new Date().toISOString() },
-      summary: `no new entries at ${path} — nothing to triage`,
+      summary: 'feed-triage: no new entries at the configured path — nothing to triage',
       artifacts_produced: [],
       schema_version: 1,
     }
@@ -70,6 +70,22 @@ export async function handler(
   // The `[needs-llm]` prefix is the entire wire into deriveRunStatus, and the
   // path after `Context:` is the entire payload channel — RunArtifact persists
   // `summary` and drops `artifacts_produced`.
+  //
+  // This is the ONE place a resolved config value is written to a run log on
+  // purpose, and the two arms above are the reason it needs saying. Two clauses
+  // hold it:
+  //
+  // 1. docs/needs-llm-contract.md defines the text after `Context:` as a path
+  //    the scanner resolves and reads. A key name there — the fix applied
+  //    above — would leave the scanner nothing to open, so the handoff would
+  //    stop being consumable at all.
+  // 2. The same contract only lets the scanner read paths resolving inside the
+  //    warpline home. That is what bounds the exposure: an operator path that
+  //    is itself sensitive cannot usefully be named here anyway, and the
+  //    manifest input description says so where an author will read it.
+  //
+  // The test beside this file splits the summary on `Context: ` and asserts the
+  // head is sentinel-free, so the exception cannot widen past this one field.
   return {
     status: 'skipped',
     phases_completed: ['feed-triage'],
