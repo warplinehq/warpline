@@ -54,7 +54,7 @@ export async function handler(
       status: 'failed',
       phases_completed: [],
       phases_failed: ['feed-monitor'],
-      errors: [makeSkillError('parse_error', `feed_url must be an http(s) URL, got: ${String(feedUrl)}`, { impact: 'HIGH' })],
+      errors: [makeSkillError('parse_error', "input 'feed_url' must be an http(s) URL, e.g. https://example.com/feed.xml", { impact: 'HIGH' })],
       data_freshness: {},
       summary: 'feed-monitor: invalid feed_url input',
       artifacts_produced: [],

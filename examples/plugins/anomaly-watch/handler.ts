@@ -45,7 +45,7 @@ export async function handler(
       phases_failed: [],
       errors: [],
       data_freshness: {},
-      summary: `no metrics file at ${path} — nothing to check`,
+      summary: 'anomaly-watch: no metrics file at the configured path — nothing to check',
       artifacts_produced: [],
       schema_version: 1,
     }

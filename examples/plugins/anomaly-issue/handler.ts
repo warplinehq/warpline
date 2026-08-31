@@ -82,12 +82,15 @@ export async function fileIssues(
         body: JSON.stringify(issueFor(a)),
       })
     } catch (err) {
+      // The thrown error's message is dropped, not forwarded: a failed fetch
+      // reports the request URL, and that URL embeds the configured repo. The
+      // anomaly name and the abort flag are what you act on anyway.
       const aborted = signal.aborted
       return {
         created,
         error: makeSkillError(
           aborted ? 'timeout' : 'dependency_unavailable',
-          `${aborted ? 'aborted' : 'request failed'} filing ${a.name} on ${repo}: ${err instanceof Error ? err.message : String(err)}`,
+          `${aborted ? 'aborted' : 'request failed'} filing ${a.name}`,
           { impact: 'HIGH', retryable: false },
         ),
       }
@@ -96,7 +99,7 @@ export async function fileIssues(
       const code = res.status === 401 || res.status === 403 ? 'auth_failure' : 'dependency_unavailable'
       return {
         created,
-        error: makeSkillError(code, `GitHub API ${res.status} filing ${a.name} on ${repo}`, { impact: 'HIGH', retryable: false }),
+        error: makeSkillError(code, `GitHub API ${res.status} filing ${a.name}`, { impact: 'HIGH', retryable: false }),
       }
     }
     let html_url: unknown
@@ -107,7 +110,7 @@ export async function fileIssues(
     }
     if (typeof html_url !== 'string') {
       // The issue EXISTS on GitHub by now — record it, or the retry duplicates it.
-      created.push({ name: a.name, url: `https://github.com/${repo}/issues (url not returned)` })
+      created.push({ name: a.name, url: '(issue created; the API returned no url)' })
       return {
         created,
         error: makeSkillError('parse_error', `GitHub API returned no html_url for ${a.name}`, { impact: 'HIGH', retryable: false }),
@@ -139,7 +142,7 @@ export async function handler(
   const repo = args.repo
   if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
     return fail(
-      makeSkillError('parse_error', `repo must be owner/name, got: ${String(repo)}`, { impact: 'HIGH', retryable: false }),
+      makeSkillError('parse_error', "input 'repo' must be a string in owner/name form, e.g. oven-sh/bun", { impact: 'HIGH', retryable: false }),
       'anomaly-issue: invalid repo input',
     )
   }
@@ -166,8 +169,8 @@ export async function handler(
     // green under a summary that says "no file" hides it indefinitely.
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
       return fail(
-        makeSkillError('parse_error', `cannot read ${anomaliesPath}: ${err instanceof Error ? err.message : String(err)}`, { impact: 'HIGH', retryable: false }),
-        `anomaly-issue: ${anomaliesPath} is unreadable`,
+        makeSkillError('parse_error', "the file named by input 'anomalies_path' is unreadable", { impact: 'HIGH', retryable: false }),
+        'anomaly-issue: the configured anomalies file is unreadable',
       )
     }
     // NOT a bare `skipped`: deriveRunStatus persists a prefix-less `skipped`
@@ -178,7 +181,7 @@ export async function handler(
       phases_failed: [],
       errors: [],
       data_freshness: {},
-      summary: `no anomalies file at ${anomaliesPath} — nothing to file`,
+      summary: 'anomaly-issue: no anomalies file at the configured path — nothing to file',
       artifacts_produced: [],
       schema_version: 1,
     }
@@ -235,7 +238,7 @@ export async function handler(
   }
 
   const status = error === null ? 'success' : created.length > 0 ? 'partial' : 'failed'
-  const summary = `filed ${created.length} issues on ${repo}: ${created.map(c => c.name).join(', ')}`
+  const summary = `filed ${created.length} issues: ${created.map(c => c.name).join(', ')}`
     + (error ? `; stopped at ${todo[created.length]?.name}: ${error.message}` : '')
   return {
     status,

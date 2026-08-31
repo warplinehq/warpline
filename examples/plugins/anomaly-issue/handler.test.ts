@@ -110,7 +110,10 @@ describe('anomaly-issue fileIssues', () => {
     const out = await fileIssues('o/r', [errors, signups], 'tok-123', impl, signal)
     expect(out.created).toEqual([{ name: 'errors', url: 'https://github.com/o/r/issues/1' }])
     expect(out.error?.code).toBe('dependency_unavailable')
-    expect(out.error?.message).toContain('ECONNRESET')
+    // The thrown error's own message is NOT forwarded: a failed fetch reports
+    // the request URL, which embeds the configured repo.
+    expect(out.error?.message).toContain('request failed')
+    expect(out.error?.message).toContain('signups')
   })
 
   test('a response without html_url still records the issue as created', async () => {

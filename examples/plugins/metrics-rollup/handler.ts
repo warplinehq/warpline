@@ -159,9 +159,9 @@ export async function handler(
         status: 'failed',
         phases_completed: [],
         phases_failed: ['metrics-rollup'],
-        errors: [makeSkillError('parse_error', `cannot read ${metricsPath}: ${err instanceof Error ? err.message : String(err)}`, { impact: 'HIGH', retryable: false })],
+        errors: [makeSkillError('parse_error', "the file named by input 'metrics_path' is unreadable", { impact: 'HIGH', retryable: false })],
         data_freshness: {},
-        summary: `metrics-rollup: ${metricsPath} is unreadable`,
+        summary: 'metrics-rollup: the configured metrics file is unreadable',
         artifacts_produced: [],
         schema_version: 1,
       }
@@ -174,7 +174,7 @@ export async function handler(
       phases_failed: [],
       errors: [],
       data_freshness: {},
-      summary: `no metrics file at ${metricsPath} — nothing to roll up`,
+      summary: 'metrics-rollup: no metrics file at the configured path — nothing to roll up',
       artifacts_produced: [],
       schema_version: 1,
     }
