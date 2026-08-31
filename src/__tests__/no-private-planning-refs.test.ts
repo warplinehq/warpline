@@ -28,8 +28,16 @@ import { join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
-/** This file necessarily contains the patterns it searches for. */
+/**
+ * This file necessarily contains the patterns it searches for, and so does the
+ * committed list it now reads them from. Both are exempt from `scan()` for the
+ * same reason: without the exemption each one matches every pattern it carries
+ * and the guard goes permanently red on itself. Both are still checked against
+ * LOCAL_TERMS by the test below, so the exemption cannot become the one place a
+ * local term is free to sit.
+ */
 const SELF = 'src/__tests__/no-private-planning-refs.test.ts'
+const PATTERN_FILE = '.github/private-names.txt'
 
 /**
  * Launch copy: gitignored, so `scan()` — which asks `git ls-files` — can never
@@ -79,20 +87,68 @@ const PLANNING_REF = /\b(?:D|T|INTG|OBS|EVD)-\d+(?:-\d+)*\b|\bPhase \d+\b/
  * Class 2 — names belonging to the private deployment. `epc` is deliberately
  * matched only as a whole word: it is an Energy Performance Certificate feed,
  * not a generic term, and a substring match would fire on unrelated words.
+ *
+ * The list lives in `.github/private-names.txt` rather than inline here because
+ * `scripts/scan-public-surfaces.sh` needs the identical set and reads it with
+ * `grep -E`. Two hand-maintained copies drift and nothing says so; one tracked
+ * file cannot. Entries are REGEX FRAGMENTS, not literals, so they never go
+ * through `esc()` — the grouped alternations and the `gsc_` character class
+ * have to keep working as patterns.
+ *
+ * An absent or empty list THROWS at module load rather than degrading to an
+ * empty alternation. An empty pattern matches nothing, so the whole file would
+ * report silently, perfectly green, which is the one thing this guard must
+ * never be.
  */
-const PRIVATE_NAME = new RegExp(
-  [
-    // API feeds the closed deployment happened to call
-    'companies-house', 'ch-client', 'epc', 'posthog', 'hogql', 'supabase', 'govuk',
-    // its plugin and skill names
-    'intel-(?:brief|scan|report)', 'today-aggregator', 'content-kanban',
-    'outreach-(?:drafts|generator)', 'collateral-(?:import|discover)',
-    'hypothesis-gen', 'experiment-checker', 'seo-audit',
-    // its capability vocabulary, and the repos themselves
-    'gsc_\\w+', 'graphify',
-  ].map((p) => `\\b${p}\\b`).join('|'),
-  'i',
-)
+const PRIVATE_NAME_PATTERNS: string[] = (() => {
+  let text: string
+  try {
+    text = readFileSync(join(REPO_ROOT, PATTERN_FILE), 'utf8')
+  } catch {
+    throw new Error(
+      `${PATTERN_FILE} is unreadable; it is the committed deployment-name list this guard scans for`,
+    )
+  }
+  const patterns = text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '' && !l.startsWith('#'))
+  if (patterns.length === 0) {
+    throw new Error(`${PATTERN_FILE} yielded no patterns; an empty list is a guard that cannot fail`)
+  }
+  return patterns
+})()
+
+const PRIVATE_NAME = new RegExp(PRIVATE_NAME_PATTERNS.map((p) => `\\b${p}\\b`).join('|'), 'i')
+
+/**
+ * Both forms below are legal in a JavaScript `RegExp` and fatal, or worse than
+ * fatal, under the release workflow's `grep -E`. A non-capturing group makes
+ * GNU grep error out, so the release gate is red on every invocation. A
+ * backslash shorthand class is a GNU and JavaScript extension with no POSIX
+ * equivalent, and a strict engine compiles it cleanly and then matches nothing
+ * — the gate is green because it never looked.
+ *
+ * Plain string checks, deliberately, and never a shell-out to a regex engine:
+ * the CI shards run a different `awk` and a different `grep` from a developer
+ * machine, and each of those accepts at least one of the two forms, so a
+ * delegated assertion passes vacuously on the exact defect it names.
+ *
+ * Takes lines rather than reading the file, so it can be pointed at a scratch
+ * copy and watched to fail.
+ */
+function unportablePatterns(lines: string[]): string[] {
+  return lines.flatMap((raw, i) => {
+    const line = raw.trim()
+    if (line === '' || line.startsWith('#')) return []
+    return [
+      ...(line.includes('(?') ? [`line ${i + 1}: a non-capturing group, which GNU grep -E rejects`] : []),
+      ...(/\\[A-Za-z]/.test(line)
+        ? [`line ${i + 1}: a backslash shorthand class, which POSIX ERE has no equivalent for`]
+        : []),
+    ]
+  })
+}
 
 /**
  * Class 2b — terms too sensitive to write down here. This file is tracked and
@@ -164,6 +220,7 @@ function scan(): Map<string, string[]> {
     .filter(Boolean)
   const files = new Set(tracked.filter((f) => !BINARY.test(f)))
   files.delete(SELF)
+  files.delete(PATTERN_FILE)
 
   const hits = new Map<string, string[]>()
   for (const file of files) {
@@ -236,20 +293,31 @@ describe('no private planning or deployment references', () => {
   })
 
   /**
-   * SELF is exempt from the scan above because it necessarily spells out every
-   * pattern it hunts for — so anything placed here is invisible to the check
-   * that lives here. LOCAL_TERMS is the one list with no business appearing in
-   * this file, so it is checked against SELF too and the exemption cannot
-   * swallow it.
+   * SELF and PATTERN_FILE are exempt from the scan above because each one
+   * necessarily spells out every pattern it hunts for — so anything placed in
+   * either is invisible to the check that lives here. LOCAL_TERMS is the one
+   * list with no business appearing in either, so both are checked against it
+   * and neither exemption can swallow a term written in by mistake.
    */
-  test('this file does not itself carry a local private term', () => {
+  test('neither exempted file itself carries a local private term', () => {
     if (LOCAL_NAME === null) return
-    const offenders = readFileSync(join(REPO_ROOT, SELF), 'utf8')
-      .split('\n')
-      .flatMap((line, i) =>
-        LOCAL_NAME.test(line) ? [`${SELF}:${i + 1}`] : [],
-      )
+    const offenders = [SELF, PATTERN_FILE].flatMap((rel) =>
+      readFileSync(join(REPO_ROOT, rel), 'utf8')
+        .split('\n')
+        .flatMap((line, i) => (LOCAL_NAME.test(line) ? [`${rel}:${i + 1}`] : [])),
+    )
     expect(offenders).toEqual([])
+  })
+
+  /**
+   * The rule that stops the NEXT pattern added to the committed list from being
+   * fine here and fatal in the release workflow. Without it the four entries
+   * rewritten when the list moved out of this file are a one-time correction
+   * rather than something enforced.
+   */
+  test('every committed pattern is portable to POSIX ERE', () => {
+    const lines = readFileSync(join(REPO_ROOT, PATTERN_FILE), 'utf8').split('\n')
+    expect(unportablePatterns(lines)).toEqual([])
   })
 
   /**

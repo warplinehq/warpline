@@ -1,0 +1,36 @@
+# Names belonging to the closed deployment this runtime was extracted from.
+# Already public on the published package, so committing them leaks nothing new.
+# The terms that are not public live one per line in gitignored .private-terms
+# and are never written down here.
+# One pattern per line, and no blank lines anywhere, because a consumer that
+# hands this whole file to a pattern-list flag reads an empty line as a match on
+# everything. Every comment line is long and specific for the same reason.
+# Two consumers read this file. One is the JavaScript RegExp constructor in
+# src/__tests__/no-private-planning-refs.test.ts. The other is grep -E in
+# scripts/scan-public-surfaces.sh. Every line has to be valid in both dialects,
+# so use a plain capturing group and never the non-capturing kind, which is a
+# JavaScript extension that GNU grep rejects outright. Spell a character class
+# out in brackets rather than as a backslash shorthand, which POSIX has no
+# equivalent for and which a strict engine silently matches nothing with.
+# A test in that same file enforces both of those rules on every line below, so
+# the next pattern added here cannot reintroduce either form.
+# API feeds the closed deployment happened to call
+companies-house
+ch-client
+epc
+posthog
+hogql
+supabase
+govuk
+# its plugin and skill names
+intel-(brief|scan|report)
+today-aggregator
+content-kanban
+outreach-(drafts|generator)
+collateral-(import|discover)
+hypothesis-gen
+experiment-checker
+seo-audit
+# its capability vocabulary, and the repos themselves
+gsc_[A-Za-z0-9_]+
+graphify
