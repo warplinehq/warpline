@@ -26,7 +26,9 @@
  */
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { pluginsDir } from '../lib/paths.js'
+import { pluginsDir, pluginConfigPath } from '../lib/paths.js'
+import { loadPluginConfig, PluginConfigError } from '../lib/plugin-config.js'
+import { resolvePluginArgs } from '../schemas/plugin-config.js'
 import { SkillResultSchema, makeSkillError } from '../schemas/skill-result.js'
 import type { SkillResult } from '../schemas/skill-result.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
@@ -261,6 +263,42 @@ export async function invokePlugin(
   }
 
   // -------------------------------------------------------------------
+  // Config resolution
+  // -------------------------------------------------------------------
+  // Here, and not in the callers. Both production call sites and any
+  // third-party host calling runAdvance route through this function, so one
+  // insertion serves all of them and none can skip it.
+  //
+  // ABOVE the retry loop, and that placement is the whole mechanism behind
+  // "an invalid config is never retried". Only `retryable: true` re-enters the
+  // loop, but this return sits outside it entirely, so the rule holds by
+  // construction rather than by a predicate someone could edit.
+  //
+  // The SHAPE below is the load-failure arm above. The error CODE is not:
+  // a config an operator mistyped is a parse failure, not a missing
+  // dependency, and it takes its wording from the invalid-handler-output arm
+  // further down.
+  const configPath = pluginConfigPath(pluginName)
+  let resolvedArgs: Record<string, unknown>
+  try {
+    const fileConfig = await loadPluginConfig(configPath)
+    // `?? {}` because a manifest that bypassed zod parse has no `inputs` at
+    // all — the same tolerance the retry-loop defaults below rely on.
+    const resolution = resolvePluginArgs(manifest.inputs ?? {}, fileConfig, args)
+    if (!resolution.ok) {
+      return configFailure(
+        pluginName,
+        start,
+        `Plugin '${pluginName}' has an invalid config (${configPath}): ${resolution.problems.join('; ')}`,
+      )
+    }
+    resolvedArgs = resolution.args
+  } catch (err) {
+    if (!(err instanceof PluginConfigError)) throw err
+    return configFailure(pluginName, start, err.message)
+  }
+
+  // -------------------------------------------------------------------
   // Retry loop
   // -------------------------------------------------------------------
   // Manifest fields may be absent when the caller bypassed zod parse (legacy
@@ -334,7 +372,7 @@ export async function invokePlugin(
     let rawResult: SkillResult
     try {
       rawResult = await Promise.race([
-        executeHandler(pluginName, handlerFn, manifest, args, attemptCtl.signal),
+        executeHandler(pluginName, handlerFn, manifest, resolvedArgs, attemptCtl.signal),
         abortPromise,
       ])
     } finally {
@@ -503,6 +541,48 @@ export async function invokePlugin(
 // -------------------------------------------------------------------------
 // Internal helper
 // -------------------------------------------------------------------------
+
+/**
+ * The one-attempt failure a bad config produces.
+ *
+ * `message` is composed by the caller and is the contract half that matters:
+ * it names the config file path and the offending input key and the shape
+ * expected of it, and it never carries the value that was read. Config files
+ * are where operators put tokens, and this string lands in a run log.
+ */
+function configFailure(
+  pluginName: string,
+  start: number,
+  message: string,
+): PluginInvocationResult {
+  const failedAttempt: AttemptRecord = {
+    attempt: 1,
+    started_at: new Date(start).toISOString(),
+    elapsed_ms: Date.now() - start,
+    status: 'failed',
+    error: message,
+  }
+  return {
+    plugin: pluginName,
+    result: {
+      status: 'failed',
+      phases_completed: [],
+      phases_failed: [pluginName],
+      errors: [makeSkillError('parse_error', message)],
+      data_freshness: {},
+      summary: `${pluginName}: invalid config`,
+      artifacts_produced: [],
+      schema_version: 1,
+    },
+    duration_ms: Date.now() - start,
+    attempt_count: 1,
+    attempts: [failedAttempt],
+    final_error: message,
+    retried: false,
+    cancelled: false,
+    timed_out: false,
+  }
+}
 
 async function executeHandler(
   pluginName: string,

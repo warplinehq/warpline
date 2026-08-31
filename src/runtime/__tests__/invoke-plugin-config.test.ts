@@ -7,7 +7,8 @@
  * merge function would have passed the whole time it had none. The fixture
  * handlers BRANCH on the value they received rather than echoing it into a
  * `SkillResult` field — an assertion that reads the value back out of the
- * result would be the same information-disclosure defect T-09-01 forbids.
+ * result would need the runtime to put it there, and a config file is where an
+ * operator keeps an API token.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, rm, writeFile } from 'node:fs/promises'

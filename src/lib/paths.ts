@@ -78,6 +78,21 @@ export function preferencesPath(): string {
   return path.join(warplineHome(), 'preferences.json')
 }
 
+/**
+ * Operator-authored configuration for one plugin.
+ *
+ * Home-level rather than inside the plugin directory: a plugin directory is
+ * shipped material, not user-writable territory, and an operator editing a file
+ * there loses it on the next update. One file per plugin rather than one
+ * aggregate document, so a single bad edit fails a single plugin instead of
+ * every plugin in the same advance.
+ *
+ * Internal. This is NOT re-exported from `paths-public.ts`.
+ */
+export function pluginConfigPath(pluginName: string): string {
+  return path.join(warplineHome(), 'config', `${pluginName}.json`)
+}
+
 /** Engine run lock. */
 export function lockPath(): string {
   return path.join(stateDir(), '.lock')
