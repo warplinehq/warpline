@@ -66,7 +66,7 @@ const PATTERN_FILE = '.github/private-names.txt'
  * the arrangement the empty-enumeration assertion below exists to produce.
  */
 const PLANNING_ROOT = '.planning'
-const LAUNCH_DRAFT = /-(SHOW-HN|LAUNCH|ANNOUNCE|DOCTRINE)[^/]*\.md$/
+const LAUNCH_DRAFT = /-(SHOW-HN|LAUNCH|ANNOUNCE|DOCTRINE|RELEASE-NOTES)[^/]*\.md$/
 
 /**
  * Scan EVERY tracked text file, from `git ls-files` rather than a glob list.
