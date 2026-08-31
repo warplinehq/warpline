@@ -89,7 +89,9 @@ describe('invalid config grows no new gate', () => {
   })
 
   test('SkillResult.status offers exactly its four members', () => {
-    const options = [...SkillResultSchema.shape.status.options]
+    // Widened to string[]: the point is to compare against a hand-written list,
+    // and a list typed from the enum would be tautological anyway.
+    const options: string[] = [...SkillResultSchema.shape.status.options]
     expect(options).toHaveLength(4)
     expect(options.sort()).toEqual([...SKILL_RESULT_STATUSES].sort())
   })
