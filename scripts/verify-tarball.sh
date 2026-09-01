@@ -165,6 +165,44 @@ if (reachable.length) {
 }
 console.log('   warpline/schemas/run-log: ' + Object.keys(shape).length + ' fields, no removed name, no helper')
 
+// `warpline/schemas/engine-state` ships shapes and nothing else from 0.3.0.
+// Five persistence exports left it, because `./schemas/*` is a wildcard export
+// and a helper under that directory is public API for disk I/O by accident —
+// here, read and write access to the engine's own state document behind a
+// specifier whose name promises declarative shapes. Nothing verified what this
+// subpath exported before this probe, which is how it survived a release.
+const engineState = await import('warpline/schemas/engine-state')
+
+// Defined BEFORE enumerate, and the ordering is the whole assertion:
+// enumerating keys off an undefined export finds none of the moved names and
+// reports success. That vacuous pass is what this probe exists to refuse.
+for (const name of ['EngineStateSchema', 'PendingGateSchema']) {
+  if (!(name in engineState) || !engineState[name]) {
+    console.error('warpline/schemas/engine-state did not export ' + name)
+    process.exit(1)
+  }
+}
+
+const stateShape = engineState.EngineStateSchema.shape
+if (!stateShape || Object.keys(stateShape).length === 0) {
+  console.error('warpline/schemas/engine-state: EngineStateSchema exposes no shape to enumerate')
+  process.exit(1)
+}
+
+// The subpath resolves, so this is not the allowlist-refusal shape: the module
+// is there and the names must not be on it. `in` rather than `typeof`, so a
+// re-export that resolves to `undefined` still trips it.
+const STATE_MOVED = [
+  'readEngineState', 'readEngineStateReadOnly', 'writeEngineState',
+  'withoutStateBackups', 'EngineStateInvalidError',
+]
+const stateReachable = STATE_MOVED.filter((n) => n in engineState)
+if (stateReachable.length) {
+  console.error('warpline/schemas/engine-state still reaches filesystem helpers: ' + stateReachable.join(', '))
+  process.exit(1)
+}
+console.log('   warpline/schemas/engine-state: ' + Object.keys(stateShape).length + ' fields, no helper')
+
 // Exactly one path accessor is public contract at 0.1.0. A wider export
 // list here means something internal acquired a semver obligation by accident.
 const paths = await import('warpline/lib/paths')
