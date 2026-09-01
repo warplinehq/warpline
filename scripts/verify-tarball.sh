@@ -115,8 +115,46 @@ if (typeof runAdvance !== 'function') { console.error('runAdvance missing'); pro
 const { PluginManifestSchema } = await import('warpline/schemas/plugin-manifest')
 if (!PluginManifestSchema) { console.error('PluginManifestSchema missing'); process.exit(1) }
 
-const { SkillResultSchema } = await import('warpline/schemas/skill-result')
-if (!SkillResultSchema) { console.error('SkillResultSchema missing'); process.exit(1) }
+// `warpline/schemas/skill-result` ships shapes and nothing else from 0.3.0. One
+// helper left it, `resolveOutput`, because `./schemas/*` is a wildcard export
+// and a helper under that directory is public API for disk I/O by accident —
+// here a single synchronous existence check, inside a function small enough to
+// look free, behind a specifier whose name promises declarative shapes. Nothing
+// verified what this subpath exported before this probe, which is how it
+// survived a release.
+const skillResult = await import('warpline/schemas/skill-result')
+
+// Defined BEFORE enumerate, and the ordering is the whole assertion:
+// enumerating keys off an undefined export finds none of the moved names and
+// reports success. That vacuous pass is what this probe exists to refuse.
+for (const name of ['SkillResultSchema', 'OutputRecordSchema']) {
+  if (!(name in skillResult) || !skillResult[name]) {
+    console.error('warpline/schemas/skill-result did not export ' + name)
+    process.exit(1)
+  }
+}
+
+// Enumerated off `SkillResultSchema`, the plain object schema, and off nothing
+// else. `OutputRecordSchema` carries a refinement, so whether it exposes
+// `.shape` is a zod-version detail; reading it here would turn a version bump
+// into a throw inside the probe that reads as a probe bug rather than a
+// finding. Existence is all this probe needs from it.
+const resultShape = skillResult.SkillResultSchema.shape
+if (!resultShape || Object.keys(resultShape).length === 0) {
+  console.error('warpline/schemas/skill-result: SkillResultSchema exposes no shape to enumerate')
+  process.exit(1)
+}
+
+// The subpath resolves, so this is not the allowlist-refusal shape: the module
+// is there and the name must not be on it. `in` rather than `typeof`, so a
+// re-export that resolves to `undefined` still trips it.
+const SR_MOVED = ['resolveOutput']
+const srReachable = SR_MOVED.filter((n) => n in skillResult)
+if (srReachable.length) {
+  console.error('warpline/schemas/skill-result still reaches filesystem helpers: ' + srReachable.join(', '))
+  process.exit(1)
+}
+console.log('   warpline/schemas/skill-result: ' + Object.keys(resultShape).length + ' fields, no helper')
 
 // `warpline/schemas/run-log` ships shapes and nothing else from 0.2.0. Six
 // fields left it — nothing wrote them and no document described them — and
