@@ -85,17 +85,11 @@ const DEFERRED = new Set<string>([
  * offender.
  */
 const DEFERRED_FS = new Set<string>([
-  // Found during 09-05, not caused by it. `readEngineState`,
-  // `readEngineStateReadOnly` and `writeEngineState` are the state store, ~200
-  // lines of it, and every caller in the runtime and the board imports them
-  // from here. Splitting them is a breaking change to a published subpath that
-  // needs its own plan, its own release-notes entry and its own tarball probe —
-  // the same treatment `schemas/run-log` got here.
-  'src/schemas/engine-state.ts',
   // Found during 09-05, not caused by it. One `existsSync` inside
   // `resolveOutput`, which is small enough to look free and is not: moving it
   // breaks `warpline/schemas/skill-result` for anyone resolving an Output, so
-  // it travels with the same plan as the entry above rather than sideways here.
+  // it gets the same treatment the engine-state entry beside it already got —
+  // its own plan, its own release-notes entry and its own tarball probe.
   'src/schemas/skill-result.ts',
 ])
 
@@ -180,9 +174,9 @@ function publishedModules(root: string): string[] {
  * loophole: `tsconfig.build.json` excludes `src/**​/__tests__/**`, so no test
  * file is compiled into `dist/` and none is reachable through the wildcard.
  * Including them would force a ratchet entry for every fixture that writes to a
- * tmpdir — `engine-state.test.ts` cannot test a state store without importing
- * the filesystem — and a ratchet full of non-offenders is how a ratchet becomes
- * an ignore list.
+ * tmpdir — a schema test cannot round-trip a document through a real write
+ * without importing the filesystem — and a ratchet full of non-offenders is how
+ * a ratchet becomes an ignore list.
  *
  * Throws rather than returning `[]` when no schema module can be enumerated:
  * zero files is silently, perfectly green.

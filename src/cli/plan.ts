@@ -16,10 +16,10 @@
  *      no path override. `plan` therefore routes through the `_setPaths` seam
  *      and restores the previous snapshot, or a fixture-home test silently
  *      compares against live state.
- *   3. `readEngineState` copies a corrupt state file to `{path}.corrupt` — a
- *      write on a read path. State is read through the backup-free variant,
- *      and the indirect read inside `checkTaskLock` is covered by
- *      `withoutStateBackups`.
+ *   3. `readEngineState` is the write-capable read and THROWS on a state file
+ *      it cannot validate, which a preview contracted never to fail must not
+ *      do. State is read through the tolerant variant, and the indirect read
+ *      inside `checkTaskLock` is covered by `withoutStateBackups`.
  *
  * `now` is captured exactly once, at entry, and threaded through both the
  * evaluator and the renderer, so two consecutive previews are
@@ -44,7 +44,7 @@ import {
 import type { EvalContext, RunProfile } from '../runtime/engine.js'
 import { computeTier } from '../runtime/tier.js'
 import { checkApproval } from '../runtime/approval-gate.js'
-import { readEngineStateReadOnly, withoutStateBackups } from '../schemas/engine-state.js'
+import { readEngineStateReadOnly, withoutStateBackups } from '../runtime/engine-state-store.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../board/state-manager.js'
 import { renderPlan } from './plan-render.js'
 import type { GrantState, NotDueEntry, PlanEntry, PlanModel } from './plan-render.js'

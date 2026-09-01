@@ -25,9 +25,9 @@
  * handing back defaults a later write would persist, and every arm that
  * touches engine state can raise it, so one catch here maps it to a message
  * and code 1 for all of them. It is duck-typed on `err.name` deliberately:
- * importing the error class would pull `src/schemas/engine-state.ts` — and
- * therefore zod — into the graph for `warpline --help`, which is exactly what
- * rule 2 above exists to prevent. Anything else re-throws unchanged.
+ * importing the error class would pull `src/runtime/engine-state-store.ts` —
+ * and therefore zod — into the graph for `warpline --help`, which is exactly
+ * what rule 2 above exists to prevent. Anything else re-throws unchanged.
  */
 
 const USAGE = `warpline — deterministic plugin runtime with approval gates

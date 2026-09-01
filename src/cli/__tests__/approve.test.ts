@@ -17,7 +17,7 @@ import { _setHome, sessionApprovalPath } from '../../lib/paths.js'
 import { checkApproval, mergeGrant, MAX_GRANT_WINDOW_MS } from '../../runtime/approval-gate.js'
 import { invokePlugin } from '../../runtime/invoke-plugin.js'
 import { applyPendingGate, denialFingerprint, findPendingGate, GATE_MAX_AGE_MS } from '../../runtime/engine.js'
-import { readEngineState } from '../../schemas/engine-state.js'
+import { readEngineState } from '../../runtime/engine-state-store.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 let root: string

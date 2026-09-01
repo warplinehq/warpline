@@ -20,7 +20,8 @@ import { tmpdir } from 'node:os'
 import { loadPluginManifests, evaluatePlugin, runAdvance, explainLoadFailure } from '../engine.js'
 import type { EvalContext } from '../engine.js'
 import { computeTier } from '../tier.js'
-import { defaultEngineState, readEngineState, writeEngineState } from '../../schemas/engine-state.js'
+import { readEngineState, writeEngineState } from '../engine-state-store.js'
+import { defaultEngineState } from '../../schemas/engine-state.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 function makeManifest(name: string, overrides: Partial<PluginManifest> = {}): PluginManifest {

@@ -60,7 +60,7 @@ import {
   EngineStateInvalidError,
   readEngineState,
   readEngineStateReadOnly,
-} from '../schemas/engine-state.js'
+} from '../runtime/engine-state-store.js'
 import { engineStatePath, pluginsDir, sessionApprovalPath } from '../lib/paths.js'
 import { suggest } from './suggest.js'
 

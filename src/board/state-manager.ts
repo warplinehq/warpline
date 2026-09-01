@@ -17,9 +17,8 @@ import { appendFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
+import { readEngineState, writeEngineState } from '../runtime/engine-state-store.js'
 import {
-  readEngineState,
-  writeEngineState,
   TaskAgingSchema,
   DeferralSchema,
   TaskStateEnum,

@@ -1122,7 +1122,7 @@ export async function handler(manifest, args) {
    * data is deliberately dropped.
    */
   test('Test 36: a pre-Phase-8 stub gate is discarded on read and the discard is logged', async () => {
-    const { readEngineState } = await import('../../schemas/engine-state.js')
+    const { readEngineState } = await import('../engine-state-store.js')
     const discardEvents = join(ctx.runsDir, 'discard-events.jsonl')
 
     await writeFile(
@@ -1173,7 +1173,7 @@ export async function handler(manifest, args) {
     const { runAdvance, applyPendingGate, findPendingGate, loadPluginManifests } = await import(
       '../engine.js'
     )
-    const { readEngineState } = await import('../../schemas/engine-state.js')
+    const { readEngineState } = await import('../engine-state-store.js')
     await createOutputPlugin(
       'gated-writer',
       JSON.stringify([{ type: 'brief', format: 'markdown', path: 'brief.md' }]),
@@ -1282,7 +1282,7 @@ export async function handler(manifest, args) {
    */
   test('Test 45: an unapplied gate survives an advance that parks nothing for it', async () => {
     const { runAdvance, findPendingGate } = await import('../engine.js')
-    const { readEngineState } = await import('../../schemas/engine-state.js')
+    const { readEngineState } = await import('../engine-state-store.js')
     await createOutputPlugin(
       'gated-writer',
       JSON.stringify([{ type: 'brief', format: 'markdown', path: 'brief.md' }]),

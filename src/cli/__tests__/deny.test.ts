@@ -515,7 +515,7 @@ describe('warpline deny', () => {
 
     // Both edge shapes: `from '…'` and `import('…')`, the latter covering the
     // bare side-effect `import '…'` too. Matching only the static form left a
-    // hole a grant writer could hide in — `engine-state.ts` already uses
+    // hole a grant writer could hide in — `engine-state-store.ts` already uses
     // `await import('../board/engine-events.js')`, so the shape the walker
     // could not see was in the closure it was walking.
     const RELATIVE_EDGE = /(?:from|import)\s*\(?\s*'(\.[^']+)'/g
@@ -542,13 +542,15 @@ describe('warpline deny', () => {
     expect(closure.size).toBeGreaterThan(5)
     expect([...closure.keys()].some((f) => f.endsWith(DEFINER))).toBe(true)
 
-    // …and the widening is load-bearing rather than cosmetic. `engine-state.ts`
-    // reaches `engine-events.ts` ONLY through a dynamic import — the comment
-    // there says so, and the import is dynamic on purpose so the board's event
-    // surface is not pulled into every consumer of the state schema. Rooted
-    // there, the old pattern found nothing.
+    // …and the widening is load-bearing rather than cosmetic.
+    // `engine-state-store.ts` reaches `engine-events.ts` ONLY through a dynamic
+    // import — the comment there says so, and the import is dynamic on purpose
+    // so the board's event surface is not pulled into every consumer of the
+    // state store. Rooted there, the old pattern found nothing. The root moved
+    // out of `src/schemas/` with the store itself, and the claim got stronger
+    // for it: the store is not a published subpath at all.
     const dynamicOnly = await walk(
-      fileURLToPath(new URL('../../schemas/engine-state.ts', import.meta.url)),
+      fileURLToPath(new URL('../../runtime/engine-state-store.ts', import.meta.url)),
     )
     expect(
       [...dynamicOnly.keys()].some((f) => f.endsWith(join('board', 'engine-events.ts'))),

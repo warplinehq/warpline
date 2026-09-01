@@ -35,7 +35,7 @@ import { isPluginFresh } from './staleness.js'
 import {
   readEngineState,
   writeEngineState,
-} from '../schemas/engine-state.js'
+} from './engine-state-store.js'
 import type { Denial, EngineState, PendingGate } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs } from './run-log-store.js'
 import type { RunLog } from '../schemas/run-log.js'

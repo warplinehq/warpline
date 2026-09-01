@@ -46,11 +46,11 @@ import { parseArgs } from 'node:util'
 import { findPendingGate, loadPluginManifests, proposalFingerprint } from '../runtime/engine.js'
 import { emitDenialRecorded, emitGateInvalidated } from '../board/engine-events.js'
 import {
-  DenialSchema,
   EngineStateInvalidError,
   readEngineState,
   writeEngineState,
-} from '../schemas/engine-state.js'
+} from '../runtime/engine-state-store.js'
+import { DenialSchema } from '../schemas/engine-state.js'
 import type { Denial, EngineState } from '../schemas/engine-state.js'
 import { engineStatePath, eventsJsonlPath, pluginsDir } from '../lib/paths.js'
 import { suggest } from './suggest.js'
