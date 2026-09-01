@@ -84,14 +84,7 @@ const DEFERRED = new Set<string>([
  * entry, and a companion assertion that fails when an entry stops being an
  * offender.
  */
-const DEFERRED_FS = new Set<string>([
-  // Found during 09-05, not caused by it. One `existsSync` inside
-  // `resolveOutput`, which is small enough to look free and is not: moving it
-  // breaks `warpline/schemas/skill-result` for anyone resolving an Output, so
-  // it gets the same treatment the engine-state entry beside it already got —
-  // its own plan, its own release-notes entry and its own tarball probe.
-  'src/schemas/skill-result.ts',
-])
+const DEFERRED_FS = new Set<string>([])
 
 /**
  * Node built-ins that make a module a filesystem client. Matched on the import

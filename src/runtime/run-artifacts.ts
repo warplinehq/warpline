@@ -11,8 +11,10 @@
  * can pass `opts.runsDir` pointed at a mkdtemp-backed location.
  */
 import { readdir, writeFile, unlink, readFile, appendFile, mkdir } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { runsDir } from '../lib/paths.js'
+import type { OutputRecord } from '../schemas/skill-result.js'
 
 export interface RunArtifact {
   run_id: string
@@ -172,3 +174,29 @@ export async function readLastRunForPlugin(
   return first ?? null
 }
 
+// `OutputResolution` and `resolveOutput` arrived from `src/schemas/skill-result.ts`
+// in this release: `./schemas/*` is a wildcard entry in the `exports` map, so one
+// synchronous existence check under that directory made a subpath named `schemas`
+// public API for disk I/O. This module already owns run artifacts on disk. There is
+// no back-compat re-export from the old home. Relocation only — nothing below was
+// rewritten; the signature and the three states are what they were.
+
+/**
+ * What an Output points at right now.
+ *
+ * A path Output can outlive the file it names — the runtime never deletes a
+ * path Output's target, but nothing stops the operator or the producing plugin
+ * from doing so. That is a defined state, not an error, so a renderer can say
+ * "the file is gone" instead of throwing.
+ */
+export type OutputResolution =
+  | { state: 'inline'; body: string }
+  | { state: 'present'; path: string }
+  | { state: 'missing'; path: string }
+
+/** Resolve an Output to its current state. Never throws. */
+export function resolveOutput(output: OutputRecord): OutputResolution {
+  if (output.body !== undefined) return { state: 'inline', body: output.body }
+  const path = output.path as string
+  return existsSync(path) ? { state: 'present', path } : { state: 'missing', path }
+}

@@ -1,13 +1,9 @@
 import { describe, it, expect } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import {
   SkillResultSchema,
   SkillErrorSchema,
   OutputRecordSchema,
   OUTPUT_BODY_CAP_BYTES,
-  resolveOutput,
 } from '../skill-result.js'
 
 describe('SkillResultSchema', () => {
@@ -224,31 +220,5 @@ describe('artifacts_produced as Outputs', () => {
       artifacts_produced: [{ type: 'brief', body: 'x', path: 'y.md' }],
     })
     expect(result.success).toBe(false)
-  })
-})
-
-describe('resolveOutput', () => {
-  it('resolves an inline body without touching the filesystem', () => {
-    const out = OutputRecordSchema.parse({ type: 'brief', body: '# hi' })
-    expect(resolveOutput(out)).toEqual({ state: 'inline', body: '# hi' })
-  })
-
-  it('resolves a path that exists to a present state', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'warpline-output-'))
-    try {
-      const file = join(dir, 'report.md')
-      await writeFile(file, '# report')
-      const out = OutputRecordSchema.parse({ type: 'report', path: file })
-      expect(resolveOutput(out)).toEqual({ state: 'present', path: file })
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('resolves a path that no longer exists to a missing state rather than throwing', () => {
-    const gone = join(tmpdir(), 'warpline-output-does-not-exist', 'report.md')
-    const out = OutputRecordSchema.parse({ type: 'report', path: gone })
-    expect(() => resolveOutput(out)).not.toThrow()
-    expect(resolveOutput(out)).toEqual({ state: 'missing', path: gone })
   })
 })

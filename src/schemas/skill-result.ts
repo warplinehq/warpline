@@ -1,5 +1,19 @@
+/**
+ * Shapes only. This module is reachable as `warpline/schemas/skill-result`, and
+ * `./schemas/*` is a wildcard entry in the `exports` map — so anything written
+ * here is public API from the release it appears in, with no review step in
+ * between.
+ *
+ * The one helper that used to sit among these schemas, `resolveOutput`, and the
+ * `OutputResolution` union it returns, now live in `src/runtime/run-artifacts.ts`.
+ * There is no back-compat re-export: a single synchronous existence check made a
+ * subpath named `schemas` public API for disk I/O, and the bridge that would
+ * soften the break is the same bridge that keeps the old path working.
+ * `src/__tests__/no-orphan-schema-fields.test.ts` asserts no file under
+ * `src/schemas/` imports the Node filesystem or path built-ins, so the boundary
+ * holds for the next schema module as well as for this one.
+ */
 import { z } from 'zod'
-import { existsSync } from 'node:fs'
 
 /**
  * Error taxonomy for skill results.
@@ -112,26 +126,6 @@ export const OutputRecordSchema = z
   })
 
 export type OutputRecord = z.infer<typeof OutputRecordSchema>
-
-/**
- * What an Output points at right now.
- *
- * A path Output can outlive the file it names — the runtime never deletes a
- * path Output's target, but nothing stops the operator or the producing plugin
- * from doing so. That is a defined state, not an error, so a renderer can say
- * "the file is gone" instead of throwing.
- */
-export type OutputResolution =
-  | { state: 'inline'; body: string }
-  | { state: 'present'; path: string }
-  | { state: 'missing'; path: string }
-
-/** Resolve an Output to its current state. Never throws. */
-export function resolveOutput(output: OutputRecord): OutputResolution {
-  if (output.body !== undefined) return { state: 'inline', body: output.body }
-  const path = output.path as string
-  return existsSync(path) ? { state: 'present', path } : { state: 'missing', path }
-}
 
 /**
  * Skill result contract.
