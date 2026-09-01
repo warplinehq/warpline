@@ -413,6 +413,66 @@ describe('no published schema module imports the filesystem', () => {
     }
   })
 
+  /**
+   * The four forms the matcher was blind to, one test each rather than one
+   * combined case: a single assertion proves one form red, and the claim being
+   * made is per-form. Each pairs its offender with a clean control module, so
+   * the assertion discriminates rather than counts. The filesystem built-in and
+   * the path built-in are each exercised twice across the four — a fixture set
+   * that only ever names one of them proves half the alternation.
+   */
+  test('FS-FORM-M1: the bare static form, with no node: prefix, is reported', () => {
+    const root = fixture({
+      'package.json': PKG,
+      'src/schemas/m1.ts': "import { existsSync } from 'fs'\n" + SCHEMA,
+      'src/schemas/m1-control.ts': SCHEMA,
+    })
+    try {
+      expect(filesystemInSchemas(root)).toEqual(['src/schemas/m1.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('FS-FORM-M2: the side-effect form, with no binding and no from, is reported', () => {
+    const root = fixture({
+      'package.json': PKG,
+      'src/schemas/m2.ts': "import 'node:path'\n" + SCHEMA,
+      'src/schemas/m2-control.ts': SCHEMA,
+    })
+    try {
+      expect(filesystemInSchemas(root)).toEqual(['src/schemas/m2.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('FS-FORM-M3: the CommonJS require form is reported', () => {
+    const root = fixture({
+      'package.json': PKG,
+      'src/schemas/m3.ts': "const fs = require('node:fs')\n" + SCHEMA,
+      'src/schemas/m3-control.ts': SCHEMA,
+    })
+    try {
+      expect(filesystemInSchemas(root)).toEqual(['src/schemas/m3.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('FS-FORM-M4: the bare dynamic form, with no node: prefix, is reported', () => {
+    const root = fixture({
+      'package.json': PKG,
+      'src/schemas/m4.ts': "const { join } = await import('path')\n" + SCHEMA,
+      'src/schemas/m4-control.ts': SCHEMA,
+    })
+    try {
+      expect(filesystemInSchemas(root)).toEqual(['src/schemas/m4.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   test('a test fixture under the schemas directory is not an offender', () => {
     const root = fixture({
       'package.json': PKG,
