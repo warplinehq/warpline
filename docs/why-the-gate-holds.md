@@ -62,7 +62,7 @@ reason a two-line change to a scheduled job stays a two-line change.
 A claim about a safety property is worth nothing without its source. So here's
 this one, with line numbers attached.
 
-Blanket approval exists. `approval-gate.ts:76` is the wildcard short-circuit. If
+Blanket approval exists. `approval-gate.ts:94` is the wildcard short-circuit. If
 a live grant's scope is the wildcard, the check returns true without consulting
 the plugin's name at all. Read it at
 [approval-gate.ts](https://github.com/warplinehq/warpline/blob/main/src/runtime/approval-gate.ts).
@@ -282,29 +282,30 @@ The gate holds because it isn't a policy. It's the only path through.
 Verification notes for the claims above. Each clause of "blanket approval is one
 explicit human command that prints its coverage first, it expires, and no run
 grants itself anything" is tied below to the search that established it. Run
-2026-08-23 against this tree; re-run them rather than re-reasoning them.
+2026-09-01 against this tree; re-run them rather than re-reasoning them.
 
 1. "no run grants itself anything" — the engine imports the read path only.
    grep -n 'approval-gate' on the engine returns one import:
      22:import { checkApproval } from './approval-gate.js'
-   (a second hit at :207 is prose inside a docstring, not an import). Neither
-   write function is imported by the advance path.
+   (two further hits at :348 and :1328 are prose inside docstrings, not
+   imports). Neither write function is imported by the advance path.
 
 2. "no run grants itself anything" — neither write function has a caller
    outside its own module and the approve CLI. Searching the source tree for
    grantApproval, excluding the tests directory and the approval-gate module
    itself, returns nothing at all: exit 1, no output. The same search for
-   mergeGrant returns exactly two lines, both in the approve CLI:
-     approve.ts:20  import { mergeGrant, MAX_GRANT_WINDOW_MS } from ...
-     approve.ts:165 const result = await mergeGrant(
+   mergeGrant returns one import and one call site, both in the approve CLI:
+     approve.ts:58  import { DEFAULT_TTL_MS, mergeGrant, MAX_GRANT_WINDOW_MS } ...
+     approve.ts:450 const result = await mergeGrant(
+   (a third hit at suggest.ts:8 is prose inside a docstring, not a call).
    One importer, one call site, and it is the command a person types.
 
 3. "one explicit human command" / "prints its coverage first" — the wildcard is
    reachable from the CLI only through the explicit flag, which the guard at
-   approve.ts:105 makes mutually exclusive with positional plugin names:
-     105:  if (values.all && positionals.length > 0) {
-   and the coverage line is written at approve.ts:156-163, ten lines before the
-   grant is merged at :165. Reading order is the proof: nothing is on disk when
+   approve.ts:132 makes mutually exclusive with positional plugin names:
+     132:  if (values.all && positionals.length > 0) {
+   and the coverage line is written at approve.ts:435, fifteen lines before the
+   grant is merged at :450. Reading order is the proof: nothing is on disk when
    the coverage is printed.
 
 4. "it expires" — the two constants, quoted from the module that defines them:
