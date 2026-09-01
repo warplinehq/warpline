@@ -87,38 +87,57 @@ const DEFERRED = new Set<string>([
 const DEFERRED_FS = new Set<string>([])
 
 /**
- * Node built-ins that make a module a filesystem client, matched on the import
- * specifier.
+ * **An allowlist, and the inversion is the point.** This used to enumerate the
+ * built-ins that make a module a filesystem client — `(?:node:)?(?:fs|path)`
+ * with an optional subpath, across four import forms. Enumerating what is
+ * forbidden is a losing position, and it lost four ways at once: a backtick
+ * dynamic specifier is a literal no denylist arm quoted; `export * from
+ * '../runtime/engine-state-store.js'` restores every relocated helper to
+ * `warpline/schemas/engine-state` while naming no built-in at all;
+ * `node:child_process` is arbitrary disk access through a name the alternation
+ * never listed; `node:os` hands out `tmpdir()`. Each would have needed its own
+ * arm, and the next one would have needed the arm after that.
  *
- * **Four shapes, one pattern**, because the previous one covered two and the
- * other two were reported by nobody: a static `from '...'`, a dynamic
- * `import('...')`, a side-effect `import '...'` with no binding and no `from`,
- * and a CommonJS `require('...')`. Each is caught with or without the `node:`
- * prefix, which the previous pattern demanded on both of its arms.
+ * A schema module has exactly two legitimate specifiers — `zod`, and a sibling
+ * schema module by relative path — so the predicate asserts *that* instead.
+ * One rule closes all four, and every built-in nobody has thought of yet.
  *
- * **Two axes, and conflating them is how the gap survived.** The old docstring
- * said a subpath and "the bare form" both hit; "bare" there meant *no subpath*
- * (`node:fs` beside `node:fs/promises`), not *no prefix* (`fs` beside
- * `node:fs`). It read as a claim about the prefix and was a claim about the
- * subpath, so `from 'fs'` looked covered for as long as nobody fixtured it.
- * Both axes are optional now: `(?:node:)?` for the prefix, `(?:\/[^'"]*)?` for
- * the subpath.
+ * The function below still carries the filesystem name, because keeping disk
+ * I/O out of `warpline/schemas/*` is the invariant. The predicate is broader
+ * than the name by construction: a schema module importing `lodash` is
+ * reported too, and that is correct — the subpath ships shapes.
  *
- * The built-in name is followed by either a subpath separator or the closing
- * quote, so a package whose name merely starts the same way misses — `fs-extra`
- * and `pathe` both fail that anchor. The specifier is entered through a quote,
- * so `'./path'` misses on its first character. Widening the prefix is what
- * created both risks; `FS-FORM-NEG` below is the other half of the change.
+ * **The specifier scanner takes backticks only in call position.** A template
+ * literal is legal in `import(...)` / `require(...)` and a syntax error after
+ * `from`, and this repository writes prose like ``derives it from
+ * `plugin_entries` `` inside docstrings. Accepting a backtick after `from`
+ * would report two real schema modules on the strength of their comments.
  *
  * **What this still cannot see**, recorded rather than left to be assumed away:
- * a `createRequire` handle bound to a variable and called later, and a fully
- * computed dynamic specifier. Neither carries a literal specifier adjacent to
- * an introducer keyword, so no regex reaches either, and neither has ever
- * appeared in this repository. A guard that says nothing about its edges is
- * read as having none.
+ * a `createRequire` handle bound to a variable and called later; a fully
+ * computed specifier, which carries no literal for any regex to reach; and an
+ * indirect global, `globalThis['Bun'].write(...)`, which the `BUN_GLOBAL` scan
+ * below catches only in its written form. None has ever appeared here. A guard
+ * that says nothing about its edges is read as having none.
+ *
+ * **Deliberately reported, not a false positive to be fixed:** a specifier
+ * quoted in prose (`` * was `import { mkdir } from 'node:fs/promises'` ``) and
+ * a type-only `import type { PathLike } from 'node:fs'`. The first is loud
+ * rather than silent, and the second names the filesystem in a module whose
+ * subpath promises shapes. Both are cheap to phrase around; neither is worth a
+ * comment stripper that could swallow a real import inside a string.
  */
-const FS_BUILTIN =
-  /(?<![.\w])(?:from|import|require)\s*\(?\s*['"](?:node:)?(?:fs|path)(?:\/[^'"]*)?['"]/
+const ALLOWED_SPECIFIER = /^(?:zod|\.\/[\w.-]+\.js)$/
+const SPECIFIER =
+  /(?<![.\w])(?:(?:from|import)\s*["']|(?:import|require)\s*\(\s*["'`])([^"'`\n]+)["'`]/g
+
+/**
+ * The no-import case. `Bun.file(p).text()` and `Bun.write(p, s)` are a live
+ * idiom in this repository (`src/runtime/__tests__/approval-gate.test.ts`), and
+ * a global needs no specifier, so a schema module could do disk I/O with an
+ * empty import list and satisfy the allowlist completely.
+ */
+const BUN_GLOBAL = /\bBun\s*\.\s*(?:file|write)\s*\(/
 
 /** A term is a literal; `\b` anchors it so a substring of another word misses. */
 const bounded = (t: string) => new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
@@ -180,7 +199,8 @@ function publishedModules(root: string): string[] {
 }
 
 /**
- * Every schema module that imports the Node filesystem or path built-ins.
+ * Every schema module that names a specifier outside the allowlist, or reaches
+ * the filesystem through the `Bun` global without naming one at all.
  *
  * `./schemas/*` is a **wildcard** entry in the `exports` map, so a file placed
  * under `src/schemas/` is public API the moment it is written, with no review
@@ -220,7 +240,10 @@ function filesystemInSchemas(root: string): string[] {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue
       throw err
     }
-    if (FS_BUILTIN.test(text)) offenders.push(file)
+    const specifiers = [...text.matchAll(SPECIFIER)].map((m) => m[1]!)
+    if (specifiers.some((s) => !ALLOWED_SPECIFIER.test(s)) || BUN_GLOBAL.test(text)) {
+      offenders.push(file)
+    }
   }
   return offenders.sort()
 }
@@ -502,23 +525,92 @@ describe('no published schema module imports the filesystem', () => {
   })
 
   /**
-   * The other half of the widening. Making the `node:` prefix optional is what
-   * enlarged the match surface, so the four shapes now adjacent to a hit are
-   * asserted clean in one case: the offender list must be **empty**, not short.
-   * `createRequire` is here because research predicted it would fire; it does
-   * not, because the substring is `Require` and the alternation is
-   * case-sensitive. The case pins that rather than assuming it.
+   * The four forms the denylist could not see, closed by one predicate rather
+   * than four new arms. Combined into one case on the precedent of "the subpath
+   * and dynamic forms are caught too": the allowlist does not have a per-form
+   * branch to prove, so a per-form test would be four copies of one assertion.
+   * The clean control is what makes the list discriminate.
+   *
+   * The re-export bridge is first because it is the one that matters here: that
+   * single line inside `src/schemas/engine-state.ts` restores all five
+   * relocated helpers to the published subpath, and the old matcher stayed
+   * green on it.
    */
-  test('FS-FORM-NEG: four lookalike shapes are none of them reported', () => {
+  test('FS-FORM-M5: the four forms a built-in denylist could not see are reported', () => {
+    const root = fixture({
+      'package.json': PKG,
+      'src/schemas/m5-bridge.ts': "export * from '../runtime/engine-state-store.js'\n" + SCHEMA,
+      'src/schemas/m5-backtick.ts': 'const fs = await import(`node:fs`)\n' + SCHEMA,
+      'src/schemas/m5-exec.ts': "import { execFileSync } from 'node:child_process'\n" + SCHEMA,
+      'src/schemas/m5-os.ts': "import { tmpdir } from 'node:os'\n" + SCHEMA,
+      'src/schemas/m5-control.ts': SCHEMA,
+    })
+    try {
+      expect(filesystemInSchemas(root)).toEqual([
+        'src/schemas/m5-backtick.ts',
+        'src/schemas/m5-bridge.ts',
+        'src/schemas/m5-exec.ts',
+        'src/schemas/m5-os.ts',
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The no-import case, which no specifier rule of any width can reach: `Bun`
+   * is a global, so this module's import list is empty and every specifier in
+   * it is allowed. The control is a module that names `Bun` without calling
+   * into the filesystem through it, so the scan discriminates on the call
+   * rather than on the identifier.
+   */
+  test('FS-FORM-M6: filesystem access through the Bun global is reported', () => {
+    const root = fixture({
+      'package.json': PKG,
+      'src/schemas/m6.ts': 'const raw = await Bun.file(p).text()\n' + SCHEMA,
+      'src/schemas/m6-write.ts': 'await Bun.write(p, s)\n' + SCHEMA,
+      'src/schemas/m6-control.ts': 'const v = Bun.version\n' + SCHEMA,
+    })
+    try {
+      expect(filesystemInSchemas(root)).toEqual(['src/schemas/m6-write.ts', 'src/schemas/m6.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * Rewritten with the inversion, and the ruling it re-pins is the opposite of
+   * the one it used to. Under a built-in denylist these three were lookalikes
+   * asserted clean: `fs-extra` and `pathe` failed the built-in anchor and
+   * `'./path'` failed on its first character. Under the allowlist all three are
+   * offenders — `fs-extra` because a schema module importing a filesystem
+   * wrapper *is* a filesystem client, `pathe` on the same reasoning, and
+   * `'./path'` because a relative specifier with no `.js` suffix is not a
+   * sibling ES module in this build. That is the allowlist working rather than
+   * a fixture that survived the change.
+   *
+   * `createRequire` is the one that stays clean, and for the reason it always
+   * did: the substring is `Require`, the scanner is case-sensitive, and a
+   * handle called later carries no literal. It is a recorded blind spot, not a
+   * pass. The two-line control is what stops "everything is an offender now"
+   * from reading as success.
+   */
+  test('FS-FORM-NEG: the allowlist rules on lookalikes, and pins what it still cannot see', () => {
     const root = fixture({
       'package.json': PKG,
       'src/schemas/n1.ts': "import graceful from 'fs-extra'\n" + SCHEMA,
       'src/schemas/n2.ts': "import { join } from 'pathe'\n" + SCHEMA,
       'src/schemas/n3.ts': "import { resolve } from './path'\n" + SCHEMA,
       'src/schemas/n4.ts': "const load = createRequire('node:fs')\n" + SCHEMA,
+      'src/schemas/n5.ts':
+        "import { z } from 'zod'\nimport type { X } from './other.js'\n" + SCHEMA,
     })
     try {
-      expect(filesystemInSchemas(root)).toEqual([])
+      expect(filesystemInSchemas(root)).toEqual([
+        'src/schemas/n1.ts',
+        'src/schemas/n2.ts',
+        'src/schemas/n3.ts',
+      ])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
