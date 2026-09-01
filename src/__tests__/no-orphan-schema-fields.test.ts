@@ -87,10 +87,38 @@ const DEFERRED = new Set<string>([
 const DEFERRED_FS = new Set<string>([])
 
 /**
- * Node built-ins that make a module a filesystem client. Matched on the import
- * specifier, so a subpath (`node:fs/promises`) and the bare form both hit.
+ * Node built-ins that make a module a filesystem client, matched on the import
+ * specifier.
+ *
+ * **Four shapes, one pattern**, because the previous one covered two and the
+ * other two were reported by nobody: a static `from '...'`, a dynamic
+ * `import('...')`, a side-effect `import '...'` with no binding and no `from`,
+ * and a CommonJS `require('...')`. Each is caught with or without the `node:`
+ * prefix, which the previous pattern demanded on both of its arms.
+ *
+ * **Two axes, and conflating them is how the gap survived.** The old docstring
+ * said a subpath and "the bare form" both hit; "bare" there meant *no subpath*
+ * (`node:fs` beside `node:fs/promises`), not *no prefix* (`fs` beside
+ * `node:fs`). It read as a claim about the prefix and was a claim about the
+ * subpath, so `from 'fs'` looked covered for as long as nobody fixtured it.
+ * Both axes are optional now: `(?:node:)?` for the prefix, `(?:\/[^'"]*)?` for
+ * the subpath.
+ *
+ * The built-in name is followed by either a subpath separator or the closing
+ * quote, so a package whose name merely starts the same way misses — `fs-extra`
+ * and `pathe` both fail that anchor. The specifier is entered through a quote,
+ * so `'./path'` misses on its first character. Widening the prefix is what
+ * created both risks; `FS-FORM-NEG` below is the other half of the change.
+ *
+ * **What this still cannot see**, recorded rather than left to be assumed away:
+ * a `createRequire` handle bound to a variable and called later, and a fully
+ * computed dynamic specifier. Neither carries a literal specifier adjacent to
+ * an introducer keyword, so no regex reaches either, and neither has ever
+ * appeared in this repository. A guard that says nothing about its edges is
+ * read as having none.
  */
-const FS_BUILTIN = /from\s+['"]node:(fs|path)(\/[^'"]*)?['"]|import\s*\(\s*['"]node:(fs|path)(\/[^'"]*)?['"]/
+const FS_BUILTIN =
+  /(?<![.\w])(?:from|import|require)\s*\(?\s*['"](?:node:)?(?:fs|path)(?:\/[^'"]*)?['"]/
 
 /** A term is a literal; `\b` anchors it so a substring of another word misses. */
 const bounded = (t: string) => new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
@@ -468,6 +496,29 @@ describe('no published schema module imports the filesystem', () => {
     })
     try {
       expect(filesystemInSchemas(root)).toEqual(['src/schemas/m4.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The other half of the widening. Making the `node:` prefix optional is what
+   * enlarged the match surface, so the four shapes now adjacent to a hit are
+   * asserted clean in one case: the offender list must be **empty**, not short.
+   * `createRequire` is here because research predicted it would fire; it does
+   * not, because the substring is `Require` and the alternation is
+   * case-sensitive. The case pins that rather than assuming it.
+   */
+  test('FS-FORM-NEG: four lookalike shapes are none of them reported', () => {
+    const root = fixture({
+      'package.json': PKG,
+      'src/schemas/n1.ts': "import graceful from 'fs-extra'\n" + SCHEMA,
+      'src/schemas/n2.ts': "import { join } from 'pathe'\n" + SCHEMA,
+      'src/schemas/n3.ts': "import { resolve } from './path'\n" + SCHEMA,
+      'src/schemas/n4.ts': "const load = createRequire('node:fs')\n" + SCHEMA,
+    })
+    try {
+      expect(filesystemInSchemas(root)).toEqual([])
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
