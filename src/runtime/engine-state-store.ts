@@ -30,11 +30,10 @@
  * This file is a relocation. Nothing here was rewritten; signatures and
  * behaviour are what they were.
  */
-import { readFile, rename, writeFile } from 'node:fs/promises'
-import { mkdir } from 'node:fs/promises'
-import path from 'node:path'
+import { readFile } from 'node:fs/promises'
 
 import { z } from 'zod'
+import { atomicWriteText } from '../lib/fs-atomic.js'
 import {
   ENGINE_STATE_MAX_SCHEMA_VERSION,
   EngineStateSchema,
@@ -263,10 +262,28 @@ export async function withoutStateBackups<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Atomic write: temp file + rename, so a crash never leaves a half-written state. */
+/**
+ * Atomic write, through the shared helper rather than a local copy of it.
+ *
+ * This used to hand-roll the temp-file-then-rename dance with a *fixed* temp
+ * name, `${statePath}.tmp`, which is the one detail that made the atomicity
+ * claim narrower than it read. Two writers share that inode: A truncates and
+ * starts writing, B finishes and renames, and the document renamed into place
+ * is A's half. A throw between the write and the rename also left the temp
+ * file beside the real document forever. `atomicWriteText` fixes both — a
+ * per-process, per-call temp name and a best-effort unlink on failure — and
+ * it is the implementation its own docstring says must not be copy-pasted.
+ *
+ * `atomicWriteText` rather than `atomicWriteJson` only to keep the trailing
+ * newline this has always written; the bytes are unchanged.
+ *
+ * Serialising concurrent writers is a separate, unclosed problem: `engine.ts`,
+ * `cli/deny.ts` and `cli/approve.ts` read-modify-write this document with no
+ * lock, so last-writer-wins is still reachable. The lock cannot move down into
+ * here — `board/state-manager.ts` already calls this from inside
+ * `withStateLock`, which is a non-reentrant `O_EXCL` file lock, so a nested
+ * acquire would self-deadlock.
+ */
 export async function writeEngineState(state: EngineState, statePath: string): Promise<void> {
-  await mkdir(path.dirname(statePath), { recursive: true })
-  const tmp = `${statePath}.tmp`
-  await writeFile(tmp, JSON.stringify(state, null, 2) + '\n', 'utf-8')
-  await rename(tmp, statePath)
+  await atomicWriteText(statePath, JSON.stringify(state, null, 2) + '\n')
 }

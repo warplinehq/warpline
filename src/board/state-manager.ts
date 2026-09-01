@@ -12,7 +12,7 @@
  * active-experiments here — domain concerns, cut from core. Hosts keep such
  * data in their own modules or in the EngineState `extensions` bag.)
  */
-import { readFile, writeFile, rename, open, unlink, appendFile } from 'node:fs/promises'
+import { readFile, open, unlink, appendFile } from 'node:fs/promises'
 import { appendFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -31,6 +31,7 @@ import {
 import { BoardEventSchema, AcknowledgementsSchema } from '../schemas/board.js'
 import type { BoardEvent, Acknowledgements } from '../schemas/board.js'
 import { stateDir, warplineHome } from '../lib/paths.js'
+import { atomicWriteJson } from '../lib/fs-atomic.js'
 
 // ── Path configuration (injectable for tests) ────────────────────
 
@@ -253,11 +254,16 @@ export async function readAcks(): Promise<Acknowledgements> {
   } catch { return {} }
 }
 
+/**
+ * The lock serialises writers; `atomicWriteJson` is what makes the write
+ * itself safe. This hand-rolled the same temp-file-then-rename with a fixed
+ * `.tmp` name, which leaks the temp file on a throw and is only atomic while
+ * exactly one process is writing. Same bytes out — `atomicWriteJson` uses the
+ * same `JSON.stringify(value, null, 2)` and no trailing newline.
+ */
 export async function writeAcks(acks: Acknowledgements): Promise<void> {
   await withStateLock(async () => {
-    const tmp = `${activePaths().acksPath}.tmp`
-    await writeFile(tmp, JSON.stringify(acks, null, 2))
-    await rename(tmp, activePaths().acksPath)
+    await atomicWriteJson(activePaths().acksPath, acks)
   })
 }
 

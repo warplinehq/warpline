@@ -218,6 +218,23 @@ describe('engine state read policy', () => {
     await writeEngineState(defaultEngineState(), statePath)
     expect(await siblings()).toEqual([])
   })
+
+  /**
+   * The success path above says nothing about the failure path, and the
+   * failure path is where the old fixed-name temp file leaked: a throw
+   * between the write and the rename left `engine-state.json.tmp` beside the
+   * document permanently. The rename is forced to fail by making the target a
+   * non-empty directory, which is the shape a stray `engine-state.json/` takes
+   * on any platform. `siblings()` filters only the document name, so a
+   * surviving `.tmp-…` file is what this catches.
+   */
+  it('leaves no temp file behind when the write fails', async () => {
+    await mkdir(join(statePath, 'occupied'), { recursive: true })
+    await writeFile(join(statePath, 'occupied', 'x'), 'x', 'utf-8')
+
+    await expect(writeEngineState(defaultEngineState(), statePath)).rejects.toThrow()
+    expect(await siblings()).toEqual([])
+  })
 })
 
 // ── The per-plugin last Output pointer (R7), through a real write ─────────
