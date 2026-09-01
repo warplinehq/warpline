@@ -251,6 +251,10 @@ export async function handler(
     schema_version: 1,
     ...(created.length > 0 && {
       reversible: false,
+      // Documented carve-out from the never-echo rule, one field wide: an issue
+      // URL contains the configured repo, and an undo instruction that does not
+      // name what to close cannot be acted on. See docs/plugin-authoring.md.
+      // Every other field of this result stays free of the configured value.
       undo_instruction: `Close by hand — GitHub issues cannot be deleted by the API: ${created.map(c => c.url).join(', ')}`,
     }),
   }

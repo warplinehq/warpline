@@ -1160,7 +1160,9 @@ describe('hand-written manifest prose', () => {
   // only artifact there is to pin.
   test('plugin-authoring carries the handoff carve-out and the atomic-write instruction', () => {
     const doc = read('docs/plugin-authoring.md')
-    expect(doc).toContain('One exception, and it is one field wide')
+    expect(doc).toContain('Two exceptions, each one field wide')
+    expect(doc).toContain('undo_instruction')
+    expect(doc).toContain('anomaly-issue')
     expect(doc).toContain('needs-llm-contract.md')
     expect(doc).toContain('feed-triage')
     expect(doc).toContain('rename it over the target')

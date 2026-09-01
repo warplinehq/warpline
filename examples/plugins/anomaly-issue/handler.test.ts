@@ -318,4 +318,53 @@ describe('anomaly-issue config value disclosure', () => {
     expect(out.created).toHaveLength(1)
     expect(JSON.stringify(out.created)).not.toContain(SENTINEL)
   })
+
+  // The second carve-out from the never-echo rule, and the only other one.
+  // A filed issue's URL contains the configured repo, and it has to: an undo
+  // instruction that does not name what to close cannot be acted on. The bound
+  // is the same shape as the handoff exception — one field, and every other
+  // field stays value-free. This test is what holds it to one field.
+  test('a filed issue URL reaches undo_instruction and nothing else', async () => {
+    const realFetch = globalThis.fetch
+    const dir = await mkdtemp(join(tmpdir(), 'anomaly-issue-undo-'))
+    const anomaliesPath = join(dir, 'anomalies.json')
+    await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors] }))
+    const priorToken = process.env.GITHUB_TOKEN
+    const priorHome = process.env.WARPLINE_HOME
+    process.env.GITHUB_TOKEN = 'tok-123'
+    // The ledger is written under the warpline home; re-root it so this test
+    // writes nothing outside its temp dir (CLAUDE.md rule 2).
+    process.env.WARPLINE_HOME = join(dir, 'home')
+    const issueUrl = `https://github.com/${sentinelRepo}/issues/7`
+
+    try {
+      globalThis.fetch = (async () => ({
+        ok: true,
+        status: 201,
+        json: async () => ({ html_url: issueUrl }),
+      })) as unknown as typeof fetch
+
+      const result = await handler(
+        {} as PluginManifest,
+        { repo: sentinelRepo, anomalies_path: anomaliesPath },
+        new AbortController().signal,
+      )
+
+      // The carve-out itself: the URL is here, because a human needs it.
+      expect(result.undo_instruction).toContain(issueUrl)
+
+      // And it is here ONLY. Strip the one excepted field and the rest of the
+      // result must be free of the configured value — the same strong form the
+      // feed-triage handoff test uses when it splits on `Context: `.
+      const { undo_instruction: _excepted, ...rest } = result
+      expect(JSON.stringify(rest)).not.toContain(SENTINEL)
+      expect(result.summary).not.toContain(SENTINEL)
+    } finally {
+      globalThis.fetch = realFetch
+      if (priorToken === undefined) delete process.env.GITHUB_TOKEN
+      else process.env.GITHUB_TOKEN = priorToken
+      if (priorHome === undefined) delete process.env.WARPLINE_HOME
+      else process.env.WARPLINE_HOME = priorHome
+    }
+  })
 })

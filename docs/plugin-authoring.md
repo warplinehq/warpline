@@ -170,7 +170,7 @@ paste into issues. Name the key and the shape you expected instead:
 Omit the value; do not mask it. A masking heuristic is a list of things that
 look like secrets, and it leaks the first one it fails to recognise.
 
-**One exception, and it is one field wide.** A `[needs-llm]` handoff summary
+**Two exceptions, each one field wide.** The first: a `[needs-llm]` handoff summary
 names a payload PATH after `Context:`, because
 [needs-llm-contract.md](needs-llm-contract.md) defines that field as a path the
 scanner resolves and reads — a key name there would leave the scanner nothing to
@@ -183,6 +183,18 @@ a secret. The bundled `feed-triage` is the worked case. Its other two summaries
 name the key like every other example, and its test splits the handoff summary
 on `Context: ` to assert the half a human reads is value-free — which is what
 keeps the exception this one field wide instead of a precedent.
+
+The second: an `undo_instruction` on a side effect that already happened names
+what to undo, and naming it can require the value. The bundled `anomaly-issue`
+is the worked case. It files GitHub issues, and a GitHub issue URL contains the
+repository it was filed in — so the configured `repo` reaches the run log
+through that field. Dropping the URL would leave an undo instruction nobody can
+act on, which is worse than the disclosure. The bound is the same as the first
+exception: one field. Its test asserts the URL is in `undo_instruction` and
+that every other field of the result is free of the configured value. Reach for
+this only where the side effect is irreversible and the operator has to finish
+it by hand. An input whose value would be a secret does not belong in a plugin
+that files anything.
 
 **The name `action` is taken.** `warpline run` passes a mandatory `action`
 positional as a per-invocation argument, which is tier 3 and beats both tiers
