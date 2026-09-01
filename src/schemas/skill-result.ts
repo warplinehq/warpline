@@ -5,10 +5,14 @@
  * between.
  *
  * The one helper that used to sit among these schemas, `resolveOutput`, and the
- * `OutputResolution` union it returns, now live in `src/runtime/run-artifacts.ts`.
- * There is no back-compat re-export: a single synchronous existence check made a
- * subpath named `schemas` public API for disk I/O, and the bridge that would
- * soften the break is the same bridge that keeps the old path working.
+ * `OutputResolution` union it returns, are gone as of 0.3.0. A single
+ * synchronous existence check was enough to make a subpath named `schemas`
+ * public API for disk I/O. It moved to the runtime first, where it turned out
+ * to have no caller anywhere in the repository, so it was deleted rather than
+ * kept as unreachable code with a filesystem import serving only itself. The
+ * three states it resolved to are described in the 0.3.0 release notes. There
+ * is no back-compat re-export: the bridge that would soften the break is the
+ * same bridge that keeps the old path working.
  * `src/__tests__/no-orphan-schema-fields.test.ts` asserts no file under
  * `src/schemas/` imports the Node filesystem or path built-ins, so the boundary
  * holds for the next schema module as well as for this one.

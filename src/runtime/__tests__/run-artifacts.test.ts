@@ -10,9 +10,8 @@ import { join, resolve } from 'node:path'
 import { warplineHome } from '../../lib/paths.js'
 import {
   writeRunArtifact, appendRunLog, writeRunLog, trimPluginHistory,
-  getRunsDir, resolveOutput, type RunArtifact,
+  getRunsDir, type RunArtifact,
 } from '../run-artifacts.js'
-import { OutputRecordSchema } from '../../schemas/skill-result.js'
 
 describe('run-artifacts', () => {
   let runsDir: string
@@ -144,40 +143,5 @@ describe('run-artifacts', () => {
 
   test('getRunsDir(override) returns the override untouched', () => {
     expect(getRunsDir('/tmp/foo')).toBe('/tmp/foo')
-  })
-})
-
-/**
- * `resolveOutput`, tested where it now lives.
- *
- * This block moved out of `src/schemas/__tests__/skill-result.test.ts` with the
- * function it exercises. The schemas subpath is a wildcard export, so one
- * synchronous existence check under `src/schemas/` was public API for disk I/O;
- * the helper moved to `src/runtime/run-artifacts.ts` and its tests followed.
- * Behaviour is unchanged — same assertions, same function, new import path.
- */
-describe('resolveOutput', () => {
-  it('resolves an inline body without touching the filesystem', () => {
-    const out = OutputRecordSchema.parse({ type: 'brief', body: '# hi' })
-    expect(resolveOutput(out)).toEqual({ state: 'inline', body: '# hi' })
-  })
-
-  it('resolves a path that exists to a present state', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'warpline-output-'))
-    try {
-      const file = join(dir, 'report.md')
-      await writeFile(file, '# report')
-      const out = OutputRecordSchema.parse({ type: 'report', path: file })
-      expect(resolveOutput(out)).toEqual({ state: 'present', path: file })
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('resolves a path that no longer exists to a missing state rather than throwing', () => {
-    const gone = join(tmpdir(), 'warpline-output-does-not-exist', 'report.md')
-    const out = OutputRecordSchema.parse({ type: 'report', path: gone })
-    expect(() => resolveOutput(out)).not.toThrow()
-    expect(resolveOutput(out)).toEqual({ state: 'missing', path: gone })
   })
 })
