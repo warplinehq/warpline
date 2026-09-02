@@ -83,6 +83,9 @@ export async function handler(
 }
 ```
 
+Typing that function is optional, and `import type { HandlerFn } from 'warpline'`
+is how you do it if you want the compiler to check the signature for you.
+
 Rules the runtime holds you to:
 
 - **Return failures, don't throw.** A thrown error becomes a failed run with

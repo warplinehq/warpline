@@ -33,6 +33,10 @@
       "types": "./dist/lib/paths-public.d.ts",
       "default": "./dist/lib/paths-public.js"
     },
+    "./unstable-runtime": {
+      "types": "./dist/unstable-runtime.d.ts",
+      "default": "./dist/unstable-runtime.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

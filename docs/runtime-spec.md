@@ -167,6 +167,28 @@ Pin the version you tested against, and read the release notes for the version
 you move to. The release notes are the record of what changed between two
 versions; nothing else here claims to be.
 
+### Published specifiers, and what each promises
+
+Four specifiers are published: `warpline`, `warpline/schemas/*`,
+`warpline/lib/paths` and `warpline/unstable-runtime`. Nothing else in the
+package is reachable — the `exports` map is an allowlist, and an import of any
+other subpath fails at resolution rather than resolving to something internal.
+
+The root barrel `warpline` and the two narrow subpaths beneath it are public
+contract from 0.1.0 onward. They are governed by the stability promise stated
+above and are deliberately small for that reason.
+
+`warpline/unstable-runtime` is not. Any name behind a `warpline/unstable-*`
+specifier may change, narrow or disappear in any 0.x release. What you get is a
+line in that release's notes, and no deprecation window — the specifier carries
+the warning so that nobody has to have read this paragraph to be warned. If you
+depend on one of those names, pin the exact version you tested against.
+
+That statement is scoped to the specifier and not to any list of symbols, which
+is deliberate: what is behind an `unstable-*` specifier is expected to move, and
+a later release that adds a specifier of that shape inherits this promise rather
+than inventing its own.
+
 ## 2. Retry Policy
 
 Retries fire only on a first failure whose `SkillResult.retryable === true`.
