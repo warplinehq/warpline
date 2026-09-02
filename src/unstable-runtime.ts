@@ -8,22 +8,39 @@
  * exists so a host can reach the runtime before we know which parts of it we
  * are willing to owe semver on.
  *
- * Deliberately narrow: `makeEvent` is the only name published here today. The
+ * Deliberately narrow, and closed: the ten runtime names below plus the
+ * `TierName` type are the whole surface, decided by reading every call site in
+ * the hosts being migrated rather than by guessing at what might be wanted. The
  * other eleven `engine-events` exports — `_trimEventsLog`, `GateDiscardReason`,
  * `emitRunStarted`, `emitRunCompleted`, `emitPluginStarted`, `emitPluginFailed`,
  * `emitPluginSkipped`, `emitGateInvalidated`, `emitDenialRecorded`,
- * `emitPluginDenied` and `emitPluginGated` — stay internal for now, as does
- * everything in `engine.ts` and `invoke-plugin.ts` that the root barrel does not
- * already name.
+ * `emitPluginDenied` and `emitPluginGated` — stay internal, as does everything
+ * in `engine.ts`, `tier.ts` and `invoke-plugin.ts` not named here or on the root
+ * barrel. Approval and run-artifact helpers are never published from any
+ * specifier.
  *
  * Named re-exports only, never a star re-export. The `exports` map is an
  * allowlist, and a star publishes whatever the source module exports next — at
- * this commit that is eleven symbols nobody reviewed for a public surface. The
- * exact-set assertion in `scripts/verify-tarball.sh` is what holds it: a widened
- * set reddens the release gate on the day it lands rather than after it ships.
+ * this commit that is eleven engine-events symbols nobody reviewed for a public
+ * surface. The exact-set assertion in `scripts/verify-tarball.sh` is what holds
+ * it: a widened set reddens the release gate on the day it lands rather than
+ * after it ships. That literal and this file are edited together, or the gate
+ * says so.
  *
- * This barrel grows to the full decided symbol set in a later 0.x release, so
- * one export is a tracer through the export-publish-consume path and not the
- * final surface. Do not widen this re-export without a decision record.
+ * Do not widen this re-export without a decision record.
  */
-export { makeEvent } from './board/engine-events.js'
+
+export {
+  emitAttemptFailed,
+  emitBoardEvent,
+  emitPluginCompleted,
+  makeEvent,
+} from './board/engine-events.js'
+
+export { computeTier, formatIdleDuration, isEligibleForTier } from './runtime/tier.js'
+
+export type { TierName } from './runtime/tier.js'
+
+export { invokePlugin } from './runtime/invoke-plugin.js'
+
+export { loadPluginManifests, RUN_PROFILES } from './runtime/engine.js'

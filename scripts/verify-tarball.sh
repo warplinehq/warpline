@@ -264,10 +264,11 @@ if (typeof paths.warplineHome !== 'function') { console.error('warplineHome is n
 // "fix" one into the literal below; `bun run typecheck` against an example is
 // the only check that can see those.
 //
-// PROVISIONAL at one name. The tracer commit publishes `makeEvent` alone to
-// prove the whole export -> publish -> consume path with one symbol, and plan
-// 11-03 widens this literal to the full decided symbol set. Until then a wider
-// observed set is an unrecorded export, which is what the `!==` refuses.
+// The set below is CLOSED. It is the whole runtime surface the hosts being cut
+// over reach, decided from a read of every consuming call site rather than from
+// a guess about what might be wanted, and it is not a floor to grow past
+// casually. A wider observed set is an unrecorded export, which is what the
+// `!==` refuses; the literal and the barrel are edited together or this reddens.
 const unstable = await import('warpline/unstable-runtime')
 
 // Defined BEFORE the export set is enumerated, and the ordering is the whole
@@ -280,10 +281,12 @@ const NEVER_PUBLISHED = [
   'writeRunArtifact', 'getRunsDir', 'trimPluginHistory',
 ]
 
+const UNSTABLE_EXPECTED = 'RUN_PROFILES,computeTier,emitAttemptFailed,emitBoardEvent,emitPluginCompleted,formatIdleDuration,invokePlugin,isEligibleForTier,loadPluginManifests,makeEvent'
+
 const unstableExports = Object.keys(unstable).filter((k) => k !== 'default').sort().join(',')
 console.log('   warpline/unstable-runtime exports: ' + unstableExports)
-if (unstableExports !== 'makeEvent') {
-  console.error('expected exactly makeEvent, got ' + unstableExports)
+if (unstableExports !== UNSTABLE_EXPECTED) {
+  console.error('expected exactly ' + UNSTABLE_EXPECTED + ', got ' + unstableExports)
   process.exit(1)
 }
 
