@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import type { HandlerFn } from 'warpline'
 import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
 import { makeSkillError, type SkillError, type SkillResult } from 'warpline/schemas/skill-result'
 import { warplineHome } from 'warpline/lib/paths'
@@ -259,3 +260,11 @@ export async function handler(
     }),
   }
 }
+
+// The only check anywhere that can see the root barrel's type export. `HandlerFn`
+// is a type, so it leaves no trace in `dist/index.js` and the tarball probe is
+// structurally blind to it; `bun run typecheck` resolves `warpline` from here by
+// package self-reference through the exports map into `dist/`. Left as a bare
+// `satisfies` rather than annotating the declaration, so the declaration form
+// `docs/plugin-authoring.md` shows stays exactly as written.
+handler satisfies HandlerFn

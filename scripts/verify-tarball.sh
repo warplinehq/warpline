@@ -9,8 +9,9 @@
 #   2. `warpline --help` runs under Node with the tarball's bytes
 #   3. the `exports` map resolves every published specifier — under Node AND
 #      Bun — exposes exactly one path accessor, ships no filesystem helper and
-#      no removed field behind `schemas/run-log`, and REFUSES an unmapped
-#      subpath (ERR_PACKAGE_PATH_NOT_EXPORTED)
+#      no removed field behind `schemas/run-log`, exposes exactly the decided
+#      symbol set behind `unstable-runtime` and no never-published name, and
+#      REFUSES an unmapped subpath (ERR_PACKAGE_PATH_NOT_EXPORTED)
 #   4. the bin's Node floor gate prints required-vs-found and exits 1 without
 #      an ERR_UNKNOWN_FILE_EXTENSION trace
 #   5. `warpline scaffold` writes a plugin carrying no absolute path, and a
@@ -251,6 +252,46 @@ if (exported !== 'warplineHome') {
   process.exit(1)
 }
 if (typeof paths.warplineHome !== 'function') { console.error('warplineHome is not callable'); process.exit(1) }
+
+// `warpline/unstable-runtime` is the deliberately-unstable subpath: every name
+// behind it may change or vanish in any 0.x release, with a release-note line
+// and no deprecation window. An exact set rather than a presence check, so an
+// accidental `export *` in the barrel — which would publish eleven unreviewed
+// engine-events symbols — reddens this on the day it lands.
+//
+// `TierName` and every other erased type are correctly ABSENT from this set. A
+// type leaves no trace in `dist/unstable-runtime.js`, so a reader must not
+// "fix" one into the literal below; `bun run typecheck` against an example is
+// the only check that can see those.
+//
+// PROVISIONAL at one name. The tracer commit publishes `makeEvent` alone to
+// prove the whole export -> publish -> consume path with one symbol, and plan
+// 11-03 widens this literal to the full decided symbol set. Until then a wider
+// observed set is an unrecorded export, which is what the `!==` refuses.
+const unstable = await import('warpline/unstable-runtime')
+
+// Defined BEFORE the export set is enumerated, and the ordering is the whole
+// assertion: enumerating keys off an undefined export finds none of the
+// never-published names and reports success. That vacuous pass is what this
+// probe exists to refuse. `in` rather than `typeof`, so a re-export that
+// resolves to `undefined` still trips it.
+const NEVER_PUBLISHED = [
+  'checkApproval', 'grantApproval', 'revokeApproval',
+  'writeRunArtifact', 'getRunsDir', 'trimPluginHistory',
+]
+
+const unstableExports = Object.keys(unstable).filter((k) => k !== 'default').sort().join(',')
+console.log('   warpline/unstable-runtime exports: ' + unstableExports)
+if (unstableExports !== 'makeEvent') {
+  console.error('expected exactly makeEvent, got ' + unstableExports)
+  process.exit(1)
+}
+
+const neverReachable = NEVER_PUBLISHED.filter((n) => n in unstable)
+if (neverReachable.length) {
+  console.error('warpline/unstable-runtime reaches never-published names: ' + neverReachable.join(', '))
+  process.exit(1)
+}
 SPECIFIERS
 
 ( cd "$CONSUMER" && node specifiers.mjs ) || fail "published specifiers did not resolve under node"
