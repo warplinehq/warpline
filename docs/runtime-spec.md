@@ -428,6 +428,17 @@ The quiet-hours skip reports the same status a normal advance would for that
 root. A skipped cycle over a root that loaded no manifests is still a cycle
 over a root that loaded no manifests, so it reports `failed` and calls
 `onRunFailure` from that path — it writes no run log, because it did no work.
+The same holds one step up: a root that loaded some of its manifests and failed
+on others reports `partial` on this path too, and calls `onRunFailure` naming
+the plugins that did not load. No plugin runs during a skip, so a load failure
+is the only way to be partial here — but a quiet hour is not a reason to stop
+reporting one.
+
+Only the plugin root's own directories are candidates. A stray file in the root
+is not a plugin and is not a failure, because there is no plugin there to fail;
+a symlink resolving to a directory is a plugin like any other. A directory that
+holds no loadable manifest IS reported as a failure — that is a
+misconfiguration an operator can act on, not a stray file.
 Quiet hours suppresses the work, not the verdict on the root.
 
 `plugin_entries` is the only accumulated field, and it is deliberately the only

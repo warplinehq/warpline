@@ -681,12 +681,37 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // which the one status worth reporting stops being reported. A root that
     // DID load manifests is unaffected: it still reports a complete skip and
     // still hands back an empty run-log path.
-    const quietStatus: AdvanceResult['status'] = noManifestsLoaded ? 'failed' : 'complete'
+    // Two conditions, in the same precedence the normal path uses: a root that
+    // loaded NOTHING is `failed`, a root that loaded something but not all of
+    // it is `partial`, and only a root that loaded cleanly is `complete`. The
+    // zero-manifest half was hoisted above this guard when it was written; the
+    // load-failure half was not, so the two arms disagreed on the same root —
+    // `partial` awake and `complete` asleep — against the spec's own statement
+    // that the skip reports the status a normal advance would. No plugin runs
+    // on this path, so load failures are the only way to be partial here.
+    const quietStatus: AdvanceResult['status'] = noManifestsLoaded
+      ? 'failed'
+      : loadFailures.length > 0
+        ? 'partial'
+        : 'complete'
     await emitRunCompleted(run_id, quietStatus, eventsPath)
     // This arm sits above the failure-hook block at the end of the function,
     // so without this call the hook would never fire here and the contract
     // stated on the option would be false the day it was written.
-    if (noManifestsLoaded) fireRunFailure(`run failed: ${emptyRootReason}`)
+    //
+    // Fired for `partial` too, not only `failed`. The end-of-path block fires
+    // on ANY non-complete status, so hooking only the zero-manifest case would
+    // leave the two arms disagreeing about whether the host hears — the same
+    // asymmetry the status fix above just closed, one layer down. Reason shape
+    // matches that block's, so a host cannot tell which arm produced it.
+    if (quietStatus !== 'complete') {
+      const failed = loadFailures.map((f) => f.plugin)
+      fireRunFailure(
+        failed.length > 0
+          ? `run ${quietStatus}: ${failed.length} plugin(s) failed [${failed.join(', ')}]`
+          : `run ${quietStatus}: ${emptyRootReason}`,
+      )
+    }
     return {
       run_id,
       status: quietStatus,

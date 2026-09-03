@@ -583,6 +583,7 @@ export async function handler(manifest, args) {
   test('a root with a broken manifest reports the same status asleep as awake — quiet-hours arm active', async () => {
     const { runAdvance } = await import('../engine.js')
     const quiet = await createTestHome({ preferences: { review_gate: false, quiet_hours: windowAroundNow() } })
+    const reasons: string[] = []
 
     try {
       // A MIXED root: one manifest loads, one does not. Both are needed — a
@@ -619,11 +620,18 @@ export async function handler(manifest, args) {
         stateDir: join(quiet.stateDir, 'engine-state.json'),
         runsDir: quiet.runsDir,
         eventsPath: join(quiet.runsDir, 'events.jsonl'),
+        onRunFailure: (reason: string) => reasons.push(reason),
       })
 
       // Not 'complete': the root did not load what it holds, and a quiet hour
       // is not a reason to stop saying so.
       expect(result.status).toBe('partial')
+
+      // And the host hears about it. The end-of-path block fires the hook on
+      // any non-complete status, so an arm that reported `partial` silently
+      // would still disagree with the normal path — one layer below the status.
+      expect(reasons).toHaveLength(1)
+      expect(reasons[0]).toContain('fx-bad')
     } finally {
       await quiet.cleanup()
     }
