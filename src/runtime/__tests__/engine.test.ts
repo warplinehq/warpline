@@ -1,12 +1,20 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { topoSort } from '../engine.js'
 import { grantApproval } from '../approval-gate.js'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
 import { snapshotHome } from './helpers/snapshot-home.js'
-import { _setHome, lockPath } from '../../lib/paths.js'
+import {
+  _setHome,
+  eventsJsonlPath,
+  lockPath,
+  pluginConfigPath,
+  runsDir as homeRunsDir,
+  sessionApprovalPath,
+  stateDir as homeStateDir,
+} from '../../lib/paths.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 // -----------------------------------------------------------------------
@@ -551,6 +559,166 @@ describe('runAdvance refuses a plugin root it cannot read', () => {
     // evidence that the guard sits in the right place — the guard sitting above
     // every write is what evidences that.
     expect(existsSync(lockPath())).toBe(false)
+  })
+
+  test('the empty string is refused on its own terms, never resolved to the working directory', async () => {
+    const { runAdvance } = await import('../engine.js')
+
+    // The destructure defaults only `undefined`, so an empty string falls
+    // through to `readdir` and LOOKS refused for free. Any `resolve` inserted
+    // to satisfy "name the resolved path" turns it into the working directory,
+    // which reads fine, and the refusal silently becomes "load the current
+    // directory". Its own message is what makes that impossible.
+    await expect(runAdvance({ pluginsDir: '' })).rejects.toThrow(
+      /warpline: plugin root is an empty string/,
+    )
+    await expect(runAdvance({ pluginsDir: '' })).rejects.not.toThrow(/ENOENT/)
+  })
+
+  test('a plugin root that is a regular file rejects with ENOTDIR and the path', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const notADir = join(ctx.root, 'plugins-but-a-file')
+    await writeFile(notADir, 'not a directory')
+
+    await expect(
+      runAdvance({
+        pluginsDir: notADir,
+        stateDir: join(ctx.stateDir, 'engine-state.json'),
+        runsDir: ctx.runsDir,
+        eventsPath: join(ctx.runsDir, 'events.jsonl'),
+      }),
+    ).rejects.toThrow(new RegExp(`cannot read plugin root ${notADir}: ENOTDIR`))
+  })
+
+  // `chmod 000` does not deny readdir to uid 0, so as root this arm would go
+  // green without ever producing the errno it names. Skipped visibly instead:
+  // a green that proved nothing is the exact failure class this suite exists
+  // to remove.
+  test.skipIf(process.getuid?.() === 0)(
+    'an unreadable plugin root rejects with EACCES and the path',
+    async () => {
+      const { runAdvance } = await import('../engine.js')
+      const sealed = join(ctx.root, 'sealed-plugins')
+      await mkdir(sealed, { recursive: true })
+      await chmod(sealed, 0o000)
+      try {
+        await expect(
+          runAdvance({
+            pluginsDir: sealed,
+            stateDir: join(ctx.stateDir, 'engine-state.json'),
+            runsDir: ctx.runsDir,
+            eventsPath: join(ctx.runsDir, 'events.jsonl'),
+          }),
+        ).rejects.toThrow(new RegExp(`cannot read plugin root ${sealed}: EACCES`))
+      } finally {
+        // Restore before cleanup, or rm cannot descend and the temp home leaks.
+        await chmod(sealed, 0o755)
+      }
+    },
+  )
+
+  test('the refusal is reachable with no other option set', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const absent = join(ctx.root, 'no-such-plugin-root')
+
+    // Nothing but `pluginsDir`. The home is re-rooted into the temp directory
+    // by `beforeEach`, so the options this call does NOT pass resolve there
+    // too — and the rejection precedes every write regardless.
+    await expect(runAdvance({ pluginsDir: absent })).rejects.toThrow(
+      new RegExp(`cannot read plugin root ${absent}: ENOENT`),
+    )
+  })
+})
+
+// -----------------------------------------------------------------------
+// The plugin root and the home are two independent roots
+// -----------------------------------------------------------------------
+
+describe('runAdvance — the plugin root and the home are independent', () => {
+  let ctx: TestHome
+
+  async function writeDeclarativePlugin(dir: string, name: string): Promise<void> {
+    await mkdir(dir, { recursive: true })
+    await writeFile(
+      join(dir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify(makeManifest(name))}`,
+    )
+  }
+
+  beforeEach(async () => {
+    ctx = await createTestHome()
+    _setHome(ctx.root)
+  })
+
+  afterEach(async () => {
+    _setHome(null)
+    await ctx.cleanup()
+  })
+
+  test('an omitted pluginsDir falls back to the home default', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await writeDeclarativePlugin(join(ctx.pluginsDir, 'fx-default'), 'fx-default')
+
+    const result = await runAdvance({
+      stateDir: join(ctx.stateDir, 'engine-state.json'),
+      runsDir: ctx.runsDir,
+      eventsPath: join(ctx.runsDir, 'events.jsonl'),
+    })
+
+    expect(result.plugin_states.has('fx-default')).toBe(true)
+  })
+
+  test('a root equal to the home default, and one nested inside it, are both accepted', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await writeDeclarativePlugin(join(ctx.pluginsDir, 'fx-equal'), 'fx-equal')
+    const nested = join(ctx.pluginsDir, 'fx-equal', 'inner-root')
+    await writeDeclarativePlugin(join(nested, 'fx-nested'), 'fx-nested')
+
+    const common = {
+      stateDir: join(ctx.stateDir, 'engine-state.json'),
+      runsDir: ctx.runsDir,
+      eventsPath: join(ctx.runsDir, 'events.jsonl'),
+    }
+
+    const equal = await runAdvance({ pluginsDir: ctx.pluginsDir, ...common })
+    expect(equal.plugin_states.has('fx-equal')).toBe(true)
+
+    const inside = await runAdvance({ pluginsDir: nested, ...common })
+    expect(inside.plugin_states.has('fx-nested')).toBe(true)
+  })
+
+  test('a plugin root in a second home does not move any home-derived path', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const other = await createTestHome()
+    try {
+      await writeDeclarativePlugin(join(other.pluginsDir, 'fx-elsewhere'), 'fx-elsewhere')
+
+      const result = await runAdvance({
+        pluginsDir: other.pluginsDir,
+        stateDir: join(ctx.stateDir, 'engine-state.json'),
+        runsDir: ctx.runsDir,
+        eventsPath: join(ctx.runsDir, 'events.jsonl'),
+      })
+      expect(result.plugin_states.has('fx-elsewhere')).toBe(true)
+
+      // Asserted through the `lib/paths.ts` accessors, NOT by reading the
+      // options back: `stateDir` the option is a full file path while
+      // `stateDir()` the accessor is a directory, and comparing those two
+      // would pass for the wrong reason.
+      const derived = [
+        homeStateDir(),
+        homeRunsDir(),
+        eventsJsonlPath(),
+        sessionApprovalPath(),
+        pluginConfigPath('fx-elsewhere'),
+      ]
+      for (const p of derived) {
+        expect(p.startsWith(ctx.root)).toBe(true)
+        expect(p.startsWith(other.root)).toBe(false)
+      }
+    } finally {
+      await other.cleanup()
+    }
   })
 })
 
