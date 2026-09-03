@@ -118,7 +118,16 @@ export interface AdvanceOptions {
    * normally — this preserves pre-profile interactive behavior.
    */
   profile?: RunProfile
-  /** Override plugins directory (for testing) */
+  /**
+   * The plugin root this advance reads from. Precedence is exactly
+   * option -> default: this value when supplied, otherwise
+   * `<warplineHome()>/plugins`. One root, not a search path.
+   *
+   * A host may point this outside the home; state, runs, the event log, the
+   * session-approval grant and per-plugin config stay home-derived either way.
+   * A root that is absent, is not a directory, or cannot be read is refused
+   * before any write.
+   */
   pluginsDir?: string
   /** Override state file path (for testing — full path to engine-state.json) */
   stateDir?: string
@@ -556,6 +565,22 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // plugin schedules are filtered by the profile tier.
   const headless = profile !== undefined
   const allowedSchedules = profile ? PROFILE_ALLOWED_SCHEDULES[profile] : undefined
+
+  // The destructure above defaults only `undefined`, so an empty string
+  // arrives here unchanged — and `resolve('')` is the current working
+  // directory, which reads fine. Left alone, "no plugin root" would silently
+  // become "load whatever is in the working directory", or would report a
+  // directory that plainly exists as absent. Refused before anything resolves
+  // it, with a message of its own so the two cases stay tellable apart.
+  if (pluginsDir === '') {
+    throw new Error(
+      `warpline: plugin root is an empty string\n` +
+        `      Cause: an empty path resolves to the current working directory,\n` +
+        `             so this would load whatever happens to be there.\n` +
+        `      Fix:   pass a real directory as the plugin root, or omit the\n` +
+        `             option to use the default at ${getDefaultPluginsDir()}`,
+    )
+  }
 
   // Load the plugin manifests FIRST, and refuse a root that cannot be read
   // before anything below writes. State, the run log, the event log and the

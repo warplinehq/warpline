@@ -331,6 +331,32 @@ if (!refused.message.includes(absentRoot) || !refused.message.includes('ENOENT')
   process.exit(1)
 }
 console.log('   plugin-root refusal: absent root rejects naming the path and ENOENT')
+
+// The empty string is the arm that looks free. It reaches readdir unchanged
+// and rejects on its own, so a build with no explicit branch for it still
+// rejects here — with an errno, against the RESOLVED empty string, which is
+// the working directory. Requiring the empty-string message rather than merely
+// a rejection is what tells "refused" apart from "resolved to the cwd and
+// happened to fail".
+let emptyRefused = null
+try {
+  await runAdvance({ pluginsDir: '' })
+} catch (err) {
+  emptyRefused = err
+}
+if (emptyRefused === null) {
+  console.error('runAdvance resolved for an empty plugin root')
+  process.exit(1)
+}
+if (!(emptyRefused instanceof Error)) {
+  console.error('runAdvance rejected with a non-Error for an empty plugin root')
+  process.exit(1)
+}
+if (!emptyRefused.message.includes('plugin root is an empty string')) {
+  console.error('empty plugin root was resolved rather than refused: ' + emptyRefused.message)
+  process.exit(1)
+}
+console.log('   plugin-root refusal: empty root is refused, not resolved to the working directory')
 SPECIFIERS
 
 ( cd "$CONSUMER" && node specifiers.mjs ) || fail "published specifiers did not resolve under node"

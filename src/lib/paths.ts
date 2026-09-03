@@ -1,7 +1,14 @@
 /**
  * Warpline home + path resolution.
  *
- * Every file warpline reads or writes lives under one home directory:
+ * There are two roots, not one. State and configuration — engine state, run
+ * artifacts, the event log, the session-approval grant, per-plugin config —
+ * resolve from the home below. The PLUGIN root is separate: a host may supply
+ * its own through `AdvanceOptions.pluginsDir`, and it defaults to
+ * `<home>/plugins` only when none is given. The two are independent and are
+ * not required to be disjoint.
+ *
+ * The home resolves as:
  *
  *   1. `WARPLINE_HOME` env var, when set (must exist or be creatable)
  *   2. the nearest ancestor of cwd containing a `.warpline/` directory
@@ -53,7 +60,12 @@ export function runsDir(): string {
   return path.join(warplineHome(), 'runs')
 }
 
-/** Directory scanned for plugins (<name>/manifest.ts + handler.ts). */
+/**
+ * The DEFAULT plugin root (<name>/manifest.ts + handler.ts under it).
+ *
+ * Not necessarily the root a given advance reads: `AdvanceOptions.pluginsDir`
+ * takes precedence when a host supplies one.
+ */
 export function pluginsDir(): string {
   return path.join(warplineHome(), 'plugins')
 }

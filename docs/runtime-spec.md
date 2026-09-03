@@ -18,9 +18,22 @@ diataxis: reference
 
 ## 1. Manifest Fields
 
-Every plugin under `<home>/plugins/<name>/manifest.ts` exports a value
+Every plugin under `<plugin root>/<name>/manifest.ts` exports a value
 validated against `PluginManifestSchema`, imported from
 `warpline/schemas/plugin-manifest`.
+
+The plugin root is resolved by exactly one rule: `AdvanceOptions.pluginsDir`
+when the host supplies it, otherwise `<warplineHome()>/plugins`. It is a single
+root, not a search-path list — nothing falls back to a second location when a
+plugin is not found under the first.
+
+The plugin root and the home are independent. A supplied root may sit outside
+the home, inside it, or be exactly `<home>/plugins`; nothing requires the two to
+be disjoint. What does not move is everything the home derives: `state/`,
+`runs/`, `events.jsonl`, the session-approval grant, and `config/<plugin>.json`
+all stay under `warplineHome()` whatever plugin root an advance is given. A
+root that is absent, is not a directory, cannot be read, or is the empty string
+is refused before the advance writes anything.
 
 The table below is generated from that schema — `bun run docs:generate` in a
 clone refreshes it, and CI regenerates and fails on a stale diff, so it cannot
