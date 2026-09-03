@@ -1314,13 +1314,48 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
    */
   root_error?: { path: string; code: string }
 }> {
-  const { readdir } = await import('node:fs/promises')
+  const { readdir, stat } = await import('node:fs/promises')
   const plugins = new Map<string, PluginManifest>()
   const failures: LoadFailure[] = []
 
   let entries: string[]
   try {
-    entries = await readdir(pluginsDir)
+    // `withFileTypes` is load-bearing, not a tidy-up. A plugin is a DIRECTORY
+    // holding a manifest, so a plain `readdir` hands back stray files too and
+    // each one becomes an `<entry>/manifest.ts` import that can only fail.
+    // That was invisible while `runAdvance` discarded `failures`; it stopped
+    // being invisible the moment a load failure started setting
+    // `plugin_states` and flipping the run to `partial`. A `.DS_Store` — which
+    // appears in any plugin root a macOS operator has opened in Finder — would
+    // otherwise mean every advance reports `partial` forever and calls
+    // `onRunFailure` on every run.
+    //
+    // Non-directories are dropped, NOT reported as failures: a file in the
+    // root was never a plugin, so there is nothing to attribute a failure to.
+    // A directory that holds no manifest still fails loudly, because that IS a
+    // misconfiguration an operator can act on — a `Manifest.ts` misname or a
+    // half-finished scaffold. The distinction is the whole fix: filtering on
+    // "has a manifest" instead would silence both.
+    // A SYMLINK to a plugin directory is a directory for this purpose. Dirent
+    // reports the link itself, so `isDirectory()` is false for one and a bare
+    // `isDirectory()` filter would silently drop a plugin that loaded fine
+    // before — a developer symlinking a plugin under development into the root
+    // is the ordinary case. `stat` follows the link; a broken link or one
+    // pointing at a file throws or reports non-directory and is dropped with
+    // the other non-directories.
+    const dirents = await readdir(pluginsDir, { withFileTypes: true })
+    const named = await Promise.all(
+      dirents.map(async (d) => {
+        if (d.isDirectory()) return d.name
+        if (!d.isSymbolicLink()) return null
+        try {
+          return (await stat(join(pluginsDir, d.name))).isDirectory() ? d.name : null
+        } catch {
+          return null
+        }
+      }),
+    )
+    entries = named.filter((n): n is string => n !== null)
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? 'UNKNOWN'
     return { manifests: plugins, failures, root_error: { path: resolve(pluginsDir), code } }

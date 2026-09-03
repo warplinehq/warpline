@@ -14,7 +14,7 @@
  * never depends on module resolution from a temp directory.
  */
 import { describe, test, expect, beforeEach, afterEach, setSystemTime } from 'bun:test'
-import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -162,6 +162,40 @@ describe('loadPluginManifests — per-plugin load failures', () => {
 
     expect(Array.from(manifests.keys())).toEqual(['fx-good'])
     expect(failures.map((f) => f.plugin)).toEqual(['fx-empty'])
+  })
+
+  // The regression the Test 6 fix could have introduced and did, before this
+  // caught it: `Dirent.isDirectory()` is FALSE for a symlink to a directory,
+  // so filtering on it alone silently drops a symlinked plugin that loaded
+  // fine beforehand. Silently — no failure row, no warning. Symlinking a
+  // plugin under development into the root is an ordinary developer setup.
+  test('Test 8: a symlink to a plugin directory still loads', async () => {
+    await writeValidPlugin('fx-good')
+
+    const external = join(root, 'external', 'fx-linked')
+    await mkdir(external, { recursive: true })
+    await writeFile(
+      join(external, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify(makeManifest('fx-linked'))}`,
+    )
+    await symlink(external, join(pluginsDir, 'fx-linked'))
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(Array.from(manifests.keys()).sort()).toEqual(['fx-good', 'fx-linked'])
+    expect(failures).toEqual([])
+  })
+
+  // A dangling symlink resolves to nothing. It is dropped with the other
+  // non-directories rather than reported: there is no plugin there to fail.
+  test('Test 9: a broken symlink is dropped, not reported as a failed plugin', async () => {
+    await writeValidPlugin('fx-good')
+    await symlink(join(root, 'nowhere'), join(pluginsDir, 'fx-dangling'))
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(Array.from(manifests.keys())).toEqual(['fx-good'])
+    expect(failures).toEqual([])
   })
 })
 
