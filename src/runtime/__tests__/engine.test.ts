@@ -493,6 +493,127 @@ export async function handler(manifest, args) {
 
     expect(result.run_log_path).toBeDefined()
   })
+
+  // -------------------------------------------------------------------
+  // What a root that loaded no manifests reports
+  // -------------------------------------------------------------------
+  //
+  // A readable plugin root that yields nothing loadable is a distinct
+  // outcome, not a success. These cases pin the exact value, never merely a
+  // non-complete one: the overall-status block promotes a complete run to
+  // partial when any plugin is recorded failed, so the only reason an
+  // all-fail root reports failed is that the failed value is set BEFORE that
+  // block runs. A loose assertion is satisfied by partial, and reordering
+  // those two statements would then stay green while the reported outcome
+  // quietly changed.
+
+  /** A manifest that throws on import — unterminated object literal. */
+  async function createBrokenPlugin(name: string) {
+    const dir = join(pluginsDir, name)
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'manifest.ts'), `export const manifest = { name: '${name}',`)
+  }
+
+  /**
+   * A quiet-hours window that certainly contains the moment the test runs,
+   * built from the clock rather than from a fixed pair. A hard-coded window
+   * would make the case green or red depending on the hour it ran, which is
+   * the reason each of these two tests names its arm.
+   */
+  function windowAroundNow(): { start: string; end: string } {
+    const pad = (n: number) => String(n).padStart(2, '0')
+    const fmt = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    const now = Date.now()
+    return { start: fmt(new Date(now - 60_000)), end: fmt(new Date(now + 60 * 60_000)) }
+  }
+
+  test('an empty plugin root reports a failed run — quiet-hours arm bypassed, force: true', async () => {
+    const { runAdvance } = await import('../engine.js')
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: join(stateDir, 'engine-state.json'),
+      runsDir,
+      eventsPath,
+      force: true,
+    })
+
+    expect(result.status).toBe('failed')
+  })
+
+  test('an empty plugin root reports a failed run — quiet-hours arm active, through the early return', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const quiet = await createTestHome({ preferences: { review_gate: false, quiet_hours: windowAroundNow() } })
+    const reasons: string[] = []
+
+    try {
+      const result = await runAdvance({
+        pluginsDir: quiet.pluginsDir,
+        stateDir: join(quiet.stateDir, 'engine-state.json'),
+        runsDir: quiet.runsDir,
+        eventsPath: join(quiet.runsDir, 'events.jsonl'),
+        onRunFailure: (reason: string) => reasons.push(reason),
+      })
+
+      expect(result.status).toBe('failed')
+      expect(reasons).toHaveLength(1)
+      expect(reasons[0]).toContain(quiet.pluginsDir)
+    } finally {
+      await quiet.cleanup()
+    }
+  })
+
+  test('a plugin root whose manifests all fail to import reports failed, on the result and on the persisted run log', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await createBrokenPlugin('broken-a')
+    await createBrokenPlugin('broken-b')
+    await createBrokenPlugin('broken-c')
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: join(stateDir, 'engine-state.json'),
+      runsDir,
+      eventsPath,
+      force: true,
+    })
+
+    expect(result.status).toBe('failed')
+
+    // Read the verdict out of the artifact, not out of the in-process result:
+    // a run-log write that disagreed with the returned value is exactly the
+    // false assurance this reads back to catch.
+    const persisted = JSON.parse(await readFile(result.run_log_path, 'utf-8'))
+    expect(persisted.status).toBe('failed')
+    expect(persisted.plugin_entries.filter((e: { status: string }) => e.status === 'failed').length).toBeGreaterThan(0)
+  })
+
+  test('a mixed plugin root — some manifests load, some do not — reports partial', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await createTestPlugin('mixed-ok-a')
+    await createTestPlugin('mixed-ok-b')
+    await createBrokenPlugin('mixed-broken')
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: join(stateDir, 'engine-state.json'),
+      runsDir,
+      eventsPath,
+      force: true,
+    })
+
+    // No acceptance criterion requires this case. It is here because the
+    // per-plugin state map is seeded from the manifests that LOADED, and the
+    // overall-status computation reads that map — so a row on the entries
+    // list cannot reach it on its own, and a root where some manifests fail
+    // while the rest run clean would report a complete run over a log
+    // carrying failure rows. Partial is what a mixed root must report once
+    // it can, and it is deterministic: manifests loaded, so the
+    // zero-manifest rule does not fire, and the promotion runs only from
+    // complete. Asserted exactly rather than as "not complete", because the
+    // loose form is also satisfied by interrupted — a different defect that
+    // would pass here silently.
+    expect(result.status).toBe('partial')
+  })
 })
 
 // -----------------------------------------------------------------------
