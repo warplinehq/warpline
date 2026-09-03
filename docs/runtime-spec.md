@@ -408,7 +408,8 @@ sibling — the transcript file belongs to the direct-invocation path.
   "status": "complete | partial | failed | interrupted",
   "resumed_from": null,
   "summary": "Engine run <run-id>: 3 plugins processed",
-  "plugin_entries": []
+  "plugin_entries": [],
+  "manifests_loaded": 3
 }
 ```
 
@@ -434,6 +435,17 @@ one. **A host that wants run telemetry derives it from the per-plugin entries.**
 The runtime does not compute aggregates, does not store them, and does not
 define what an aggregate should mean for a host whose plugins it has never
 seen — the same "derive, don't store" rule the rest of this runtime follows.
+
+`manifests_loaded` sits beside it without contradicting that rule, because it
+is not derived from anything. It is how many plugin manifests the loader found
+for this run — an input to the advance, not a value computed from its outcome.
+It is also not derivable from `plugin_entries`: a run that stops at a gate
+never reaches the later levels, so it holds entries for fewer plugins than it
+loaded, and reading the entry count as the manifest count would under-report on
+the ordinary gated path. The field is optional, never defaulted, so a run log
+written before it existed reads back as absent rather than as a run that loaded
+nothing — and zero, which is the signature of the empty root, keeps meaning
+exactly that.
 
 Before 0.2 this document also declared six fields nothing here ever wrote and no
 document ever described: an optional aggregate metrics object, a per-mode array

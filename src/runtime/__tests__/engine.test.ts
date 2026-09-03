@@ -310,6 +310,11 @@ export async function handler(manifest, args) {
     const states = Array.from(result.plugin_states.values())
     const completed = states.filter(s => s === 'completed')
     expect(completed).toHaveLength(2)
+
+    // Read the count off the artifact, never the in-process value: what a
+    // host can act on is what was persisted.
+    const persisted = JSON.parse(await readFile(result.run_log_path, 'utf-8'))
+    expect(persisted.manifests_loaded).toBe(2)
   })
 
   test('Test 13: runAdvance skips plugins where isPluginFresh returns true', async () => {
@@ -539,6 +544,12 @@ export async function handler(manifest, args) {
     })
 
     expect(result.status).toBe('failed')
+
+    // Zero, read back from the file. This is the value the whole distinction
+    // turns on: absent means the artifact predates the field, zero means the
+    // root was genuinely empty.
+    const persisted = JSON.parse(await readFile(result.run_log_path, 'utf-8'))
+    expect(persisted.manifests_loaded).toBe(0)
   })
 
   test('an empty plugin root reports a failed run — quiet-hours arm active, through the early return', async () => {

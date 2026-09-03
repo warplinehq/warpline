@@ -56,6 +56,24 @@ export const RunLogSchema = z.object({
   summary: z.string(),
   /** Per-plugin execution log entries, written by the engine loop. */
   plugin_entries: z.array(PluginLogEntrySchema).default([]),
+  /**
+   * How many plugin manifests the loader found for this run.
+   *
+   * Optional deliberately — neither defaulted nor required. Zero is the
+   * failure mode's own signature, the exact value that means the run loaded
+   * nothing and reported success, so a default of zero would make every
+   * artifact written before this field read back as that failure rather than
+   * as a document that predates the question. Required was refused for the
+   * mirror reason: it is permanent published contract, and it would break a
+   * host reading its own history over artifacts that are not at fault.
+   * Optional keeps "this predates the field" and "the root was genuinely
+   * empty" tellable apart forever.
+   *
+   * Not derivable from `plugin_entries`. A run that stops at a gate never
+   * reaches the later levels, so it holds entries for fewer plugins than it
+   * loaded.
+   */
+  manifests_loaded: z.number().int().optional(),
 })
 
 export type RunLog = z.infer<typeof RunLogSchema>

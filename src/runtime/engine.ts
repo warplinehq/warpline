@@ -1201,6 +1201,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     resumed_from: null,
     summary: `Engine run ${run_id}: ${plugin_entries.length} plugins processed`,
     plugin_entries,
+    // What the loader FOUND, not what the loop got through. The level loop
+    // breaks when a level gates, so later levels' plugins load and never push
+    // an entry — deriving this from `plugin_entries.length` would under-report
+    // on this runtime's ordinary path.
+    manifests_loaded: plugins.size,
   }
 
   await mkdir(runsDir, { recursive: true })

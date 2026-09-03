@@ -202,7 +202,20 @@ if (reachable.length) {
   console.error('warpline/schemas/run-log still reaches filesystem helpers: ' + reachable.join(', '))
   process.exit(1)
 }
+// The mirror of the absence list above. That one catches a removed field that
+// came back; this one catches a field this runtime writes and this document
+// describes that never reached the published shape — a schema edit left in the
+// working tree ships as a silently absent field, and every reader of the
+// artifact sees undefined where it should see a count.
+const REQUIRED = ['manifests_loaded']
+const missingRequired = REQUIRED.filter((f) => !(f in shape))
+if (missingRequired.length) {
+  console.error('warpline/schemas/run-log does not ship required fields: ' + missingRequired.join(', '))
+  process.exit(1)
+}
+
 console.log('   warpline/schemas/run-log: ' + Object.keys(shape).length + ' fields, no removed name, no helper')
+console.log('   warpline/schemas/run-log: required field present: ' + REQUIRED.join(', '))
 
 // `warpline/schemas/engine-state` ships shapes and nothing else from 0.3.0.
 // Five persistence exports left it, because `./schemas/*` is a wildcard export
