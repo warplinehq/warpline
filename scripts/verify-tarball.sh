@@ -370,6 +370,44 @@ if (!emptyRefused.message.includes('plugin root is an empty string')) {
   process.exit(1)
 }
 console.log('   plugin-root refusal: empty root is refused, not resolved to the working directory')
+
+// A stray file in the plugin root is not a plugin. This is behaviour, not
+// shape: a 0.3.4 that ships the spec paragraph and none of the loader change
+// passes every other check in this file and fails here. Probed through
+// `loadPluginManifests` rather than a full advance because the assertion is
+// about what the loader treats as a candidate, and a full advance would need a
+// writable home to say it.
+{
+  const { loadPluginManifests } = await import('warpline/unstable-runtime')
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+
+  const probeRoot = mkdtempSync(join(tmpdir(), 'warpline-strayfile-'))
+  mkdirSync(join(probeRoot, 'fx-ok'), { recursive: true })
+  writeFileSync(
+    join(probeRoot, 'fx-ok', 'manifest.ts'),
+    "export const manifest = { name: 'fx-ok', version: '1.0.0', description: 'probe', " +
+      "inputs: {}, outputs: {}, capabilities: [], schedule: 'on_run', " +
+      "autonomy_level: 'autonomous', side_effects: [], ttl_hours: 24, dependencies: [], " +
+      'timeout_ms: 5000, max_parallelism: 1 }',
+  )
+  writeFileSync(join(probeRoot, '.DS_Store'), '')
+
+  const { manifests, failures } = await loadPluginManifests(probeRoot)
+  if (failures.length !== 0) {
+    console.error(
+      'a stray file in the plugin root was reported as a failed plugin: ' +
+        failures.map((f) => f.plugin).join(', '),
+    )
+    process.exit(1)
+  }
+  if (!manifests.has('fx-ok')) {
+    console.error('the real plugin beside the stray file did not load')
+    process.exit(1)
+  }
+  console.log('   plugin root: a stray file is not a plugin and is not a failure')
+}
 SPECIFIERS
 
 ( cd "$CONSUMER" && node specifiers.mjs ) || fail "published specifiers did not resolve under node"
