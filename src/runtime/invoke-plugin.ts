@@ -30,7 +30,7 @@ import { pluginsDir, pluginConfigPath } from '../lib/paths.js'
 import { loadPluginConfig, PluginConfigError } from '../lib/plugin-config.js'
 import { resolvePluginArgs } from '../schemas/plugin-config.js'
 import { SkillResultSchema, makeSkillError } from '../schemas/skill-result.js'
-import type { SkillResult } from '../schemas/skill-result.js'
+import type { SkillResult, SkillResultInput } from '../schemas/skill-result.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { emitAttemptFailed } from '../board/engine-events.js'
 import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
@@ -95,12 +95,19 @@ export interface PluginInvocationResult {
  * Plugin handler signature.
  * Handlers SHOULD forward it to abortable IO (fetch / child_process); handlers that
  * ignore it still run to natural completion or manifest.timeout_ms.
+ *
+ * The return is `SkillResultInput`, the schema's INPUT type, not `SkillResult`.
+ * A handler writes a result; it does not read one back. Typing it against the
+ * output type made the bare-string `artifacts_produced` arm — which the schema
+ * documents as valid until 1.0 — unreachable through the only path a plugin
+ * has. The widening is additive: everything assignable to `SkillResult` is
+ * still assignable here, and the parse boundary below is unmoved.
  */
 export type HandlerFn = (
   manifest: PluginManifest,
   args: Record<string, unknown>,
   signal: AbortSignal,
-) => Promise<SkillResult>
+) => Promise<SkillResultInput>
 
 /**
  * Options accepted by invokePlugin. Exported so Plan 03 can wire its API route
@@ -369,7 +376,7 @@ export async function invokePlugin(
       else attemptCtl.signal.addEventListener('abort', onAbort, { once: true })
     })
 
-    let rawResult: SkillResult
+    let rawResult: SkillResultInput
     try {
       rawResult = await Promise.race([
         executeHandler(pluginName, handlerFn, manifest, resolvedArgs, attemptCtl.signal),
@@ -590,7 +597,7 @@ async function executeHandler(
   manifest: PluginManifest,
   args: Record<string, unknown>,
   signal: AbortSignal,
-): Promise<SkillResult> {
+): Promise<SkillResultInput> {
   try {
     return await handlerFn(manifest, args, signal)
   } catch (err) {

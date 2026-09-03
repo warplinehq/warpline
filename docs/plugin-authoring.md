@@ -84,7 +84,11 @@ export async function handler(
 ```
 
 Typing that function is optional, and `import type { HandlerFn } from 'warpline'`
-is how you do it if you want the compiler to check the signature for you.
+is how you do it if you want the compiler to check the signature for you. Its
+return type is `SkillResultInput` rather than the `SkillResult` above — the
+schema's input side, where defaulted fields are optional and a bare path string
+is allowed in `artifacts_produced`. Annotating with `SkillResult`, as this
+example does, still satisfies it.
 
 Rules the runtime holds you to:
 

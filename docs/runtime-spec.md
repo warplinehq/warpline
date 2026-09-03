@@ -264,8 +264,20 @@ export type HandlerFn = (
   manifest: PluginManifest,
   args: Record<string, unknown>,
   signal: AbortSignal,
-) => Promise<SkillResult>
+) => Promise<SkillResultInput>
 ```
+
+The return type is `SkillResultInput`, not `SkillResult`. A handler writes a
+result; it never reads one back. `SkillResult` is the schema's OUTPUT type —
+what a caller holds after `.parse()` — so a handler typed against it can only
+write the already-normalized shape, and the bare-string `artifacts_produced` arm
+that § Output records below documents as valid until 1.0 was unreachable through
+the only path a plugin has. `SkillResultInput` is the same schema's input side:
+defaulted fields optional, the string arm allowed. Both types come from
+`warpline/schemas/skill-result`.
+
+Everything assignable to `SkillResult` is assignable to `SkillResultInput`, so a
+handler already annotated with the output type keeps typechecking unchanged.
 
 Handlers with real I/O should forward `signal` to their I/O primitives:
 
@@ -425,6 +437,12 @@ afterwards, so the set is not extended casually.
 `SkillResult.artifacts_produced` is an array of Output records — a thing the
 plugin produced that an operator will read and take away. `SkillResult.schema_version`
 defaults to `2` to mark the change.
+
+A handler may also write a bare path string here. It normalizes at the parse
+boundary to `{ type: 'artifact', format: 'markdown', path: <the string> }`, so
+nothing downstream branches on which arm an entry arrived through. That arm is
+the pre-0.2 shape, it stays valid until 1.0, and it is reachable only because
+`HandlerFn` returns the schema's input type — see § 4.
 
 | Field | Type | Required | Notes |
 |---|---|---|---|

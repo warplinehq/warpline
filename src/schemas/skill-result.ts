@@ -169,4 +169,21 @@ export const SkillResultSchema = z.object({
 })
 
 export type SkillResult = z.infer<typeof SkillResultSchema>
+
+/**
+ * The result as a PRODUCER writes it, before the parse boundary runs.
+ *
+ * `SkillResult` above is `z.infer<>` — the schema's OUTPUT type, what a reader
+ * holds after `.parse()`. This is the input side of the same schema: defaulted
+ * fields are optional, and `artifacts_produced` still carries the bare-string
+ * arm documented above.
+ *
+ * The distinction is not decorative. A handler typed against the output type
+ * can never write a bare string, so the arm this schema promises until 1.0 is
+ * unreachable through the only path a plugin has. `HandlerFn` returns this type
+ * for that reason. Every value assignable to `SkillResult` is assignable here
+ * too — the widening is additive, and a handler already written against the
+ * output type keeps typechecking unchanged.
+ */
+export type SkillResultInput = z.input<typeof SkillResultSchema>
 export type SkillError = z.infer<typeof SkillErrorSchema>
