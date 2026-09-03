@@ -132,6 +132,37 @@ describe('loadPluginManifests — per-plugin load failures', () => {
     expect(root_error?.code).toBe('ENOENT')
     expect(root_error?.path).toContain('does-not-exist')
   })
+
+  // A plugin is a DIRECTORY holding a manifest. `readdir` without
+  // `withFileTypes` reported files too, so every stray file in the root became
+  // an `<entry>/manifest.ts` import that could only fail. That was invisible
+  // while `runAdvance` discarded `failures`; it stopped being invisible the
+  // moment load failures started flipping run status, and `.DS_Store` appears
+  // in any plugin root a macOS operator has opened in Finder.
+  test('Test 6: a stray file in the plugin root is not a plugin and is not a failure', async () => {
+    await writeValidPlugin('fx-good')
+    await writeFile(join(pluginsDir, '.DS_Store'), '')
+    await writeFile(join(pluginsDir, 'README.md'), '# not a plugin\n')
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(Array.from(manifests.keys())).toEqual(['fx-good'])
+    expect(failures).toEqual([])
+  })
+
+  // The complement, and the reason the fix skips non-directories rather than
+  // "entries without a manifest": a DIRECTORY that should carry a manifest and
+  // does not is a real misconfiguration (`Manifest.ts`, a half-finished
+  // scaffold) and must stay loud.
+  test('Test 7: a directory with no manifest is still reported as a failure', async () => {
+    await writeValidPlugin('fx-good')
+    await mkdir(join(pluginsDir, 'fx-empty'), { recursive: true })
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(Array.from(manifests.keys())).toEqual(['fx-good'])
+    expect(failures.map((f) => f.plugin)).toEqual(['fx-empty'])
+  })
 })
 
 // ---------------------------------------------------------------------------

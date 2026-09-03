@@ -574,6 +574,61 @@ export async function handler(manifest, args) {
     }
   })
 
+  // `docs/runtime-spec.md` § quiet hours: "The quiet-hours skip reports the
+  // same status a normal advance would for that root." The zero-manifest
+  // condition was hoisted above the early return so both arms agreed on it,
+  // but LOAD FAILURES were not — so a root with one broken manifest reported
+  // `partial` awake and `complete` asleep. Same root, same fixture, only the
+  // preference differing; the arm is named because the window is clock-built.
+  test('a root with a broken manifest reports the same status asleep as awake — quiet-hours arm active', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const quiet = await createTestHome({ preferences: { review_gate: false, quiet_hours: windowAroundNow() } })
+
+    try {
+      // A MIXED root: one manifest loads, one does not. Both are needed — a
+      // root holding only the broken one loads nothing at all and takes the
+      // zero-manifest arm instead, which is a different (already covered)
+      // case and would make this test green for the wrong reason.
+      const good = join(quiet.pluginsDir, 'fx-good')
+      await mkdir(good, { recursive: true })
+      await writeFile(
+        join(good, 'manifest.ts'),
+        `export const manifest = ${JSON.stringify({
+          name: 'fx-good',
+          version: '1.0.0',
+          description: 'fx-good fixture',
+          inputs: {},
+          outputs: {},
+          capabilities: [],
+          schedule: 'on_run',
+          autonomy_level: 'autonomous',
+          side_effects: [],
+          ttl_hours: 24,
+          dependencies: [],
+          timeout_ms: 5000,
+          max_parallelism: 1,
+        })}`,
+      )
+
+      const dir = join(quiet.pluginsDir, 'fx-bad')
+      await mkdir(dir, { recursive: true })
+      await writeFile(join(dir, 'manifest.ts'), `export const manifest = { name: 'fx-bad',`)
+
+      const result = await runAdvance({
+        pluginsDir: quiet.pluginsDir,
+        stateDir: join(quiet.stateDir, 'engine-state.json'),
+        runsDir: quiet.runsDir,
+        eventsPath: join(quiet.runsDir, 'events.jsonl'),
+      })
+
+      // Not 'complete': the root did not load what it holds, and a quiet hour
+      // is not a reason to stop saying so.
+      expect(result.status).toBe('partial')
+    } finally {
+      await quiet.cleanup()
+    }
+  })
+
   test('a plugin root whose manifests all fail to import reports failed, on the result and on the persisted run log', async () => {
     const { runAdvance } = await import('../engine.js')
     await createBrokenPlugin('broken-a')
