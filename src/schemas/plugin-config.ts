@@ -64,7 +64,26 @@ export type ResolvedArgs =
   | { ok: true; args: Record<string, unknown> }
   | { ok: false; problems: string[] }
 
-const TYPEOF_CHECKED = new Set(['string', 'number', 'boolean'])
+/**
+ * How a received value is checked against the name its input declared.
+ *
+ * A predicate per member rather than a `typeof` comparison, because two of the
+ * five cannot be told apart by `typeof`: it answers `'object'` for an array and
+ * for `null` alike, so a bare comparison would accept an array where an object
+ * was declared and reject one where an array was.
+ *
+ * A declared name with no entry here is not checked. That is the tolerance the
+ * enum's closure already covers — an unlisted name fails `.parse()` at import
+ * time — and it is what keeps this map from having to grow in lockstep with a
+ * schema it does not import.
+ */
+const TYPE_CHECKS: Record<string, (value: unknown) => boolean> = {
+  string: (v) => typeof v === 'string',
+  number: (v) => typeof v === 'number',
+  boolean: (v) => typeof v === 'boolean',
+  array: (v) => Array.isArray(v),
+  object: (v) => typeof v === 'object' && v !== null && !Array.isArray(v),
+}
 
 /**
  * Merge declared defaults, the config file and the caller's args into the
@@ -111,7 +130,8 @@ export function resolvePluginArgs(
       }
       continue
     }
-    if (input.type && TYPEOF_CHECKED.has(input.type) && typeof merged[key] !== input.type) {
+    const check = input.type ? TYPE_CHECKS[input.type] : undefined
+    if (check && !check(merged[key])) {
       problems.push(`input '${key}' must be a ${input.type}`)
     }
   }

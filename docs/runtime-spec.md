@@ -80,11 +80,14 @@ Each entry in `inputs` declares one parameter the plugin expects to receive as
 an argument at invoke time, and it is a declaration the runtime enforces rather
 than documentation nobody reads.
 
-`inputs[].type` is a closed set — `string`, `number` or `boolean`. A value
-outside it is a hard `.parse()` failure, not a fall back: manifests are parsed
-at import time, so a misspelled type name stops the plugin rather than letting
-it run unvalidated. `array` and `object` are deliberately absent because nothing
-declares them; the set can grow additively if something does.
+`inputs[].type` is a closed set — `string`, `number`, `boolean`, `array` or
+`object`. A value outside it is a hard `.parse()` failure, not a fall back:
+manifests are parsed at import time, so a misspelled type name stops the plugin
+rather than letting it run unvalidated.
+
+A declared name is checked against the value received, not merely accepted. The
+`array` and `object` checks are predicates rather than `typeof` comparisons,
+because `typeof` answers `object` for an array and for `null` alike.
 
 `inputs[].default` is optional and holds the value the input takes when nobody
 supplies one. It is the LOWEST of three precedence tiers, resolved inside
@@ -162,6 +165,12 @@ closed. It accepted any string before 0.2, so a manifest outside this repo
 declaring a name that is not in the set now fails at import time. That is a
 breaking change, permitted by the pre-1.0 promise above and taken deliberately:
 a type field nothing validates is a field that means nothing.
+
+The same set gained `array` and `object` in 0.3.2. That direction is additive —
+a manifest that validated before still validates — and it corrects a claim this
+document made rather than granting a new liberty: the two were left out on the
+stated premise that nothing declared them, and consumer manifests declare both.
+The set is still closed at five, and a sixth name is still a hard failure.
 
 Pin the version you tested against, and read the release notes for the version
 you move to. The release notes are the record of what changed between two

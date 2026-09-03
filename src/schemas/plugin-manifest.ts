@@ -88,10 +88,23 @@ export const PluginManifestSchema = z.object({
        * outside this repo declaring a name that is not here. That is
        * permitted by the pre-1.0 contract promise in § Contract stability of
        * `docs/runtime-spec.md`, and it is the accepted cost of the field
-       * meaning anything at all. `array` and `object` are not admitted
-       * because nothing declares them; adding a member later is additive.
+       * meaning anything at all.
+       *
+       * `array` and `object` were left out on the premise that nothing
+       * declares them. The premise was published and it was false — consumer
+       * manifests declare both — so a manifest outside this repo threw at
+       * import time on a set the document said was closed because its members
+       * were unused. They are admitted here, additively, which is what the
+       * comment they replace said adding a member later would be. `null` is
+       * not admitted, and neither is a free string: the set stays closed, and
+       * a sixth name is still a hard `.parse()` failure.
+       *
+       * A member of this set is CHECKED, not merely accepted:
+       * `resolvePluginArgs` in `plugin-config.ts` validates a received value
+       * against the declared name, and the two array/object predicates there
+       * are why `typeof [] === 'object'` does not quietly cross the two.
        */
-      type: z.enum(['string', 'number', 'boolean']),
+      type: z.enum(['string', 'number', 'boolean', 'array', 'object']),
       required: z.boolean().default(true),
       /**
        * The value this input takes when nobody supplies one.

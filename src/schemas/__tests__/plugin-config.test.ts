@@ -92,4 +92,35 @@ describe('resolvePluginArgs precedence', () => {
   test('the merged object carries no prototype', () => {
     expect(Object.getPrototypeOf(argsOf(resolvePluginArgs({}, {}, {})))).toBeNull()
   })
+
+  /**
+   * `array` and `object` are checked, not merely admitted.
+   *
+   * `typeof [] === 'object'`, so a bare `typeof` comparison would pass an array
+   * for a declared object and reject an array for a declared array. Admitting
+   * the two names to the manifest enum without these two predicates would hand
+   * back the thing narrowing the enum was for: a type field nothing validates.
+   */
+  test('a declared array rejects a non-array and accepts an array', () => {
+    const bad = resolvePluginArgs({ rows: { type: 'array' } }, {}, { rows: 'one,two' })
+    expect(bad.ok).toBe(false)
+    if (bad.ok) throw new Error('unreachable')
+    expect(bad.problems[0]).toContain('array')
+    expect(bad.problems[0]).not.toContain('one,two')
+
+    expect(argsOf(resolvePluginArgs({ rows: { type: 'array' } }, {}, { rows: [1, 2] }))['rows'])
+      .toEqual([1, 2])
+  })
+
+  test('a declared object rejects an array and rejects null', () => {
+    for (const value of [[1, 2], null]) {
+      const result = resolvePluginArgs({ payload: { type: 'object' } }, {}, { payload: value })
+      expect(result.ok).toBe(false)
+    }
+    expect(
+      argsOf(resolvePluginArgs({ payload: { type: 'object' } }, {}, { payload: { a: 1 } }))[
+        'payload'
+      ],
+    ).toEqual({ a: 1 })
+  })
 })

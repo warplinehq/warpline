@@ -208,4 +208,36 @@ describe('inputs.type and inputs.default', () => {
     expect(parsed.inputs['site_url']?.default).toBeUndefined()
     expect(parsed.inputs['site_url']?.required).toBe(true)
   })
+
+  /**
+   * `array` and `object` are members.
+   *
+   * They were left out on the stated premise that nothing declares them. The
+   * premise was published and it was false: a consumer's manifest declaring a
+   * list-valued input hits `PluginManifestSchema.parse()` at import time, which
+   * is a runtime throw no compiler sees, and it fails on a set the document
+   * claims is closed because the members are unused.
+   *
+   * These two cases are what makes that a check rather than a claim.
+   */
+  test("declaring 'array' parses", () => {
+    const parsed = PluginManifestSchema.parse(withInputs({ rows: { type: 'array' } }))
+    expect(parsed.inputs['rows']?.type).toBe('array')
+  })
+
+  test("declaring 'object' parses", () => {
+    const parsed = PluginManifestSchema.parse(withInputs({ payload: { type: 'object' } }))
+    expect(parsed.inputs['payload']?.type).toBe('object')
+  })
+
+  test('the set stays closed — a sixth name is still a hard parse failure', () => {
+    let threw = false
+    try {
+      PluginManifestSchema.parse(withInputs({ rows: { type: 'list' } }))
+    } catch (e) {
+      threw = true
+      expect((e as z.ZodError).issues[0]?.path).toEqual(['inputs', 'rows', 'type'])
+    }
+    expect(threw).toBe(true)
+  })
 })
