@@ -295,6 +295,42 @@ if (neverReachable.length) {
   console.error('warpline/unstable-runtime reaches never-published names: ' + neverReachable.join(', '))
   process.exit(1)
 }
+
+// Every other check in this file is a shape assertion: a name is exported, a
+// specifier resolves, a set matches. An artifact that shipped the documentation
+// for the plugin-root refusal and none of the behaviour would pass all of them.
+// So this one calls the thing and reads what comes back.
+//
+// The rejection precedes every write in `runAdvance`, so there is no home to
+// set up here and nothing to clean up afterwards. That is itself part of what
+// is being proven.
+//
+// The message is checked for BOTH the path and the errno, not merely for a
+// rejection: a `TypeError` out of a botched build rejects too, and a bare
+// rejection check would call that a pass.
+const { join } = await import('node:path')
+const { tmpdir } = await import('node:os')
+
+const absentRoot = join(tmpdir(), 'warpline-verify-tarball-absent-plugin-root-' + Date.now())
+let refused = null
+try {
+  await runAdvance({ pluginsDir: absentRoot })
+} catch (err) {
+  refused = err
+}
+if (refused === null) {
+  console.error('runAdvance resolved for an absent plugin root: ' + absentRoot)
+  process.exit(1)
+}
+if (!(refused instanceof Error)) {
+  console.error('runAdvance rejected with a non-Error for an absent plugin root')
+  process.exit(1)
+}
+if (!refused.message.includes(absentRoot) || !refused.message.includes('ENOENT')) {
+  console.error('refusal names neither the path nor the errno: ' + refused.message)
+  process.exit(1)
+}
+console.log('   plugin-root refusal: absent root rejects naming the path and ENOENT')
 SPECIFIERS
 
 ( cd "$CONSUMER" && node specifiers.mjs ) || fail "published specifiers did not resolve under node"

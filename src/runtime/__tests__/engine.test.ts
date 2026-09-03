@@ -1,10 +1,12 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { topoSort } from '../engine.js'
 import { grantApproval } from '../approval-gate.js'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
-import { _setHome } from '../../lib/paths.js'
+import { snapshotHome } from './helpers/snapshot-home.js'
+import { _setHome, lockPath } from '../../lib/paths.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 // -----------------------------------------------------------------------
@@ -482,6 +484,73 @@ export async function handler(manifest, args) {
     })
 
     expect(result.run_log_path).toBeDefined()
+  })
+})
+
+// -----------------------------------------------------------------------
+// runAdvance — the plugin root it cannot read
+// -----------------------------------------------------------------------
+//
+// An advance against a home with no plugins directory used to be
+// indistinguishable from a clean advance over no plugins: exit 0, an empty
+// plugin list, nothing to look at. It now refuses, and it refuses ABOVE every
+// write, so the operator gets an error naming what and where instead of a run
+// record that says nothing happened.
+
+describe('runAdvance refuses a plugin root it cannot read', () => {
+  let ctx: TestHome
+
+  beforeEach(async () => {
+    ctx = await createTestHome()
+    _setHome(ctx.root)
+  })
+
+  afterEach(async () => {
+    _setHome(null)
+    await ctx.cleanup()
+  })
+
+  test('an absent plugin root rejects with the resolved path and the errno', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const absent = join(ctx.root, 'no-such-plugin-root')
+
+    await expect(
+      runAdvance({
+        pluginsDir: absent,
+        stateDir: join(ctx.stateDir, 'engine-state.json'),
+        runsDir: ctx.runsDir,
+        eventsPath: join(ctx.runsDir, 'events.jsonl'),
+      }),
+    ).rejects.toThrow(new RegExp(`cannot read plugin root ${absent}: ENOENT`))
+  })
+
+  test('a refused advance leaves the whole home byte-identical', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const absent = join(ctx.root, 'no-such-plugin-root')
+    const eventsPath = join(ctx.runsDir, 'events.jsonl')
+
+    const before = await snapshotHome(ctx.root)
+    await expect(
+      runAdvance({
+        pluginsDir: absent,
+        stateDir: join(ctx.stateDir, 'engine-state.json'),
+        runsDir: ctx.runsDir,
+        eventsPath,
+      }),
+    ).rejects.toThrow(/ENOENT/)
+    const after = await snapshotHome(ctx.root)
+
+    expect(after).toEqual(before)
+
+    // The snapshot already covers these three, but it fails as one line diff.
+    // Named individually so a regression says WHICH write escaped the guard.
+    expect(await readdir(ctx.runsDir)).toEqual([])
+    expect(existsSync(eventsPath)).toBe(false)
+    // `runAdvance` acquires no lock today, so this clause passes vacuously. It
+    // is here to pin the ordering for whoever adds one, and must NOT be read as
+    // evidence that the guard sits in the right place — the guard sitting above
+    // every write is what evidences that.
+    expect(existsSync(lockPath())).toBe(false)
   })
 })
 

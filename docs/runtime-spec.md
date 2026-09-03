@@ -573,15 +573,24 @@ describe('my route', () => {
 ```
 
 `loadPluginManifests(pluginsDir)` resolves to
-`{ manifests: Map<string, PluginManifest>, failures: LoadFailure[] }`. A plugin
+`{ manifests: Map<string, PluginManifest>, failures: LoadFailure[], root_error?: { path, code } }`.
+A plugin
 directory whose `manifest.ts` cannot be imported is absent from `manifests` and
 present in `failures` as `{ plugin, error }`, where `plugin` is the directory
 name (a broken manifest has no trustworthy `name` field) and `error` is the
 thrown `Error.message` — no stack trace. A directory whose name is a member of
 `Object.prototype` fails the same way, without being imported at all. `failures` is sorted by `plugin` inside
 the loader, so alphabetical ordering is a property of the data rather than of
-whichever surface renders it, and it is always an array: an all-valid directory
-and a missing directory both yield `[]`. A mock that returns a bare `Map` no
+whichever surface renders it, and it stays an array in every case.
+
+A plugin root that is missing, is not a directory, or cannot be read is a
+different thing from a per-plugin failure: there is no plugin to attribute it
+to. It is reported on the return as `root_error`, carrying the resolved `path`
+and the errno `code`, and `manifests` and `failures` are both empty. The loader
+still never throws. `runAdvance` turns `root_error` into a rejection, before
+any write; `warpline plan` renders the result without failing, because a
+preview of a home that has no plugins directory is a legitimate question with a
+legitimate answer. A mock that returns a bare `Map` no
 longer satisfies the signature.
 
 Fixture plugins live under `test-utils/fixture-plugins/` in a clone:

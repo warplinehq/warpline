@@ -16,7 +16,7 @@
  */
 import { mkdir } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createHash, randomUUID } from 'node:crypto'
 import { checkApproval } from './approval-gate.js'
@@ -557,6 +557,19 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   const headless = profile !== undefined
   const allowedSchedules = profile ? PROFILE_ALLOWED_SCHEDULES[profile] : undefined
 
+  // Load the plugin manifests FIRST, and refuse a root that cannot be read
+  // before anything below writes. State, the run log, the event log and the
+  // lock all come after this point, so a refused advance leaves the home
+  // byte-identical — there is no half-run to explain and nothing to clean up.
+  const { manifests: plugins, root_error } = await loadPluginManifests(pluginsDir)
+  if (root_error) {
+    throw new Error(
+      `warpline: cannot read plugin root ${root_error.path}: ${root_error.code}\n` +
+        `      Fix:   pass an existing directory as the plugin root, or create\n` +
+        `             the default one at ${getDefaultPluginsDir()}`,
+    )
+  }
+
   // 1. Generate run_id
   const run_id = `${new Date().toISOString().replace(/[:.]/g, '')}-${randomUUID().slice(0, 8)}`
   const started_at = new Date().toISOString()
@@ -622,12 +635,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // 3b. Emit run_started event
   await emitRunStarted(run_id, eventsPath)
 
-  // 4. Load all plugin manifests from pluginsDir. The loader also returns
-  // per-plugin `failures`; a run does not surface them yet, so only
-  // `manifests` is taken here and run behaviour is unchanged.
-  const { manifests: plugins } = await loadPluginManifests(pluginsDir)
-
-  // 5. Topological sort
+  // 5. Topological sort over the manifests loaded at the top of this function.
+  //    (Step 4 was the load; it now happens above every write.)
   const levels = topoSort(plugins)
 
   // 6. Per-plugin FSM state
@@ -1183,6 +1192,18 @@ export function explainLoadFailure(message: string, pluginsDir: string): string 
 export async function loadPluginManifests(pluginsDir: string): Promise<{
   manifests: Map<string, PluginManifest>
   failures: LoadFailure[]
+  /**
+   * Set when the plugin root itself could not be listed — absent, not a
+   * directory, or unreadable. Distinct from `failures`, which is per-plugin: a
+   * root that cannot be read has no plugins to attribute a failure to, and an
+   * empty map is otherwise indistinguishable from a root with nothing in it.
+   *
+   * Reported rather than thrown. `warpline plan` renders the loader's result
+   * without failing, and a preview that started throwing on a home with no
+   * plugins directory would be a worse answer than the one it gives today.
+   * `runAdvance` applies the stricter policy and rejects.
+   */
+  root_error?: { path: string; code: string }
 }> {
   const { readdir } = await import('node:fs/promises')
   const plugins = new Map<string, PluginManifest>()
@@ -1191,8 +1212,9 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
   let entries: string[]
   try {
     entries = await readdir(pluginsDir)
-  } catch {
-    return { manifests: plugins, failures } // empty if dir doesn't exist
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? 'UNKNOWN'
+    return { manifests: plugins, failures, root_error: { path: resolve(pluginsDir), code } }
   }
 
   await Promise.all(

@@ -125,10 +125,10 @@ describe('loadPluginManifests — per-plugin load failures', () => {
 
   test('Test 5: a missing plugins directory is reported on the return rather than being indistinguishable from an empty one', async () => {
     const missing = join(root, 'does-not-exist')
-    const result = await loadPluginManifests(missing)
-    const { root_error } = result as unknown as { root_error?: { path: string; code: string } }
+    const { manifests, failures, root_error } = await loadPluginManifests(missing)
 
-    expect(result.manifests.size).toBe(0)
+    expect(manifests.size).toBe(0)
+    expect(failures).toEqual([])
     expect(root_error?.code).toBe('ENOENT')
     expect(root_error?.path).toContain('does-not-exist')
   })
