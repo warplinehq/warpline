@@ -8,9 +8,8 @@
  * `warpline/schemas/*` resolution path entirely.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, readdir, rm, stat, writeFile, readFile } from 'node:fs/promises'
+import { mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { _setHome, sessionApprovalPath } from '../../lib/paths.js'
@@ -18,6 +17,7 @@ import { checkApproval, mergeGrant, MAX_GRANT_WINDOW_MS } from '../../runtime/ap
 import { invokePlugin } from '../../runtime/invoke-plugin.js'
 import { applyPendingGate, denialFingerprint, findPendingGate, GATE_MAX_AGE_MS } from '../../runtime/engine.js'
 import { readEngineState } from '../../runtime/engine-state-store.js'
+import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 let root: string
@@ -264,33 +264,6 @@ describe('warpline approve — parked gates', () => {
   let statePath: string
   let eventsPath: string
   let marker: string
-
-  /**
-   * Every file under `dir`, recursively, as `path|bytes|sha256|mtimeMs`.
-   *
-   * Copied from `plan-prohibition.test.ts` rather than exported from it: that
-   * file's walker is deliberately local, and a shared one invites an exclusion
-   * list, which is the moment a prohibition test stops proving anything.
-   */
-  async function snapshotHome(dir: string): Promise<string[]> {
-    const out: string[] = []
-    async function walk(current: string, prefix: string): Promise<void> {
-      for (const entry of await readdir(current, { withFileTypes: true })) {
-        const child = join(current, entry.name)
-        const rel = prefix ? `${prefix}/${entry.name}` : entry.name
-        if (entry.isDirectory()) {
-          await walk(child, rel)
-          continue
-        }
-        const [bytes, info] = await Promise.all([readFile(child), stat(child)])
-        out.push(
-          `${rel}|${bytes.byteLength}|${createHash('sha256').update(bytes).digest('hex')}|${info.mtimeMs}`,
-        )
-      }
-    }
-    await walk(dir, '')
-    return out.sort()
-  }
 
   /** A supervised plugin whose handler records, on disk, that it ran. */
   async function writeGatedPlugin(

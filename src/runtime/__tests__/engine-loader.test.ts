@@ -7,7 +7,8 @@
  * so a broken plugin vanished from the due-set with nothing to show for it.
  * It now returns `{ manifests, failures }` with `failures` sorted by directory
  * name inside the loader, so ordering is a property of the data rather than of
- * whichever surface renders it.
+ * whichever surface renders it. A root that cannot be read at all is a third
+ * thing again — not a per-plugin failure — and is reported as `root_error`.
  *
  * Fixtures use the zero-import `export const manifest = {…}` form so a fixture
  * never depends on module resolution from a temp directory.
@@ -122,11 +123,14 @@ describe('loadPluginManifests — per-plugin load failures', () => {
     expect(failures).toEqual([])
   })
 
-  test('Test 5: a missing plugins directory returns empty manifests and empty failures without throwing', async () => {
-    const { manifests, failures } = await loadPluginManifests(join(root, 'does-not-exist'))
+  test('Test 5: a missing plugins directory is reported on the return rather than being indistinguishable from an empty one', async () => {
+    const missing = join(root, 'does-not-exist')
+    const result = await loadPluginManifests(missing)
+    const { root_error } = result as unknown as { root_error?: { path: string; code: string } }
 
-    expect(manifests.size).toBe(0)
-    expect(failures).toEqual([])
+    expect(result.manifests.size).toBe(0)
+    expect(root_error?.code).toBe('ENOENT')
+    expect(root_error?.path).toContain('does-not-exist')
   })
 })
 

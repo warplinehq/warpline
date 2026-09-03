@@ -35,13 +35,16 @@
  * 02-09 lints; that is another reason it is quarantined in its own directory.
  */
 import { describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test'
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createTestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
+// The whole-home walk is shared: this file, `approve.test.ts` and the engine's
+// refusal cases all assert against the same bytes, with the same absence of an
+// exclusion list.
+import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { _setHome } from '../../lib/paths.js'
 import { _getPaths, _setPaths } from '../../board/state-manager.js'
 import { invokePlugin } from '../../runtime/invoke-plugin.js'
@@ -60,38 +63,6 @@ async function capture(fn: () => Promise<number>): Promise<number> {
     process.stdout.write = realOut
     process.stderr.write = realErr
   }
-}
-
-// ── The snapshot ──
-
-/**
- * Every file under `dir`, recursively, as `path|bytes|sha256|mtimeMs`.
- *
- * Deliberately a full recursive walk with NO exclusion list: the moment a path
- * is named as "expected to change", the test stops proving the prohibition and
- * starts documenting an exception. Returned sorted so a mismatch reads as a
- * line diff naming the offending file rather than "Set(9) !== Set(10)".
- */
-async function snapshotHome(dir: string): Promise<string[]> {
-  const out: string[] = []
-
-  async function walk(current: string, prefix: string): Promise<void> {
-    for (const entry of await readdir(current, { withFileTypes: true })) {
-      const child = join(current, entry.name)
-      const rel = prefix ? `${prefix}/${entry.name}` : entry.name
-      if (entry.isDirectory()) {
-        await walk(child, rel)
-        continue
-      }
-      const [bytes, info] = await Promise.all([readFile(child), stat(child)])
-      out.push(
-        `${rel}|${bytes.byteLength}|${createHash('sha256').update(bytes).digest('hex')}|${info.mtimeMs}`,
-      )
-    }
-  }
-
-  await walk(dir, '')
-  return out.sort()
 }
 
 // ── Fixtures ──
