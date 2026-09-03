@@ -144,16 +144,27 @@ export interface AdvanceOptions {
   /** Called after each plugin resolves with final FSM state and elapsed_ms (for streaming CLI output) */
   onPluginEnd?: (plugin: string, status: string, elapsed: number, reason?: string) => void
   /**
-   * Called exactly once with a human-readable reason when the overall
-   * run status is non-complete (i.e. 'partial' or 'interrupted'). Fires after
-   * state persistence and run-log write, before runAdvance returns.
+   * Called exactly once with a human-readable reason whenever the overall run
+   * status is non-complete — any of 'partial', 'failed' or 'interrupted'. On
+   * the normal path it fires after state persistence and the run-log write,
+   * before runAdvance returns. The quiet-hours skip writes neither, so a
+   * cycle refused there for loading no manifests fires the hook from that arm
+   * instead: the contract holds on both paths, with no exception to remember.
    */
   onRunFailure?: (reason: string) => void
 }
 
 export interface AdvanceResult {
   run_id: string
-  status: 'complete' | 'partial' | 'interrupted'
+  /**
+   * `failed` is produced when the run loaded no plugin manifests at all — a
+   * readable root holding nothing importable, or one whose every manifest
+   * threw. Distinct from `partial`, which means some plugins ran and others
+   * did not. Widening this union changed no published shape: the run log's
+   * own status enum has admitted all four values since 0.1.0, and the engine
+   * had simply never produced this one.
+   */
+  status: 'complete' | 'partial' | 'failed' | 'interrupted'
   plugin_states: Map<string, PluginFsmState | 'skipped'>
   gated_plugins: string[]
   run_log_path: string
@@ -586,13 +597,36 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // before anything below writes. State, the run log, the event log and the
   // lock all come after this point, so a refused advance leaves the home
   // byte-identical — there is no half-run to explain and nothing to clean up.
-  const { manifests: plugins, root_error } = await loadPluginManifests(pluginsDir)
+  const { manifests: plugins, failures: loadFailures, root_error } = await loadPluginManifests(pluginsDir)
   if (root_error) {
     throw new Error(
       `warpline: cannot read plugin root ${root_error.path}: ${root_error.code}\n` +
         `      Fix:   pass an existing directory as the plugin root, or create\n` +
         `             the default one at ${getDefaultPluginsDir()}`,
     )
+  }
+
+  // A readable root that produced no manifests is its own outcome, not a
+  // clean run over nothing. Computed once, here, above the quiet-hours guard
+  // — one condition decides both exits, so there is no arm left where a root
+  // that loaded nothing can still report a complete run.
+  const noManifestsLoaded = plugins.size === 0
+  const emptyRootReason = `no plugin manifests loaded from ${resolve(pluginsDir)}`
+
+  /**
+   * The failure hook, called from the two places a run can end non-complete:
+   * the quiet-hours early return and the end of the normal path. A hook that
+   * throws is reported and swallowed — a host's notifier failing is not the
+   * engine failing to report.
+   */
+  const fireRunFailure = (reason: string): void => {
+    if (!onRunFailure) return
+    try {
+      onRunFailure(reason)
+    } catch (hookErr) {
+      const msg = hookErr instanceof Error ? hookErr.message : String(hookErr)
+      console.error(`[engine] onRunFailure hook threw: ${msg}`)
+    }
   }
 
   // 1. Generate run_id
@@ -641,10 +675,21 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // Guardrail: quiet hours — skip run if active (unless dryRun or force)
   if (isQuietHours(prefs) && !dryRun && !force) {
     console.log('[engine] Quiet hours active — skipping run')
-    await emitRunCompleted(run_id, 'complete', eventsPath)
+    // The zero-manifest verdict is the same on this path as on the normal
+    // one. A skipped cycle over a root that loaded nothing is still a root
+    // that loaded nothing, and a carve-out here would be a quiet hour in
+    // which the one status worth reporting stops being reported. A root that
+    // DID load manifests is unaffected: it still reports a complete skip and
+    // still hands back an empty run-log path.
+    const quietStatus: AdvanceResult['status'] = noManifestsLoaded ? 'failed' : 'complete'
+    await emitRunCompleted(run_id, quietStatus, eventsPath)
+    // This arm sits above the failure-hook block at the end of the function,
+    // so without this call the hook would never fire here and the contract
+    // stated on the option would be false the day it was written.
+    if (noManifestsLoaded) fireRunFailure(`run failed: ${emptyRootReason}`)
     return {
       run_id,
-      status: 'complete',
+      status: quietStatus,
       plugin_states: new Map(),
       gated_plugins: [],
       run_log_path: '',
@@ -678,7 +723,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   const parked_gates: PendingGate[] = []
   const plugin_entries: RunLog['plugin_entries'] = []
 
-  let engineStatus: AdvanceResult['status'] = 'complete'
+  // Seeded BEFORE the overall-status block below, and the ordering is the
+  // point: that block promotes complete to partial when any plugin is
+  // recorded failed, so an all-fail root reports failed only because failed
+  // is already in hand when it runs. Reverse the two and "the root produced
+  // nothing" becomes "some plugins failed" — the conflation this exists to
+  // remove.
+  let engineStatus: AdvanceResult['status'] = noManifestsLoaded ? 'failed' : 'complete'
   let stopped = false
 
   // 6b. Evaluation context shared by every plugin in this run. The
@@ -1030,6 +1081,29 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     }
   }
 
+  // A manifest that never imported gets a row AND a state entry. The row is
+  // what tells an all-fail root apart from an empty one on the artifact; the
+  // state entry is what lets the overall-status computation below see it at
+  // all, because that map is seeded from the manifests that loaded. The row
+  // on its own would leave a mixed root reporting a complete run over a log
+  // carrying failure rows.
+  //
+  // Placed here rather than beside the seeding above, so the level loop —
+  // built from the loaded manifests only — never gets the chance to look up a
+  // name that never loaded. The loader's error text goes in unchanged: the
+  // module-resolution detail is the only part an operator can act on.
+  for (const failure of loadFailures) {
+    plugin_entries.push({
+      plugin: failure.plugin,
+      status: 'failed',
+      started_at,
+      elapsed_ms: 0,
+      result_summary: `manifest did not load: ${failure.error}`,
+      retried: false,
+    })
+    plugin_states.set(failure.plugin, 'failed')
+  }
+
   // Determine overall status
   const allStates = Array.from(plugin_states.values())
   const hasFailed = allStates.some(s => s === 'failed')
@@ -1119,7 +1193,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     run_id,
     started_at,
     completed_at,
-    status: engineStatus === 'complete' ? 'complete' : engineStatus === 'partial' ? 'partial' : 'interrupted',
+    // The artifact carries the engine's own status, unmapped. Folding
+    // everything that was neither complete nor partial into interrupted
+    // recorded an empty root as a killed run — and the verdict is read from
+    // this file, not from the value the caller happened to receive.
+    status: engineStatus,
     resumed_from: null,
     summary: `Engine run ${run_id}: ${plugin_entries.length} plugins processed`,
     plugin_entries,
@@ -1131,23 +1209,24 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // 10. Emit run_completed event
   await emitRunCompleted(run_id, engineStatus, eventsPath)
 
-  // 11. Fire onRunFailure exactly once if the run did not complete
-  // cleanly. 'partial' covers any failed/gated plugin; 'interrupted' covers
-  // non-terminating stops. Success path does not invoke the hook.
-  if (onRunFailure && engineStatus !== 'complete') {
+  // 11. Fire onRunFailure exactly once if the run did not complete cleanly.
+  // 'partial' covers any failed or gated plugin, 'failed' a root that loaded
+  // no manifests, 'interrupted' a non-terminating stop. The success path does
+  // not invoke the hook.
+  if (engineStatus !== 'complete') {
     const failedPlugins = Array.from(plugin_states.entries())
       .filter(([, s]) => s === 'failed')
       .map(([name]) => name)
+    // An empty root has no failed plugin to name, and saying the engine did
+    // not complete cleanly tells an operator nothing about an empty
+    // directory. Name the root instead.
     const reason =
       failedPlugins.length > 0
         ? `run ${engineStatus}: ${failedPlugins.length} plugin(s) failed [${failedPlugins.join(', ')}]`
-        : `run ${engineStatus}: engine did not complete cleanly`
-    try {
-      onRunFailure(reason)
-    } catch (hookErr) {
-      const msg = hookErr instanceof Error ? hookErr.message : String(hookErr)
-      console.error(`[engine] onRunFailure hook threw: ${msg}`)
-    }
+        : noManifestsLoaded
+          ? `run ${engineStatus}: ${emptyRootReason}`
+          : `run ${engineStatus}: engine did not complete cleanly`
+    fireRunFailure(reason)
   }
 
   return {

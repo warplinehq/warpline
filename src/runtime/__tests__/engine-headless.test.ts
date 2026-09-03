@@ -162,6 +162,58 @@ describe('Engine profile filter', () => {
     expect(result.plugin_states.get('fx-manual')).toBe('skipped')
   })
 
+  // "Everything was deselected" is not "nothing was found". These two say so:
+  // the manifests all load, the tier filter or the dry run then removes every
+  // one of them from the work, and the run is still complete. The status that
+  // marks a root which loaded nothing must not fire here.
+  test('a profile that filters out every loaded manifest still reports complete', async () => {
+    // A root of its own, because the shared fixture always has at least one
+    // eligible plugin under every profile. Here all three manifests load and
+    // the tier filter removes all three.
+    const root = join(tmpdir(), `warpline-headless-allfiltered-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
+    const filteredPlugins = join(root, 'plugins')
+    const filteredState = join(root, 'state')
+    const filteredRuns = join(root, 'runs')
+    await mkdir(filteredPlugins, { recursive: true })
+    await mkdir(filteredState, { recursive: true })
+    await mkdir(filteredRuns, { recursive: true })
+    await writeFile(join(filteredState, 'preferences.json'), JSON.stringify({ review_gate: false }))
+    for (const name of ['fx-w1', 'fx-w2', 'fx-w3']) {
+      await writePlugin(filteredPlugins, makeManifest(name, { schedule: 'weekly', autonomy_level: 'autonomous' }))
+    }
+
+    try {
+      const result = await runAdvance({
+        pluginsDir: filteredPlugins,
+        stateDir: join(filteredState, 'engine-state.json'),
+        runsDir: filteredRuns,
+        eventsPath: join(filteredRuns, 'events.jsonl'),
+        // Weekly schedules are not eligible under the manual tier, so every
+        // one of the three is deselected.
+        profile: 'manual',
+      })
+
+      const states = Array.from(result.plugin_states.values())
+      expect(states).toHaveLength(3)
+      expect(states.filter((st) => st === 'skipped')).toHaveLength(3)
+      expect(result.status).toBe('complete')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a dry run over a root whose manifests all load reports complete', async () => {
+    const result = await runAdvance({
+      pluginsDir: fixture.pluginsDir,
+      stateDir: fixture.statePath,
+      runsDir: fixture.runsDir,
+      eventsPath: fixture.eventsPath,
+      dryRun: true,
+    })
+
+    expect(result.status).toBe('complete')
+  })
+
   test('no-profile (undefined): runs ALL plugins including manual (existing interactive behavior)', async () => {
     const result = await runAdvance({
       pluginsDir: fixture.pluginsDir,

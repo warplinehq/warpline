@@ -415,6 +415,20 @@ sibling — the transcript file belongs to the direct-invocation path.
 `completed_at` is null for a run that was interrupted. `resumed_from` names the
 run this one continued, and is null for a fresh advance.
 
+`status` is `failed` when the advance loaded no plugin manifests at all: a
+readable plugin root holding nothing importable, or one whose every manifest
+threw on import. That is a distinct outcome from `partial`, which means some
+plugins ran and others did not — a root that loaded manifests and executed them
+never reports `failed`, however many of them failed individually. A root that
+cannot be read at all is a third thing again, and is refused before the run
+starts, so it writes no run log to carry a status.
+
+The quiet-hours skip reports the same status a normal advance would for that
+root. A skipped cycle over a root that loaded no manifests is still a cycle
+over a root that loaded no manifests, so it reports `failed` and calls
+`onRunFailure` from that path — it writes no run log, because it did no work.
+Quiet hours suppresses the work, not the verdict on the root.
+
 `plugin_entries` is the only accumulated field, and it is deliberately the only
 one. **A host that wants run telemetry derives it from the per-plugin entries.**
 The runtime does not compute aggregates, does not store them, and does not
@@ -441,10 +455,17 @@ set is closed — an unlisted value fails validation rather than being dropped.
 | Status | Meaning |
 |--------|---------|
 | `completed` | The handler ran and returned a result the engine accepted |
-| `failed` | The handler threw, or returned a failed result |
+| `failed` | The handler threw, returned a failed result, or the plugin's manifest never loaded |
 | `skipped` | The plugin was not due — fresh, filtered, locked, or without a session Grant |
 | `gated` | Supervised: the handler ran and its result was parked pending a human answer |
 | `denied` | A human answered no, and the answer still applies to what is being proposed |
+
+`plugin_entries` therefore no longer means "the plugins the engine attempted".
+A plugin whose `manifest.ts` failed to import gets a `failed` entry too,
+carrying the loader's error text as its `result_summary` and a zero
+`elapsed_ms` — nothing ran. Without those entries a root whose every manifest
+was broken and a root that was simply empty would write the same log, and
+telling those two apart is the whole diagnosis.
 
 `gated` and `denied` are the two outcomes of supervision, which is why they sit
 together and apart from `skipped`. A denial recorded as `skipped` would land in
