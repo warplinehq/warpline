@@ -39,6 +39,30 @@ import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { randomUUID } from 'node:crypto'
+
+// REFUSES TO RUN UNDER BUN, and this is the most important line in the file.
+//
+// Every trap here is Node-specific: `--permission` is a Node flag, and
+// `process.getActiveResourcesInfo()` is a Node API. Run under bun, the flags
+// are ignored and the deferred-work check reads empty — so a manifest that
+// writes at import time comes back `declarative`. Measured, not feared: the
+// deferred fixture screens `dirty` under node and `declarative` under bun.
+//
+// That is a SILENT FALSE GREEN in a guard whose whole purpose is to not be one,
+// and it is reachable by accident — `bun` is this project's primary runtime,
+// and a test harness spawning `process.execPath` under `bun test` picks bun
+// without anyone deciding to. Which is exactly how it was found.
+if (process.versions.bun) {
+  console.error(
+    'screen-plugin-root: refusing to run under bun.\n' +
+      '  This screen depends on `node --permission` and `process.getActiveResourcesInfo()`.\n' +
+      '  Under bun both are absent, the traps silently do nothing, and a manifest that\n' +
+      '  writes at import time is reported `declarative`. Run it with node:\n' +
+      '      node scripts/screen-plugin-root.mjs <plugin-root>',
+  )
+  process.exit(2)
+}
 
 const execFileAsync = promisify(execFile)
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -89,14 +113,20 @@ async function screenOne(root, name) {
     CHILD,
     manifest,
   ]
+  // A nonce the manifest cannot learn: the child deletes it from env and argv
+  // before importing. Without this, a manifest whose first line printed a
+  // lookalike verdict DICTATED ITS OWN — verified against a fixture that
+  // screened `declarative` while writing a file.
+  const nonce = randomUUID()
   try {
     const { stdout } = await execFileAsync(process.execPath, args, {
       timeout: TIMEOUT_MS,
       maxBuffer: 8 * 1024 * 1024,
+      env: { ...process.env, __WARPLINE_SCREEN_NONCE: nonce },
     })
-    const line = stdout.split('\n').find((l) => l.includes('"__screen__"'))
-    if (!line) return { name, verdict: 'unscreenable', reason: 'child emitted no verdict line' }
-    const r = JSON.parse(line)
+    const line = stdout.split('\n').find((l) => l.startsWith(nonce + ' '))
+    if (!line) return { name, verdict: 'unscreenable', reason: 'child emitted no authentic verdict line' }
+    const r = JSON.parse(line.slice(nonce.length + 1))
     if (r.outcome === 'import-failed') {
       return { name, verdict: 'unscreenable', reason: `import failed: ${r.error}` }
     }
@@ -106,11 +136,23 @@ async function screenOne(root, name) {
       return { name, verdict: 'unscreenable', reason: defects.map((d) => d.detail).join('; ') }
     }
     const stdio = r.hits.filter((h) => h.kind === 'stdio')
-    if (real.length === 0 && stdio.length === 0) return { name, verdict: 'declarative', hits: [] }
+    // Deferred work is work. A manifest that schedules a write for after import
+    // left a Timeout behind and screened `declarative` — the child had always
+    // collected `handles`, and the parent had always thrown them away. Evidence
+    // gathered and discarded is worse than evidence not gathered: it reads as
+    // covered.
+    const handles = (r.handles ?? []).filter((h) => h !== 'PipeWrap')
+    if (real.length === 0 && stdio.length === 0 && handles.length === 0) {
+      return { name, verdict: 'declarative', hits: [] }
+    }
     return {
       name,
-      verdict: real.length ? 'dirty' : 'dirty-stdio',
-      hits: [...real, ...stdio].map((h) => `${h.kind}: ${h.detail}`),
+      verdict: real.length || handles.length ? 'dirty' : 'dirty-stdio',
+      hits: [
+        ...real.map((h) => `${h.kind}: ${h.detail}`),
+        ...handles.map((h) => `deferred: left a ${h} pending after import`),
+        ...stdio.map((h) => `${h.kind}: ${h.detail}`),
+      ],
     }
   } catch (err) {
     if (err.killed || err.signal) {

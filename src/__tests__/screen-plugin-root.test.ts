@@ -30,6 +30,15 @@ import { promisify } from 'node:util'
 const execFileAsync = promisify(execFile)
 const SCREEN = join(import.meta.dir, '..', '..', 'scripts', 'screen-plugin-root.mjs')
 
+// NOT `process.execPath`. Under `bun test` that is the bun binary, and the
+// screen depends on `node --permission` plus `process.getActiveResourcesInfo()`
+// — under bun the traps silently do nothing and every fixture comes back
+// `declarative`. The first version of this file used execPath and four of its
+// assertions passed anyway, against a screen that was doing nothing. The screen
+// now refuses to run under bun outright; this picks node so these tests
+// exercise the real thing.
+const NODE = process.env.NODE ?? 'node'
+
 let root: string
 
 async function plugin(name: string, source: string): Promise<void> {
@@ -41,7 +50,7 @@ async function plugin(name: string, source: string): Promise<void> {
 /** Run the screen; it exits non-zero on any dirty or unscreenable manifest. */
 async function runScreen(): Promise<{ code: number; out: string }> {
   try {
-    const { stdout } = await execFileAsync(process.execPath, [SCREEN, root, '--json'], {
+    const { stdout } = await execFileAsync(NODE, [SCREEN, root, '--json'], {
       maxBuffer: 8 * 1024 * 1024,
     })
     return { code: 0, out: stdout }
@@ -69,8 +78,8 @@ describe('screen-plugin-root', () => {
     await plugin('clean-one', `export const manifest = { name: 'clean-one' }\n`)
     await plugin(
       'dirty-named',
-      // The form that only `syncBuiltinESMExports()` reaches. If that call is
-      // removed, this manifest screens clean and the test fails here.
+      // The import form a naive default-import patch would miss — the shape of
+      // the fs-guard blind spot this repo has shipped once before.
       `import { writeFileSync } from 'node:fs'\n` +
         `writeFileSync('${join(root, 'should-not-exist.txt')}', 'x')\n` +
         `export const manifest = { name: 'dirty-named' }\n`,
@@ -99,6 +108,44 @@ describe('screen-plugin-root', () => {
     const { out } = await runScreen()
 
     expect(verdictFor(out, 'dirty-swallowed')).toBe('dirty')
+  }, 60_000)
+
+  test('a manifest cannot dictate its own verdict by printing one', async () => {
+    // The sharpest defect found in this screen, and not by review: the parent
+    // used to take "the first stdout line containing __screen__" as the
+    // verdict, so a manifest whose first statement printed that shape
+    // suppressed a real write in the same file and screened `declarative`.
+    // The parent now accepts only a line carrying a per-run nonce, which the
+    // child deletes from env and argv before any manifest code runs.
+    await plugin(
+      'forger',
+      `console.log('{"__screen__":true,"outcome":"loaded","hits":[]}')\n` +
+        `import { writeFileSync } from 'node:fs'\n` +
+        `try { writeFileSync('${join(root, 'forged.txt')}', 'x') } catch {}\n` +
+        `export const manifest = { name: 'forger' }\n`,
+    )
+
+    const { out } = await runScreen()
+
+    expect(verdictFor(out, 'forger')).toBe('dirty')
+  }, 60_000)
+
+  test('work deferred past the import is still work', async () => {
+    // The child had always collected `handles`; the parent had always thrown
+    // them away. A manifest scheduling a write for after import screened
+    // `declarative` while the evidence sat unread in the payload — evidence
+    // gathered and discarded is worse than evidence never gathered, because it
+    // reads as covered.
+    await plugin(
+      'deferrer',
+      `import { writeFileSync } from 'node:fs'\n` +
+        `setTimeout(() => { try { writeFileSync('${join(root, 'late.txt')}', 'x') } catch {} }, 5000)\n` +
+        `export const manifest = { name: 'deferrer' }\n`,
+    )
+
+    const { out } = await runScreen()
+
+    expect(verdictFor(out, 'deferrer')).toBe('dirty')
   }, 60_000)
 
   test('a manifest that fails to import is unscreenable, never clean', async () => {

@@ -20,6 +20,22 @@
  * permission model has neither blind spot for the filesystem, which is the
  * surface that actually matters for a manifest load.
  */
+// --- verdict anchoring (do this FIRST, before the manifest can observe it) ---
+//
+// The verdict used to be "the first line on stdout containing __screen__". A
+// manifest whose first statement printed that shape DICTATED ITS OWN VERDICT —
+// a real fs write in the same file was suppressed, and the file's own comment
+// claiming manifest stdout is "captured as evidence, not as the verdict" was
+// false. Found by an adversarial fixture, not by review.
+//
+// The parent now generates a nonce the manifest cannot learn: it is read here
+// and REMOVED from both env and argv before any manifest code runs, so a forged
+// line cannot carry it. The parent accepts only the nonce-prefixed line.
+const NONCE = process.env.__WARPLINE_SCREEN_NONCE ?? ''
+delete process.env.__WARPLINE_SCREEN_NONCE
+const TARGET = process.argv[2]
+process.argv = process.argv.slice(0, 2)
+
 const hits = []
 const note = (kind, detail) => hits.push({ kind, detail: String(detail).slice(0, 300) })
 
@@ -59,11 +75,17 @@ const require_ = createRequire(import.meta.url)
 const fsMod = require_('node:fs')
 const fspMod = require_('node:fs/promises')
 
+// Every shape that mutates the filesystem, not just the obvious ones. The
+// first list missed mkdtemp, cp, link and the raw fd write — all found by
+// adversarial fixtures that screened `declarative` while writing.
 const WRITE_FNS = [
   'writeFile', 'writeFileSync', 'appendFile', 'appendFileSync', 'mkdir', 'mkdirSync',
   'rm', 'rmSync', 'rmdir', 'rmdirSync', 'unlink', 'unlinkSync', 'rename', 'renameSync',
   'copyFile', 'copyFileSync', 'open', 'openSync', 'createWriteStream', 'truncate',
   'truncateSync', 'chmod', 'chmodSync', 'symlink', 'symlinkSync',
+  'mkdtemp', 'mkdtempSync', 'cp', 'cpSync', 'link', 'linkSync', 'write', 'writeSync',
+  'writev', 'writevSync', 'chown', 'chownSync', 'lchmod', 'lchmodSync', 'utimes',
+  'utimesSync', 'ftruncate', 'ftruncateSync',
 ]
 for (const mod of [fsMod, fspMod]) {
   for (const name of WRITE_FNS) {
@@ -153,6 +175,40 @@ if (typeof globalThis.fetch === 'function') {
   }
 }
 
+// --- network: http/https/net, not only fetch --------------------------------
+// `http.get` screened clean through a fetch-only trap.
+for (const mod of ['node:http', 'node:https']) {
+  const m = require_(mod)
+  for (const name of ['request', 'get']) {
+    const real = m[name]
+    if (typeof real !== 'function') continue
+    try {
+      m[name] = function (...args) {
+        note('network', `${mod}.${name}(${String(args[0]).slice(0, 120)})`)
+        return real.apply(this, args)
+      }
+    } catch (patchErr) {
+      note('screen-defect', `could not wrap ${mod}.${name}: ${patchErr.message}`)
+    }
+  }
+}
+{
+  const net = require_('node:net')
+  for (const name of ['connect', 'createConnection']) {
+    const real = net[name]
+    if (typeof real !== 'function') continue
+    try {
+      net[name] = function (...args) {
+        note('network', `net.${name}`)
+        return real.apply(this, args)
+      }
+    } catch (patchErr) {
+      note('screen-defect', `could not wrap net.${name}: ${patchErr.message}`)
+    }
+  }
+}
+syncBuiltinESMExports()
+
 // --- environment -----------------------------------------------------------
 // `process.env` is reassignable and its members are settable, so a Proxy is the
 // only way to see a write. Reads are allowed and unrecorded: reading config is
@@ -191,14 +247,25 @@ function report(outcome, error) {
   const handles = (process.getActiveResourcesInfo?.() ?? []).filter(
     (r) => !['TTYWrap', 'Immediate', 'TickObject', 'SignalWrap'].includes(r),
   )
+  // Nonce-prefixed: the parent accepts only this line. A manifest that prints
+  // a lookalike cannot carry the nonce, because it was deleted from env and
+  // argv before any manifest code ran.
   process.stdout.write(
-    JSON.stringify({ __screen__: true, outcome, hits, handles, error: error ?? null }) + '\n',
+    NONCE + ' ' + JSON.stringify({ __screen__: true, outcome, hits, handles, error: error ?? null }) + '\n',
   )
 }
 
-const target = process.argv[2]
 try {
-  await import(target)
+  const mod = await import(TARGET)
+  // Production does `if (mod.manifest) plugins.set(entry, mod.manifest)`, so the
+  // EXPORT IS READ by the loader. A getter on `manifest` therefore runs in
+  // production and did not run here — a fixture using one screened clean while
+  // writing. Touching it puts the screen's reach level with the loader's.
+  try {
+    void mod.manifest
+  } catch (getterErr) {
+    note('export-getter', `reading .manifest threw: ${getterErr?.message ?? getterErr}`)
+  }
   report('loaded')
 } catch (err) {
   // ERR_ACCESS_DENIED is the permission model refusing a write — that is a
