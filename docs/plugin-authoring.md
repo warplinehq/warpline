@@ -210,11 +210,54 @@ the operator typed on the command line, never to your default and never to the
 config file. Pick another name.
 
 **There is no environment-variable tier**, today. The file is the only channel
-an input has, so an input carrying a secret is a secret sitting on disk under
-the operator's home. That is a known limitation rather than an oversight, and
-it is stated here so you meet it before you design around it: if a value has to
-come from the environment, read it inside your handler, where it is yours and
-never passes through the runtime.
+an *input* has, so an input carrying a secret is a secret sitting on disk under
+the operator's home. That is a known limitation rather than an oversight, and it
+is stated here so you meet it before you design around it. A credential does not
+belong in that file: declare its name on `manifest.secrets` and read the value
+from the environment inside your handler. The next section is how.
+
+### Where credentials come from
+
+The environment, and nowhere else.
+
+A credential is not an input and gets no tier in the table above. Your manifest
+declares the environment variable **keys** you need:
+
+```typescript
+secrets: ['GITHUB_TOKEN'],
+```
+
+Names only. **Warpline resolves the names and never stores the values.** There
+is no vault, no `.env` file the runtime reads, and no secrets file under the
+warpline home — so an operator who copies or `rsync`s that home ships no
+declared credential, because there is nothing at rest to ship.
+
+What the declaration buys you is a failure that happens **before** your handler
+is called. Every declared name is looked up before the run starts, by exact key
+equality — no case folding, no trimming, no prefix convention. A name that does
+not resolve fails the run with a single `auth_failure` naming the key, and that
+check sits above the retry loop, so it happens once and is never retried. A
+credential absent on the first attempt is absent on the third.
+
+**A key set to the empty string counts as absent** and fails by name. `FOO=` is
+a broken credential, not a present one, and admitting it would only move the
+same failure into your handler — which is the position the declaration exists to
+get in front of.
+
+Declaring nothing, and declaring `secrets: []`, are the same thing: the check
+runs and passes. Read the value with `process.env.GITHUB_TOKEN` inside your
+handler, at the point of use.
+
+**Never put a resolved credential value into a `SkillResult`**, for the reason
+the config channel above states at length: a run log is a file people paste into
+issues. Name the key you expected.
+
+**The known limit, stated as a limit.** The declared list bounds the sanctioned
+path and nothing else. A token an operator puts in `<home>/config/<plugin>.json`
+and never declares here is outside every mechanism warpline offers for
+credentials — including any redaction a later release adds, which can only act
+on what it was told about. Declaring the name is what puts a credential inside
+the part warpline can reason about.
 
 ## Capabilities
 
@@ -345,6 +388,7 @@ one case needs longer.
 
 - [ ] Could any part be a pure function it isn't? (doctrine review)
 - [ ] Every external touch declared in `side_effects`?
+- [ ] Every environment variable you read declared in `secrets`?
 - [ ] Args validated, failures returned as typed errors?
 - [ ] `signal` forwarded to real I/O?
 - [ ] Decision logic exported and unit-tested?
