@@ -67,7 +67,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 
@@ -233,5 +233,99 @@ describe('no example reaches past the published surface', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+/**
+ * Plainly outside the allowlist, unambiguously not a relative path, and the
+ * one built-in that hands an example arbitrary disk and process access — so a
+ * fixture importing it is a specifier nobody would argue about.
+ */
+const FORBIDDEN = 'node:child_process'
+
+/**
+ * One file per import form, each naming the same forbidden specifier. Keyed by
+ * file name so the assertions can name what they expect instead of counting:
+ * four offenders is also what you get when one form is found twice and another
+ * not at all, and that is precisely the state this fixture exists to detect.
+ */
+const FORMS: Record<string, string> = {
+  'static-named.ts': `import { execFileSync } from '${FORBIDDEN}'\n`,
+  'type-only.ts': `import type { ChildProcess } from '${FORBIDDEN}'\n`,
+  'dynamic.ts': `const child = await import('${FORBIDDEN}')\n`,
+  're-export.ts': `export { spawn } from '${FORBIDDEN}'\n`,
+}
+
+const EXPECTED = Object.keys(FORMS)
+  .map((name) => `${name}:1: ${FORBIDDEN}`)
+  .sort()
+
+/** Under `mkdtemp` and nowhere else — tests never write inside the repository. */
+function fixture(extra: Record<string, string> = {}): string {
+  const root = mkdtempSync(join(tmpdir(), 'warpline-import-forms-'))
+  for (const [name, body] of Object.entries({ ...FORMS, ...extra })) {
+    writeFileSync(join(root, name), body)
+  }
+  return root
+}
+
+/**
+ * Matches an invocation of the search or enumeration binary by bare name. Its
+ * own source is not a match: after `exec` comes `|spawn)`, so the alternation
+ * never lines up against the text of the pattern itself.
+ */
+const BARE_NAME = /(?:exec|spawn)(?:File)?(?:Sync)?\(\s*['"](?:grep|find)['"]/
+
+describe('the lint has been watched finding things', () => {
+  test('all four import forms are reported, by name and not by count', () => {
+    const root = fixture()
+    try {
+      expect(offenders(root)).toEqual(EXPECTED)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * A file an ignore-file-honouring search would drop is still found.
+   *
+   * **What this proves, measured rather than assumed.** A ugrep build invoked
+   * with `--ignore-files` drops a `.gitignore`d file only when it walks a
+   * directory itself. Handed explicit file arguments — which is what the helper
+   * above does, because `find` decides the file set — it reads every path it is
+   * given, and so does every other search binary. That was probed on this
+   * machine this session rather than recalled, and it means this assertion does
+   * NOT catch someone replacing the absolute path with a bare name while the
+   * arguments stay explicit. The self-assertion below is the tripwire for that;
+   * these two are separate claims and neither substitutes for the other.
+   *
+   * What this assertion does catch is the rewrite that actually happened in
+   * this project's own census: a search told to walk a directory, under a
+   * binary that honours ignore files, reporting a false zero over a whole tree.
+   * Rewriting the helper to recurse reddens here, on the file the fixture's own
+   * `.gitignore` names.
+   */
+  test('a file a .gitignore would hide is still reported', () => {
+    const root = fixture({ '.gitignore': 'dynamic.ts\n' })
+    try {
+      expect(offenders(root)).toEqual(EXPECTED)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The half the fixture above cannot reach. Swapping the absolute path for a
+   * bare name is invisible to every behavioural assertion in this file — on the
+   * machines that matter the bare name resolves to the same binary, so the
+   * behaviour is identical right up until it runs somewhere it is not. Reading
+   * this file back is the only mechanised way to hold the rule that made the
+   * ignore-file trap harmless in the first place.
+   */
+  test('this file names its binaries by absolute path and never by bare name', () => {
+    const self = readFileSync(join(import.meta.dir, 'import-direction.test.ts'), 'utf8')
+    expect(self).toContain(GREP)
+    expect(self).toContain(FIND)
+    expect(BARE_NAME.test(self)).toBe(false)
   })
 })
