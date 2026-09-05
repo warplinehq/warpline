@@ -395,17 +395,22 @@ External abort sources:
 
 ## 5. Run Artifact and Run Log Shapes
 
-Two different documents live under `<home>/runs/`, both named `<run_id>.json`,
-written by two different paths. They are not the same shape, and reading one as
-the other is the mistake this section used to make.
+Warpline keeps **three records of a run**, in three formats, in two
+directories. They answer different questions, and reading one as another is
+the mistake this section used to make.
 
-| Written by | Document | Files |
-|---|---|---|
-| `warpline run <plugin>` — one plugin, invoked directly | `RunArtifact` | `<run_id>.json` and a `<run_id>.log` transcript |
-| an engine advance — every due plugin in one pass | `RunLog` | `<run_id>.json` |
+| Written by | Document | Files | Answers |
+|---|---|---|---|
+| `warpline run <plugin>` — one plugin, invoked directly | `RunArtifact` | `<home>/runs/<run_id>.json` and a `<run_id>.log` transcript | what happened on each retry attempt of one invocation |
+| an engine advance — every due plugin in one pass | `RunLog` | `<home>/runs/<run_id>.json` | what the whole pass did, plugin by plugin, as one document |
+| an engine advance, additionally | JSONL run log | `<home>/logs/runs/YYYY-MM-DD.jsonl` | what happened across many runs on one day, as a stream to tail or grep |
+
+The first two share a directory and a filename pattern and are not the same
+shape. The third shares neither, on purpose — see below.
 
 § 6 turns on that distinction: the 20-newest trim only ever sees a
-`RunArtifact`, and only `pruneRunLogs` deletes an advance's `RunLog`.
+`RunArtifact`, only `pruneRunLogs` deletes an advance's `RunLog`, and the JSONL
+stream prunes itself on the same window from the same constant.
 
 ### The run artifact
 
@@ -622,6 +627,44 @@ The pre-0.2 bare-string form still validates. A string normalizes at the parse
 boundary to `{type: 'artifact', format: 'markdown', path: <the string>}`, so
 nothing downstream branches on which form an entry arrived through. The string
 form stays valid until 1.0 and is removed then with an announcement.
+
+### The JSONL run log
+
+An advance also appends a line per event to a daily file at
+`<home>/logs/runs/YYYY-MM-DD.jsonl`. One file per day, one JSON object per line.
+The audience is a headless scheduled cycle nobody watched: the run artifact and
+the run log each describe one run, and this is the format you tail or grep when
+the question spans several.
+
+The path is **`<home>/logs/runs/`, not `<home>/runs/`**, and the two are easier
+to confuse than they look. The logger joins its configured logs directory with
+its own `runs/` segment, so pointing it at the warpline home root would land the
+daily files in `<home>/runs/` — the directory `pruneRunLogs` and
+`trimPluginHistory` scan for the two `<run_id>.json` shapes above. The literal
+path is what this spec fixes.
+
+A line carries:
+
+| Field | Type | Notes |
+|---|---|---|
+| `ts` | ISO 8601 | when the line was appended |
+| `run_id` | string | the advance that emitted it; shared by every line of one run |
+| `level` | `info` \| `warn` \| `error` | `error` for a failed plugin, `warn` for a run that did not complete cleanly |
+| `event` | string | `run_start`, `plugin_result`, `run_end` |
+| `plugin` | string, optional | present on `plugin_result` |
+| `status` | string, optional | the plugin's outcome, or the run's |
+| `elapsed_ms` | number, optional | the plugin's duration |
+| `detail` | string, optional | the plugin's result summary, or the run's |
+
+The first line is written after the plugin root has been loaded and accepted, so
+an advance refused for an unreadable root leaves the home byte-identical, as it
+did before this format existed.
+
+Retention is the **same window** as `pruneRunLogs`, read from the **same
+constant** rather than restated — a daily file whose mtime is older than that
+window is unlinked at the start of the next advance. Three formats pruned on
+three literals would be three retention rules that agree until somebody tunes
+one.
 
 ## 6. Retention
 
