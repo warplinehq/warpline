@@ -528,11 +528,24 @@ export async function invokePlugin(
     // Scrubbing at the write sites instead is the same guard with a hole cut
     // in it for whatever is written next.
     //
-    // Outside the `parsed.success` branch on purpose: the fabricated failure
-    // below quotes the Zod error, which echoes received values.
-    const parsed = SkillResultSchema.safeParse(rawResult)
-    const thisResult: SkillResult = scrubSecrets(
-      stampOutputs(
+    // The scrub runs on the INPUT, above the parse, and that ordering is
+    // load-bearing twice over.
+    //
+    // `[redacted]` is ten bytes, so every credential shorter than that makes
+    // the result GROW. An Output's inline `body` is byte-capped by a
+    // refinement inside this very schema, so a scrub below the parse would
+    // measure the cap on bytes nobody writes: a body at the cap pre-scrub is
+    // over it post-scrub, `engine-state.json` embeds that same refinement
+    // twice, and from that write onward every fail-closed read of the single
+    // state document throws. Above the parse, the cap is measured on the bytes
+    // that persist, and a body the redaction pushed over is refused the same
+    // way any other over-cap body is.
+    //
+    // It also covers the fabricated failure below, which quotes the Zod error
+    // and so echoes received values — those values are already redacted,
+    // because they are what the parse was handed.
+    const parsed = SkillResultSchema.safeParse(scrubSecrets(rawResult, Object.values(secrets.values)))
+    const thisResult: SkillResult = stampOutputs(
       parsed.success
         ? parsed.data
         : {
@@ -550,9 +563,7 @@ export async function invokePlugin(
             artifacts_produced: [],
             schema_version: 1,
           },
-        runId,
-      ),
-      Object.values(secrets.values),
+      runId,
     )
 
     const elapsed = Date.now() - attemptStart

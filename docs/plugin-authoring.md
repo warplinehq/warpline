@@ -258,6 +258,14 @@ slip does not reach disk. Treat that as a backstop and not as permission. It
 knows the values it was told about and nothing else, and the sentence below is
 what "nothing else" covers.
 
+**The replacement runs before validation, and it can cost you bytes.**
+`[redacted]` is ten bytes, so a credential shorter than that makes your result
+larger than you returned it. The Output body cap is measured on the redacted
+bytes, because those are the bytes warpline writes — so an inline `body` within
+ten bytes of the cap that carries a short credential fails validation even
+though the body you assembled fits. Leave headroom. Better, keep the credential
+out of the body.
+
 **The known limit, stated as a limit.** The declared list bounds the sanctioned
 path and nothing else. A token an operator puts in `<home>/config/<plugin>.json`
 and never declares here is outside every mechanism warpline offers for

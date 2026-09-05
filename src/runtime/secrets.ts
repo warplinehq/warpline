@@ -28,7 +28,7 @@
  *
  * The resolved map is returned rather than discarded because there is now a
  * caller with a place to hand it: `scrubSecrets` below, which `invokePlugin`
- * runs over every parsed result at the parse boundary. The values are read for
+ * runs over every handler's output at the parse boundary. The values are read for
  * that and for nothing else — they are never handed to a writer, and a value
  * that reaches a run artifact, an event, a run log or `engine-state.json` is
  * the leak this module is shaped to avoid. The resolved NAMES go to the
@@ -110,16 +110,32 @@ export function resolveSecrets(
 /**
  * What replaces a resolved credential value wherever a handler put one.
  *
- * Short on purpose. An Output's inline `body` is byte-capped at the parse
- * boundary and `pending_gates[].plugin_result` is re-parsed every time the
- * state document is read, so a placeholder longer than the value it replaces
- * could push a body that was at the cap over it on the next read.
+ * Fixed length, and longer than plenty of real credentials — so this scrub
+ * GROWS a result whenever a declared value is shorter than ten bytes. That is
+ * not made safe by keeping the placeholder short, which is what this docstring
+ * used to claim: a short placeholder is still longer than a four-character
+ * token, and the hazard it named was reachable.
+ *
+ * What makes it safe is ordering. An Output's inline `body` is byte-capped by a
+ * refinement inside `SkillResultSchema`, and `invokePlugin` scrubs the handler's
+ * output BEFORE handing it to that schema, so the cap is measured on the bytes
+ * that get written rather than on the bytes the handler returned. A body the
+ * redaction pushes over the cap is refused at the parse boundary like any other
+ * over-cap body, instead of being persisted into `engine-state.json` and
+ * failing every later read of it.
  */
 export const REDACTED = '[redacted]'
 
 /**
- * Replace every occurrence of a resolved credential value in a parsed
- * `SkillResult` with a fixed placeholder.
+ * Replace every occurrence of a resolved credential value in a handler's
+ * returned result with a fixed placeholder.
+ *
+ * **It runs above the parse, not below it.** `invokePlugin` scrubs the raw
+ * object and hands the scrubbed one to `SkillResultSchema.safeParse`. The
+ * placeholder is ten bytes and can therefore make a result larger, and the
+ * schema is where the Output body cap is enforced — so measuring that cap after
+ * the scrub is the difference between a cap on what is written and a cap on
+ * what was returned. See {@link REDACTED}.
  *
  * **This is not the heuristic the config channel refuses.**
  * `src/schemas/plugin-config.ts` states, about a problem string, that a value
@@ -154,6 +170,11 @@ export const REDACTED = '[redacted]'
  * `record<string, string>`, so a handler that used a token as a KEY there would
  * keep it. Stated rather than fixed: closing it means a walk that rewrites keys,
  * and that belongs behind a case watched failing first, not behind an argument.
+ * Running above the parse shows that same bound from a second angle: a key also
+ * appears in the `path` of a Zod issue, so a credential used as a key in a
+ * result that FAILS to parse now reaches the fabricated `parse_error` message
+ * as well. Measured, not assumed. It is the one place the reordering trades
+ * away, and it trades a value that already reached disk on the success path.
  *
  * The walk is over EVERY string value in the object, not over a named field list.
  * `summary`, `errors[].message`, `undo_instruction` and

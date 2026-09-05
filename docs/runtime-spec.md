@@ -606,6 +606,16 @@ of characters an operator typed, it is the size of `engine-state.json`, which is
 reparsed and rewritten whole on every advance and every `warpline plan` — an
 inline body sits inside a parked gate in that document.
 
+The cap is measured **after** credential redaction. `invokePlugin` replaces
+every value it resolved from `secrets` with `[redacted]` before handing the
+result to this schema, so the bytes counted here are the bytes that get
+written. `[redacted]` is ten bytes, so a declared credential shorter than that
+makes a result larger than the handler returned it — an inline body within ten
+bytes of the cap carrying a short credential is refused at the parse boundary
+rather than persisted. Refusing it there is the point: `engine-state.json`
+embeds this same schema, it is reparsed whole on every read, and an over-cap
+body written into it makes every later read of the document fail.
+
 `run_id` and `produced_at` are stamped by the runtime at the point it accepts a
 result, never by the plugin. A plugin that could stamp its own provenance could
 claim a run it did not come from, so whatever a handler puts in those two fields
