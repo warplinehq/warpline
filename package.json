@@ -37,6 +37,10 @@
       "types": "./dist/unstable-runtime.d.ts",
       "default": "./dist/unstable-runtime.js"
     },
+    "./unstable-fs": {
+      "types": "./dist/unstable-fs.d.ts",
+      "default": "./dist/unstable-fs.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

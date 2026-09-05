@@ -191,16 +191,18 @@ versions; nothing else here claims to be.
 
 ### Published specifiers, and what each promises
 
-Four specifiers are published: `warpline`, `warpline/schemas/*`,
-`warpline/lib/paths` and `warpline/unstable-runtime`. Nothing else in the
-package is reachable — the `exports` map is an allowlist, and an import of any
-other subpath fails at resolution rather than resolving to something internal.
+Five specifiers are published: `warpline`, `warpline/schemas/*`,
+`warpline/lib/paths`, `warpline/unstable-runtime` and `warpline/unstable-fs`.
+Nothing else in the package is reachable — the `exports` map is an allowlist,
+and an import of any other subpath fails at resolution rather than resolving to
+something internal.
 
 The root barrel `warpline` and the two narrow subpaths beneath it are public
 contract from 0.1.0 onward. They are governed by the stability promise stated
 above and are deliberately small for that reason.
 
-`warpline/unstable-runtime` is not. Any name behind a `warpline/unstable-*`
+Neither `warpline/unstable-runtime` nor `warpline/unstable-fs` is. Any name
+behind a `warpline/unstable-*`
 specifier may change, narrow or disappear in any 0.x release. What you get is a
 line in that release's notes, and no deprecation window — the specifier carries
 the warning so that nobody has to have read this paragraph to be warned. If you

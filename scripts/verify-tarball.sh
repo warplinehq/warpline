@@ -10,8 +10,9 @@
 #   3. the `exports` map resolves every published specifier — under Node AND
 #      Bun — exposes exactly one path accessor, ships no filesystem helper and
 #      no removed field behind `schemas/run-log`, exposes exactly the decided
-#      symbol set behind `unstable-runtime` and no never-published name, and
-#      REFUSES an unmapped subpath (ERR_PACKAGE_PATH_NOT_EXPORTED)
+#      symbol set behind `unstable-runtime` and behind `unstable-fs` with no
+#      never-published name reachable from either, and REFUSES an unmapped
+#      subpath (ERR_PACKAGE_PATH_NOT_EXPORTED)
 #   4. the bin's Node floor gate prints required-vs-found and exits 1 without
 #      an ERR_UNKNOWN_FILE_EXTENSION trace
 #   5. `warpline scaffold` writes a plugin carrying no absolute path, and a
@@ -307,6 +308,49 @@ const neverReachable = NEVER_PUBLISHED.filter((n) => n in unstable)
 if (neverReachable.length) {
   console.error('warpline/unstable-runtime reaches never-published names: ' + neverReachable.join(', '))
   process.exit(1)
+}
+
+// `warpline/unstable-fs` is the second deliberately-unstable subpath, and it
+// inherits the paragraph in docs/runtime-spec.md rather than inventing its own
+// promise. Same exact-set shape as above, and for the same reason: the barrel
+// re-exports from a module that also holds `tmpSuffix` and `bestEffortUnlink`,
+// so a star re-export slipped in later would publish the atomic write's own
+// internals. The literal below and `src/unstable-fs.ts` are edited together, or
+// this reddens.
+//
+// A literal `./unstable-fs` entry in the `exports` map, never an
+// `./unstable-*` wildcard: a wildcard makes this assertion impossible to write,
+// because there is no enumerable set of specifiers to compare against.
+//
+// Sorted before joining, so the declaration order inside the barrel cannot
+// change the answer. `!==` against the whole joined string, so this is an
+// exact-set comparison and not a subset test — a widened set is an unrecorded
+// export, which is exactly what must fail here.
+const unstableFs = await import('warpline/unstable-fs')
+
+const UNSTABLE_FS_EXPECTED = 'atomicWriteJson,atomicWriteText,readJsonOrNull'
+
+const unstableFsExports = Object.keys(unstableFs).filter((k) => k !== 'default').sort().join(',')
+console.log('   warpline/unstable-fs exports: ' + unstableFsExports)
+if (unstableFsExports !== UNSTABLE_FS_EXPECTED) {
+  console.error('expected exactly ' + UNSTABLE_FS_EXPECTED + ', got ' + unstableFsExports)
+  process.exit(1)
+}
+
+// The same never-published list, run against the second namespace. Approval and
+// run-artifact helpers must be unreachable from EVERY published barrel, not
+// from the one that happened to be checked first.
+const fsNeverReachable = NEVER_PUBLISHED.filter((n) => n in unstableFs)
+if (fsNeverReachable.length) {
+  console.error('warpline/unstable-fs reaches never-published names: ' + fsNeverReachable.join(', '))
+  process.exit(1)
+}
+
+for (const name of ['atomicWriteJson', 'atomicWriteText', 'readJsonOrNull']) {
+  if (typeof unstableFs[name] !== 'function') {
+    console.error('warpline/unstable-fs: ' + name + ' is not callable')
+    process.exit(1)
+  }
 }
 
 // Every other check in this file is a shape assertion: a name is exported, a
