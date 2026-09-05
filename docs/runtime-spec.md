@@ -161,6 +161,17 @@ The manifest contract is best-effort and explicitly pre-1.0 — it
 may change in any 0.x release. That is the whole promise, and it is
 deliberately not a stronger one.
 
+It is also the whole *subject*. The promise is made about the manifest contract
+and by its own words about nothing else: the run-log schema, the board schema,
+the engine-state schema and the capability schemas are outside it, and a
+document persisted under `~/.warpline/` — `engine-state.json` and the run log
+among them — carries no compatibility undertaking at all. Those shapes are
+reachable through `warpline/schemas/*` because that specifier is how this
+package publishes shapes, not because publishing them promised anything; a
+release may change any of them without a deprecation window. The negative half
+is stated here rather than left to inference because a promise whose edges are
+unwritten is read at its widest by whoever is relying on it.
+
 Adding a field is already safe by construction, for the reason stated
 immediately above — every field with a default is optional in a manifest file,
 so a new one cannot invalidate a manifest that already validates. An older build
@@ -172,6 +183,18 @@ closed enums stay closed. Five sets are closed — the side-effect type, the
 autonomy level, the schedule, the minimum tier and `inputs[].type` — and an
 addition to any of them fans out into exhaustive switches and into this
 document, which is why they are not extended casually.
+
+The side-effect type is closed at five — `sends_email`, `creates_issue`,
+`writes_db`, `external_api` and `modifies_file` — and one of those five is not
+like the others. `creates_issue` names an outcome where the other four name a
+mechanism: writing a row, calling an API, sending mail, touching a file. Asked
+once, answered, and recorded here so it is not asked again. The asymmetry is
+known and it is not being corrected, because every value is a literal that
+installed manifests declare and that the runtime hashes into a denial
+fingerprint. Renaming one breaks every installed plugin's manifest and
+invalidates the denials already recorded against it — a manifest-contract
+break, which is the one thing the promise above actually covers. A cosmetic
+gain is not worth spending that.
 
 `inputs[].type` is the one of the five that was narrowed rather than born
 closed. It accepted any string before 0.2, so a manifest outside this repo

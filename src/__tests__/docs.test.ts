@@ -1170,3 +1170,53 @@ describe('hand-written manifest prose', () => {
     expect(doc).not.toContain('plugin-config.json')
   })
 })
+
+// ── The published surface and the document describing it must agree ───────
+//
+// `package.json`'s `exports` map is the allowlist — it decides what a stranger
+// with the tarball installed can reach. The "Published specifiers" section is
+// the only place that surface is described in prose, and prose has no compiler.
+// A specifier added to the map and not to the document leaves the document
+// quietly wrong about the one question it exists to answer.
+//
+// `package.json` is read off disk rather than imported, because an import of a
+// modelled shape asserts against the model and not against the file npm packs.
+
+describe('the published specifier list matches the exports allowlist', () => {
+  // Sliced to the section, not searched across the whole document. Unsliced,
+  // the root key `.` maps to the bare string `warpline`, which occurs on
+  // hundreds of lines here — the assertion would pass for a document that
+  // never mentions specifiers at all.
+  const publishedSection = () => {
+    const doc = read('docs/runtime-spec.md')
+    const begin = doc.indexOf('### Published specifiers')
+    expect(begin).toBeGreaterThan(-1)
+    const end = doc.indexOf('\n## ', begin)
+    return doc.slice(begin, end === -1 ? doc.length : end)
+  }
+
+  test('every exports key except ./package.json is named in the section', () => {
+    const pkg = JSON.parse(read('package.json')) as { exports: Record<string, unknown> }
+    const section = publishedSection()
+    const missing = Object.keys(pkg.exports)
+      .filter((k) => k !== './package.json')
+      .map((k) => (k === '.' ? 'warpline' : `warpline/${k.slice(2)}`))
+      .filter((specifier) => !section.includes(specifier))
+    expect(missing).toEqual([])
+  })
+
+  // ROADMAP criterion 4. The pre-1.0 promise is stated about the manifest
+  // contract; without its negative half written down, a consumer reads it at
+  // its widest and treats every shape behind `warpline/schemas/*` as covered.
+  // `engine-state` is the fragment asserted on because it is the one persisted
+  // document an operator is most likely to build a tool against.
+  test('the pre-1.0 promise states what it does not cover', () => {
+    const doc = read('docs/runtime-spec.md')
+    const begin = doc.indexOf('### Contract stability')
+    const end = doc.indexOf('### Published specifiers', begin)
+    expect(begin).toBeGreaterThan(-1)
+    const stability = doc.slice(begin, end)
+    expect(stability).toContain('the engine-state schema and the capability schemas are outside it')
+    expect(stability).toContain('creates_issue')
+  })
+})
