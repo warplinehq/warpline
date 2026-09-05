@@ -30,6 +30,39 @@ import {
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { invokePlugin } from './invoke-plugin.js'
 import type { CapabilityGrantWitness } from './capabilities.js'
+
+/**
+ * The grant witness for a plugin the engine has already cleared to run.
+ *
+ * **Read the name before the body.** This function does not read the Grant and
+ * must never be called by anything that has not read it. It is only correct
+ * downstream of the dueness check below, which reads the Grant ONCE: a plugin
+ * declaring side effects reaches that call site only when the read returned
+ * true, and a plugin declaring none never consulted it at all. Called from
+ * anywhere else it would fabricate a granted witness nobody checked, which is
+ * the failure the single-read rule exists to prevent — and no guard in this
+ * repository catches fabrication, only re-reads. `run-plugin.ts` reads no
+ * grant and passes its own explicit not-granted arm rather than calling this.
+ *
+ * The granted arm records the scope the read ASKED about, which is the plugin
+ * name. The reader answers true for every scope once a grant carries the
+ * wildcard and does not report which one matched, so the requested scope is
+ * the strongest true statement available here.
+ *
+ * It is a named function rather than the ternary it replaced because a ternary
+ * inlined at the call site cannot be told apart from its own opposite: with no
+ * gated member registered, swapping the two arms was green across the entire
+ * suite. `grant-witness.test.ts` covers both arms and asserts this file
+ * carries no inline literal that could drift from them.
+ */
+export function witnessAfterGrantRead(
+  pluginName: string,
+  declaredSideEffects: PluginManifest['side_effects'],
+): CapabilityGrantWitness {
+  return declaredSideEffects.length === 0
+    ? { granted: false, reason: 'no-declared-side-effects' }
+    : { granted: true, scope: pluginName }
+}
 import { computeTier, isEligibleForTier } from './tier.js'
 import type { TierName } from './tier.js'
 import { isPluginFresh } from './staleness.js'
@@ -958,22 +991,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // the rationale in invoke-plugin.ts; an advance writes a RunLog, not
           // a RunArtifact.
           //
-          // The Grant was read ONCE, by the dueness check above: a plugin
-          // declaring side effects reaches this line only when that read
-          // returned true, and a plugin declaring none never consulted it at
-          // all. The witness carries that answer forward instead of asking
-          // again. A second read is a second place to get the gate wrong, and
-          // it would sit inside the code path a plugin author is holding.
-          //
-          // The granted arm records the scope the read ASKED about, which is
-          // the plugin name. The reader answers true for every scope once a
-          // grant carries the wildcard and does not report which one matched,
-          // so the requested scope is the strongest true statement available
-          // here.
-          const witness: CapabilityGrantWitness =
-            manifest.side_effects.length === 0
-              ? { granted: false, reason: 'no-declared-side-effects' }
-              : { granted: true, scope: pluginName }
+          // The Grant was read ONCE, by the dueness check above, and the
+          // witness carries that answer forward instead of asking again. Why
+          // that is sound, and why the arms are what they are, is on
+          // `witnessAfterGrantRead` — one copy, because two copies of an
+          // argument drift and the copy that drifts is the one nobody reads.
+          const witness = witnessAfterGrantRead(pluginName, manifest.side_effects)
           invocationResult = await invokePlugin(
             pluginName,
             {},
