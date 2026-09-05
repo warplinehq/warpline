@@ -128,10 +128,18 @@ export interface WithheldMember {
   readonly reason: string
 }
 
+/**
+ * The object a handler is handed: the members this plugin is entitled to, and
+ * nothing else. Values are `unknown` because the registry is empty of
+ * production members; the first member is what gives this type a shape worth
+ * narrowing, and narrowing it before then would be a shape nobody has.
+ */
+export type CapabilityContext = Readonly<Record<string, unknown>>
+
 /** What `mintContext` returns: the handler's members, and what was held back. */
 export interface MintedContext {
   /** The object handed to a handler. Only members it is entitled to. */
-  readonly context: Readonly<Record<string, unknown>>
+  readonly context: CapabilityContext
   /** One entry per member withheld, in registry order. */
   readonly withheld: readonly WithheldMember[]
 }
