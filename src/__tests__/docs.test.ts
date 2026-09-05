@@ -1220,3 +1220,23 @@ describe('the published specifier list matches the exports allowlist', () => {
     expect(stability).toContain('creates_issue')
   })
 })
+
+// ── `dependencies` is a gate, not a habit ─────────────────────────────────
+//
+// ROADMAP criterion 5: no LLM SDK ever enters `dependencies`. `package.json`
+// is the first file a sceptical reader opens, and a runtime that claims its
+// dispatch is deterministic while shipping an LLM SDK as a runtime dependency
+// refutes itself there, before anyone reads a line of `src/`.
+//
+// A test rather than a lint script for the reason `no-orphan-schema-fields`
+// records: `bun test` is the command CONTRIBUTING names and CI runs, so this
+// cannot be skipped by forgetting a second command. Equality against the whole
+// sorted key list, never a "does not contain" list — a denylist only catches
+// the SDKs somebody thought to name.
+
+describe('the runtime dependency tree stays at one package', () => {
+  test('dependencies is exactly zod', () => {
+    const pkg = JSON.parse(read('package.json')) as { dependencies: Record<string, string> }
+    expect(Object.keys(pkg.dependencies).sort()).toEqual(['zod'])
+  })
+})
