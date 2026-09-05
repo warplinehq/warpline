@@ -240,6 +240,32 @@ describe('generated manifest table', () => {
   })
 })
 
+describe('generated capability table', () => {
+  test('docs/plugin-authoring.md matches what the registry generates today', async () => {
+    const { capabilityTable } = await import('../../scripts/gen-capability-table.js')
+    const doc = read('docs/plugin-authoring.md')
+    const begin = doc.indexOf('<!-- generated: capability-effects -->')
+    const end = doc.indexOf('<!-- /generated -->', begin)
+    expect(begin).toBeGreaterThan(-1)
+
+    const inDoc = doc.slice(begin, end + '<!-- /generated -->'.length)
+    // Regenerate with `bun run scripts/gen-capability-table.ts --write`.
+    expect(inDoc).toBe(capabilityTable())
+  })
+
+  /**
+   * The disambiguation lives outside the markers, so a regeneration cannot take
+   * it away. `capabilities` means two unrelated things in this repository and
+   * the doc has to say which one the table is about.
+   */
+  test('the unrelated manifest field is named as unrelated, outside the region', () => {
+    const doc = read('docs/plugin-authoring.md')
+    const begin = doc.indexOf('<!-- generated: capability-effects -->')
+    expect(doc.slice(0, begin)).toContain('`manifest.capabilities`')
+    expect(doc.slice(0, begin)).toContain('informational')
+  })
+})
+
 // ── The README's gate demo must be output the code still produces ────────
 //
 // The block is presented to a stranger as a real `warpline plan` run showing

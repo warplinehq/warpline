@@ -216,6 +216,32 @@ it is stated here so you meet it before you design around it: if a value has to
 come from the environment, read it inside your handler, where it is yours and
 never passes through the runtime.
 
+## Capabilities
+
+A capability is a member the runtime mints and hands to your handler, drawn from
+what your own manifest declared. The rule is one sentence: a plugin that did not
+declare an effect is never handed the member that performs it. The declaration
+is what mints. The approval Grant is a separate question, read once by the
+runtime before your handler is invoked and never again from inside a member.
+
+**This is not the manifest's `capabilities` field.** `manifest.capabilities` is
+a free-text array of informational tags describing what a plugin does. It grants
+nothing, the mint never reads it, and no member is keyed off it. The table below
+is keyed off `side_effects`.
+
+Members reach a handler as a fourth parameter, after `signal`. The runtime calls
+handlers with three arguments today and `HandlerFn` describes three; the fourth
+lands with the first member, and a three-parameter handler keeps working when it
+does, because JavaScript discards an argument a function does not name.
+
+<!-- generated: capability-effects -->
+
+| Member | Requires `side_effects` entry | What it does |
+|---|---|---|
+| — | — | No capability members are registered in this release. |
+
+<!-- /generated -->
+
 ## Runtime constraints
 
 Your manifest and handler are TypeScript that warpline imports **at runtime**.
