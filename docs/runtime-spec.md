@@ -215,9 +215,9 @@ versions; nothing else here claims to be.
 
 ### Published specifiers, and what each promises
 
-Six specifiers are published: `warpline`, `warpline/schemas/*`,
-`warpline/lib/paths`, `warpline/unstable-runtime`, `warpline/unstable-fs` and
-`warpline/unstable-result`.
+Seven specifiers are published: `warpline`, `warpline/schemas/*`,
+`warpline/lib/paths`, `warpline/unstable-runtime`, `warpline/unstable-fs`,
+`warpline/unstable-result` and `warpline/unstable-capabilities`.
 Nothing else in the package is reachable — the `exports` map is an allowlist,
 and an import of any other subpath fails at resolution rather than resolving to
 something internal.
@@ -236,6 +236,15 @@ That statement is scoped to the specifier and not to any list of symbols, which
 is deliberate: what is behind an `unstable-*` specifier is expected to move, and
 a later release that adds a specifier of that shape inherits this promise rather
 than inventing its own.
+
+`warpline/unstable-capabilities` is **type-only**. Every name behind it is
+erased at build time, so the module it resolves to exports no runtime value at
+all, and importing it for a value gets you nothing. It carries the shape of the
+capability context a handler is handed, the shape of the grant witness a caller
+of the runtime must supply, and the four-parameter handler type that ties the
+two together. The mint and the capability registry are deliberately not behind
+it: the registry is a table designed to grow, and publishing it would owe a
+stability promise on every row anybody adds.
 
 ## 2. Retry Policy
 
@@ -772,6 +781,38 @@ grant exists — always, including with no grant file on disk at all. This is
 worth stating because everything above reads like a universal rule: it is not.
 The gate covers the effects a plugin *declares*. A plugin that performs an
 effect it did not declare is a plugin bug, and no approval state changes that.
+
+### Who reads the grant, and who mints a capability
+
+Two invariants, and they read like a contradiction until you notice they are
+about different files.
+
+**The declaration mints; the engine checks.** A capability member reaches a
+handler only when the plugin's manifest declared the effect that member
+performs — the declaration is what mints. Whether the run carries approval for
+that effect is a separate question, and it is answered ONCE, by the engine,
+before invocation. One of each, in different files. So "no capability re-reads
+the grant" and "authority flows only from a checked grant" are both true at the
+same time: the capability layer imports nothing that reads the grant file and
+calls no read function, and the answer it works from is handed in by the caller
+that did read it.
+
+**The mint is called from exactly one place.** `invokePlugin` is the only
+function that mints a context, so there is no path from `warpline approve` —
+the verb that WRITES the grant — to a capability. The verb that grants
+authority and the code that hands authority out do not meet. That is not a
+convention. A test in this repository asserts set equality over every non-test
+source file that names the mint, so a third one reddens on the day it lands,
+and a lost one reddens too.
+
+A caller that reads no grant at all — `warpline run`, which starts a plugin by
+hand — says so explicitly rather than by omission. It passes the witness arm
+naming a manual run, and receives only the members that need no approval. The
+obligation is fixed at the signature: the witness is a required parameter of
+`invokePlugin`, so a caller cannot be added without answering. Within one
+package that witness can of course be constructed by hand; this runtime does
+not sandbox its handlers, and nothing here claims otherwise. What is bought is
+that the question cannot be skipped, not that the answer cannot be written.
 
 ### Merge semantics (`warpline approve`)
 

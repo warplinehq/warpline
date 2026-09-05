@@ -11,8 +11,10 @@
 #      Bun — exposes exactly one path accessor, ships no filesystem helper and
 #      no removed field behind `schemas/run-log`, exposes exactly the decided
 #      symbol set behind `unstable-runtime`, `unstable-fs` and
-#      `unstable-result` with no never-published name reachable from any of
-#      them, and REFUSES an unmapped subpath (ERR_PACKAGE_PATH_NOT_EXPORTED)
+#      `unstable-result` — and exactly NO runtime value behind the type-only
+#      `unstable-capabilities` — with no never-published name reachable from
+#      any of them, and REFUSES an unmapped subpath
+#      (ERR_PACKAGE_PATH_NOT_EXPORTED)
 #   4. the bin's Node floor gate prints required-vs-found and exits 1 without
 #      an ERR_UNKNOWN_FILE_EXTENSION trace
 #   5. `warpline scaffold` writes a plugin carrying no absolute path, and a
@@ -387,6 +389,48 @@ for (const name of ['readDependencyOutput', 'skillFailure', 'skillHandoff', 'ski
     console.error('warpline/unstable-result: ' + name + ' is not callable')
     process.exit(1)
   }
+}
+
+// `warpline/unstable-capabilities` is the fourth deliberately-unstable subpath
+// and the first type-only one, which changes what this assertion means without
+// changing its shape.
+//
+// The expected set is the EMPTY STRING, and that is the assertion rather than a
+// concession to one. Every name behind this specifier is erased at build time,
+// so a correct `dist/unstable-capabilities.js` exports nothing at all — the
+// file tsc emits for a type-only module is `export {}`. Comparing against the
+// empty string is therefore the strongest runtime statement available here, and
+// it is the one that reddens on the day somebody adds a helper function to a
+// barrel whose entire promise is that it carries none.
+//
+// It is emphatically NOT a check of the types. A type leaves no trace in a
+// `dist/*.js` file — the comment on `unstable-runtime` above says so about its
+// own erased names, and no TypeScript is installed in this script's temp
+// directory. `src/runtime/__tests__/unstable-capabilities.types.ts` imports
+// these three names through this same specifier and is read by `tsc --noEmit`,
+// which is what covers the half this block cannot see. The import below still
+// earns its place: it is what fails with ERR_PACKAGE_PATH_NOT_EXPORTED if the
+// `exports` entry is missing or points at a file `files` did not ship.
+const unstableCapabilities = await import('warpline/unstable-capabilities')
+
+const UNSTABLE_CAPABILITIES_EXPECTED = ''
+
+const unstableCapabilitiesExports = Object.keys(unstableCapabilities).filter((k) => k !== 'default').sort().join(',')
+console.log('   warpline/unstable-capabilities exports: [' + unstableCapabilitiesExports + '] (type-only, empty by design)')
+if (unstableCapabilitiesExports !== UNSTABLE_CAPABILITIES_EXPECTED) {
+  console.error('expected exactly the empty set, got ' + unstableCapabilitiesExports)
+  process.exit(1)
+}
+
+// The same never-published list, run against the fourth namespace. It is reused
+// verbatim rather than copied, so a name added to it is refused from every
+// published barrel at once. Running it against an empty namespace is not
+// vacuous: it is the assertion that stays correct if this barrel ever stops
+// being empty.
+const capabilitiesNeverReachable = NEVER_PUBLISHED.filter((n) => n in unstableCapabilities)
+if (capabilitiesNeverReachable.length) {
+  console.error('warpline/unstable-capabilities reaches never-published names: ' + capabilitiesNeverReachable.join(', '))
+  process.exit(1)
 }
 
 // Every other check in this file is a shape assertion: a name is exported, a
