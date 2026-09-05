@@ -353,9 +353,11 @@ permission you do not already have.
 
 **There is no snapshot store, and so no history, retention or diff.** Keep that
 under the plugin's own channel meanwhile: write what you want to remember as a
-declared output, and read the previous value back through the dependency-output
-helper on `warpline/unstable-result`. What a store would add is retention and
-comparison you would otherwise write per plugin — not a capability you lack.
+declared output, and read your own prior state back the way your handler
+already reads anything — from a path you control, named through your config
+file. The runtime hands a handler no reader for its own past runs, so a plugin
+that needs history owns that file today. What a store would add is retention
+and comparison you would otherwise write per plugin, not permission you lack.
 
 ## Runtime constraints
 
