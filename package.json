@@ -41,6 +41,10 @@
       "types": "./dist/unstable-fs.d.ts",
       "default": "./dist/unstable-fs.js"
     },
+    "./unstable-result": {
+      "types": "./dist/unstable-result.d.ts",
+      "default": "./dist/unstable-result.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {

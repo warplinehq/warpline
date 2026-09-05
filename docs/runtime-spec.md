@@ -215,8 +215,9 @@ versions; nothing else here claims to be.
 
 ### Published specifiers, and what each promises
 
-Five specifiers are published: `warpline`, `warpline/schemas/*`,
-`warpline/lib/paths`, `warpline/unstable-runtime` and `warpline/unstable-fs`.
+Six specifiers are published: `warpline`, `warpline/schemas/*`,
+`warpline/lib/paths`, `warpline/unstable-runtime`, `warpline/unstable-fs` and
+`warpline/unstable-result`.
 Nothing else in the package is reachable — the `exports` map is an allowlist,
 and an import of any other subpath fails at resolution rather than resolving to
 something internal.

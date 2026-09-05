@@ -10,9 +10,9 @@
 #   3. the `exports` map resolves every published specifier — under Node AND
 #      Bun — exposes exactly one path accessor, ships no filesystem helper and
 #      no removed field behind `schemas/run-log`, exposes exactly the decided
-#      symbol set behind `unstable-runtime` and behind `unstable-fs` with no
-#      never-published name reachable from either, and REFUSES an unmapped
-#      subpath (ERR_PACKAGE_PATH_NOT_EXPORTED)
+#      symbol set behind `unstable-runtime`, `unstable-fs` and
+#      `unstable-result` with no never-published name reachable from any of
+#      them, and REFUSES an unmapped subpath (ERR_PACKAGE_PATH_NOT_EXPORTED)
 #   4. the bin's Node floor gate prints required-vs-found and exits 1 without
 #      an ERR_UNKNOWN_FILE_EXTENSION trace
 #   5. `warpline scaffold` writes a plugin carrying no absolute path, and a
@@ -349,6 +349,42 @@ if (fsNeverReachable.length) {
 for (const name of ['atomicWriteJson', 'atomicWriteText', 'readJsonOrNull']) {
   if (typeof unstableFs[name] !== 'function') {
     console.error('warpline/unstable-fs: ' + name + ' is not callable')
+    process.exit(1)
+  }
+}
+
+// `warpline/unstable-result` is the third deliberately-unstable subpath, and it
+// inherits the same paragraph in docs/runtime-spec.md rather than inventing its
+// own promise. Exact set, same reason: the barrel re-exports from two runtime
+// modules, either of which may grow a helper that has no business being public.
+//
+// One entry rather than two, because the reader returns an `OutputRecord` — the
+// same schema family the builders construct — so producing a result and reading
+// one are two halves of one subject. The literal below and
+// `src/unstable-result.ts` are edited together, or this reddens.
+const unstableResult = await import('warpline/unstable-result')
+
+const UNSTABLE_RESULT_EXPECTED = 'readDependencyOutput,skillFailure,skillOk'
+
+const unstableResultExports = Object.keys(unstableResult).filter((k) => k !== 'default').sort().join(',')
+console.log('   warpline/unstable-result exports: ' + unstableResultExports)
+if (unstableResultExports !== UNSTABLE_RESULT_EXPECTED) {
+  console.error('expected exactly ' + UNSTABLE_RESULT_EXPECTED + ', got ' + unstableResultExports)
+  process.exit(1)
+}
+
+// The same never-published list, run against the third namespace. It is reused
+// verbatim and not copied, so a name added to it is refused from every
+// published barrel at once rather than from the ones somebody remembered.
+const resultNeverReachable = NEVER_PUBLISHED.filter((n) => n in unstableResult)
+if (resultNeverReachable.length) {
+  console.error('warpline/unstable-result reaches never-published names: ' + resultNeverReachable.join(', '))
+  process.exit(1)
+}
+
+for (const name of ['readDependencyOutput', 'skillFailure', 'skillOk']) {
+  if (typeof unstableResult[name] !== 'function') {
+    console.error('warpline/unstable-result: ' + name + ' is not callable')
     process.exit(1)
   }
 }
