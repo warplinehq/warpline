@@ -144,9 +144,18 @@ export interface InvokePluginOptions {
  * the retry loop. They disagreed until 2026-08-28 — the run said `delegated`
  * while its own `attempts[0]` said `failed` — and a second copy of this
  * predicate is exactly how that comes back.
+ *
+ * It reads FIELD-OR-PREFIX: the structured `needs_llm` field, or the older
+ * `[needs-llm]` summary prefix. Both, because the prefix arm cannot be retired
+ * yet — the scanner that finds handoffs ships as a Claude Code skill, outside
+ * this package and outside `bun test`'s reach, and it reads the summary string.
+ * Dropping the prefix would move the same disagreement one layer out, where
+ * nothing here can see it. A `skipped` status is still required by both arms:
+ * the field alone must not make a successful result delegated.
  */
 function isHandoff(result: SkillResult | null): boolean {
-  return result?.status === 'skipped' && (result.summary?.startsWith('[needs-llm]') ?? false)
+  if (result?.status !== 'skipped') return false
+  return result.needs_llm !== undefined || (result.summary?.startsWith('[needs-llm]') ?? false)
 }
 
 /**

@@ -45,6 +45,48 @@ Three rules, all enforced or honoured by the runtime:
    — all pre-resolved into the summary/context payload. The LLM gets a
    decision to make, not a scavenger hunt.
 
+## The structured arm
+
+A summary is a string, and a plugin that hands off has to assemble one
+correctly or the handoff is not consumable. The same handoff can be declared as
+a field, `needs_llm`, so an author constructs it instead of formatting it:
+
+```jsonc
+{
+  "status": "skipped",
+  "summary": "[needs-llm] Draft distribution posts for 2 articles. Context: <path>",
+  "needs_llm": {
+    "task": "Draft distribution posts for 2 articles",
+    "context_path": "state/distribution-queue.json"
+  }
+}
+```
+
+The `task` field is the sentence a human reads — what judgment is being asked
+for, with no terminating punctuation, since the summary supplies that. The
+`context_path` field is the payload, and everything the `Context:` rule above
+says about paths binds it here in its own right rather than by reference.
+
+`context_path` names a **path** and never an inline payload, and it is a path
+**relative to the warpline home**. Relative is what makes the restriction
+enforceable: a schema cannot ask where the home is, but a relative path with no
+parent-directory segment resolves inside whatever root it is joined to, so the
+in-home rule holds by construction rather than by a check somebody has to
+remember. An absolute path, a Windows drive letter, and any `..` segment are
+refused at the parse boundary, and the whole result is refused with them. The
+refusal names the key and the shape expected of it and never the offending
+value — a path is exactly the kind of value that carries a secret, and a
+refusal lands in the run log.
+
+The reason is the same one the string arm has: the scanner runs in a session
+with the operator's rights, so the set of files a plugin can make it open must
+be bounded by the home and not by the plugin.
+
+The runtime classifies a handoff on **either** arm — one predicate,
+`isHandoff` in `invoke-plugin.ts`, reads the field or the prefix. `status:
+'skipped'` is still required by both: the field alone does not turn a
+successful result into a delegated one.
+
 ## Who consumes the handoff
 
 A **companion skill** — a Claude Code skill (see `skills/needs-llm-template/`)

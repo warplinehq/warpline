@@ -132,6 +132,56 @@ export const OutputRecordSchema = z
 export type OutputRecord = z.infer<typeof OutputRecordSchema>
 
 /**
+ * The shape a handoff's context path must have, as one sentence reused by the
+ * refusal below.
+ *
+ * The refusal names the key and the shape expected of it and never the value.
+ * A path is exactly the kind of value an operator's machine puts secrets in,
+ * and this string lands in a run log — the same discipline `resolvePluginArgs`
+ * states for config problems.
+ */
+const CONTEXT_PATH_SHAPE =
+  'needs_llm.context_path must be a path relative to the warpline home, with no parent-directory segment'
+
+/**
+ * Does this path resolve inside the warpline home, whatever that home is?
+ *
+ * A schema module cannot ask where the home is — `warpline/schemas/*` ships
+ * shapes and imports nothing but `zod` and its siblings, which is asserted. So
+ * the check is on the path's SHAPE rather than on its resolution: a relative
+ * path with no parent-directory segment lands under whatever root it is joined
+ * to, and that is the whole of the guarantee needed here. An absolute path, a
+ * drive letter and a `..` segment are the three ways out, and all three are
+ * refused.
+ */
+function resolvesInsideHome(p: string): boolean {
+  if (p.startsWith('/') || p.startsWith('\\')) return false
+  if (/^[A-Za-z]:[\\/]/.test(p)) return false
+  return !p.split(/[\\/]/).includes('..')
+}
+
+/**
+ * A `[needs-llm]` handoff, as a field a plugin can construct rather than a
+ * string it has to assemble.
+ *
+ * `context_path` names a PATH and never an inline payload, for the reason
+ * docs/needs-llm-contract.md gives for the string arm: the scanner runs in a
+ * session with the operator's rights, so the set of things a plugin can make
+ * it open has to be bounded by the warpline home rather than by the plugin. An
+ * inline blob would be read as a path, fail to resolve, and be reported as
+ * out-of-home instead of consumed. Write the payload to a file under the home
+ * and name that file, relative to the home.
+ */
+export const NeedsLlmSchema = z.object({
+  /** What judgment work is being handed off, in one sentence and no punctuation at the end. */
+  task: z.string(),
+  /** Path to the payload, RELATIVE to the warpline home. */
+  context_path: z.string().min(1).refine(resolvesInsideHome, { message: CONTEXT_PATH_SHAPE }),
+})
+
+export type NeedsLlm = z.infer<typeof NeedsLlmSchema>
+
+/**
  * Skill result contract.
  * Every sub-skill must emit this structure in a ```skill-result fenced block.
  * Warpline validates on ingestion via SkillResultSchema.safeParse().
@@ -166,6 +216,19 @@ export const SkillResultSchema = z.object({
   reversible: z.boolean().optional(),
   /** Human-readable instruction for undoing the side effects, if reversible. */
   undo_instruction: z.string().optional(),
+  /**
+   * The judgment work this result hands off, structured rather than spelled
+   * into the summary. Emitted TOGETHER with the `[needs-llm]` summary prefix,
+   * never instead of it — the scanner that ships as a Claude Code skill reads
+   * the summary string, and a result carrying only this field is one the
+   * runtime calls delegated and the scanner never picks up.
+   *
+   * Optional, never nullable: an absent optional is omitted by
+   * Zod and dropped by `JSON.stringify`, so a plugin that delegated nothing
+   * carries no key at all rather than a `null` a reader would have to
+   * interpret.
+   */
+  needs_llm: NeedsLlmSchema.optional(),
 })
 
 export type SkillResult = z.infer<typeof SkillResultSchema>

@@ -275,12 +275,19 @@ Timeout vs. retry interaction:
 | per-attempt timeout trips            | `failed`    | `false`                   | `true`      |
 | external `controller.abort()`        | `cancelled` | `false`                   | `false`     |
 | handler returns `skipped` + `[needs-llm]` summary prefix | `delegated` | `false` | `false`     |
+| handler returns `skipped` + a `needs_llm` field          | `delegated` | `false` | `false`     |
 
 `delegated` (2026-08-19): a `[needs-llm]` handoff is a successful dispatch to a
 companion LLM skill, not a failure. `deriveRunStatus()` in `invoke-plugin.ts` is
 the single mapping shared by the persisted run artifact, any live run bus,
 and the board event (severity `info`). A plain `skipped` without the prefix still
 maps to `failed` — widen deliberately if a persisted-run path ever produces one.
+
+The two handoff rows are one predicate, not two. `isHandoff()` reads the
+structured `needs_llm` field or the `[needs-llm]` summary prefix, and both rows
+still require `skipped`. A result carrying both arms is classified once. See
+[needs-llm-contract.md](needs-llm-contract.md) for the field's shape and for
+why the prefix arm is emitted alongside it rather than replaced by it.
 
 ### Attempt status
 
