@@ -3,11 +3,15 @@
  * the handler is called.
  *
  * Every case here goes through the real `invokePlugin` against a real fixture
- * plugin on disk. The point is the word BEFORE: a presence check that runs
- * inside a handler is a check every plugin author has to remember, and one that
- * fails after the handler has already started doing work. The assertion that
- * carries that is the marker file — the fixture handler writes one as its first
- * statement, and the failing cases assert it is absent.
+ * plugin on disk, with one exception: the substring-shadowing block at the foot
+ * of the file calls `scrubSecrets` directly, because the defect it pins is a
+ * property of the replacement ORDER and asserting it needs an exact-equality
+ * check on the scrubbed string rather than a search of a file. The point is the
+ * word BEFORE: a presence check that runs inside a handler is a check every
+ * plugin author has to remember, and one that fails after the handler has
+ * already started doing work. The assertion that carries that is the marker
+ * file — the fixture handler writes one as its first statement, and the failing
+ * cases assert it is absent.
  *
  * Values never appear in an assertion by accident. Where a case needs a
  * credential that IS set, its value is a sentinel and the test asserts the
@@ -24,6 +28,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { invokePlugin } from '../invoke-plugin.js'
+import { REDACTED, scrubSecrets } from '../secrets.js'
 import { _setHome } from '../../lib/paths.js'
 
 let root: string
@@ -425,5 +430,72 @@ describe('a resolved credential reaches no sink invokePlugin writes', () => {
       expect(res.result.needs_llm?.task).not.toContain(CANARY)
       expect(res.result.summary).not.toContain(CANARY)
     })
+  })
+})
+
+// -----------------------------------------------------------------------
+// Two resolved credentials, where one value is a substring of the other
+// -----------------------------------------------------------------------
+//
+// `manifest.secrets: ['DB_PASSWORD', 'DB_URL']` is an ordinary declaration, and
+// the password is a substring of the URL. Replacing in declaration order lets
+// the placeholder the short value inserts break the long value's own match, so
+// the long value's remainder — host, user and database — survives the scrub.
+// Every case above resolves at most one credential, which is why the whole file
+// was green over it.
+//
+// The assertions are exact equality and not `not.toContain(short)`. Absence of
+// the short value is true of the leaky output as well, so it is green over the
+// defect; only the whole scrubbed string says the long value was consumed.
+//
+// Both declaration orders, because whether the leak happens at all depends on
+// which name an author wrote first, and that is not a property anyone should
+// have to get right.
+
+describe('scrubSecrets with two resolved values where one contains the other', () => {
+  const KEY = 'sk-live-abc123XYZ'
+  const PREFIX = 'sk-'
+  const URL = 'postgres://u:s3cr3t@db/x'
+  const PASSWORD = 's3cr3t'
+
+  test('a prefix declared first does not shadow the whole key', () => {
+    expect(scrubSecrets({ summary: `auth ${KEY} failed` }, [PREFIX, KEY])).toEqual({
+      summary: `auth ${REDACTED} failed`,
+    })
+  })
+
+  test('a prefix declared second does not shadow the whole key', () => {
+    expect(scrubSecrets({ summary: `auth ${KEY} failed` }, [KEY, PREFIX])).toEqual({
+      summary: `auth ${REDACTED} failed`,
+    })
+  })
+
+  test('a password declared first does not leave the connection string on disk', () => {
+    expect(scrubSecrets({ summary: `connected to ${URL}` }, [PASSWORD, URL])).toEqual({
+      summary: `connected to ${REDACTED}`,
+    })
+  })
+
+  test('a password declared second does not leave the connection string on disk', () => {
+    expect(scrubSecrets({ summary: `connected to ${URL}` }, [URL, PASSWORD])).toEqual({
+      summary: `connected to ${REDACTED}`,
+    })
+  })
+
+  test('the shorter value is still replaced where it stands on its own', () => {
+    // The counterpart risk to the fix: consuming the longer value first must
+    // not mean the shorter one stops being scrubbed elsewhere in the string.
+    expect(scrubSecrets({ summary: `${PREFIX} then ${KEY}` }, [PREFIX, KEY])).toEqual({
+      summary: `${REDACTED} then ${REDACTED}`,
+    })
+  })
+
+  test('the caller’s array is not reordered', () => {
+    // The sort is on a copy. `Object.values(secrets.values)` is a fresh array
+    // today, so mutating it would be invisible — which is exactly why it is
+    // worth pinning before some caller passes something it keeps.
+    const declared = [PREFIX, KEY]
+    scrubSecrets({ summary: KEY }, declared)
+    expect(declared).toEqual([PREFIX, KEY])
   })
 })

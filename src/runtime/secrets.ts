@@ -174,7 +174,14 @@ export function scrubSecrets<T>(value: T, secretValues: readonly string[]): T {
     )
   }
   if (values.length === 0) return value
-  return walk(value, values) as T
+  // Longest first, and a COPY so the caller's array keeps its order. Replacing
+  // in declaration order lets a short value that is a substring of a long one
+  // insert the placeholder INTO the long one, which stops the long one matching
+  // and leaves its remainder standing — `['DB_PASSWORD', 'DB_URL']` leaves the
+  // host, user and database of the URL on disk. Consuming the longest match
+  // first makes that unreachable, because no surviving value can contain one
+  // already replaced.
+  return walk(value, [...values].sort((a, b) => b.length - a.length)) as T
 }
 
 /**
