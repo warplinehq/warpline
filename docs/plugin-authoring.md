@@ -300,6 +300,63 @@ error, not a convention.
 
 <!-- /generated -->
 
+### Taking the fourth parameter
+
+```typescript
+import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
+
+export const handler: CapabilityHandlerFn = async (manifest, args, signal, capabilities) => {
+  const declared = capabilities.secrets.resolvedNames(capabilities.caller)
+  // ...
+}
+```
+
+Three rules, and they are the whole model:
+
+1. **The declaration is what mints.** A member appears on the context only when
+   your manifest declares the `side_effects` entry the table above names for
+   it. A member marked **ungated** names no entry and is minted for every
+   plugin, on every run.
+2. **The approval Grant is a separate question.** For a member that does name
+   an entry, the declaration is necessary and not sufficient: the runtime reads
+   the Grant once, before your handler is invoked, and a run carrying no
+   approval receives no gated member. Nothing inside a member reads it again.
+3. **Every member call names its caller.** The caller is the first argument of
+   every member function, it is required, and omitting it is a compile error.
+   Pass `capabilities.caller` — it is on the context for exactly this reason.
+
+A member you were not entitled to is absent from the context rather than
+present and throwing. Read that as the answer to "did my manifest declare
+this?", which is the only question it is answering.
+
+### The bound, stated plainly
+
+**The capability context bounds the sanctioned path. It does not bound your
+handler.** Your handler runs in the same process as the runtime and can reach
+whatever that process can reach: the environment, the filesystem, the network.
+The declaration decides what warpline hands you, not what you are able to
+touch. Warpline offers no isolation here and claims none. What the declaration
+buys is that the approval gate and the run record agree with each other about
+what a plugin said it would do — which is why an undeclared side effect is the
+one unforgivable plugin bug.
+
+### Two things that do not exist yet
+
+Both are deferred rather than refused, and both have a way to work today.
+
+**There is no `warpline/unstable-http`, and no minted HTTP member.** Call
+`fetch` directly from your handler and declare `external_api` on
+`side_effects`. The gate reads your declaration, so a plugin calling out
+through `fetch` is gated exactly as one calling through a member would be —
+what a member would add later is a shared timeout and retry story, not
+permission you do not already have.
+
+**There is no snapshot store, and so no history, retention or diff.** Keep that
+under the plugin's own channel meanwhile: write what you want to remember as a
+declared output, and read the previous value back through the dependency-output
+helper on `warpline/unstable-result`. What a store would add is retention and
+comparison you would otherwise write per plugin — not a capability you lack.
+
 ## Runtime constraints
 
 Your manifest and handler are TypeScript that warpline imports **at runtime**.
