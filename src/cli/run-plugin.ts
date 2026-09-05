@@ -149,6 +149,14 @@ export async function runPlugin(
   if (!plugin || !action) return usage(USAGE)
 
   try {
+    // This verb reads no Grant, anywhere in this file, and it did not before
+    // this argument existed either. What changes is that the absence is now a
+    // statement in the diff rather than something a reader has to notice is
+    // missing: a run started by hand answers the Grant question with the arm
+    // that is true of it, and receives the members that need no approval.
+    //
+    // Behaviour is unchanged. A manual run of a plugin declaring no side
+    // effects gets exactly what it got before.
     const invocation = await invokePlugin(
       plugin,
       { action },
@@ -158,6 +166,7 @@ export async function runPlugin(
         persistArtifact: true,
         userInitiated: true,
       },
+      { granted: false, reason: 'manual-run' },
     )
     const ok = invocation.result.status !== 'failed'
     const payload: RunPayload = {

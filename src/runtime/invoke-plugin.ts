@@ -35,7 +35,7 @@ import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { emitAttemptFailed } from '../board/engine-events.js'
 import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
 import { mintContext } from './capabilities.js'
-import type { CapabilityContext } from './capabilities.js'
+import type { CapabilityContext, CapabilityGrantWitness } from './capabilities.js'
 
 /**
  * Resolve the default plugins directory via canonical paths.ts.
@@ -243,14 +243,32 @@ export function stampOutputs(result: SkillResult, runId: string): SkillResult {
 /**
  * Invoke a plugin handler in-process via dynamic import.
  *
+ * `witness` is a SEPARATE, NON-DEFAULTED parameter, and never a field on
+ * `options`. `options` carries a default, so every field on it is optional by
+ * construction — a witness placed there could be omitted and would still
+ * compile, which turns a caller obligation fixed at the signature back into a
+ * rule each call site has to remember. Here, omitting it does not compile.
+ *
+ * What that buys is narrow and worth stating exactly. It is not that a witness
+ * cannot be constructed by hand: within one package any caller can write the
+ * literal, and this runtime does not sandbox its handlers. It is that a NEW
+ * caller — including a third-party host reaching this function through
+ * `warpline/unstable-runtime` — cannot be added without answering whether the
+ * Grant was read. The runtime hands a handler authority minted from what its
+ * manifest declared, so the caller that supplies no answer is the one that
+ * would make warpline the deputy granting it.
+ *
  * @param pluginName - Plugin directory name under .warpline/plugins/ (or pluginsDir override)
  * @param args - Arguments passed to the handler function
  * @param options - InvokePluginOptions (see type)
+ * @param witness - What the caller learned when it read the Grant, or the arm
+ *   naming why it read none. Required; there is no default and no `?`.
  */
 export async function invokePlugin(
   pluginName: string,
   args: Record<string, unknown> = {},
   options: InvokePluginOptions = {},
+  witness: CapabilityGrantWitness,
 ): Promise<PluginInvocationResult> {
   const dir = options.pluginsDir ?? getDefaultPluginsDir()
   const start = Date.now()
@@ -365,7 +383,7 @@ export async function invokePlugin(
   // line nobody reads.
   const { context: capabilities } = mintContext(
     { manifest, caller: { plugin: pluginName, runId } },
-    { granted: false, reason: 'manual-run' },
+    witness,
   )
 
   // -------------------------------------------------------------------

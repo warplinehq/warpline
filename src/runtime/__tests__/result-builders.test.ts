@@ -207,7 +207,7 @@ afterEach(async () => {
 
 describe('a handler that returns skillOk survives invokePlugin', () => {
   test('the fields the builder set reach the caller, and the ones it left alone are defaulted', async () => {
-    const { result } = await invokePlugin('builder-plugin', {}, { pluginsDir: tmpDir, eventsPath })
+    const { result } = await invokePlugin('builder-plugin', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
 
     expect(result.status).toBe('success')
     expect(result.summary).toBe('built by the builder')

@@ -1372,7 +1372,7 @@ export async function handler(manifest, args) {
     const invoked = await invokePlugin('stamped', {}, {
       pluginsDir: ctx.pluginsDir,
       runId: 'run-under-test',
-    })
+    }, { granted: false, reason: 'manual-run' })
     const output = invoked.result.artifacts_produced[0]
     expect(output).toBeDefined()
     expect(output?.run_id).toBe('run-under-test')

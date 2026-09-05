@@ -62,7 +62,7 @@ describe('invokePlugin — retry loop', () => {
    * matter what the classifier does.
    */
   it('a [needs-llm] handoff is delegated at BOTH the run and attempt level', async () => {
-    const res = await invokePlugin('needs-llm-plugin', {}, { pluginsDir: FIXTURES_DIR })
+    const res = await invokePlugin('needs-llm-plugin', {}, { pluginsDir: FIXTURES_DIR }, { granted: false, reason: 'manual-run' })
 
     expect(deriveRunStatus(res)).toBe('delegated')
     expect(res.attempts.length).toBe(1)
@@ -79,7 +79,7 @@ describe('invokePlugin — retry loop', () => {
   })
 
   it('success on first attempt → attempt_count=1, retried=false', async () => {
-    const res = await invokePlugin('success-plugin', {}, { pluginsDir: FIXTURES_DIR })
+    const res = await invokePlugin('success-plugin', {}, { pluginsDir: FIXTURES_DIR }, { granted: false, reason: 'manual-run' })
 
     expect(res.attempt_count).toBe(1)
     expect(res.retried).toBe(false)
@@ -98,6 +98,7 @@ describe('invokePlugin — retry loop', () => {
       'retry-then-succeed-plugin',
       { counterPath },
       { pluginsDir: FIXTURES_DIR },
+    { granted: false, reason: 'manual-run' },
     )
 
     expect(res.attempt_count).toBe(2)
@@ -114,6 +115,7 @@ describe('invokePlugin — retry loop', () => {
       'retryable-fail-plugin',
       {},
       { pluginsDir: FIXTURES_DIR, maxRetriesOverride: 0 },
+    { granted: false, reason: 'manual-run' },
     )
 
     expect(res.attempt_count).toBe(1)
@@ -124,7 +126,7 @@ describe('invokePlugin — retry loop', () => {
   })
 
   it('nonretryable failure never retries', async () => {
-    const res = await invokePlugin('nonretryable-fail-plugin', {}, { pluginsDir: FIXTURES_DIR })
+    const res = await invokePlugin('nonretryable-fail-plugin', {}, { pluginsDir: FIXTURES_DIR }, { granted: false, reason: 'manual-run' })
 
     expect(res.attempt_count).toBe(1)
     expect(res.retried).toBe(false)
@@ -139,6 +141,7 @@ describe('invokePlugin — retry loop', () => {
       'retryable-fail-plugin',
       {},
       { pluginsDir: FIXTURES_DIR, maxRetriesOverride: 3 },
+    { granted: false, reason: 'manual-run' },
     )
 
     expect(res.attempt_count).toBe(4)
@@ -153,6 +156,7 @@ describe('invokePlugin — retry loop', () => {
       'retryable-fail-plugin',
       {},
       { pluginsDir: FIXTURES_DIR, maxRetriesOverride: 3 },
+    { granted: false, reason: 'manual-run' },
     )
 
     // Filter to delays >= 1ms that match backoff ranges; the spy also captures
@@ -177,6 +181,7 @@ describe('invokePlugin — retry loop', () => {
       'retryable-fail-plugin',
       {},
       { pluginsDir: FIXTURES_DIR, maxRetriesOverride: 2 },
+    { granted: false, reason: 'manual-run' },
     )
 
     expect(emitAttemptFailedSpy).toHaveBeenCalledTimes(2)
@@ -199,8 +204,10 @@ describe('invokePlugin — retry loop', () => {
     const { result } = await invokePlugin(
       'retryable-fail-plugin',
       {},
-      // Exactly what `warpline run` passes: no runId, persistArtifact true.
+      // Exactly what `warpline run` passes: no runId, persistArtifact true,
+      // and the not-granted witness naming a manual run.
       { pluginsDir: FIXTURES_DIR, maxRetriesOverride: 1, persistArtifact: true, runsDir },
+      { granted: false, reason: 'manual-run' },
     )
 
     const notified = emitAttemptFailedSpy.mock.calls[0]?.[3]

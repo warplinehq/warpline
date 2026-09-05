@@ -81,7 +81,7 @@ async function writeConfig(name: string, body: string): Promise<string> {
 }
 
 function run(name: string, args: Record<string, unknown> = {}) {
-  return invokePlugin(name, args, { pluginsDir: pluginsRoot, eventsPath })
+  return invokePlugin(name, args, { pluginsDir: pluginsRoot, eventsPath }, { granted: false, reason: 'manual-run' })
 }
 
 beforeEach(async () => {

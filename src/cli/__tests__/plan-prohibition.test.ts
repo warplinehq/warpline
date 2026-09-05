@@ -238,7 +238,7 @@ export async function handler(_manifest, _args) {
 
     // The positive control. A fixture that cannot fail proves nothing: without
     // this half, a typo in the sentinel path would read as a passing test.
-    const { result } = await invokePlugin('sentinel-handler', {}, { pluginsDir: home.pluginsDir })
+    const { result } = await invokePlugin('sentinel-handler', {}, { pluginsDir: home.pluginsDir }, { granted: false, reason: 'manual-run' })
     expect(result.status).toBe('success')
     expect(existsSync(sentinel)).toBe(true)
   })

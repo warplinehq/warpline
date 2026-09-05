@@ -106,7 +106,7 @@ afterEach(async () => {
 
 describe('invokePlugin', () => {
   test('Test 1: loads handler via dynamic import and returns its SkillResult', async () => {
-    const result = await invokePlugin('good-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH })
+    const result = await invokePlugin('good-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
 
     expect(result.plugin).toBe('good-plugin')
     expect(result.result.status).toBe('success')
@@ -117,7 +117,7 @@ describe('invokePlugin', () => {
 
   test('Test 2: handler that throws returns failed SkillResult — not a thrown exception', async () => {
     // Must NOT throw — must return a failed result
-    const result = await invokePlugin('throwing-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH })
+    const result = await invokePlugin('throwing-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
 
     expect(result.plugin).toBe('throwing-plugin')
     expect(result.result.status).toBe('failed')
@@ -126,7 +126,7 @@ describe('invokePlugin', () => {
   })
 
   test('Test 3: handler returning invalid SkillResult shape triggers parse_error in result', async () => {
-    const result = await invokePlugin('bad-shape-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH })
+    const result = await invokePlugin('bad-shape-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
 
     expect(result.plugin).toBe('bad-shape-plugin')
     expect(result.result.status).toBe('failed')
@@ -152,7 +152,7 @@ describe('invokePlugin', () => {
     `)
 
     const start = Date.now()
-    const result = await invokePlugin('retryable-fail-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH })
+    const result = await invokePlugin('retryable-fail-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
     const elapsed = Date.now() - start
 
     expect(result.result.status).toBe('failed')
@@ -179,7 +179,7 @@ describe('invokePlugin', () => {
     `)
 
     const start = Date.now()
-    const result = await invokePlugin('non-retryable-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH })
+    const result = await invokePlugin('non-retryable-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
     const elapsed = Date.now() - start
 
     expect(result.result.status).toBe('failed')
@@ -225,14 +225,14 @@ describe('invokePlugin', () => {
       }
     `)
 
-    const result = await invokePlugin('retry-success-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH })
+    const result = await invokePlugin('retry-success-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
 
     expect(result.result.status).toBe('success')
     expect(result.retried).toBe(true)
   }, 10_000)
 
   test('Test 7: result includes duration_ms and plugin name metadata', async () => {
-    const result = await invokePlugin('good-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH })
+    const result = await invokePlugin('good-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
 
     expect(result.plugin).toBe('good-plugin')
     expect(typeof result.duration_ms).toBe('number')
@@ -241,7 +241,7 @@ describe('invokePlugin', () => {
   })
 
   test('Test 8: handler returning skipped with [needs-llm] prefix is returned as-is (no retry, not treated as failure)', async () => {
-    const result = await invokePlugin('llm-stub-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH })
+    const result = await invokePlugin('llm-stub-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
 
     expect(result.result.status).toBe('skipped')
     expect(result.result.summary).toContain('[needs-llm]')
@@ -258,7 +258,7 @@ describe('invokePlugin', () => {
       runsDir,
       persistArtifact: true,
       runId: 'delegated-artifact-test',
-    })
+    }, { granted: false, reason: 'manual-run' })
 
     expect(deriveRunStatus(result)).toBe('delegated')
     const artifact = JSON.parse(

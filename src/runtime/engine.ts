@@ -29,6 +29,7 @@ import {
 } from '../lib/paths.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { invokePlugin } from './invoke-plugin.js'
+import type { CapabilityGrantWitness } from './capabilities.js'
 import { computeTier, isEligibleForTier } from './tier.js'
 import type { TierName } from './tier.js'
 import { isPluginFresh } from './staleness.js'
@@ -956,7 +957,29 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // nothing else knows. `persistArtifact` stays off deliberately — see
           // the rationale in invoke-plugin.ts; an advance writes a RunLog, not
           // a RunArtifact.
-          invocationResult = await invokePlugin(pluginName, {}, { pluginsDir, runId: run_id })
+          //
+          // The Grant was read ONCE, by the dueness check above: a plugin
+          // declaring side effects reaches this line only when that read
+          // returned true, and a plugin declaring none never consulted it at
+          // all. The witness carries that answer forward instead of asking
+          // again. A second read is a second place to get the gate wrong, and
+          // it would sit inside the code path a plugin author is holding.
+          //
+          // The granted arm records the scope the read ASKED about, which is
+          // the plugin name. The reader answers true for every scope once a
+          // grant carries the wildcard and does not report which one matched,
+          // so the requested scope is the strongest true statement available
+          // here.
+          const witness: CapabilityGrantWitness =
+            manifest.side_effects.length === 0
+              ? { granted: false, reason: 'no-declared-side-effects' }
+              : { granted: true, scope: pluginName }
+          invocationResult = await invokePlugin(
+            pluginName,
+            {},
+            { pluginsDir, runId: run_id },
+            witness,
+          )
         } catch (err) {
           plugin_states.set(pluginName, 'failed')
           const errMsg = err instanceof Error ? err.message : String(err)

@@ -124,7 +124,7 @@ afterEach(async () => {
 
 describe('one path carries both handler arities', () => {
   test('a three-parameter handler runs and returns its result unchanged', async () => {
-    const invocation = await invokePlugin('three-param', {}, { pluginsDir: tmpDir })
+    const invocation = await invokePlugin('three-param', {}, { pluginsDir: tmpDir }, { granted: false, reason: 'manual-run' })
 
     expect(invocation.result.status).toBe('success')
     expect(invocation.result.summary).toBe('three-param ran with object')
@@ -133,7 +133,7 @@ describe('one path carries both handler arities', () => {
   })
 
   test('a four-parameter handler receives a defined fourth argument', async () => {
-    const invocation = await invokePlugin('four-param', {}, { pluginsDir: tmpDir })
+    const invocation = await invokePlugin('four-param', {}, { pluginsDir: tmpDir }, { granted: false, reason: 'manual-run' })
 
     expect(invocation.result.status).toBe('success')
     const seen = JSON.parse(invocation.result.summary) as {
@@ -149,7 +149,7 @@ describe('one path carries both handler arities', () => {
   })
 
   test('the fourth argument is what the mint produces for that manifest and witness', async () => {
-    const invocation = await invokePlugin('four-param', {}, { pluginsDir: tmpDir })
+    const invocation = await invokePlugin('four-param', {}, { pluginsDir: tmpDir }, { granted: false, reason: 'manual-run' })
     const seen = JSON.parse(invocation.result.summary) as { keys: string[] }
 
     // Derived from the registry rather than written as a literal, so the first

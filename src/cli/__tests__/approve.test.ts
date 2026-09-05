@@ -382,7 +382,7 @@ export async function handler() {
     // Non-vacuity: the handler EXISTS and the marker mechanism works. Without
     // this, "the marker is absent" would also pass for a fixture that could
     // never have written one.
-    await invokePlugin('gated-writer', {}, { pluginsDir: join(root, 'plugins') })
+    await invokePlugin('gated-writer', {}, { pluginsDir: join(root, 'plugins') }, { granted: false, reason: 'manual-run' })
     expect(existsSync(marker)).toBe(true)
   })
 

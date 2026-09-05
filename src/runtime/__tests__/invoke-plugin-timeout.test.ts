@@ -22,7 +22,7 @@ const EVENTS_PATH = join(tmpdir(), `invoke-plugin-timeout-events-${Date.now()}.j
 describe('invokePlugin — per-attempt timeout', () => {
   it('times out when handler sleeps past manifest.timeout_ms; no retry afterwards', async () => {
     // abort-unaware-plugin: manifest timeout_ms=200, handler sleeps 5s, max_retries=0
-    const res = await invokePlugin('abort-unaware-plugin', {}, { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH })
+    const res = await invokePlugin('abort-unaware-plugin', {}, { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
 
     expect(res.timed_out).toBe(true)
     expect(res.cancelled).toBe(false)
@@ -35,6 +35,7 @@ describe('invokePlugin — per-attempt timeout', () => {
       'timeout-plugin',
       {},
       { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH },
+    { granted: false, reason: 'manual-run' },
     )
     // manifest max_retries=2 but timeout should break out of loop immediately
     expect(res.timed_out).toBe(true)
@@ -43,7 +44,7 @@ describe('invokePlugin — per-attempt timeout', () => {
   }, 10_000)
 
   it('clean success when handler completes inside timeout', async () => {
-    const res = await invokePlugin('success-plugin', {}, { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH })
+    const res = await invokePlugin('success-plugin', {}, { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
     expect(res.timed_out).toBe(false)
     expect(res.cancelled).toBe(false)
     expect(res.result.status).toBe('success')
@@ -60,6 +61,7 @@ describe('invokePlugin — external AbortSignal', () => {
       'abort-aware-plugin',
       {},
       { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH, signal: controller.signal },
+    { granted: false, reason: 'manual-run' },
     )
 
     expect(res.cancelled).toBe(true)
@@ -76,6 +78,7 @@ describe('invokePlugin — external AbortSignal', () => {
       'abort-aware-plugin',
       {},
       { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH, signal: controller.signal },
+    { granted: false, reason: 'manual-run' },
     )
 
     expect(res.cancelled).toBe(true)

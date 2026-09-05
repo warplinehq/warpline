@@ -116,21 +116,21 @@ afterEach(async () => {
 
 describe('one classifier, reading field-or-prefix', () => {
   test('the structured field alone is a handoff', async () => {
-    const inv = await invokePlugin('field-only', {}, { pluginsDir: tmpDir, eventsPath })
+    const inv = await invokePlugin('field-only', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
 
     expect(deriveRunStatus(inv)).toBe('delegated')
     expect(inv.attempts[0]?.status).toBe('delegated')
   })
 
   test('the string prefix alone is still a handoff', async () => {
-    const inv = await invokePlugin('prefix-only', {}, { pluginsDir: tmpDir, eventsPath })
+    const inv = await invokePlugin('prefix-only', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
 
     expect(deriveRunStatus(inv)).toBe('delegated')
     expect(inv.attempts[0]?.status).toBe('delegated')
   })
 
   test('both arms together are classified once, not twice', async () => {
-    const inv = await invokePlugin('both-arms', {}, { pluginsDir: tmpDir, eventsPath })
+    const inv = await invokePlugin('both-arms', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
 
     // One attempt, one classification, one status. A second classifier reading
     // the other arm would show up as a second attempt or a disagreeing pair.
@@ -143,7 +143,7 @@ describe('one classifier, reading field-or-prefix', () => {
   })
 
   test('neither arm is not a handoff', async () => {
-    const inv = await invokePlugin('neither', {}, { pluginsDir: tmpDir, eventsPath })
+    const inv = await invokePlugin('neither', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
 
     expect(deriveRunStatus(inv)).toBe('failed')
     expect(inv.attempts[0]?.status).toBe('failed')
@@ -152,7 +152,7 @@ describe('one classifier, reading field-or-prefix', () => {
 
 describe('the field survives the parse boundary', () => {
   test('a handler that sets it hands it to the caller intact', async () => {
-    const { result } = await invokePlugin('field-only', {}, { pluginsDir: tmpDir, eventsPath })
+    const { result } = await invokePlugin('field-only', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
 
     expect(result.needs_llm).toEqual({
       task: 'Triage 3 entries',
@@ -183,6 +183,7 @@ describe('the context path is bounded to the warpline home', () => {
       'escaping-absolute',
       {},
       { pluginsDir: tmpDir, eventsPath },
+    { granted: false, reason: 'manual-run' },
     )
 
     expect(result.status).toBe('failed')
@@ -201,6 +202,7 @@ describe('the context path is bounded to the warpline home', () => {
       'escaping-traversal',
       {},
       { pluginsDir: tmpDir, eventsPath },
+    { granted: false, reason: 'manual-run' },
     )
 
     expect(result.status).toBe('failed')
@@ -263,7 +265,7 @@ describe('the builder emits both arms', () => {
       ].join('\n'),
     )
 
-    const inv = await invokePlugin('builder-handoff', {}, { pluginsDir: tmpDir, eventsPath })
+    const inv = await invokePlugin('builder-handoff', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
 
     expect(deriveRunStatus(inv)).toBe('delegated')
     expect(inv.result.needs_llm?.context_path).toBe('state/entries.json')
