@@ -34,6 +34,7 @@ import type { SkillResult, SkillResultInput } from '../schemas/skill-result.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { emitAttemptFailed } from '../board/engine-events.js'
 import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
+import { resolveSecrets } from './secrets.js'
 import { mintContext } from './capabilities.js'
 import type { CapabilityContext, CapabilityGrantWitness } from './capabilities.js'
 
@@ -352,16 +353,47 @@ export async function invokePlugin(
     // all — the same tolerance the retry-loop defaults below rely on.
     const resolution = resolvePluginArgs(manifest.inputs ?? {}, fileConfig, args)
     if (!resolution.ok) {
-      return configFailure(
+      return oneAttemptFailure(
         pluginName,
         start,
+        'parse_error',
+        `${pluginName}: invalid config`,
         `Plugin '${pluginName}' has an invalid config (${configPath}): ${resolution.problems.join('; ')}`,
       )
     }
     resolvedArgs = resolution.args
   } catch (err) {
     if (!(err instanceof PluginConfigError)) throw err
-    return configFailure(pluginName, start, err.message)
+    return oneAttemptFailure(pluginName, start, 'parse_error', `${pluginName}: invalid config`, err.message)
+  }
+
+  // -------------------------------------------------------------------
+  // Credential pre-flight
+  // -------------------------------------------------------------------
+  // Immediately after config resolution, in the same structural position for
+  // the same structural reason: outside the retry loop entirely, so "a missing
+  // credential is never retried" holds by construction rather than by a
+  // predicate someone could edit. A credential absent on the first attempt is
+  // absent on the third, and `auth_failure` is already `retryable: false`, so
+  // the rule holds twice over — but only one of the two is structural.
+  //
+  // Here, and not in the callers, for the reason stated above: every caller,
+  // including a third-party host reaching this function through
+  // `warpline/unstable-runtime`, routes through it and none can skip it.
+  //
+  // Only `ok` is read. The resolved values are deliberately not bound to a
+  // local: nothing in this function has a place to hand them, and a credential
+  // value that reaches an attempt record, a run artifact or a `SkillResult` is
+  // the one outcome the declaration was made to avoid.
+  const secrets = resolveSecrets(manifest)
+  if (!secrets.ok) {
+    return oneAttemptFailure(
+      pluginName,
+      start,
+      secrets.code,
+      `${pluginName}: missing credential`,
+      `Plugin '${pluginName}' ${secrets.message}`,
+    )
   }
 
   // -------------------------------------------------------------------
@@ -631,16 +663,26 @@ export async function invokePlugin(
 // -------------------------------------------------------------------------
 
 /**
- * The one-attempt failure a bad config produces.
+ * A failure decided ABOVE the retry loop: one attempt, never retried.
  *
- * `message` is composed by the caller and is the contract half that matters:
- * it names the config file path and the offending input key and the shape
- * expected of it, and it never carries the value that was read. Config files
- * are where operators put tokens, and this string lands in a run log.
+ * Both pre-flight arms return through here — a config an operator mistyped and
+ * a declared credential the environment does not provide. One shape, two codes,
+ * because the shape is the part that must not drift between them and the code
+ * is the part that must differ: a mistyped config is a parse failure and a
+ * missing credential is an auth failure.
+ *
+ * `message` is composed by the caller and is the contract half that matters. It
+ * names the config file path and the offending input key and the shape expected
+ * of it, or it names the credential key and the manifest field to declare it
+ * on — and in neither case does it carry the value that was read. Config files
+ * and environment variables are where operators keep tokens, and this string
+ * lands in a run log.
  */
-function configFailure(
+function oneAttemptFailure(
   pluginName: string,
   start: number,
+  code: 'parse_error' | 'auth_failure',
+  summary: string,
   message: string,
 ): PluginInvocationResult {
   const failedAttempt: AttemptRecord = {
@@ -656,9 +698,9 @@ function configFailure(
       status: 'failed',
       phases_completed: [],
       phases_failed: [pluginName],
-      errors: [makeSkillError('parse_error', message)],
+      errors: [makeSkillError(code, message)],
       data_freshness: {},
-      summary: `${pluginName}: invalid config`,
+      summary,
       artifacts_produced: [],
       schema_version: 1,
     },
