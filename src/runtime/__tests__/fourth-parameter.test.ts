@@ -16,18 +16,19 @@
  * ignores an extra argument either way, which is exactly why the compile-time
  * half needs its own assertion.
  *
- * **What the fourth-argument assertion can and cannot discriminate today.** The
- * capability registry carries no production members at this commit, so the mint
- * returns an empty object for every manifest and every witness. The comparison
- * below is therefore against `mintContext`'s own output for the same inputs,
- * computed here rather than written as a literal — which pins the shape and the
- * provenance of the call, but cannot yet tell "the mint produced this" apart
- * from "an empty object was passed". The discriminating power arrives with the
- * first registry member, and it arrives without an edit to this file, because
- * the expectation is derived from the registry rather than restated. The other
- * half of the proof is `src/__tests__/mint-call-sites.test.ts`, which asserts
- * that the mint is named by exactly two non-test source files, one of which is
- * the module under test here.
+ * **What the fourth-argument assertion discriminates.** The comparison below is
+ * against `mintContext`'s own output for the same inputs, computed here rather
+ * than written as a literal. While the registry carried no members, that pinned
+ * the shape and the provenance of the call, but it could not tell "the mint
+ * produced this" apart from "an empty object was passed" — both sides were
+ * `[]`. The first registered member ended that, and ended it without an edit to
+ * this file, because the expectation is derived from the registry rather than
+ * restated: the two sides now read `['caller', 'secrets']`, and handing the
+ * handler a bare `{}` instead of the minted context reddens this test by name.
+ * That red was watched. The other half of the proof is
+ * `src/__tests__/mint-call-sites.test.ts`, which asserts that the mint is named
+ * by exactly two non-test source files, one of which is the module under test
+ * here.
  *
  * The four-parameter fixture reports what it received by encoding it into its
  * own `summary`. Fixture handlers are written into a temp directory and are not
