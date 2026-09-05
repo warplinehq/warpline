@@ -34,6 +34,8 @@ import type { SkillResult, SkillResultInput } from '../schemas/skill-result.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { emitAttemptFailed } from '../board/engine-events.js'
 import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
+import { mintContext } from './capabilities.js'
+import type { CapabilityContext } from './capabilities.js'
 
 /**
  * Resolve the default plugins directory via canonical paths.ts.
@@ -107,6 +109,36 @@ export type HandlerFn = (
   manifest: PluginManifest,
   args: Record<string, unknown>,
   signal: AbortSignal,
+) => Promise<SkillResultInput>
+
+/**
+ * The handler signature with the capability context on it.
+ *
+ * This is what `executeHandler` calls through, and `HandlerFn` above is its
+ * assignable-narrower variant rather than a second code path: a three-parameter
+ * function type IS assignable to a four-parameter one, so every handler written
+ * before this parameter existed keeps working by construction and no
+ * compatibility branch exists to drift.
+ *
+ * Widening the PARAMETER TYPE is the whole mechanism, and it is not the same
+ * claim as "JavaScript ignores extra arguments". That is true at run time and
+ * insufficient at compile time — calling a `HandlerFn`-typed value with four
+ * arguments is `TS2554: Expected 3 arguments, but got 4`. So the type below is
+ * what `executeHandler` takes, and nothing is cast to reach the fourth
+ * argument.
+ *
+ * `HandlerFn` in the root barrel is untouched and stays the published name. It
+ * is permanent public contract from 0.1.0, and naming a capability type inside
+ * a root-barrel signature would make that type structurally permanent while its
+ * own specifier promises the opposite. A plugin author who wants the fourth
+ * parameter typed imports this from `warpline/unstable-capabilities`, where the
+ * instability is in the import path.
+ */
+export type CapabilityHandlerFn = (
+  manifest: PluginManifest,
+  args: Record<string, unknown>,
+  signal: AbortSignal,
+  capabilities: CapabilityContext,
 ) => Promise<SkillResultInput>
 
 /**
@@ -315,6 +347,28 @@ export async function invokePlugin(
   }
 
   // -------------------------------------------------------------------
+  // Capability context
+  // -------------------------------------------------------------------
+  // Here, and not in the callers, for the reason the config resolution above
+  // states in its own words: both production call sites and any third-party
+  // host reaching this function through `warpline/unstable-runtime` route
+  // through it, so one insertion serves every caller and none can skip it.
+  //
+  // ABOVE the retry loop, because the members a plugin is entitled to are
+  // decided by what its manifest declared and by the answer the caller carried
+  // in. Neither changes between attempt one and attempt three, and minting per
+  // attempt would invite a member that quietly differs across them.
+  //
+  // Only `context` is taken. `withheld` is the runtime-facing half — the
+  // per-member refusal an operator can act on — and nothing here has a place to
+  // surface it yet, so it is left where it is rather than dropped into a log
+  // line nobody reads.
+  const { context: capabilities } = mintContext(
+    { manifest, caller: { plugin: pluginName, runId } },
+    { granted: false, reason: 'manual-run' },
+  )
+
+  // -------------------------------------------------------------------
   // Retry loop
   // -------------------------------------------------------------------
   // Manifest fields may be absent when the caller bypassed zod parse (legacy
@@ -388,7 +442,7 @@ export async function invokePlugin(
     let rawResult: SkillResultInput
     try {
       rawResult = await Promise.race([
-        executeHandler(pluginName, handlerFn, manifest, resolvedArgs, attemptCtl.signal),
+        executeHandler(pluginName, handlerFn, manifest, resolvedArgs, attemptCtl.signal, capabilities),
         abortPromise,
       ])
     } finally {
@@ -602,13 +656,14 @@ function configFailure(
 
 async function executeHandler(
   pluginName: string,
-  handlerFn: HandlerFn,
+  handlerFn: CapabilityHandlerFn,
   manifest: PluginManifest,
   args: Record<string, unknown>,
   signal: AbortSignal,
+  capabilities: CapabilityContext,
 ): Promise<SkillResultInput> {
   try {
-    return await handlerFn(manifest, args, signal)
+    return await handlerFn(manifest, args, signal, capabilities)
   } catch (err) {
     return {
       status: 'failed',
