@@ -413,8 +413,20 @@ export async function invokePlugin(
   // per-member refusal an operator can act on — and nothing here has a place to
   // surface it yet, so it is left where it is rather than dropped into a log
   // line nobody reads.
+  //
+  // `Object.keys(secrets.values)` and not `manifest.secrets`: the names a
+  // handler is handed are the ones that RESOLVED, not the ones that were
+  // merely declared. Today the two sets are identical, because the pre-flight
+  // above returns early when any declared name is missing — reading the keys
+  // rather than the declaration is what keeps them identical for the right
+  // reason, and keeps them correct if that ever stops being true. It reads
+  // keys only; no credential value is bound to a local here or anywhere else.
   const { context: capabilities } = mintContext(
-    { manifest, caller: { plugin: pluginName, runId } },
+    {
+      manifest,
+      caller: { plugin: pluginName, runId },
+      resolvedSecretNames: Object.keys(secrets.values),
+    },
     witness,
   )
 

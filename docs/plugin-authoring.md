@@ -282,14 +282,21 @@ continue to: it is public contract from 0.1.0 and renaming or widening it would
 cost every installed plugin. To type the fourth parameter, import
 `CapabilityHandlerFn` — or `CapabilityContext` for the parameter alone — from
 `warpline/unstable-capabilities`, which is type-only and carries its instability
-in the import path. No member is registered in this release, so what a handler
-receives today is an empty object rather than nothing.
+in the import path.
+
+The context carries the members your manifest earned, plus `caller` — the
+identity of this invocation, the plugin name and the run id. `caller` is not a
+member: no effect keys it and it appears in no row of the table below. It is
+there because every member takes a caller as its **required first parameter**,
+and your handler is called with `(manifest, args, signal, capabilities)` and so
+has no run id of its own to pass. Calling a member without it is a compile
+error, not a convention.
 
 <!-- generated: capability-effects -->
 
 | Member | Requires `side_effects` entry | What it does |
 |---|---|---|
-| — | — | No capability members are registered in this release. |
+| `secrets` | **ungated** | Lists the credential names this plugin declared and the runtime resolved. Names only — never a value. |
 
 <!-- /generated -->
 

@@ -407,7 +407,7 @@ for (const name of ['readDependencyOutput', 'skillFailure', 'skillHandoff', 'ski
 // `dist/*.js` file — the comment on `unstable-runtime` above says so about its
 // own erased names, and no TypeScript is installed in this script's temp
 // directory. `src/runtime/__tests__/unstable-capabilities.types.ts` imports
-// these three names through this same specifier and is read by `tsc --noEmit`,
+// every name through this same specifier and is read by `tsc --noEmit`,
 // which is what covers the half this block cannot see. The import below still
 // earns its place: it is what fails with ERR_PACKAGE_PATH_NOT_EXPORTED if the
 // `exports` entry is missing or points at a file `files` did not ship.

@@ -28,14 +28,26 @@
  * compile error, and that IS the check.
  */
 import type {
+  CapabilityCaller,
   CapabilityContext,
   CapabilityGrantWitness,
   CapabilityHandlerFn,
+  SecretsHandle,
 } from 'warpline/unstable-capabilities'
 
-/** The object a handler is handed. Indexing it is what pins its shape. */
-const context: CapabilityContext = {}
+/**
+ * The object a handler is handed. The two named keys are what an author can
+ * reach without a cast, and writing them out is what pins them: an empty
+ * literal no longer satisfies this type, which is the point — a context
+ * missing `secrets` or `caller` is one production cannot produce.
+ */
+const _caller: CapabilityCaller = { plugin: 'some-plugin', runId: 'some-run' }
+const _handle: SecretsHandle = { resolvedNames: (_c: CapabilityCaller) => ['SOME_TOKEN'] }
+const context: CapabilityContext = { caller: _caller, secrets: _handle }
 const _members: readonly string[] = Object.keys(context)
+
+/** The caller argument, supplied the way a plugin author would supply it. */
+const _names: readonly string[] = context.secrets.resolvedNames(context.caller)
 
 /**
  * Both arms of the witness, written out. A union narrowed to one arm would
@@ -60,5 +72,11 @@ const _handler: CapabilityHandlerFn = async (manifest, args, signal, capabilitie
   artifacts_produced: [],
 })
 
-export type { CapabilityContext, CapabilityGrantWitness, CapabilityHandlerFn }
-export { context, _members, _granted, _manual, _ungated, _handler }
+export type {
+  CapabilityCaller,
+  CapabilityContext,
+  CapabilityGrantWitness,
+  CapabilityHandlerFn,
+  SecretsHandle,
+}
+export { context, _caller, _handle, _members, _names, _granted, _manual, _ungated, _handler }

@@ -13,7 +13,7 @@
  * capability registry stay internal: the registry is a table designed to grow,
  * and publishing it would owe semver on every row anybody adds. What a
  * consumer needs is the SHAPE of what it is handed and the shape of what it
- * must hand in, which is exactly the three names below.
+ * must hand in, which is exactly the names below.
  *
  * The consequence is worth stating rather than leaving for a reader to
  * discover: `dist/unstable-capabilities.js` contains no exported value at all,
@@ -38,12 +38,20 @@
  * assertion in `scripts/verify-tarball.sh` is what holds the runtime half; the
  * type probe under `src/runtime/__tests__/` is what holds this half.
  *
+ * `CapabilityCaller` and `SecretsHandle` are here for the same reason the
+ * witness is: every member takes a caller as its required first parameter, so
+ * a plugin author calling one cannot name the argument's type without them.
+ * Publishing the member's shape while withholding the type of what it demands
+ * would be publishing a call nobody outside this package could write down.
+ *
  * Do not widen this re-export without a decision record.
  */
 
 export type {
+  CapabilityCaller,
   CapabilityContext,
   CapabilityGrantWitness,
+  SecretsHandle,
 } from './runtime/capabilities.js'
 
 export type {

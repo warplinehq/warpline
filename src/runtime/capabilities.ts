@@ -20,10 +20,10 @@
  * wrong, and the second one would sit inside code a plugin author is holding.
  * `src/__tests__/no-grant-recheck.test.ts` is what keeps that true.
  *
- * At this commit the registry is empty of production members. That is
- * deliberate: the apparatus — the required effect field, the projection, the
- * refusal, the witness — is proven before any authority flows through it, and
- * the first member arrives already covered by it.
+ * The registry carries one member: the credential-name handle. The apparatus
+ * — the required effect field, the projection, the refusal, the witness — was
+ * built and proven before it, which is why it arrived already covered by the
+ * registry-iterating refusal test and needed no assertion written for it.
  */
 import type { PluginManifest, SideEffectType } from '../schemas/plugin-manifest.js'
 
@@ -55,12 +55,20 @@ export type CapabilityGrantWitness =
   | { readonly granted: false; readonly reason: 'manual-run' | 'no-declared-side-effects' }
 
 /**
- * Who a member is being minted for.
+ * Who a member is being minted for, and who a member call must name.
  *
- * `runId` is optional today because nothing in the runtime calls `mintContext`
- * yet, and an invented run id would be worse than an absent one. It becomes
- * required with the caller-identity entry criterion, which lands alongside the
- * first member that has anything to write under a run.
+ * This is the type the caller-identity entry criterion is about. Every member
+ * takes one of these as its FIRST parameter, non-defaulted and non-optional,
+ * so a call that does not say who is calling is a compile error rather than a
+ * convention. `capability-e1.test.ts` is where that is watched.
+ *
+ * `runId` stays optional, and the reason is worth stating rather than reading
+ * as an oversight. `invokePlugin` always supplies one — it mints an id when
+ * its caller passed none — so every production mint carries a run id. What
+ * cannot honestly carry one is `mintContext`'s own fallback when a test seam
+ * omits the caller entirely: an invented run id there would be a fabricated
+ * value in a field a member could one day write into a run artifact, which is
+ * worse than an absent one.
  */
 export interface CapabilityCaller {
   readonly plugin: string
@@ -106,9 +114,33 @@ export interface CapabilityEntry {
 
 /**
  * Every capability member, keyed by the name it appears under in a handler's
- * context. Empty of production members at this commit.
+ * context.
+ *
+ * One member: the credential-name handle. It is UNGATED — `effect: null` —
+ * and that is a measured decision rather than a convenience. The unit it
+ * stands for is a pre-flight read of the process environment, which is none of
+ * the five values `side_effects` is drawn from, so keying it on one of them
+ * would be a declaration nobody could truthfully make. The consequence is the
+ * one that matters at the seams: a run started by hand through the CLI, which
+ * reads no grant and passes an explicit not-granted witness, still receives it
+ * — so no existing behaviour changed on the day it landed.
  */
-export const CAPABILITY_REGISTRY: Readonly<Record<string, CapabilityEntry>> = {}
+export const CAPABILITY_REGISTRY: Readonly<Record<string, CapabilityEntry>> = {
+  secrets: {
+    effect: null,
+    description:
+      'Lists the credential names this plugin declared and the runtime resolved. Names only — never a value.',
+    mint: (args): SecretsHandle => ({
+      resolvedNames: (caller: CapabilityCaller): readonly string[] => {
+        // The caller is required and unread. See `SecretsHandle` for why that
+        // is deliberate; `void` is here so nobody deletes the parameter as
+        // dead, which would take the entry criterion with it.
+        void caller
+        return args.resolvedSecretNames
+      },
+    }),
+  },
+}
 
 /**
  * Member name to declared effect — a PROJECTION of the registry above, in the
@@ -129,12 +161,52 @@ export interface WithheldMember {
 }
 
 /**
- * The object a handler is handed: the members this plugin is entitled to, and
- * nothing else. Values are `unknown` because the registry is empty of
- * production members; the first member is what gives this type a shape worth
- * narrowing, and narrowing it before then would be a shape nobody has.
+ * The handle listing the credential names this invocation resolved.
+ *
+ * **Names, and no member that returns a value — in any form.** Not a lookup,
+ * not an accessor, not a test-only escape. A handler runs in this process and
+ * holds `process.env` regardless, so a getter here would buy a violated
+ * requirement and no containment whatsoever. What the declaration bounds is
+ * the SANCTIONED path, and this is that path's whole surface.
+ *
+ * Every name it lists RESOLVED. The pre-flight in `secrets.ts` refuses the run
+ * before the handler is called when a declared name is absent or empty, so
+ * this handle has no partial state to represent — a defensive branch for a
+ * declared-but-missing name here is a branch that can never be taken.
+ *
+ * `caller` is required and is deliberately not read today. The obligation
+ * belongs at the signature from the first member onwards: a member that DOES
+ * vary its answer by caller then inherits it, where adding a required
+ * parameter to an already-published member type would be a breaking change.
  */
-export type CapabilityContext = Readonly<Record<string, unknown>>
+export interface SecretsHandle {
+  readonly resolvedNames: (caller: CapabilityCaller) => readonly string[]
+}
+
+/**
+ * The object a handler is handed: the members this plugin is entitled to, the
+ * caller they were minted for, and nothing else.
+ *
+ * The index signature stays — a member's value is `unknown` until a handler
+ * narrows it, and the fixture-registry test seam mints members this type has
+ * never heard of. The two named keys are what a plugin author can reach
+ * without a cast, and they are named because both are always present in
+ * production: `secrets` is ungated, so it is minted for every plugin on every
+ * run, and `caller` is written unconditionally.
+ *
+ * **`caller` is not a capability member.** It performs nothing, it is keyed off
+ * no effect, and it appears in no row of the generated table. It is the
+ * invocation's identity, carried on the context because a handler is called
+ * with `(manifest, args, signal, capabilities)` and has no run id of its own —
+ * without it, the caller argument every member requires would be one no plugin
+ * author could honestly supply. `capability-e1.test.ts` asserts it is absent
+ * from the registry, so it cannot be mistaken for a member that skipped the
+ * effect declaration.
+ */
+export type CapabilityContext = Readonly<Record<string, unknown>> & {
+  readonly caller: CapabilityCaller
+  readonly secrets: SecretsHandle
+}
 
 /** What `mintContext` returns: the handler's members, and what was held back. */
 export interface MintedContext {
@@ -197,7 +269,9 @@ export function mintContext(
     resolvedSecretNames: input.resolvedSecretNames ?? [],
   }
 
-  const context: Record<string, unknown> = {}
+  // `caller` first, so it is present whatever the registry does. It is data,
+  // not a member: no effect keys it and no table row names it.
+  const context: Record<string, unknown> = { caller: args.caller }
   const withheld: WithheldMember[] = []
 
   for (const [member, entry] of Object.entries(registry)) {
@@ -215,5 +289,12 @@ export function mintContext(
     context[member] = entry.mint(args)
   }
 
-  return { context, withheld }
+  // The cast is the one place this module asserts something the compiler
+  // cannot see. Production always mints `secrets` — it is ungated, so no
+  // manifest and no witness can withhold it — and `caller` is written above
+  // unconditionally, so a production context always satisfies the named keys.
+  // Only the `registry` test seam can produce a context missing them, and a
+  // test that mints against fixture members is already reading its own
+  // registry rather than this type's promises.
+  return { context: context as CapabilityContext, withheld }
 }
