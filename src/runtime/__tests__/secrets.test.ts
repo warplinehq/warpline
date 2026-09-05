@@ -19,7 +19,7 @@
  * visible to every sibling file in the same shard.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -211,6 +211,219 @@ describe('invokePlugin credential resolution', () => {
       const message = res.result.errors[0]?.message ?? ''
       expect(message).toContain('WARPLINE_TEST_SECRET_TWO')
       expect(message).not.toContain('WARPLINE_TEST_SECRET_ONE')
+    })
+  })
+})
+
+// -----------------------------------------------------------------------
+// A resolved credential value reaches no file `invokePlugin` writes
+// -----------------------------------------------------------------------
+//
+// Two disk paths belong to a bare `invokePlugin`: the run artifact it writes
+// when `persistArtifact` is set, and the `events.jsonl` line `emitAttemptFailed`
+// appends between retries. A third sink is not a file at all — the structured
+// `[needs-llm]` carrier on the `SkillResult` the call RETURNS, which the run
+// artifact never copies because it is assembled field by field.
+//
+// Every case proves the canary REACHED the sink before asserting it is not in
+// the persisted text. Absence on its own is green when the value never resolved
+// at all, and a credential that never resolved is exactly the shape a broken
+// fixture has.
+
+/** A value no other string in this suite contains. */
+const CANARY = 'WL-CANARY-6f3a9d21c05b'
+
+/** Where the leaky fixture records the value it was actually handed. */
+function sawPath(name: string): string {
+  return join(pluginsRoot, name, 'handler-saw')
+}
+
+/**
+ * A fixture that puts the resolved credential everywhere a handler can put a
+ * string: the summary, an error message, and an Output's inline body.
+ *
+ * The error is `rate_limit` with `retryable: true` deliberately. The retry
+ * predicate in `invoke-plugin.ts` requires exactly that, and `emitAttemptFailed`
+ * — the only writer of `events.jsonl` on this path — fires only between
+ * attempts. A `dependency_unavailable` here would leave the event log empty and
+ * the case would be red for the wrong reason in both directions.
+ *
+ * It RETURNS the failure rather than throwing one. A throw routes through the
+ * same parse boundary via `executeHandler`'s catch, but the fabricated result it
+ * produces carries no `artifacts_produced`, so the inline body would vanish.
+ */
+async function writeLeakyPlugin(name: string, secretKey: string): Promise<void> {
+  const dir = join(pluginsRoot, name)
+  await mkdir(dir, { recursive: true })
+  const manifest = {
+    name,
+    version: '1.0.0',
+    description: 'redaction fixture',
+    inputs: {},
+    outputs: {},
+    capabilities: [],
+    secrets: [secretKey],
+    schedule: 'on_run',
+    autonomy_level: 'autonomous',
+    side_effects: [],
+    ttl_hours: 24,
+    dependencies: [],
+    timeout_ms: 5000,
+    max_parallelism: 1,
+    min_tier: 'normal',
+    max_retries: 2,
+    retry_delay_ms: 1,
+  }
+  await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+  await writeFile(
+    join(dir, 'handler.ts'),
+    `import { writeFileSync } from 'node:fs'
+    export async function handler() {
+      const value = process.env[${JSON.stringify(secretKey)}] ?? ''
+      writeFileSync(${JSON.stringify(sawPath(name))}, value)
+      return {
+        status: 'failed',
+        phases_completed: [],
+        phases_failed: ['${name}'],
+        errors: [{ code: 'rate_limit', message: 'upstream refused token ' + value, impact: 'MEDIUM', retryable: true }],
+        data_freshness: {},
+        summary: '${name} called with ' + value,
+        artifacts_produced: [{ type: 'report', format: 'markdown', body: 'token was ' + value }],
+        schema_version: 1,
+      }
+    }`,
+  )
+}
+
+/**
+ * A fixture whose ONLY carrier of the credential is the structured
+ * `[needs-llm]` field's inner `task` string.
+ *
+ * Its own handler, separate from the leaky one above: a result carrying that
+ * field classifies as a handoff, which changes the status every other case
+ * records. And the canary is deliberately absent from the summary — a scrubber
+ * written against an enumerated field list leaves this one standing, which is
+ * the whole point of the case.
+ *
+ * The result object is built by hand rather than through the builder, whose
+ * needs-llm arm copies the task text into the summary and would move the canary
+ * onto a field that is already covered.
+ */
+async function writeHandoffPlugin(name: string, secretKey: string): Promise<void> {
+  const dir = join(pluginsRoot, name)
+  await mkdir(dir, { recursive: true })
+  const manifest = {
+    name,
+    version: '1.0.0',
+    description: 'structured handoff redaction fixture',
+    inputs: {},
+    outputs: {},
+    capabilities: [],
+    secrets: [secretKey],
+    schedule: 'on_run',
+    autonomy_level: 'autonomous',
+    side_effects: [],
+    ttl_hours: 24,
+    dependencies: [],
+    timeout_ms: 5000,
+    max_parallelism: 1,
+    min_tier: 'normal',
+    max_retries: 1,
+    retry_delay_ms: 1,
+  }
+  await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+  await writeFile(
+    join(dir, 'handler.ts'),
+    `export async function handler() {
+      const value = process.env[${JSON.stringify(secretKey)}] ?? ''
+      return {
+        status: 'skipped',
+        phases_completed: [],
+        phases_failed: [],
+        errors: [],
+        data_freshness: {},
+        summary: '${name}: handing off',
+        artifacts_produced: [],
+        schema_version: 1,
+        needs_llm: { task: 'Triage the account behind ' + value, context_path: 'state/entries.json' },
+      }
+    }`,
+  )
+}
+
+describe('a resolved credential reaches no sink invokePlugin writes', () => {
+  test('the run artifact carries no resolved credential value', async () => {
+    const key = 'WARPLINE_TEST_CANARY_ARTIFACT'
+    await writeLeakyPlugin('leak-artifact', key)
+    const runsRoot = join(root, 'runs')
+    const runId = 'redaction-artifact-run'
+
+    await withEnv(key, CANARY, async () => {
+      await invokePlugin(
+        'leak-artifact',
+        {},
+        { pluginsDir: pluginsRoot, eventsPath, persistArtifact: true, runsDir: runsRoot, runId },
+        { granted: false, reason: 'manual-run' },
+      )
+
+      // Presence: the handler resolved the credential and held it.
+      expect(await readFile(sawPath('leak-artifact'), 'utf-8')).toBe(CANARY)
+      const raw = await readFile(join(runsRoot, `${runId}.json`), 'utf-8')
+      expect(raw.length).toBeGreaterThan(0)
+      const artifact = JSON.parse(raw)
+      expect(artifact.summary.length).toBeGreaterThan(0)
+      expect(artifact.final_error.length).toBeGreaterThan(0)
+
+      // Absence.
+      expect(raw).not.toContain(CANARY)
+    })
+  })
+
+  test('events.jsonl carries no resolved credential value', async () => {
+    const key = 'WARPLINE_TEST_CANARY_EVENTS'
+    await writeLeakyPlugin('leak-events', key)
+
+    await withEnv(key, CANARY, async () => {
+      await invokePlugin(
+        'leak-events',
+        {},
+        { pluginsDir: pluginsRoot, eventsPath },
+        { granted: false, reason: 'manual-run' },
+      )
+
+      // Presence: the handler held it, and the retry notice was actually written.
+      expect(await readFile(sawPath('leak-events'), 'utf-8')).toBe(CANARY)
+      const raw = await readFile(eventsPath, 'utf-8')
+      expect(raw).toContain('attempt_failed')
+
+      // Absence.
+      expect(raw).not.toContain(CANARY)
+    })
+  })
+
+  test('the structured [needs-llm] task on the returned result carries no resolved credential value', async () => {
+    const key = 'WARPLINE_TEST_CANARY_HANDOFF'
+    await writeHandoffPlugin('leak-handoff', key)
+
+    await withEnv(key, CANARY, async () => {
+      const res = await invokePlugin(
+        'leak-handoff',
+        {},
+        { pluginsDir: pluginsRoot, eventsPath },
+        { granted: false, reason: 'manual-run' },
+      )
+
+      // Presence: the field survived the parse boundary and carries text. An
+      // absent field, or the `failed` fallback a rejected parse produces, would
+      // pass the absence check below over a result that never carried anything.
+      expect(res.result.status).toBe('skipped')
+      expect(res.result.needs_llm).toBeDefined()
+      expect(typeof res.result.needs_llm?.task).toBe('string')
+      expect((res.result.needs_llm?.task ?? '').length).toBeGreaterThan(0)
+
+      // Absence.
+      expect(res.result.needs_llm?.task).not.toContain(CANARY)
+      expect(res.result.summary).not.toContain(CANARY)
     })
   })
 })

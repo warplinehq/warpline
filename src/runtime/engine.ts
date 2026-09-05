@@ -26,7 +26,9 @@ import {
   pluginsDir as pluginsDirDefault,
   engineStatePath,
   runsDir as runsDirDefault,
+  warplineHome,
 } from '../lib/paths.js'
+import { JsonlRunLogger } from '../lib/jsonl-logger.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { invokePlugin } from './invoke-plugin.js'
 import type { CapabilityGrantWitness } from './capabilities.js'
@@ -71,7 +73,7 @@ import {
   writeEngineState,
 } from './engine-state-store.js'
 import type { Denial, EngineState, PendingGate } from '../schemas/engine-state.js'
-import { writeRunLog, pruneRunLogs } from './run-log-store.js'
+import { writeRunLog, pruneRunLogs, RETENTION_DAYS } from './run-log-store.js'
 import type { RunLog } from '../schemas/run-log.js'
 import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
 import {
@@ -167,6 +169,19 @@ export interface AdvanceOptions {
   stateDir?: string
   /** Override runs directory (for testing) */
   runsDir?: string
+  /**
+   * Directory the headless JSONL run log is written under. Defaults to
+   * `<warplineHome()>/logs`, which puts the daily files at
+   * `<home>/logs/runs/YYYY-MM-DD.jsonl`.
+   *
+   * Named as `logs` and never as the home root, because `JsonlRunLogger`
+   * appends its own `runs/` segment and `runsDir()` is
+   * `join(warplineHome(), 'runs')` — handing it the home root would write the
+   * daily JSONL straight into the directory `pruneRunLogs` and
+   * `trimPluginHistory` scan for run artifacts, where a `.jsonl` file is not
+   * one of the two shapes either of them expects to find.
+   */
+  logsDir?: string
   /** Override events.jsonl path (for test isolation) */
   eventsPath?: string
   /** Override preferences.json path (for test isolation) */
@@ -597,6 +612,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     pluginsDir = getDefaultPluginsDir(),
     stateDir = getDefaultStatePath(),
     runsDir = getDefaultRunsDir(),
+    logsDir = getDefaultLogsDir(),
     eventsPath,
     preferencesPath,
     approvalPath,
@@ -760,6 +776,24 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
   // 3. Prune old run logs
   await pruneRunLogs(runsDir)
+
+  // 3a. The headless JSONL run log.
+  //
+  // Constructed HERE, below the plugin-root refusal near the top of this
+  // function and below the quiet-hours early return, because both of those
+  // arms must leave the warpline home byte-identical and this is the only
+  // writer added since that promise was made. Constructing the logger is
+  // itself write-free — `appendEvent` is what creates the directory — but
+  // placing it after both refusals means the ordering does not depend on
+  // that remaining true.
+  //
+  // `RETENTION_DAYS` is imported rather than restated. This is the third
+  // record warpline keeps of a run, alongside the per-plugin run artifact and
+  // the engine's own run log, and three formats pruned on three literals is
+  // three retention rules that agree until somebody tunes one.
+  const runLogger = new JsonlRunLogger({ logsDir, runId: run_id })
+  await runLogger.prune(RETENTION_DAYS)
+  await runLogger.appendEvent({ level: 'info', event: 'run_start' })
 
   // 3b. Emit run_started event
   await emitRunStarted(run_id, eventsPath)
@@ -1282,6 +1316,29 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   await mkdir(runsDir, { recursive: true })
   const run_log_path = await writeRunLog(runLog, runsDir)
 
+  // 9b. The same run, as JSONL lines.
+  //
+  // Read off `plugin_entries` after the level loop rather than emitted from
+  // each of the eight arms that push one. The arms already agree on what a
+  // plugin's outcome was; a second emission site per arm is eight chances for
+  // the two records of one advance to disagree.
+  for (const entry of runLog.plugin_entries) {
+    await runLogger.appendEvent({
+      level: entry.status === 'failed' ? 'error' : 'info',
+      event: 'plugin_result',
+      plugin: entry.plugin,
+      status: entry.status,
+      elapsed_ms: entry.elapsed_ms,
+      detail: entry.result_summary,
+    })
+  }
+  await runLogger.appendEvent({
+    level: engineStatus === 'complete' ? 'info' : 'warn',
+    event: 'run_end',
+    status: engineStatus,
+    detail: runLog.summary,
+  })
+
   // 10. Emit run_completed event
   await emitRunCompleted(run_id, engineStatus, eventsPath)
 
@@ -1728,4 +1785,8 @@ function getDefaultStatePath(): string {
 
 function getDefaultRunsDir(): string {
   return runsDirDefault()
+}
+
+function getDefaultLogsDir(): string {
+  return join(warplineHome(), 'logs')
 }

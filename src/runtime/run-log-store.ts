@@ -35,7 +35,16 @@ import { join } from 'node:path'
 import { runsDir } from '../lib/paths.js'
 import type { RunLog } from '../schemas/run-log.js'
 
-const RETENTION_DAYS = 30
+/**
+ * How long a run record survives, in days.
+ *
+ * Exported because there is now more than one run-record format under the
+ * warpline home, and each one prunes itself. Two literals would be two
+ * retention rules that agree today and drift the first time one of them is
+ * tuned, which is the whole reason this is a name rather than a number at the
+ * call site.
+ */
+export const RETENTION_DAYS = 30
 
 export function runLogFilename(runId: string): string {
   return `${runId}.json`
