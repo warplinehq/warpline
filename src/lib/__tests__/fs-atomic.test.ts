@@ -56,6 +56,14 @@ describe('atomicWriteJson', () => {
     await atomicWriteJson(path, { v: 2 })
     const raw = await readFile(path, 'utf-8')
     expect(JSON.parse(raw)).toEqual({ v: 2 })
+    // The success path leaves no residue either. The failure-path test above
+    // proves the unlink in the catch block; nothing proved the rename itself
+    // consumed the temp file, so a second write that leaked one alongside the
+    // target passed every assertion here. `atomicWriteJson` is published as
+    // `warpline/unstable-fs` now, and a directory accumulating one temp file
+    // per write is a consumer-visible defect.
+    const entries = await readdir(tmpDir)
+    expect(entries.filter((e) => e.startsWith('overwrite.json'))).toEqual(['overwrite.json'])
   })
 })
 
