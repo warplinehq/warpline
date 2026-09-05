@@ -19,7 +19,9 @@ import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 import { invokePlugin, deriveRunStatus } from '../invoke-plugin.js'
+import { skillHandoff } from '../result-builders.js'
 import { SkillResultSchema } from '../../schemas/skill-result.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
@@ -41,6 +43,8 @@ const MANIFEST: PluginManifest = {
   max_retries: 1,
   retry_delay_ms: 2000,
 }
+
+const BUILDER_PATH = fileURLToPath(new URL('../result-builders.ts', import.meta.url))
 
 let tmpDir: string
 let eventsPath: string
@@ -216,5 +220,53 @@ describe('the context path is bounded to the warpline home', () => {
     })
 
     expect(parsed.success).toBe(true)
+  })
+})
+
+describe('the builder emits both arms', () => {
+  test('skillHandoff sets the field and prefixes the summary in one call', () => {
+    const built = skillHandoff('Triage 3 entries', 'state/entries.json')
+
+    expect(built.status).toBe('skipped')
+    expect(built.needs_llm).toEqual({
+      task: 'Triage 3 entries',
+      context_path: 'state/entries.json',
+    })
+
+    // The prefix arm, in the form the shipped scanner reads: it splits on
+    // `Context: ` and opens what follows, so the summary carries the path
+    // resolved against the home rather than the relative form the field holds.
+    expect(built.summary.startsWith('[needs-llm] ')).toBe(true)
+    const [head, tail] = built.summary.split('Context: ')
+    expect(head).toBe('[needs-llm] Triage 3 entries. ')
+    expect(tail?.endsWith('state/entries.json')).toBe(true)
+    expect(tail?.startsWith('/')).toBe(true)
+  })
+
+  test('what the builder emits survives invokePlugin on both arms at once', async () => {
+    const pluginDir = join(tmpDir, 'builder-handoff')
+    await mkdir(pluginDir, { recursive: true })
+    await writeFile(
+      join(pluginDir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify({ ...MANIFEST, name: 'builder-handoff' })}`,
+    )
+    await writeFile(
+      join(pluginDir, 'handler.ts'),
+      [
+        // Absolute path: a fixture under tmpdir() has no node_modules above it,
+        // so the `warpline/unstable-result` specifier does not resolve from
+        // there. That specifier is proven against a packed tarball instead.
+        `import { skillHandoff } from ${JSON.stringify(BUILDER_PATH)}`,
+        'export async function handler() {',
+        "  return skillHandoff('Triage 3 entries', 'state/entries.json')",
+        '}',
+      ].join('\n'),
+    )
+
+    const inv = await invokePlugin('builder-handoff', {}, { pluginsDir: tmpDir, eventsPath })
+
+    expect(deriveRunStatus(inv)).toBe('delegated')
+    expect(inv.result.needs_llm?.context_path).toBe('state/entries.json')
+    expect(inv.result.summary.startsWith('[needs-llm] ')).toBe(true)
   })
 })

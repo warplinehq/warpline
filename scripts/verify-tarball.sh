@@ -364,7 +364,7 @@ for (const name of ['atomicWriteJson', 'atomicWriteText', 'readJsonOrNull']) {
 // `src/unstable-result.ts` are edited together, or this reddens.
 const unstableResult = await import('warpline/unstable-result')
 
-const UNSTABLE_RESULT_EXPECTED = 'readDependencyOutput,skillFailure,skillOk'
+const UNSTABLE_RESULT_EXPECTED = 'readDependencyOutput,skillFailure,skillHandoff,skillOk'
 
 const unstableResultExports = Object.keys(unstableResult).filter((k) => k !== 'default').sort().join(',')
 console.log('   warpline/unstable-result exports: ' + unstableResultExports)
@@ -382,7 +382,7 @@ if (resultNeverReachable.length) {
   process.exit(1)
 }
 
-for (const name of ['readDependencyOutput', 'skillFailure', 'skillOk']) {
+for (const name of ['readDependencyOutput', 'skillFailure', 'skillHandoff', 'skillOk']) {
   if (typeof unstableResult[name] !== 'function') {
     console.error('warpline/unstable-result: ' + name + ' is not callable')
     process.exit(1)

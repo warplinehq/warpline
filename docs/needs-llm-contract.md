@@ -87,6 +87,15 @@ The runtime classifies a handoff on **either** arm — one predicate,
 'skipped'` is still required by both: the field alone does not turn a
 successful result into a delegated one.
 
+**Both arms are emitted together**, and `skillHandoff` from
+`warpline/unstable-result` is what emits them. It sets `needs_llm` and prefixes
+the summary in the same call, writing the context path into the summary
+resolved against the home so the scanner has a path it can open. The string arm
+is what the shipped scanner reads today; teaching it to read the field instead
+is a change to the skill and to this document, and is deliberately not done
+here. Until it is, a result that carried only the field would be one the runtime
+calls `delegated` and the scanner never picks up.
+
 ## Who consumes the handoff
 
 A **companion skill** — a Claude Code skill (see `skills/needs-llm-template/`)
