@@ -252,12 +252,18 @@ handler, at the point of use.
 the config channel above states at length: a run log is a file people paste into
 issues. Name the key you expected.
 
+The runtime does replace the exact values it resolved from `secrets` with
+`[redacted]` at the parse boundary, before anything writes your result, so a
+slip does not reach disk. Treat that as a backstop and not as permission. It
+knows the values it was told about and nothing else, and the sentence below is
+what "nothing else" covers.
+
 **The known limit, stated as a limit.** The declared list bounds the sanctioned
 path and nothing else. A token an operator puts in `<home>/config/<plugin>.json`
 and never declares here is outside every mechanism warpline offers for
-credentials — including any redaction a later release adds, which can only act
-on what it was told about. Declaring the name is what puts a credential inside
-the part warpline can reason about.
+credentials — the redaction above included, because it can only act on what it
+was told about. Declaring the name is what puts a credential inside the part
+warpline can reason about.
 
 ## Capabilities
 

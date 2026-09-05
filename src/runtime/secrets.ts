@@ -150,7 +150,12 @@ export const REDACTED = '[redacted]'
  * with a filter, so the two decisions stay visibly coupled instead of one
  * quietly outliving the other.
  *
- * The walk is over EVERY string in the object, not over a named field list.
+ * **It scrubs string VALUES, not object KEYS.** `data_freshness` is a
+ * `record<string, string>`, so a handler that used a token as a KEY there would
+ * keep it. Stated rather than fixed: closing it means a walk that rewrites keys,
+ * and that belongs behind a case watched failing first, not behind an argument.
+ *
+ * The walk is over EVERY string value in the object, not over a named field list.
  * `summary`, `errors[].message`, `undo_instruction` and
  * `artifacts_produced[].body` are the four a list would have named — and this
  * runtime's own `SkillResult` already carries a fifth, the structured
