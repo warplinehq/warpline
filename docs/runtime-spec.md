@@ -163,14 +163,15 @@ deliberately not a stronger one.
 
 It is also the whole *subject*. The promise is made about the manifest contract
 and by its own words about nothing else: the run-log schema, the board schema,
-the engine-state schema and the capability schemas are outside it, and a
-document persisted under `~/.warpline/` — `engine-state.json` and the run log
-among them — carries no compatibility undertaking at all. Those shapes are
-reachable through `warpline/schemas/*` because that specifier is how this
+the engine-state schema and the capability schemas are outside it. Those shapes
+are reachable through `warpline/schemas/*` because that specifier is how this
 package publishes shapes, not because publishing them promised anything; a
-release may change any of them without a deprecation window. The negative half
-is stated here rather than left to inference because a promise whose edges are
-unwritten is read at its widest by whoever is relying on it.
+release may change any of them without a deprecation window. Where a persisted
+document does carry an undertaking, it is written beside the document and not
+here — § 9's `first_granted_at` rule is the one such case, and it is stated
+there because nothing above it covers the file. The negative half is stated
+here rather than left to inference because a promise whose edges are unwritten
+is read at its widest by whoever is relying on it.
 
 Adding a field is already safe by construction, for the reason stated
 immediately above — every field with a default is optional in a manifest file,
@@ -224,8 +225,7 @@ The root barrel `warpline` and the two narrow subpaths beneath it are public
 contract from 0.1.0 onward. They are governed by the stability promise stated
 above and are deliberately small for that reason.
 
-Neither `warpline/unstable-runtime` nor `warpline/unstable-fs` is. Any name
-behind a `warpline/unstable-*`
+`warpline/unstable-runtime` is not. Any name behind a `warpline/unstable-*`
 specifier may change, narrow or disappear in any 0.x release. What you get is a
 line in that release's notes, and no deprecation window — the specifier carries
 the warning so that nobody has to have read this paragraph to be warned. If you
