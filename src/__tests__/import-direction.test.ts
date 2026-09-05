@@ -67,16 +67,19 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
 /**
  * Absolute paths, and the absoluteness is the whole mechanism — see the
- * paragraph above. A self-assertion further down reads this file back and fails
- * if either is ever replaced by a bare name.
+ * paragraph above. A test further down asserts both VALUES, and only then scans
+ * this file's source for a bare-name call site. That order matters: editing the
+ * constant here is the easy regression, and it leaves the call site and every
+ * mention of the absolute path in the prose above untouched, so a source scan
+ * on its own would stay green over it.
  */
 const GREP = '/usr/bin/grep'
 const FIND = '/usr/bin/find'
@@ -87,13 +90,14 @@ const FIND = '/usr/bin/find'
  * here can bless a specifier that would not resolve for someone who installed
  * the package.
  *
- * Relative specifiers beginning `./` or `../` are allowed **by rule**, not by
- * listing: an example plugin is a directory of files that import each other,
- * and enumerating those would be a second list to maintain that says nothing
- * about import direction. Reaching out of the package is not expressible that
- * way — `examples/` ships inside the tarball, so a relative specifier climbing
- * out of an example lands in `dist/`, and any such path is caught by the
- * `..`-escaping assertion rather than by this list.
+ * Relative specifiers are allowed **by rule**, not by listing: an example
+ * plugin is a directory of files that import each other, and enumerating those
+ * would be a second list to maintain that says nothing about import direction.
+ * The rule has one condition, applied in `escapesRoot` below — the specifier
+ * must resolve to somewhere still inside the scanned tree. `../shared.js` from
+ * a nested example file is a sibling path and is allowed;
+ * `../../../src/runtime/engine.js` is the reach this whole file exists to
+ * refuse, and it is relative, so nothing in the list below would ever catch it.
  */
 const ALLOWED: readonly string[] = [
   'bun:test',
@@ -106,15 +110,27 @@ const ALLOWED: readonly string[] = [
   'warpline/schemas/skill-result',
 ]
 
-/** Allowed by rule. `..` segments are handled separately, below. */
+/** A relative specifier, which the rule above admits on one condition. */
 const RELATIVE = /^\.\.?\//
 
 /**
- * A relative specifier that climbs above its own example directory. This is the
- * shape the rule above cannot wave through: `../../../src/runtime/engine.js`
- * from an example is precisely the reach this file refuses, and it is relative.
+ * That condition, and it is path arithmetic rather than a pattern.
+ *
+ * A regex banning every `..` segment was the first attempt and it was wrong in
+ * both directions at once: it refused `../shared.js`, which the rule is
+ * supposed to allow, while its comment claimed to be about climbing out of the
+ * tree. Resolving the specifier against the importing file answers the question
+ * the comment was actually asking. `examples/` ships inside the tarball, so a
+ * specifier resolving above the scanned root reaches a module the `exports` map
+ * never published — the reach in its one form no allowlist of bare specifiers
+ * can see.
+ *
+ * Pure path arithmetic: nothing is read and nothing needs to exist on disk.
  */
-const ESCAPES = /(^|\/)\.\.(\/|$)/
+function escapesRoot(root: string, file: string, specifier: string): boolean {
+  const rel = relative(root, resolve(dirname(file), specifier))
+  return rel === '..' || rel.startsWith(`..${sep}`)
+}
 
 /**
  * The line prefilter handed to `grep`. POSIX ERE only — no non-capturing
@@ -185,13 +201,13 @@ function offenders(root: string): string[] {
     if (first === -1 || second === -1) {
       throw new Error(`blind: unparseable search record, so a line went unread: ${record}`)
     }
-    const file = relative(root, record.slice(0, first))
+    const absolute = record.slice(0, first)
     const line = record.slice(first + 1, second)
     for (const match of record.slice(second + 1).matchAll(SPECIFIER)) {
       const specifier = match[1]!
       if (ALLOWED.includes(specifier)) continue
-      if (RELATIVE.test(specifier) && !ESCAPES.test(specifier)) continue
-      found.push(`${file}:${line}: ${specifier}`)
+      if (RELATIVE.test(specifier) && !escapesRoot(root, absolute, specifier)) continue
+      found.push(`${relative(root, absolute)}:${line}: ${specifier}`)
     }
   }
   return found.sort()
@@ -264,7 +280,9 @@ const EXPECTED = Object.keys(FORMS)
 function fixture(extra: Record<string, string> = {}): string {
   const root = mkdtempSync(join(tmpdir(), 'warpline-import-forms-'))
   for (const [name, body] of Object.entries({ ...FORMS, ...extra })) {
-    writeFileSync(join(root, name), body)
+    const path = join(root, name)
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, body)
   }
   return root
 }
@@ -315,17 +333,42 @@ describe('the lint has been watched finding things', () => {
   })
 
   /**
-   * The half the fixture above cannot reach. Swapping the absolute path for a
-   * bare name is invisible to every behavioural assertion in this file — on the
-   * machines that matter the bare name resolves to the same binary, so the
-   * behaviour is identical right up until it runs somewhere it is not. Reading
-   * this file back is the only mechanised way to hold the rule that made the
-   * ignore-file trap harmless in the first place.
+   * A relative specifier is a sibling path until it resolves out of the tree.
+   * Both halves in one fixture, because an assertion that only ever showed the
+   * offender would pass just as well for a rule that refuses every `..`.
    */
-  test('this file names its binaries by absolute path and never by bare name', () => {
+  test('a relative specifier is a sibling path until it climbs out of the tree', () => {
+    const root = fixture({
+      'nested/inside.ts': "export { spawn } from '../re-export.js'\n",
+      'nested/outside.ts': "import { engine } from '../../src/runtime/engine.js'\n",
+    })
+    try {
+      expect(offenders(root)).toEqual(
+        [...EXPECTED, 'nested/outside.ts:1: ../../src/runtime/engine.js'].sort(),
+      )
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The half no fixture can reach. Swapping the absolute path for a bare name
+   * is invisible to every behavioural assertion in this file — on the machines
+   * that matter the bare name resolves to the same binary, so the behaviour is
+   * identical right up until it runs somewhere it is not.
+   *
+   * The value assertions are the primary check and the source scan is the
+   * backstop, in that order, because the natural regression is editing the
+   * constant rather than the call site. `const GREP = 'grep'` leaves the call
+   * site untouched, leaves every mention of the absolute path in the prose
+   * above intact, and would sail through a source scan alone — repeating one
+   * layer down the exact mistake of asserting a property the check cannot
+   * observe.
+   */
+  test('the search binaries are absolute paths, in value and at the call site', () => {
+    expect(GREP).toBe('/usr/bin/grep')
+    expect(FIND).toBe('/usr/bin/find')
     const self = readFileSync(join(import.meta.dir, 'import-direction.test.ts'), 'utf8')
-    expect(self).toContain(GREP)
-    expect(self).toContain(FIND)
     expect(BARE_NAME.test(self)).toBe(false)
   })
 })
