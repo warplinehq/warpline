@@ -18,14 +18,20 @@
  * what stops the first from being a vacuous pass — the production registry is
  * empty today, so on its own it would report clean forever.
  */
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   CAPABILITY_EFFECTS,
   CAPABILITY_REGISTRY,
   mintContext,
+  type CapabilityCaller,
   type CapabilityEntry,
   type CapabilityGrantWitness,
+  type SecretsHandle,
 } from '../capabilities.js'
+import { invokePlugin } from '../invoke-plugin.js'
 import { PluginManifestSchema, SideEffectType } from '../../schemas/plugin-manifest.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
@@ -194,5 +200,175 @@ describe('the declaration is what mints', () => {
       FIXTURE_REGISTRY,
     )
     expect(minted.withheld.map((w) => w.reason).join('\n')).not.toContain('hunter2')
+  })
+})
+
+/**
+ * The first registered member: a handle listing credential names.
+ *
+ * Two properties carry the weight here, and they pull in opposite directions.
+ * It lists NAMES — the manifest declared them and the pre-flight resolved them
+ * — and it exposes nothing that returns a value. A handler holds
+ * `process.env` regardless, in this process, so a value getter would buy a
+ * violated requirement and no containment at all. The `Object.keys` assertion
+ * below is the runtime half of that; the grep for environment reads in
+ * `capabilities.ts` is the other half.
+ *
+ * The handle is UNGATED — its registry effect is `null` — because the unit it
+ * stands for is a pre-flight read of the environment, which is none of the
+ * five values `side_effects` is drawn from. The consequence is the one worth
+ * asserting: a run carrying no grant still receives it, so the manual CLI path
+ * is unchanged by this member landing.
+ */
+describe('the secrets handle', () => {
+  const CALLER: CapabilityCaller = { plugin: 'fixture-plugin', runId: 'run-1' }
+
+  function handleFor(resolvedSecretNames: readonly string[], witness = NOT_GRANTED): SecretsHandle {
+    const minted = mintContext(
+      { manifest: manifestDeclaring([]), caller: CALLER, resolvedSecretNames },
+      witness,
+    )
+    return minted.context.secrets
+  }
+
+  test('it lists the names the manifest declared and the pre-flight resolved', () => {
+    expect(handleFor(['GITHUB_TOKEN', 'SLACK_TOKEN']).resolvedNames(CALLER)).toEqual([
+      'GITHUB_TOKEN',
+      'SLACK_TOKEN',
+    ])
+  })
+
+  /**
+   * Not an absent handle. A plugin declaring nothing gets the member and an
+   * empty list, so a handler never branches on whether it was handed one.
+   */
+  test('a plugin declaring no credentials receives a handle listing nothing', () => {
+    const minted = mintContext({ manifest: manifestDeclaring([]), caller: CALLER }, NOT_GRANTED)
+    expect('secrets' in minted.context).toBe(true)
+    expect(minted.context.secrets.resolvedNames(CALLER)).toEqual([])
+  })
+
+  /**
+   * The whole surface, asserted as a set rather than as an absence. A test
+   * that greps for the word "value" passes the day somebody calls the getter
+   * something else; a test that pins the key set reddens whatever it is named.
+   */
+  test('the handle exposes exactly one function, and it returns names', () => {
+    const handle = handleFor(['GITHUB_TOKEN'])
+    expect(Object.keys(handle).sort()).toEqual(['resolvedNames'])
+    expect(typeof handle.resolvedNames).toBe('function')
+    expect(handle.resolvedNames(CALLER)).toEqual(['GITHUB_TOKEN'])
+  })
+
+  test('it is minted on a run carrying no grant, because it is ungated', () => {
+    expect(CAPABILITY_EFFECTS['secrets']).toBeNull()
+    expect(handleFor(['GITHUB_TOKEN'], NOT_GRANTED).resolvedNames(CALLER)).toEqual(['GITHUB_TOKEN'])
+  })
+
+  test('a manifest declaring no side effects at all still receives it', () => {
+    const minted = mintContext(
+      { manifest: manifestDeclaring([]), caller: CALLER, resolvedSecretNames: ['A'] },
+      { granted: false, reason: 'no-declared-side-effects' },
+    )
+    expect(minted.context.secrets.resolvedNames(CALLER)).toEqual(['A'])
+    expect(minted.withheld).toEqual([])
+  })
+
+  /**
+   * A handler is called with `(manifest, args, signal, capabilities)` and has
+   * no run id of its own. Without the caller on the context, the argument the
+   * next assertion requires would be one no plugin author could honestly
+   * supply — so it is carried, not reconstructed.
+   */
+  test('the context carries the caller it was minted for', () => {
+    const minted = mintContext({ manifest: manifestDeclaring([]), caller: CALLER }, NOT_GRANTED)
+    expect(minted.context.caller).toEqual(CALLER)
+  })
+})
+
+/**
+ * One end-to-end case, because everything above mints directly.
+ *
+ * What this adds over the unit cases is the wiring: that `invokePlugin`'s
+ * pre-flight result is what fills `resolvedSecretNames`, so the list a handler
+ * reads is what actually RESOLVED rather than what a manifest merely declared.
+ * The two are the same set only because the pre-flight refuses the run
+ * otherwise — and that refusal is proven in `secrets.test.ts`, with a marker
+ * file, rather than re-proven here.
+ *
+ * The credential value is a sentinel, and the assertion is that it reaches
+ * neither the summary the handler built out of the handle nor the result the
+ * runtime returns. A handler in this process can read `process.env` whatever
+ * this member does; what is being checked is that the SANCTIONED path hands
+ * over names and nothing else.
+ */
+describe('the handle reaches a handler through invokePlugin', () => {
+  let tmpDir = ''
+
+  afterEach(async () => {
+    delete process.env['CAP_HANDLE_TOKEN']
+    delete process.env['CAP_HANDLE_OTHER']
+    if (tmpDir !== '') await rm(tmpDir, { recursive: true, force: true })
+    tmpDir = ''
+  })
+
+  test('a four-parameter handler lists the resolved names and is handed no value', async () => {
+    process.env['CAP_HANDLE_TOKEN'] = 'SENTINEL-DO-NOT-LEAK'
+    process.env['CAP_HANDLE_OTHER'] = 'SENTINEL-DO-NOT-LEAK-TWO'
+
+    tmpDir = join(tmpdir(), `warpline-cap-handle-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
+    const pluginDir = join(tmpDir, 'handle-fixture')
+    await mkdir(pluginDir, { recursive: true })
+    await writeFile(
+      join(pluginDir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify({
+        ...manifestDeclaring([]),
+        name: 'handle-fixture',
+        secrets: ['CAP_HANDLE_TOKEN', 'CAP_HANDLE_OTHER'],
+      })}`,
+    )
+    await writeFile(
+      join(pluginDir, 'handler.ts'),
+      `
+      export async function handler(manifest, args, signal, capabilities) {
+        return {
+          status: 'success',
+          phases_completed: ['handle-fixture'],
+          phases_failed: [],
+          errors: [],
+          data_freshness: {},
+          summary: JSON.stringify({
+            names: capabilities.secrets.resolvedNames(capabilities.caller),
+            surface: Object.keys(capabilities.secrets).sort(),
+            plugin: capabilities.caller.plugin,
+            hasRunId: typeof capabilities.caller.runId === 'string',
+          }),
+          artifacts_produced: [],
+          schema_version: 1,
+        }
+      }
+    `,
+    )
+
+    const invocation = await invokePlugin(
+      'handle-fixture',
+      {},
+      { pluginsDir: tmpDir },
+      { granted: false, reason: 'manual-run' },
+    )
+
+    expect(invocation.result.status).toBe('success')
+    const seen = JSON.parse(invocation.result.summary) as {
+      names: string[]
+      surface: string[]
+      plugin: string
+      hasRunId: boolean
+    }
+
+    expect(seen.names).toEqual(['CAP_HANDLE_TOKEN', 'CAP_HANDLE_OTHER'])
+    expect(seen.surface).toEqual(['resolvedNames'])
+    expect(seen.plugin).toBe('handle-fixture')
+    expect(seen.hasRunId).toBe(true)
+    expect(JSON.stringify(invocation)).not.toContain('SENTINEL-DO-NOT-LEAK')
   })
 })
