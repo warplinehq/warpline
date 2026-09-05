@@ -30,6 +30,7 @@ function makeManifest(name: string, sideEffects: string[]): PluginManifest {
     inputs: {},
     outputs: {},
     capabilities: [],
+    secrets: [],
     schedule: 'on_run',
     autonomy_level: 'supervised',
     side_effects: sideEffects as PluginManifest['side_effects'],

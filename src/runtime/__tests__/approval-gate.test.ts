@@ -270,6 +270,7 @@ function sideEffectManifest(name: string, sideEffects: string[]): PluginManifest
     inputs: {},
     outputs: {},
     capabilities: [],
+    secrets: [],
     schedule: 'on_run',
     autonomy_level: 'autonomous',
     side_effects: sideEffects as PluginManifest['side_effects'],

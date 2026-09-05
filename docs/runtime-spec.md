@@ -52,6 +52,7 @@ drift from the code. Edit the schema, not the table.
 | `schedule` | `on_run` \| `daily` \| `weekly` \| `manual` | no | `"on_run"` |
 | `autonomy_level` | `autonomous` \| `supervised` \| `manual` | yes | — |
 | `side_effects` | (`sends_email` \| `creates_issue` \| `writes_db` \| `external_api` \| `modifies_file`)[] | no | `[]` |
+| `secrets` | string[] | no | `[]` |
 | `ttl_hours` | number | yes | — |
 | `dependencies` | string[] | no | `[]` |
 | `timeout_ms` | integer | no | `60000` |
@@ -123,6 +124,34 @@ a `description` is one the handler has to re-implement, and the two drift.
 Both fields are nested inside the `inputs` record value, so neither appears in
 the generated table above — that table lists top-level manifest fields only.
 This prose is the documentation for them.
+
+### `secrets`
+
+`secrets` is a list of environment variable **keys** the plugin requires. It is
+a list of names, and the names are the whole of it.
+
+Warpline resolves the names and never stores the values. There is no vault, no
+`.env` file the runtime reads and no secrets file under the warpline home, so a
+copied home carries no declared credential — the strongest form of protection at
+rest available, which is having nothing at rest.
+
+Every declared name is looked up in the process environment before the handler
+is called, by exact key equality: no case folding, no trimming and no prefix
+convention. A name that does not resolve fails the run with a single
+`auth_failure` error naming the key and this field. That failure sits above the
+retry loop, so it happens once and is never retried — a credential absent on the
+first attempt is absent on the third.
+
+A key that is present but set to the empty string counts as **absent** and fails
+by name. An empty token is a broken credential, and admitting it would only move
+the same failure into the handler, which is the position this check exists to
+get in front of.
+
+`secrets: []`, and a manifest that declares nothing, both run the check and pass
+it. Adding the field invalidates no manifest that already validated.
+
+This is not `capabilities`, which is a free-text array of informational tags.
+Neither field reads the other.
 
 ### `outputs.temporality`
 

@@ -25,6 +25,7 @@ const MANIFEST: PluginManifest = {
   inputs: {},
   outputs: {},
   capabilities: [],
+  secrets: [],
   schedule: 'on_run',
   autonomy_level: 'autonomous',
   side_effects: [],

@@ -158,6 +158,29 @@ export const PluginManifestSchema = z.object({
   side_effects: z.array(SideEffectType).default([]),
 
   /**
+   * Environment variable keys this plugin requires to do its work.
+   *
+   * Names only. **Warpline holds no credential value.** The names are resolved
+   * against the environment at invocation and the values are never persisted,
+   * never written to a run artifact and never placed in a `SkillResult` — there
+   * is no vault, no `.env` file the runtime reads, and no secrets file under the
+   * warpline home. An operator who copies the home ships no declared credential,
+   * because there is nothing at rest to copy.
+   *
+   * A declared name that is unset fails the run BEFORE the handler is called,
+   * with an `auth_failure` naming the key. An environment variable set to the
+   * empty string counts as unset: an empty token is a broken credential, and
+   * treating it as present only defers the same failure into the handler.
+   *
+   * Defaulted rather than optional, like every other list field here, so the
+   * addition is invisible to a manifest that declares nothing.
+   *
+   * This is not `capabilities` above. That field is free-text informational
+   * tags; neither field reads the other.
+   */
+  secrets: z.array(z.string()).default([]),
+
+  /**
    * Result freshness window in hours.
    * If the last successful run was within ttl_hours, the engine may skip re-running.
    * Must be a positive number (0 or negative would disable caching entirely).
