@@ -34,7 +34,7 @@ import type { SkillResult, SkillResultInput } from '../schemas/skill-result.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { emitAttemptFailed } from '../board/engine-events.js'
 import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
-import { resolveSecrets } from './secrets.js'
+import { resolveSecrets, scrubSecrets } from './secrets.js'
 import { mintContext } from './capabilities.js'
 import type { CapabilityContext, CapabilityGrantWitness } from './capabilities.js'
 
@@ -381,10 +381,13 @@ export async function invokePlugin(
   // including a third-party host reaching this function through
   // `warpline/unstable-runtime`, routes through it and none can skip it.
   //
-  // Only `ok` is read. The resolved values are deliberately not bound to a
-  // local: nothing in this function has a place to hand them, and a credential
-  // value that reaches an attempt record, a run artifact or a `SkillResult` is
-  // the one outcome the declaration was made to avoid.
+  // The resolved values ARE bound below, to exactly one consumer:
+  // `scrubSecrets`, at the parse boundary. That is the one place in this
+  // function with a use for them, and the use is removing them again. They go
+  // to no writer, no attempt record and no log line — a credential value
+  // reaching one of those is the outcome the declaration was made to avoid,
+  // and the scrub is what now enforces it rather than an argument that nothing
+  // holds a value to leak.
   const secrets = resolveSecrets(manifest)
   if (!secrets.ok) {
     return oneAttemptFailure(
@@ -516,8 +519,20 @@ export async function invokePlugin(
     // The parse boundary is also the provenance boundary: bare-string artifacts
     // normalize to Outputs here, and the runtime stamps them here, so every
     // caller downstream sees one shape carrying a run it can trust.
+    //
+    // And it is the REDACTION boundary, for the same structural reason. Every
+    // byte a handler authors crosses this line before any writer sees it, so
+    // one scrub here covers the run artifact, `events.jsonl`, the engine's run
+    // log, both places a result lands in `engine-state.json` and the JSONL run
+    // log at once — and covers a seventh writer added later without an edit.
+    // Scrubbing at the write sites instead is the same guard with a hole cut
+    // in it for whatever is written next.
+    //
+    // Outside the `parsed.success` branch on purpose: the fabricated failure
+    // below quotes the Zod error, which echoes received values.
     const parsed = SkillResultSchema.safeParse(rawResult)
-    const thisResult: SkillResult = stampOutputs(
+    const thisResult: SkillResult = scrubSecrets(
+      stampOutputs(
       parsed.success
         ? parsed.data
         : {
@@ -535,7 +550,9 @@ export async function invokePlugin(
             artifacts_produced: [],
             schema_version: 1,
           },
-      runId,
+        runId,
+      ),
+      Object.values(secrets.values),
     )
 
     const elapsed = Date.now() - attemptStart

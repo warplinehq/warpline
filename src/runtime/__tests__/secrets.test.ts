@@ -394,7 +394,7 @@ describe('a resolved credential reaches no sink invokePlugin writes', () => {
       // Presence: the handler held it, and the retry notice was actually written.
       expect(await readFile(sawPath('leak-events'), 'utf-8')).toBe(CANARY)
       const raw = await readFile(eventsPath, 'utf-8')
-      expect(raw).toContain('attempt_failed')
+      expect(raw).toContain('attempt 1 failed')
 
       // Absence.
       expect(raw).not.toContain(CANARY)

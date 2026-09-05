@@ -26,11 +26,13 @@
  *     not mask it. A masking heuristic is a list of things that look like
  *     secrets and it leaks the first one it fails to recognise.
  *
- * The resolved map is returned rather than discarded so a caller that has a
- * place to hand it has one. `invokePlugin` today reads only `ok`: nothing in
- * the runtime hands these values anywhere, and a value that reaches a run
- * artifact, an event or a `SkillResult` is the leak this whole module is shaped
- * to avoid.
+ * The resolved map is returned rather than discarded because there is now a
+ * caller with a place to hand it: `scrubSecrets` below, which `invokePlugin`
+ * runs over every parsed result at the parse boundary. The values are read for
+ * that and for nothing else — they are never handed to a writer, and a value
+ * that reaches a run artifact, an event, a run log or `engine-state.json` is
+ * the leak this module is shaped to avoid. The resolved NAMES go to the
+ * capability handle; the resolved values go to the scrubber.
  */
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 
@@ -103,4 +105,93 @@ export function resolveSecrets(
       `variable set to the empty string counts as unset. Warpline resolves ` +
       `these names and stores no value.`,
   }
+}
+
+/**
+ * What replaces a resolved credential value wherever a handler put one.
+ *
+ * Short on purpose. An Output's inline `body` is byte-capped at the parse
+ * boundary and `pending_gates[].plugin_result` is re-parsed every time the
+ * state document is read, so a placeholder longer than the value it replaces
+ * could push a body that was at the cap over it on the next read.
+ */
+export const REDACTED = '[redacted]'
+
+/**
+ * Replace every occurrence of a resolved credential value in a parsed
+ * `SkillResult` with a fixed placeholder.
+ *
+ * **This is not the heuristic the config channel refuses.**
+ * `src/schemas/plugin-config.ts` states, about a problem string, that a value
+ * is omitted and not redacted, "because a redaction heuristic is the thing that
+ * goes stale and leaks the one value it did not recognise as a secret". The
+ * objection there is to pattern-matching things that LOOK like secrets. This
+ * matches nothing. It takes the exact string values that `resolveSecrets` just
+ * read out of the environment for this invocation — a set of known cardinality,
+ * known at the call — and replaces those and only those. There is no recogniser
+ * to go stale. Read the two passages together or they read as contradictory.
+ *
+ * **The bound is declared secrets only.** A token an operator puts in
+ * `config/<plugin>.json` and never names on `manifest.secrets` is outside this
+ * set and will reach a run log unchanged. That is a limit, recorded here and in
+ * `docs/plugin-authoring.md`, not a gap waiting to be discovered.
+ *
+ * **The capability handle does not make this unnecessary.** The handle exposes
+ * resolved NAMES and no value getter, which bounds the sanctioned path a
+ * handler has. It does not bound `process.env`, which an in-process handler
+ * retains whatever warpline hands it. So the handle is where a well-behaved
+ * plugin gets its list, and this function is what actually holds when one
+ * interpolates a token into its summary anyway.
+ *
+ * **The set can never contain the empty string.** `resolveSecrets` counts an
+ * empty-valued declared credential as ABSENT and fails the invocation before
+ * the handler runs, so an empty value never reaches this function and it cannot
+ * blank a whole document. That is asserted here rather than defended against
+ * with a filter, so the two decisions stay visibly coupled instead of one
+ * quietly outliving the other.
+ *
+ * The walk is over EVERY string in the object, not over a named field list.
+ * `summary`, `errors[].message`, `undo_instruction` and
+ * `artifacts_produced[].body` are the four a list would have named — and this
+ * runtime's own `SkillResult` already carries a fifth, the structured
+ * `[needs-llm]` handoff's `task` sentence, which is handler-authored free text
+ * exactly like the others. A named list is a later writer's blind spot chosen
+ * in advance.
+ */
+export function scrubSecrets<T>(value: T, secretValues: readonly string[]): T {
+  const values = secretValues.filter((v) => v.length > 0)
+  if (values.length !== secretValues.length) {
+    throw new Error(
+      'scrubSecrets: an empty credential value reached the scrub set. ' +
+        'resolveSecrets counts an empty value as absent and fails the ' +
+        'invocation before the handler runs, so this cannot happen without ' +
+        'that rule having changed.',
+    )
+  }
+  if (values.length === 0) return value
+  return walk(value, values) as T
+}
+
+/**
+ * Rebuild `node` with every string scrubbed.
+ *
+ * Structural: arrays and plain objects are rebuilt, everything else is returned
+ * as it stands. `split`/`join` rather than a regular expression, because a
+ * credential value is arbitrary text and would need escaping to be a safe
+ * pattern — and an escaping mistake here is a silent no-op, which is the one
+ * failure mode this function must not have.
+ */
+function walk(node: unknown, values: readonly string[]): unknown {
+  if (typeof node === 'string') {
+    let out = node
+    for (const secret of values) out = out.split(secret).join(REDACTED)
+    return out
+  }
+  if (Array.isArray(node)) return node.map((entry) => walk(entry, values))
+  if (node !== null && typeof node === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, entry] of Object.entries(node)) out[key] = walk(entry, values)
+    return out
+  }
+  return node
 }
