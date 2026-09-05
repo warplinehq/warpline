@@ -230,9 +230,17 @@ nothing, the mint never reads it, and no member is keyed off it. The table below
 is keyed off `side_effects`.
 
 Members reach a handler as a fourth parameter, after `signal`. The runtime calls
-handlers with three arguments today and `HandlerFn` describes three; the fourth
-lands with the first member, and a three-parameter handler keeps working when it
-does, because JavaScript discards an argument a function does not name.
+handlers with four arguments, and a handler declared with three keeps working
+unchanged — the widening is on the parameter type, so a three-parameter function
+is still assignable and JavaScript discards the argument it does not name.
+
+`HandlerFn`, on the root barrel, still describes three parameters and will
+continue to: it is public contract from 0.1.0 and renaming or widening it would
+cost every installed plugin. To type the fourth parameter, import
+`CapabilityHandlerFn` — or `CapabilityContext` for the parameter alone — from
+`warpline/unstable-capabilities`, which is type-only and carries its instability
+in the import path. No member is registered in this release, so what a handler
+receives today is an empty object rather than nothing.
 
 <!-- generated: capability-effects -->
 

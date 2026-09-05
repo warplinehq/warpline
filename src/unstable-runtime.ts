@@ -27,6 +27,13 @@
  * after it ships. That literal and this file are edited together, or the gate
  * says so.
  *
+ * `invokePlugin` takes a grant witness as a required fourth argument: a host
+ * calling it must state whether it read the approval Grant, because a runtime
+ * that mints authority for a handler on the strength of a check nobody made is
+ * the deputy handing it out. That parameter's type is NOT re-exported here — it
+ * lives behind `warpline/unstable-capabilities`, which is type-only, and this
+ * barrel stays a list of runtime values. Import it from there.
+ *
  * Do not widen this re-export without a decision record.
  */
 
