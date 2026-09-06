@@ -97,10 +97,47 @@ function carriesPrivateTerm(value: unknown): boolean {
 
 // ── The placeholder predicate ────────────────────────────────────────────
 
+/** Hosts nobody owns: the RFC 2606 reserved names and the `.invalid` TLD. */
+const RESERVED_HOST = /(^|\.)(example\.(com|org|net)|invalid)$/i
+
+/** The hostname of a URL, a bare hostname as itself, anything else null. */
+function hostOf(value: string): string | null {
+  try {
+    return new URL(value).hostname
+  } catch {
+    return /^[a-z0-9.-]+$/i.test(value) ? value : null
+  }
+}
+
+/**
+ * A path under the adopter's own home is a placeholder by construction:
+ * no leading separator, no drive letter, no `..` segment. It also has to look
+ * like a path — at least one separator and an extension on the last segment
+ * — or `owner/repo` and `some-team/some-project` would slip through as paths,
+ * which is precisely what the allowlist exists to decide. ponytail: a
+ * directory-shaped default (`state/cache`) is refused here and needs an
+ * allowlist entry; widen this clause if one ever ships.
+ */
+function isRelativePath(value: string): boolean {
+  if (/^[\\/]/.test(value) || /^[A-Za-z]:/.test(value)) return false
+  const segments = value.split(/[\\/]/)
+  if (segments.length < 2 || segments.includes('..')) return false
+  return /\.[A-Za-z0-9]+$/.test(segments[segments.length - 1] ?? '')
+}
+
 /** A default is a placeholder when any clause holds. Everything else is an offender. */
 function isPlaceholder(value: unknown): boolean {
-  void value
-  return true
+  // Numbers and booleans carry no provenance; a value that is empty carries nothing.
+  if (typeof value === 'boolean' || typeof value === 'number') return true
+  if (value === '' || (Array.isArray(value) && value.length === 0)) return true
+  if (value !== null && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0) return true
+  if (typeof value !== 'string') return false
+  // The conventional spellings of "replace me".
+  if (value.includes('example') || value.startsWith('your-') || /^<.*>$/.test(value) || value === 'changeme') return true
+  // A hostname or URL nobody can own.
+  const host = hostOf(value)
+  if (host !== null && RESERVED_HOST.test(host)) return true
+  return isRelativePath(value)
 }
 
 // ── The helper ───────────────────────────────────────────────────────────
@@ -276,6 +313,35 @@ describe('the guard goes red on a planted default', () => {
       expect(offenders).toEqual(expected)
       expect(offenders.join('\n')).not.toContain(tracked as string)
     })
+  })
+
+  test('each clause of the predicate admits its case, and the two non-cases are offenders', async () => {
+    const input = (value: unknown) => ({ type: 'string', required: false, default: value })
+    await withFixture(
+      {
+        ...CLEAN_TRIO,
+        'fixture-clauses': {
+          flag: input(true),
+          empty_string: input(''),
+          empty_list: input([]),
+          empty_map: input({}),
+          your_prefix: input('your-org'),
+          angle_wrapped: input('<owner/repo>'),
+          change_me: input('changeme'),
+          reserved_host: input('metrics.example.org'),
+          invalid_tld: input('https://api.acme.invalid/v1'),
+          home_relative: input('state/metrics.json'),
+          absolute_path: input('/srv/acme/metrics/prod.json'),
+          bare_pair: input('acme-corp/widgets'),
+        },
+      },
+      async (root) => {
+        expect((await defaultOffenders(root)).offenders).toEqual([
+          "fixture-clauses: input 'absolute_path' default is not a recognisable placeholder",
+          "fixture-clauses: input 'bare_pair' default is not a recognisable placeholder",
+        ])
+      },
+    )
   })
 
   test('an absent examples tree is an offender rather than a thrown exception', async () => {
