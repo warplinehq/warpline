@@ -35,8 +35,10 @@ const USAGE = `warpline — deterministic plugin runtime with approval gates
 Usage: warpline <command> [options]
 
 Commands:
+  init       Create the home and copy one example plugin into it
   plan       Preview the next engine advance without executing it
   scaffold   Generate a plugin directory from the template, or --from a shipped example
+  configure  Write a plugin's config from the inputs its manifest declares
   run        Invoke a single plugin handler directly
   approve    Grant a side-effect approval for this session
   deny       Record a no, so the next advance stops asking
@@ -56,6 +58,11 @@ export async function main(argv: string[]): Promise<number> {
         process.stdout.write(USAGE)
         return 0
 
+      case 'init': {
+        const { run } = await import('./init.js')
+        return await run(rest)
+      }
+
       case 'plan': {
         const { run } = await import('./plan.js')
         // `return await`, not `return`. Inside a `try`, a bare `return
@@ -69,6 +76,11 @@ export async function main(argv: string[]): Promise<number> {
 
       case 'scaffold': {
         const { run } = await import('./scaffold.js')
+        return await run(rest)
+      }
+
+      case 'configure': {
+        const { run } = await import('./configure.js')
         return await run(rest)
       }
 

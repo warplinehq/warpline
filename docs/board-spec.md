@@ -319,9 +319,11 @@ its sub-type in `summary` rather than in `metadata_json`.
 
 ## 6. Guardrails (implemented today)
 
-Stored in `<home>/preferences.json`, validated by `PreferencesSchema`. There is
-no `config` subcommand at 0.1 — edit the file directly; an invalid one fails
-validation on read rather than being silently ignored.
+Stored in `<home>/preferences.json`, validated by `PreferencesSchema`. No verb
+writes this file — `warpline configure <plugin>` is the supported route for a
+plugin's own `<home>/config/<plugin>.json`, not for the guardrails — so edit it
+directly; an invalid one fails validation on read rather than being silently
+ignored.
 
 | Field | Default | Meaning |
 |---|---|---|

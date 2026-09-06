@@ -117,8 +117,15 @@ Worked examples in [examples/plugins/](examples/plugins/):
 Authoring guide: [docs/plugin-authoring.md](docs/plugin-authoring.md).
 
 ```bash
+# First run: create the home, copy one example plugin in, write its config
+npx warpline init
+
 # Scaffold a plugin — also prepares the home directory
 npx warpline scaffold my-plugin
+
+# Write a plugin's config from the inputs its manifest declares. Prompts on a
+# terminal; takes --from '<json>' when stdin is not one. Never writes a secret.
+npx warpline configure my-plugin
 
 # Preview what the next engine advance would do. Executes nothing.
 npx warpline plan
@@ -138,7 +145,7 @@ npx warpline deny my-plugin
 npx warpline revoke
 ```
 
-Those six subcommands are the whole CLI surface. Running everything
+Those eight subcommands are the whole CLI surface. Running everything
 that's due on a schedule is a library call, not a command. It's `runAdvance()`
 from the package root:
 

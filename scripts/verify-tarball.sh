@@ -88,7 +88,7 @@ BIN="$PREFIX/bin/warpline"
 [ -x "$BIN" ] || fail "$BIN is not executable"
 
 HELP_OUT="$("$BIN" --help)" || fail "warpline --help exited non-zero"
-for cmd in plan scaffold run approve revoke; do
+for cmd in plan scaffold run approve deny revoke init configure; do
   echo "$HELP_OUT" | grep -qE "^  $cmd " || fail "--help does not list '$cmd'"
 done
 

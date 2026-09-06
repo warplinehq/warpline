@@ -29,7 +29,7 @@ Check it landed:
 npx warpline --help
 ```
 
-You should see five commands: `plan`, `scaffold`, `run`, `approve`, `revoke`.
+You should see the command list; every verb this tutorial uses is on it.
 
 ## 2. Scaffold
 
