@@ -21,10 +21,14 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * `string`, as this one does, and parses inside the handler if it must.
  *
  * `schedule: 'manual'`: the engine's manual run profile is the only one that
- * admits this schedule, so a scheduled advance never picks the plugin up and
- * a human invoking it by hand is the only way it runs. That is a different
- * question from `autonomy_level`, which stays `autonomous` here because the
- * run itself needs no supervision once a human has started it.
+ * admits this schedule, so an advance running under a profile (the headless,
+ * scheduled form) never picks the plugin up, and `warpline run` by hand is
+ * the way it runs. An advance with NO profile applies no schedule filter at
+ * all today, so an interactive advance would try this plugin and fail on the
+ * missing note; that is the engine's gap, recorded rather than papered over
+ * here. `schedule` is a different question from `autonomy_level`, which
+ * stays `autonomous` because the run itself needs no supervision once a
+ * human has started it.
  */
 export const manifest = PluginManifestSchema.parse({
   name: 'note-intake',
