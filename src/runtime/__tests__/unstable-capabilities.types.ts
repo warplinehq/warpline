@@ -27,6 +27,7 @@
  * run time. Each name is used in a position where a wrong or absent type is a
  * compile error, and that IS the check.
  */
+import type { HandlerFn } from 'warpline'
 import type {
   CapabilityCaller,
   CapabilityContext,
@@ -79,4 +80,22 @@ export type {
   CapabilityHandlerFn,
   SecretsHandle,
 }
-export { context, _caller, _handle, _members, _names, _granted, _manual, _ungated, _handler }
+/**
+ * The root barrel's `HandlerFn`, reached through the bare `warpline` specifier.
+ * A type leaves no trace in `dist/index.js`, so the tarball probe cannot see
+ * this export; this is the one check that takes the path a consumer takes.
+ * The second line is the widening the authoring guide promises: a
+ * three-parameter handler is assignable to the four-parameter type, so a plugin
+ * written before the fourth parameter existed keeps type-checking.
+ */
+const _three: HandlerFn = async (manifest, _args, _signal) => ({
+  status: 'success',
+  phases_completed: [manifest.name],
+  phases_failed: [],
+  data_freshness: {},
+  summary: 'three parameters',
+})
+const _widened: CapabilityHandlerFn = _three
+
+export type { HandlerFn }
+export { context, _caller, _handle, _members, _names, _granted, _manual, _ungated, _handler, _three, _widened }

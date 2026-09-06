@@ -1,8 +1,7 @@
 import { join } from 'node:path'
-import type { HandlerFn } from 'warpline'
-import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
-import { makeSkillError, type SkillError, type SkillResultInput } from 'warpline/schemas/skill-result'
+import { makeSkillError, type SkillError } from 'warpline/schemas/skill-result'
 import { warplineHome } from 'warpline/lib/paths'
+import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
 import { atomicWriteJson, readJsonOrNull } from 'warpline/unstable-fs'
 import { skillFailure, skillOk } from 'warpline/unstable-result'
 
@@ -126,11 +125,9 @@ export async function fileIssues(
 /** Every failure here is the plugin's own phase, high impact, and not retried. */
 const FAILED = { phases_failed: ['anomaly-issue'], impact: 'HIGH' as const, retryable: false }
 
-export async function handler(
-  _manifest: PluginManifest,
-  args: Record<string, unknown>,
-  signal: AbortSignal,
-): Promise<SkillResultInput> {
+// The form docs/plugin-authoring.md shows and `warpline scaffold` emits: the
+// annotation supplies all four parameter types and the return type.
+export const handler: CapabilityHandlerFn = async (_manifest, args, signal, _capabilities) => {
   const repo = args.repo
   if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
     return skillFailure('parse_error', "input 'repo' must be a string in owner/name form, e.g. oven-sh/bun", FAILED)
@@ -238,11 +235,3 @@ export async function handler(
   // a fourth hand-written literal.
   return error === null ? filedSome : { ...filedSome, status: 'partial' }
 }
-
-// The only check anywhere that can see the root barrel's type export. `HandlerFn`
-// is a type, so it leaves no trace in `dist/index.js` and the tarball probe is
-// structurally blind to it; `bun run typecheck` resolves `warpline` from here by
-// package self-reference through the exports map into `dist/`. Left as a bare
-// `satisfies` rather than annotating the declaration, so the declaration form
-// `docs/plugin-authoring.md` shows stays exactly as written.
-handler satisfies HandlerFn

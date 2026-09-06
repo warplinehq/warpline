@@ -181,14 +181,28 @@ export async function scaffoldPlugin(name: string): Promise<ScaffoldResult> {
 
   await mkdir(pluginDir, { recursive: true })
 
-  // manifest.ts — validated against PluginManifestSchema at import time
+  // manifest.ts — validated against PluginManifestSchema at import time.
+  // Declarative: imports and the export, nothing else, because importing it
+  // runs it (during `warpline plan`, before any gate). One declared input, so
+  // the plugin has real config from its first run; the default is a
+  // placeholder, recognisably, and carries nothing from anywhere.
   const manifestContent = `import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
 
 export const manifest = PluginManifestSchema.parse({
   name: '${name}',
   version: '1.0.0',
   description: 'TODO: Describe what this plugin does',
-  inputs: {},
+  inputs: {
+    // Required AND defaulted: the default satisfies the requirement at the
+    // lowest precedence tier, so the plugin runs on a clean install. Replace
+    // the placeholder, or set a value in <home>/config/${name}.json.
+    target: {
+      type: 'string',
+      required: true,
+      default: 'example',
+      description: 'TODO: what this plugin acts on. Replace the placeholder default.',
+    },
+  },
   outputs: {},
   capabilities: [],
   schedule: 'on_run',
@@ -201,26 +215,27 @@ export const manifest = PluginManifestSchema.parse({
 })
 `
 
-  // handler.ts — stub returning SkillResult shape
+  // handler.ts — the four-parameter form docs/plugin-authoring.md shows. The
+  // handler type is a TYPE-only import: `warpline/unstable-capabilities`
+  // carries no runtime value, and the tarball gate asserts that set is empty.
+  // The result goes through a builder so the schema's own defaults apply; the
+  // handler writes no version field of its own.
   const handlerContent = `import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
-import type { SkillResult } from 'warpline/schemas/skill-result'
+import type { SkillResultInput } from 'warpline/schemas/skill-result'
+import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
+import { skillFailure, skillOk } from 'warpline/unstable-result'
 import { manifest } from './manifest.ts'
 
-export async function handler(
-  _manifest: PluginManifest,
-  _args: Record<string, unknown> = {},
-): Promise<SkillResult> {
-  // TODO: Implement plugin logic
-  return {
-    status: 'success',
-    phases_completed: [manifest.name],
-    phases_failed: [],
-    errors: [],
-    data_freshness: {},
-    summary: \`\${manifest.name} executed successfully\`,
-    artifacts_produced: [],
-    schema_version: 1,
+export const handler: CapabilityHandlerFn = async (_manifest, args, _signal, _capabilities) => {
+  const target = args.target
+  if (typeof target !== 'string') {
+    // Name the key and the shape, never the value: this message reaches the run log.
+    return skillFailure('parse_error', "input 'target' must be a string")
   }
+  // TODO: Implement plugin logic. Take \`_signal\` as \`signal\` and forward it to fetch()/spawn().
+  return skillOk(\`\${manifest.name} executed successfully\`, {
+    phases_completed: [manifest.name],
+  })
 }
 `
 

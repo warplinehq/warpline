@@ -3,8 +3,12 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
+import type { CapabilityContext } from 'warpline/unstable-capabilities'
 import { SkillResultSchema } from 'warpline/schemas/skill-result'
 import { pending, issueFor, fileIssues, handler, type Anomaly } from './handler.js'
+
+/** The fourth parameter. Nothing here reads a member, so an empty context is enough. */
+const CONTEXT = {} as CapabilityContext
 
 /**
  * Runs `fn` against a throwaway home with a token set. `warpline/lib/paths`
@@ -183,6 +187,7 @@ describe('anomaly-issue handler ledger', () => {
         {} as PluginManifest,
         { repo: 'o/r', anomalies_path: anomaliesPath },
         new AbortController().signal,
+        CONTEXT,
       )
       expect(result.status).toBe('partial')
       // The partial arm is built on the result builder too: no builder emits
@@ -216,6 +221,7 @@ describe('anomaly-issue handler ledger', () => {
         {} as PluginManifest,
         { repo: 'o/r', anomalies_path: anomaliesPath },
         new AbortController().signal,
+        CONTEXT,
       )
       expect(result.status).toBe('failed')
       expect(result.errors?.[0]?.code).toBe('parse_error')
@@ -249,6 +255,7 @@ describe('anomaly-issue handler ledger', () => {
         {} as PluginManifest,
         { repo: 'o/r', anomalies_path: anomaliesPath },
         new AbortController().signal,
+        CONTEXT,
       )
       expect(result.status).toBe('failed')
       expect(result.errors?.[0]?.code).toBe('parse_error')
@@ -270,7 +277,7 @@ describe('anomaly-issue handler ledger', () => {
 
 describe('anomaly-issue handler result construction', () => {
   test('an invalid repo is a failure built by the result builder, with no schema_version written by the handler', async () => {
-    const result = await handler({} as PluginManifest, { repo: 'not-a-repo' }, new AbortController().signal)
+    const result = await handler({} as PluginManifest, { repo: 'not-a-repo' }, new AbortController().signal, CONTEXT)
     expect(result.status).toBe('failed')
     expect(result.errors?.[0]?.code).toBe('parse_error')
     expect(result.schema_version).toBeUndefined()
@@ -282,7 +289,7 @@ describe('anomaly-issue handler result construction', () => {
     const real = process.env.GITHUB_TOKEN
     delete process.env.GITHUB_TOKEN
     try {
-      const result = await handler({} as PluginManifest, { repo: 'o/r' }, new AbortController().signal)
+      const result = await handler({} as PluginManifest, { repo: 'o/r' }, new AbortController().signal, CONTEXT)
       expect(result.status).toBe('failed')
       expect(result.errors?.[0]?.code).toBe('auth_failure')
       expect(result.errors?.[0]?.message).toContain('GITHUB_TOKEN')
@@ -300,6 +307,7 @@ describe('anomaly-issue handler result construction', () => {
         {} as PluginManifest,
         { repo: 'o/r', anomalies_path: join(home, 'absent.json') },
         new AbortController().signal,
+        CONTEXT,
       )
       expect(result.status).toBe('success')
       expect(result.summary).toContain('nothing to file')
@@ -318,7 +326,7 @@ describe('anomaly-issue handler result construction', () => {
       })) as unknown as typeof fetch
 
       const result = await withFetch(impl, () =>
-        handler({} as PluginManifest, { repo: 'o/r', anomalies_path: anomaliesPath }, new AbortController().signal))
+        handler({} as PluginManifest, { repo: 'o/r', anomalies_path: anomaliesPath }, new AbortController().signal, CONTEXT))
 
       expect(result.status).toBe('success')
       expect(result.reversible).toBe(false)
@@ -339,8 +347,8 @@ describe('anomaly-issue handler result construction', () => {
       }) as unknown as typeof fetch
       const args = { repo: 'o/r', anomalies_path: anomaliesPath }
 
-      const first = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal))
-      const second = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal))
+      const first = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, CONTEXT))
+      const second = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, CONTEXT))
 
       expect(first.status).toBe('success')
       expect(calls).toBe(1)
@@ -362,7 +370,7 @@ describe('anomaly-issue handler result construction', () => {
       })) as unknown as typeof fetch
       const args = { repo: 'o/r', anomalies_path: anomaliesPath }
 
-      const first = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal))
+      const first = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, CONTEXT))
       expect(first.status).toBe('success')
 
       // Serialised as an own key — a plain object would have set the prototype
@@ -372,7 +380,7 @@ describe('anomaly-issue handler result construction', () => {
       expect(Object.hasOwn(Object.prototype, 'filed')).toBe(false)
       expect(({} as Record<string, unknown>).__proto__).toBe(Object.prototype)
 
-      const second = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal))
+      const second = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, CONTEXT))
       expect(second.summary).toBe('no new anomalies (1 already filed)')
     })
   })
@@ -411,6 +419,7 @@ describe('anomaly-issue config value disclosure', () => {
       {} as PluginManifest,
       { repo: SENTINEL },
       new AbortController().signal,
+      CONTEXT,
     )
 
     expect(result.status).toBe('failed')
@@ -428,6 +437,7 @@ describe('anomaly-issue config value disclosure', () => {
         {} as PluginManifest,
         { repo: sentinelRepo, anomalies_path: join(tmpdir(), SENTINEL, 'anomalies.json') },
         new AbortController().signal,
+        CONTEXT,
       )
 
       expect(result.status).toBe('success')
@@ -444,6 +454,7 @@ describe('anomaly-issue config value disclosure', () => {
         {} as PluginManifest,
         { repo: sentinelRepo, anomalies_path: dir },
         new AbortController().signal,
+        CONTEXT,
       )
 
       expect(result.status).toBe('failed')
@@ -501,6 +512,7 @@ describe('anomaly-issue config value disclosure', () => {
         {} as PluginManifest,
         { repo: sentinelRepo, anomalies_path: anomaliesPath },
         new AbortController().signal,
+        CONTEXT,
       )
 
       // The carve-out itself: the URL is here, because a human needs it.

@@ -58,37 +58,40 @@ plugin bug: they bypass the entire human-approval model.
 ### handler.ts
 
 ```typescript
-import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
-import type { SkillResult } from 'warpline/schemas/skill-result'
-import { manifest } from './manifest.ts'   // .ts, not .js — see Runtime constraints
+import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
+import { skillFailure, skillOk } from 'warpline/unstable-result'
 
-export async function handler(
-  _manifest: PluginManifest,
-  _args: Record<string, unknown> = {},
-  signal?: AbortSignal,
-): Promise<SkillResult> {
-  // 1. Validate args — return a failed SkillResult with parse_error, don't throw
+export const handler: CapabilityHandlerFn = async (manifest, args, signal, capabilities) => {
+  // 1. Validate args — return skillFailure('parse_error', ...), don't throw
   // 2. Do the work. Forward `signal` to fetch()/spawn() so timeouts can cancel I/O
-  // 3. Return a SkillResult
-  return {
-    status: 'success',           // success | partial | failed | skipped
+  // 3. Return a result a builder constructed
+  return skillOk('one line a human reads on the board', {
     phases_completed: [manifest.name],
-    phases_failed: [],
-    errors: [],                  // makeSkillError(code, message, { impact, retryable })
     data_freshness: { source: new Date().toISOString() },
-    summary: 'one line a human reads on the board',
-    artifacts_produced: [],
-    schema_version: 1,
-  }
+  })
 }
 ```
 
-Typing that function is optional, and `import type { HandlerFn } from 'warpline'`
-is how you do it if you want the compiler to check the signature for you. Its
-return type is `SkillResultInput` rather than the `SkillResult` above — the
-schema's input side, where defaulted fields are optional and a bare path string
-is allowed in `artifacts_produced`. Annotating with `SkillResult`, as this
-example does, still satisfies it.
+This is the form `warpline scaffold` emits. The annotation is the whole type
+check: `CapabilityHandlerFn` names all four parameters and the return type,
+`SkillResultInput` — the schema's input side, where defaulted fields are
+optional and a bare path string is allowed in `artifacts_produced`. The fourth
+parameter is the capability context; [Capabilities](#capabilities) below is
+what it carries. A sibling import such as `./manifest.ts` is fine — spell the
+`.ts`, see [Runtime constraints](#runtime-constraints).
+
+`HandlerFn` on the root barrel still describes the three-parameter shape and
+still type-checks: a plugin written against it keeps compiling and keeps
+running unchanged, because the widening is on the parameter list — a
+three-parameter function is assignable to the four-parameter type. It stays
+for the plugins that already have it. A new plugin takes the form above.
+
+The builders construct the three results a plugin writes — `skillOk`,
+`skillFailure`, and `skillHandoff` for the `[needs-llm]` exit — and leave
+`schema_version` to the schema's own default. No builder emits `partial`. A
+side-effecting batch that stopped part-way sets it over a built result,
+`{ ...skillOk(summary, overrides), status: 'partial' }`; the bundled
+`anomaly-issue` is the worked case.
 
 Rules the runtime holds you to:
 
