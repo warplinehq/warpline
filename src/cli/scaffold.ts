@@ -68,7 +68,7 @@ export interface ScaffoldOptions {
  * letters, digits, hyphens, leading letter. Forward slashes, dots, spaces and
  * an empty string are all rejected, so neither value can traverse anywhere.
  */
-const IDENT = /^[a-z][a-z0-9-]*$/
+export const IDENT = /^[a-z][a-z0-9-]*$/
 
 const USAGE = 'Usage: warpline scaffold <plugin-name> [--from <example>]\n'
 

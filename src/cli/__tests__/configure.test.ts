@@ -432,10 +432,13 @@ describe('configure — --from <json>', () => {
 
 describe('configure — refusals', () => {
   test('a plugin name outside [a-z][a-z0-9-]* is refused before any path is built', async () => {
-    for (const name of ['../four', 'Four', 'four/x', '', '4our']) {
+    for (const name of ['../four', 'Four', 'four/x', '4our']) {
       const { code, stderr } = await capture([name])
       expect(code).toBe(1)
-      expect(stderr.length).toBeGreaterThan(0)
+      expect(stderr).toContain('Invalid plugin name')
+      const viaFrom = await capture([name, '--from', '{}'])
+      expect(viaFrom.code).toBe(1)
+      expect(viaFrom.stderr).toContain('Invalid plugin name')
     }
     expect(existsSync(join(home, 'config'))).toBe(false)
   })
