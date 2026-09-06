@@ -25,8 +25,11 @@
  * claims to cover is this repository's recurring failure — four leak classes so
  * far, every one a green guard whose reach did not include the thing it existed
  * to catch. Widening the scope widens the allowlist instead: `bun:test` and
- * `node:os` are in the literal below because the six `handler.test.ts` files
- * legitimately import them.
+ * `node:os` are in the literal below because the twelve `handler.test.ts` files
+ * legitimately import them, and `node:fs/promises` stays for the same reason:
+ * the test files walk and snapshot their temp homes through it, while
+ * `src/__tests__/shape-coverage.test.ts` holds the handlers alone to the
+ * narrower rule.
  *
  * **Four import forms, and one predicate covering them.** A guard blind to one
  * import form is a defect this repository has already shipped;

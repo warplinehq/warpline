@@ -358,9 +358,26 @@ const exampleDirs = () =>
     .map((e) => e.name)
     .sort()
 
+/** Every act, each in its own fresh home; the example name beside its verdict so a red names the entry. */
+async function performAll(): Promise<Map<string, boolean>> {
+  const performed = new Map<string, boolean>()
+  for (const entry of REGISTRY) performed.set(entry.example, await inFreshHome((home) => entry.act(home)))
+  return performed
+}
+
+/**
+ * The roster is closed at twelve. A thirteenth directory is a deliberate edit
+ * to this number, with its registry entry beside it, never a silent drift.
+ */
+const EXAMPLE_COUNT = 12
+
 describe('the shape registry', () => {
   test('at least three example directories exist, so an empty glob cannot pass the checks below', () => {
     expect(exampleDirs().length).toBeGreaterThanOrEqual(3)
+  })
+
+  test(`examples/plugins holds exactly ${EXAMPLE_COUNT} directories`, () => {
+    expect(exampleDirs().length).toBe(EXAMPLE_COUNT)
   })
 
   test('every example directory appears in the registry', () => {
@@ -379,19 +396,49 @@ describe('the shape registry', () => {
   })
 
   test('every registry entry performs its act in a fresh home', async () => {
-    for (const entry of REGISTRY) {
-      const performed = await inFreshHome((home) => entry.act(home))
+    for (const [example, performed] of await performAll()) {
       // The example name in the assertion, so a red names the entry.
-      expect({ example: entry.example, performed }).toEqual({ example: entry.example, performed: true })
+      expect({ example, performed }).toEqual({ example, performed: true })
     }
+  })
+
+  test('every shape from 1 to 7 is covered by an example whose act was performed', async () => {
+    // Coverage, not distinctness: twelve examples cannot carry seven distinct
+    // ids, so shapes are shared and a superset check is the right shape — an
+    // equality on a sorted array would also go red on an unrelated shape 8.
+    // Computed only from acts that returned TRUE and only over non-partial
+    // entries, so neither a declared label nor a partial act can cover a
+    // number. Shape 3 is covered by the half of the aggregate act a handler
+    // can perform — several declared dependencies, ordered by the engine, one
+    // aggregated Output — and not by reading a dependency's Output through a
+    // runtime reader, which no handler is handed a way to do; its entry above
+    // says so.
+    const performed = await performAll()
+    const covered = new Set(REGISTRY.filter((e) => !e.partial && performed.get(e.example) === true).map((e) => e.shape))
+    const shapes: Shape[] = [1, 2, 3, 4, 5, 6, 7]
+    expect(shapes.filter((s) => !covered.has(s))).toEqual([])
   })
 })
 
-// Still owed: the completeness assertion, `[...new Set(REGISTRY.filter(e =>
-// !e.partial).map(e => e.shape))].sort()` equal to `[1, 2, 3, 4, 5, 6, 7]`.
-// The roster is complete — every directory under examples/plugins has its
-// entry above, and every shape has a dedicated, non-partial one — so the
-// assertion would be green today. It is the one thing this file still owes,
-// and it lands with the plan that closes the roster, not here: the shape-3
-// entry above asserts the half of the aggregate act a handler can perform,
-// and the assertion's own comment should say so where it is asserted.
+// ── The surface every handler is written against ─────────────────────────
+//
+// Two assertions that used to live only in a plan's verify command. The
+// specifier allowlist in import-direction.test.ts still admits
+// `node:fs/promises`, because the example TEST files legitimately import it;
+// this is the narrower rule for the handlers themselves.
+
+describe('the example handlers', () => {
+  const handlers = () => exampleDirs().map((dir) => ({ dir, source: readFileSync(join(EXAMPLES, dir, 'handler.ts'), 'utf8') }))
+
+  test('at least one handler exists, so an empty glob cannot pass the checks below', () => {
+    expect(handlers().length).toBeGreaterThanOrEqual(1)
+  })
+
+  test('no handler imports node:fs/promises', () => {
+    expect(handlers().filter(({ source }) => source.includes('node:fs/promises')).map(({ dir }) => dir)).toEqual([])
+  })
+
+  test('every handler imports at least one warpline/unstable-* subpath', () => {
+    expect(handlers().filter(({ source }) => !source.includes('warpline/unstable-')).map(({ dir }) => dir)).toEqual([])
+  })
+})
