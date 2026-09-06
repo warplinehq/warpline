@@ -5,7 +5,7 @@
  * Plan 84-02, Task 1 (TDD RED → GREEN)
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, rm, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, rm, readFile, readdir, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -130,6 +130,34 @@ describe('_trimEventsLog (events.jsonl size cap, 2026-08-19)', () => {
 
   test('missing file is a no-op', async () => {
     await _trimEventsLog(join(tmpDir, 'state', 'nope.jsonl'), 10, 5)
+  })
+
+  /**
+   * The trim used a FIXED temp name, `{path}.trim-tmp`, which is the hazard
+   * `fs-atomic.ts` exists to remove. Two trims running at once wrote the same
+   * temp path, so one could rename a file the other was still writing into
+   * place. The assertion is on the leftovers as much as the content: a unique
+   * per-write suffix leaves nothing behind, and a fixed one is observable as a
+   * stray sibling when a write loses the race.
+   */
+  test('concurrent trims leave one valid log and no stray temp file', async () => {
+    await mkdir(join(tmpDir, 'state'), { recursive: true })
+    const lines = Array.from({ length: 200 }, (_, i) => JSON.stringify({ i }))
+    await writeFile(eventsPath, lines.join('\n') + '\n')
+
+    await Promise.all([
+      _trimEventsLog(eventsPath, 10, 5),
+      _trimEventsLog(eventsPath, 10, 5),
+      _trimEventsLog(eventsPath, 10, 5),
+    ])
+
+    const kept = (await readFile(eventsPath, 'utf-8')).trim().split('\n')
+    expect(kept.length).toBe(10)
+    // Every line survived whole — a clobbered rename shows up as a parse error.
+    expect(kept.map((l) => JSON.parse(l).i)).toEqual([190, 191, 192, 193, 194, 195, 196, 197, 198, 199])
+
+    const siblings = await readdir(join(tmpDir, 'state'))
+    expect(siblings).toEqual(['events.jsonl'])
   })
 })
 

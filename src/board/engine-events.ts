@@ -23,8 +23,9 @@
  *   operational breadcrumbs for a UI, not an audit trail, and nothing downstream
  *   may treat them as one.
  */
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { atomicWriteText } from '../lib/fs-atomic.js'
 import { eventsJsonlPath } from '../lib/paths.js'
 import type { BoardEvent } from '../schemas/board.js'
 
@@ -55,9 +56,18 @@ const EVENTS_LOG_TRIM_SLACK = 2_000
 
 /**
  * Trim a JSONL event log to its newest `cap` lines. Exported for tests.
- * Atomic rewrite (tmp + rename); a concurrent append landing between the read
- * and the rename can be lost — acceptable for ephemeral operational data, and
- * the engine is single-writer anyway.
+ *
+ * The rewrite goes through `atomicWriteText`, which is the whole reason
+ * `fs-atomic.ts` exists as one implementation. This function used to hand-roll
+ * it with a FIXED temp name, `{path}.trim-tmp`, and a fixed name is the hazard
+ * the shared helper's `.tmp-{pid}-{rand}` suffix exists to remove: two writers
+ * trimming at once share one temp path, so one can rename the other's
+ * half-written file into place. It also leaked that temp file on a failed
+ * write, where the helper unlinks it.
+ *
+ * A concurrent append landing between the read and the rename can still be
+ * lost — acceptable for ephemeral operational data, and the engine is
+ * single-writer anyway.
  */
 export async function _trimEventsLog(
   eventsPath: string,
@@ -72,9 +82,7 @@ export async function _trimEventsLog(
   }
   const lines = raw.split('\n').filter((l) => l.length > 0)
   if (lines.length <= cap + slack) return
-  const tmp = `${eventsPath}.trim-tmp`
-  await writeFile(tmp, lines.slice(-cap).join('\n') + '\n', 'utf-8')
-  await rename(tmp, eventsPath)
+  await atomicWriteText(eventsPath, lines.slice(-cap).join('\n') + '\n')
 }
 
 /**
