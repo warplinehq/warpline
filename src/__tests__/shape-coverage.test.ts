@@ -30,6 +30,18 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CapabilityContext } from '../runtime/capabilities.js'
+import { handler as anomalyIssue } from '../../examples/plugins/anomaly-issue/handler.js'
+import { manifest as anomalyIssueManifest } from '../../examples/plugins/anomaly-issue/manifest.js'
+import { handler as anomalyWatch } from '../../examples/plugins/anomaly-watch/handler.js'
+import { manifest as anomalyWatchManifest } from '../../examples/plugins/anomaly-watch/manifest.js'
+import { handler as feedMonitor } from '../../examples/plugins/feed-monitor/handler.js'
+import { manifest as feedMonitorManifest } from '../../examples/plugins/feed-monitor/manifest.js'
+import { handler as feedTriage } from '../../examples/plugins/feed-triage/handler.js'
+import { manifest as feedTriageManifest } from '../../examples/plugins/feed-triage/manifest.js'
+import { handler as githubPoll } from '../../examples/plugins/github-poll/handler.js'
+import { manifest as githubPollManifest } from '../../examples/plugins/github-poll/manifest.js'
+import { handler as metricsRollup } from '../../examples/plugins/metrics-rollup/handler.js'
+import { manifest as metricsRollupManifest } from '../../examples/plugins/metrics-rollup/manifest.js'
 
 const EXAMPLES = join(import.meta.dir, '..', '..', 'examples', 'plugins')
 
@@ -105,7 +117,92 @@ async function inFreshHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
 
 // ── The registry ─────────────────────────────────────────────────────────
 
-const REGISTRY: readonly ShapeEntry[] = []
+/** Fixtures, all placeholder-shaped; none of them is anyone's real value. */
+const REPO = 'example-owner/example-repo'
+const ISSUES = [
+  { number: 12, title: 'newest', labels: [{ name: 'bug' }] },
+  { number: 11, title: 'older', labels: [] },
+]
+const RSS = '<rss><channel><item><title>First</title><link>https://feeds.example.test/1</link></item></channel></rss>'
+const METRICS = { series: [{ name: 'errors', latest: 42, threshold: 10, direction: 'above' }] }
+const ISSUE_URL = `https://github.com/${REPO}/issues/1`
+
+const okJson = (body: unknown) => async () => ({ ok: true, status: 201, json: async () => body })
+const okText = (body: string) => async () => ({ ok: true, status: 200, text: async () => body })
+/** A date `days` ago as YYYY-MM-DD, in UTC. */
+const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10)
+
+const REGISTRY: readonly ShapeEntry[] = [
+  {
+    shape: 1,
+    example: 'github-poll',
+    // Polls, and leaves a snapshot of what it saw under the home.
+    act: async (home) => {
+      const result = await withFetch(okJson(ISSUES), () => githubPoll(githubPollManifest, { repo: REPO }, signal(), CONTEXT))
+      return result.status === 'success' && existsSync(join(home, 'state', 'github-poll.last.json'))
+    },
+  },
+  {
+    shape: 1,
+    example: 'feed-monitor',
+    partial: 'polls a feed and reports what is new, but persists no snapshot — github-poll carries the full act',
+    act: async () => {
+      const result = await withFetch(okText(RSS), () =>
+        feedMonitor(feedMonitorManifest, { feed_url: 'https://feeds.example.test/feed.xml' }, signal(), CONTEXT))
+      return result.status === 'success' && result.summary.includes('First')
+    },
+  },
+  {
+    shape: 2,
+    example: 'anomaly-watch',
+    // Twice in ONE home: the second run reads the observation the first wrote,
+    // and says so by quoting its timestamp. A handler that stopped looking
+    // back makes this false.
+    act: async (home) => {
+      seed(home, 'state/metrics.json', METRICS)
+      const first = await anomalyWatch(anomalyWatchManifest, {}, signal(), CONTEXT)
+      const prior = readJson<{ observed_at: string }>(join(home, 'state', 'anomaly-watch.last.json'))
+      const second = await anomalyWatch(anomalyWatchManifest, {}, signal(), CONTEXT)
+      return second.summary !== first.summary && second.summary.includes(prior.observed_at)
+    },
+  },
+  {
+    shape: 3,
+    example: 'metrics-rollup',
+    partial: 'aggregates rows it retained itself, not a declared dependency\'s Output — the digest example carries the full act',
+    // A row older than the retention window is folded into a weekly rollup.
+    act: async (home) => {
+      seed(home, 'state/metrics.json', { series: [{ name: 'errors', latest: 4 }] })
+      seed(home, 'state/metrics-rollup.json', { rows: [{ date: daysAgo(100), name: 'errors', value: 1 }], rollups: [] })
+      const result = await metricsRollup(metricsRollupManifest, {}, signal(), CONTEXT)
+      const state = readJson<{ rows: unknown[]; rollups: unknown[] }>(join(home, 'state', 'metrics-rollup.json'))
+      return result.status === 'success' && state.rollups.length > 0 && state.rows.length === 1
+    },
+  },
+  {
+    shape: 4,
+    example: 'feed-triage',
+    // The structured arm proves the builder wrote the handoff; the prefix is
+    // what the shipped scanner reads.
+    act: async (home) => {
+      seed(home, 'state/feed-entries.json', { new_entries: [{ title: 'A post', link: 'https://feeds.example.test/a', published: null }] })
+      const result = await feedTriage(feedTriageManifest, {}, signal(), CONTEXT)
+      return result.needs_llm !== undefined && result.summary.startsWith('[needs-llm]')
+    },
+  },
+  {
+    shape: 7,
+    example: 'anomaly-issue',
+    partial: 'fans in from one source and writes back; several sources with per-source isolation is the enrich example\'s act',
+    act: async (home) => {
+      seed(home, 'state/anomalies.json', { anomalies: METRICS.series })
+      const result = await withEnv('GITHUB_TOKEN', 'placeholder-token', () =>
+        withFetch(okJson({ html_url: ISSUE_URL }), () => anomalyIssue(anomalyIssueManifest, { repo: REPO }, signal(), CONTEXT)))
+      const ledger = readJson<{ filed: Record<string, string> }>(join(home, 'state', 'anomaly-issue.filed.json'))
+      return result.status === 'success' && ledger.filed.errors === ISSUE_URL
+    },
+  },
+]
 
 // ── The assertions ───────────────────────────────────────────────────────
 
