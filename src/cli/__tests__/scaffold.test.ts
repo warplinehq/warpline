@@ -17,11 +17,21 @@
  */
 import { describe, test, expect, afterEach } from 'bun:test'
 import { mkdtempSync, existsSync, lstatSync, readlinkSync, mkdirSync, symlinkSync } from 'node:fs'
-import { readFile, writeFile, mkdir, rm } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { scaffoldPlugin } from '../scaffold.js'
 import { _setHome, pluginsDir } from '../../lib/paths.js'
+import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
+
+const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
+
+/**
+ * The one handler declaration form: a const annotated with the published
+ * four-parameter type, parameters inferred from it. Unused parameters may
+ * carry an underscore prefix; the form is the same either way.
+ */
+const DECLARATION = /^export const handler: CapabilityHandlerFn = async \(_?manifest, _?args, _?signal, _?capabilities\) =>/m
 
 const homes: string[] = []
 
@@ -53,6 +63,13 @@ async function generated(name: string): Promise<{ manifest: string; handler: str
   }
 }
 
+/** Every file directly under `dir`, name to bytes. */
+async function snapshot(dir: string): Promise<Record<string, string>> {
+  const names = (await readdir(dir)).sort()
+  const entries = await Promise.all(names.map(async (f) => [f, await readFile(join(dir, f), 'utf8')] as const))
+  return Object.fromEntries(entries)
+}
+
 describe('scaffoldPlugin — generated specifiers', () => {
   test('writes both files and bakes no absolute path into any import', async () => {
     freshHome()
@@ -76,13 +93,15 @@ describe('scaffoldPlugin — generated specifiers', () => {
     expect(specifiers(manifest)).toContain('warpline/schemas/plugin-manifest')
   })
 
-  test('handler.ts imports both schema types by package specifier and its sibling with .ts', async () => {
+  test('handler.ts imports the schema types, the handler type and the builders by package specifier, and its sibling with .ts', async () => {
     freshHome()
     await scaffoldPlugin('demo')
     const { handler } = await generated('demo')
     const specs = specifiers(handler)
     expect(specs).toContain('warpline/schemas/plugin-manifest')
     expect(specs).toContain('warpline/schemas/skill-result')
+    expect(specs).toContain('warpline/unstable-capabilities')
+    expect(specs).toContain('warpline/unstable-result')
     // `.ts`, never `.js`: Node's type stripping resolves the literal
     // specifier with no extension remapping.
     expect(specs).toContain('./manifest.ts')
@@ -95,12 +114,16 @@ describe('scaffoldPlugin — generated specifiers', () => {
     const dir = join(pluginsDir(), 'demo')
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, 'manifest.ts'), 'PRIOR ART')
+    const before = await snapshot(dir)
 
     const result = await scaffoldPlugin('demo')
     expect(result.created).toBe(false)
     expect(result.message).toContain('already exists')
     expect(await readFile(join(dir, 'manifest.ts'), 'utf8')).toBe('PRIOR ART')
     expect(existsSync(join(dir, 'handler.ts'))).toBe(false)
+    // The whole directory, not the one file: a partial overwrite that left
+    // manifest.ts alone and wrote something else would pass the line above.
+    expect(await snapshot(dir)).toEqual(before)
   })
 
   test.each([
@@ -117,6 +140,69 @@ describe('scaffoldPlugin — generated specifiers', () => {
     expect(result.path).toBe('')
     expect(result.message).toContain('Invalid plugin name')
     expect(existsSync(join(home, 'plugins'))).toBe(false)
+  })
+})
+
+// ── The emitted plugin matches the published handler contract ────────────
+//
+// The scaffold is what a second author copies, so what it emits IS the
+// authoring guidance. Three places answer "how do I declare a handler" — the
+// guide, this template and the pinned `anomaly-issue` example — and the last
+// two cases below hold them to one answer.
+describe('scaffoldPlugin — the emitted plugin matches the published handler contract', () => {
+  test('handler.ts declares four parameters typed by a type-only CapabilityHandlerFn import', async () => {
+    freshHome()
+    await scaffoldPlugin('demo')
+    const { handler } = await generated('demo')
+    // Type-only: `warpline/unstable-capabilities` carries no runtime value,
+    // and the tarball gate asserts that set is empty.
+    expect(handler).toContain("import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'")
+    expect(handler).toMatch(DECLARATION)
+    expect(handler).not.toContain('export async function handler')
+  })
+
+  test('handler.ts writes no schema_version of its own and builds its result', async () => {
+    freshHome()
+    await scaffoldPlugin('demo')
+    const { handler } = await generated('demo')
+    expect(handler).not.toContain('schema_version')
+    expect(specifiers(handler)).toContain('warpline/unstable-result')
+  })
+
+  test('manifest.ts declares at least one input, each with a type, a description and a default', async () => {
+    freshHome()
+    await scaffoldPlugin('demo')
+    // Imported for real from the temp home: the `<home>/node_modules/warpline`
+    // symlink is what resolves its `warpline/schemas/*` specifier, exactly as
+    // it would for an author. Parsed again here so the shape assertion runs
+    // against this checkout's schema, not only the one behind the symlink.
+    const mod = (await import(join(pluginsDir(), 'demo', 'manifest.ts'))) as { manifest: unknown }
+    const manifest = PluginManifestSchema.parse(mod.manifest)
+    const inputs = Object.entries(manifest.inputs)
+    expect(inputs.length).toBeGreaterThan(0)
+    for (const [, input] of inputs) {
+      expect(['string', 'number', 'boolean', 'array', 'object']).toContain(input.type)
+      expect(typeof input.description).toBe('string')
+      expect(input.default).toBeDefined()
+    }
+  })
+
+  test('the authoring guide shows one declaration form, and it is the one the scaffold emits', async () => {
+    freshHome()
+    await scaffoldPlugin('demo')
+    const { handler } = await generated('demo')
+    const doc = await readFile(join(REPO_ROOT, 'docs', 'plugin-authoring.md'), 'utf8')
+    expect(doc).not.toContain('export async function handler')
+    const declarations = doc.match(/^export const handler:.*$/gm) ?? []
+    expect(declarations.length).toBeGreaterThan(0)
+    for (const line of declarations) expect(line).toMatch(DECLARATION)
+    expect(handler).toMatch(DECLARATION)
+  })
+
+  test('the pinned example uses the same form and no longer carries the bare satisfies clause', async () => {
+    const example = await readFile(join(REPO_ROOT, 'examples', 'plugins', 'anomaly-issue', 'handler.ts'), 'utf8')
+    expect(example).not.toContain('satisfies HandlerFn')
+    expect(example).toMatch(DECLARATION)
   })
 })
 
