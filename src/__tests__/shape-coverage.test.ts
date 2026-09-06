@@ -45,6 +45,8 @@ import { handler as githubPoll } from '../../examples/plugins/github-poll/handle
 import { manifest as githubPollManifest } from '../../examples/plugins/github-poll/manifest.js'
 import { handler as metricsRollup } from '../../examples/plugins/metrics-rollup/handler.js'
 import { manifest as metricsRollupManifest } from '../../examples/plugins/metrics-rollup/manifest.js'
+import { handler as noteIntake } from '../../examples/plugins/note-intake/handler.js'
+import { manifest as noteIntakeManifest } from '../../examples/plugins/note-intake/manifest.js'
 
 const EXAMPLES = join(import.meta.dir, '..', '..', 'examples', 'plugins')
 
@@ -206,6 +208,20 @@ const REGISTRY: readonly ShapeEntry[] = [
       seed(home, 'state/feed-entries.json', { new_entries: [{ title: 'A post', link: 'https://feeds.example.test/a', published: null }] })
       const result = await feedTriage(feedTriageManifest, {}, signal(), CONTEXT)
       return result.needs_llm !== undefined && result.summary.startsWith('[needs-llm]')
+    },
+  },
+  {
+    shape: 6,
+    example: 'note-intake',
+    // Operator text for ONE run, in the shape `--input note=<text>` delivers
+    // (a string under the action positional), reaches the file it was
+    // routed to. A handler that took the text and dropped it makes this false.
+    act: async (home) => {
+      const note = 'registry-act-note-7c1'
+      const result = await noteIntake(noteIntakeManifest, { note, action: 'default' }, signal(), CONTEXT)
+      const inbox = join(home, 'notes', 'note-intake')
+      if (result.status !== 'success' || !existsSync(inbox)) return false
+      return readdirSync(inbox).some((name) => readFileSync(join(inbox, name), 'utf8').includes(note))
     },
   },
   {
