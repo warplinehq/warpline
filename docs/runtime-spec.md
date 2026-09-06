@@ -852,6 +852,13 @@ condition, which is the one failure mode a gate must not have.
 A grant whose `expires_at` **equals** the current instant is still valid — the
 comparison is `now > expires_at`, not `>=`.
 
+A grant whose `expires_at` is **not a parseable date** is corrupt, and so
+*unapproved*. It is called out because the comparison alone does not reach that
+answer: `new Date('nonsense').getTime()` is `NaN`, and `now > NaN` is false, so
+an unguarded read treats a garbage expiry as an expiry infinitely far away. The
+same holds for an absent `expires_at`. Both are refused before the scope list
+is consulted.
+
 An unapproved side-effecting plugin is recorded `skipped` and the run
 continues. The gate withholds execution from one plugin; it does not abort the
 run.
@@ -910,6 +917,7 @@ later one is the failure this behaviour exists to prevent.
 | `--long` | Permits an expiry past the ceiling, and prints that it did. |
 | Prior `--long` grant | The ceiling never shortens time already held. `mergeGrant` caps at `max(first_granted_at + 23h, live expires_at)`, so a window opened by an earlier `--long` survives every later plain `approve` unchanged, and `capped` is false. Revoke to close it early. |
 | `--replace` | Overwrites the scope list and resets `expires_at`; `first_granted_at` is preserved. |
+| Unparseable `first_granted_at` | The grant is **not merged onto**. The anchor is what the ceiling is measured from, so an anchor that will not parse is a ceiling that cannot be computed. `mergeGrant` starts a fresh window instead, which costs the operator scopes they re-grant in one command rather than handing out a window nobody authorised. |
 | Expired grant | Not merged onto. The window has closed; the next grant restarts it, with a new `first_granted_at`. |
 | Default TTL | 4 hours. |
 | `--all` | The only path to `"*"`. No positional name is ever treated as a wildcard. It prints the number of side-effecting plugins and the total number of declared side effects it covers before granting. |

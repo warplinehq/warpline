@@ -65,6 +65,23 @@ interface ApprovalFile {
 }
 
 /**
+ * A grant timestamp as milliseconds, or null when the string is not a date.
+ *
+ * `new Date(x).getTime()` is NaN for an unparseable string, and every
+ * comparison against NaN is false. `now > NaN` therefore answers "not
+ * expired", which turned a grant file with a corrupt expiry into an approval
+ * of everything it scoped — the one direction a gate must never fail in.
+ * Callers treat null as invalid and refuse. `readGrant` in `src/cli/plan.ts`
+ * already guarded the display path this way; this is the decision path
+ * catching up.
+ */
+function parseTimestamp(iso: unknown): number | null {
+  if (typeof iso !== 'string') return null
+  const ms = new Date(iso).getTime()
+  return Number.isNaN(ms) ? null : ms
+}
+
+/**
  * Check if a valid, non-expired approval exists for the given scope.
  *
  * Returns true if approved, false otherwise. Never throws — a missing or
@@ -87,8 +104,10 @@ export async function checkApproval(
     const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
 
     // Check expiry. Strict `>`, so a grant is live up to and including its
-    // expiry millisecond — the edge `engine-loader.test.ts:218` pins.
-    if (now > new Date(raw.expires_at).getTime()) return false
+    // expiry millisecond — the edge `engine-loader.test.ts:218` pins. An
+    // expiry that will not parse is no expiry at all, so it is not live.
+    const expiresAt = parseTimestamp(raw.expires_at)
+    if (expiresAt === null || now > expiresAt) return false
 
     // Wildcard grants all scopes
     if (raw.scopes === '*') return true
@@ -180,15 +199,36 @@ export interface MergeGrantResult {
   extended: boolean
 }
 
+/**
+ * A live grant with its timestamps already parsed, so that no caller re-parses
+ * a string this function has already vouched for. Every number here is finite.
+ */
+interface LiveGrant {
+  grant: ApprovalFile
+  /** `first_granted_at ?? granted_at` — the `MAX_GRANT_WINDOW_MS` anchor. */
+  firstGrantedAt: number
+  expiresAt: number
+}
+
 /** Read the live grant, or null if it is missing, corrupt or already expired. */
-async function readLiveGrant(approvalPath: string, now: number): Promise<ApprovalFile | null> {
+async function readLiveGrant(approvalPath: string, now: number): Promise<LiveGrant | null> {
   try {
     const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
     // An expired grant is not merged onto: the operator's window has closed and
     // a new grant restarts it. Merging would silently resurrect scopes the
     // expiry was supposed to have retired.
-    if (now > new Date(raw.expires_at).getTime()) return null
-    return raw
+    const expiresAt = parseTimestamp(raw.expires_at)
+    if (expiresAt === null || now > expiresAt) return null
+
+    // The anchor is what the ceiling is measured from, so an anchor that will
+    // not parse is a grant whose ceiling cannot be computed — the unbounded
+    // window `MAX_GRANT_WINDOW_MS` exists to refuse. Discarding it costs the
+    // operator scopes they re-grant in one command; honouring it would hand
+    // out time nobody authorised.
+    const firstGrantedAt = parseTimestamp(raw.first_granted_at ?? raw.granted_at)
+    if (firstGrantedAt === null) return null
+
+    return { grant: raw, firstGrantedAt, expiresAt }
   } catch {
     return null
   }
@@ -217,19 +257,17 @@ export async function mergeGrant(
   const now = opts.now ?? Date.now()
   const live = await readLiveGrant(approvalPath, now)
 
-  const firstGrantedAt = live
-    ? new Date(live.first_granted_at ?? live.granted_at).getTime()
-    : now
+  const firstGrantedAt = live?.firstGrantedAt ?? now
   const ceiling = firstGrantedAt + MAX_GRANT_WINDOW_MS
-  const liveExpiry = live ? new Date(live.expires_at).getTime() : null
+  const liveExpiry = live?.expiresAt ?? null
 
   const requested: '*' | string[] = scopes === '*' ? '*' : Array.isArray(scopes) ? scopes : [scopes]
   const merged: '*' | string[] =
     opts.replace || !live
       ? requested
-      : requested === '*' || live.scopes === '*'
+      : requested === '*' || live.grant.scopes === '*'
         ? '*'
-        : [...new Set([...live.scopes, ...requested])]
+        : [...new Set([...live.grant.scopes, ...requested])]
   const finalScopes: '*' | string[] = merged === '*' ? '*' : [...merged].sort()
 
   // Expiry: replace (or a fresh window) restarts the clock; a merge keeps the

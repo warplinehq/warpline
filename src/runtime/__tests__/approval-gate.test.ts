@@ -90,6 +90,75 @@ describe('checkApproval', () => {
   })
 })
 
+/**
+ * The one failure a gate must not have: reading as APPROVED.
+ *
+ * `new Date('not-a-date').getTime()` is NaN, and every comparison against NaN
+ * is false — so `now > NaN` answered "not expired", control fell through to
+ * the scopes check, and a `'*'` grant with a corrupt expiry approved every
+ * plugin with no expiry the operator could point at. The wildcard is the
+ * deliberate choice of fixture here: it is the shape where falling through
+ * grants the most.
+ *
+ * `src/cli/plan.ts:readGrant` already guarded this on the DISPLAY path. The
+ * decision path did not, so the header could print "no grant" while the run
+ * approved everything.
+ */
+describe('a grant whose timestamps will not parse', () => {
+  const T0 = Date.UTC(2026, 0, 1, 12, 0, 0)
+  const HOUR = 60 * 60 * 1000
+
+  const grantFile = (fields: Record<string, unknown>) =>
+    writeFile(
+      approvalPath,
+      JSON.stringify({
+        granted_at: new Date(T0).toISOString(),
+        expires_at: new Date(T0 + HOUR).toISOString(),
+        scopes: '*',
+        ...fields,
+      }),
+    )
+
+  test('checkApproval reads an unparseable expiry as unapproved', async () => {
+    await grantFile({ expires_at: 'not-a-date' })
+    expect(await checkApproval('enrich.issue-render', approvalPath, { now: T0 })).toBe(false)
+  })
+
+  test('checkApproval reads a missing expiry as unapproved', async () => {
+    await writeFile(approvalPath, JSON.stringify({ granted_at: new Date(T0).toISOString(), scopes: '*' }))
+    expect(await checkApproval('enrich.issue-render', approvalPath, { now: T0 })).toBe(false)
+  })
+
+  /**
+   * The same NaN on the write path. It reached `new Date(NaN).toISOString()`,
+   * which throws `RangeError: Invalid time value`, so `warpline approve` exited
+   * non-zero and wrote nothing — the operator could not even replace the
+   * corrupt file by granting over it.
+   */
+  test('mergeGrant grants over an unparseable expiry instead of throwing', async () => {
+    await grantFile({ expires_at: 'not-a-date' })
+    const result = await mergeGrant('render-issue', { now: T0 }, approvalPath)
+    expect(result.scopes).toEqual(['render-issue'])
+    expect(await checkApproval('render-issue', approvalPath, { now: T0 })).toBe(true)
+    expect(await checkApproval('digest-sender', approvalPath, { now: T0 })).toBe(false)
+  })
+
+  /**
+   * An unparseable anchor is discarded rather than merged onto, and that is the
+   * conservative direction on purpose: the anchor is what `MAX_GRANT_WINDOW_MS`
+   * measures from, and a ceiling that cannot be computed is the unbounded grant
+   * the ceiling exists to prevent. The operator loses scopes they must re-grant;
+   * they never gain a window nobody authorised.
+   */
+  test('mergeGrant does not carry an unparseable anchor into the new grant', async () => {
+    await grantFile({ first_granted_at: 'nonsense' })
+    const result = await mergeGrant('render-issue', { now: T0 }, approvalPath)
+    expect(Number.isNaN(Date.parse(result.first_granted_at))).toBe(false)
+    expect(Number.isNaN(Date.parse(result.expires_at))).toBe(false)
+    expect(result.first_granted_at).toBe(new Date(T0).toISOString())
+  })
+})
+
 describe('grantApproval', () => {
   test('creates file with granted_at, expires_at, scopes fields', async () => {
     const before = Date.now()
