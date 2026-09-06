@@ -168,7 +168,7 @@ async function ensureHomeIsEsm(): Promise<string | null> {
  * still correct, and a missing link or marker surfaces later through the
  * engine's load-failure reporting, which is where it is actionable.
  */
-async function prepareHome(): Promise<string[]> {
+export async function prepareHome(): Promise<string[]> {
   const warnings: string[] = []
   for (const step of [linkWarplineIntoHome, ensureHomeIsEsm]) {
     try {
