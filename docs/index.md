@@ -11,6 +11,7 @@ plugin, start at the top and work down.
 - [first-plugin.md](first-plugin.md) — **start here**: build, run and gate a plugin in ten minutes
 - [doctrine.md](doctrine.md) — the deterministic/LLM boundary
 - [runtime-spec.md](runtime-spec.md) — manifest fields, retry/timeout/abort semantics, run artifacts
+- [derive-dont-store.md](derive-dont-store.md) — why there is no snapshot store, diff engine or resource cache, and what `ttl_hours` plus one overwritten file does instead
 - [board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)
   — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface
   at 0.1, so this spec is not shipped in the package and the link is absolute.

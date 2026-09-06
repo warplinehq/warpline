@@ -204,6 +204,7 @@ handoff up, the deterministic work carries on running without it.
 - [docs/first-plugin.md](docs/first-plugin.md) — **start here**: build, run and gate a plugin in ten minutes
 - [docs/doctrine.md](docs/doctrine.md) — the deterministic/LLM boundary
 - [docs/runtime-spec.md](docs/runtime-spec.md) — manifest fields, retry/timeout/abort semantics, run artifacts
+- [docs/derive-dont-store.md](docs/derive-dont-store.md) — why there is no snapshot store, diff engine or resource cache, and what `ttl_hours` plus one overwritten file does instead
 - [docs/board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)
   — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface
   at 0.1, so this spec is not shipped in the package and the link is absolute.
