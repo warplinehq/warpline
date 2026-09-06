@@ -39,6 +39,8 @@ import { handler as dailyDigest } from '../../examples/plugins/daily-digest/hand
 import { manifest as dailyDigestManifest } from '../../examples/plugins/daily-digest/manifest.js'
 import { handler as derivedSummary } from '../../examples/plugins/derived-summary/handler.js'
 import { manifest as derivedSummaryManifest } from '../../examples/plugins/derived-summary/manifest.js'
+import { handler as draftWriter } from '../../examples/plugins/draft-writer/handler.js'
+import { manifest as draftWriterManifest } from '../../examples/plugins/draft-writer/manifest.js'
 import { handler as feedMonitor } from '../../examples/plugins/feed-monitor/handler.js'
 import { manifest as feedMonitorManifest } from '../../examples/plugins/feed-monitor/manifest.js'
 import { handler as feedTriage } from '../../examples/plugins/feed-triage/handler.js'
@@ -77,10 +79,10 @@ interface ShapeEntry {
 const CONTEXT = {} as CapabilityContext
 const signal = () => new AbortController().signal
 
-/** Write a JSON fixture under the home, creating the parent. */
+/** Write a fixture under the home, creating the parent: a string as text, anything else as JSON. */
 function seed(home: string, rel: string, value: unknown): void {
   mkdirSync(join(home, rel, '..'), { recursive: true })
-  writeFileSync(join(home, rel), JSON.stringify(value))
+  writeFileSync(join(home, rel), typeof value === 'string' ? value : JSON.stringify(value))
 }
 
 function readJson<T>(path: string): T {
@@ -240,6 +242,24 @@ const REGISTRY: readonly ShapeEntry[] = [
       seed(home, 'state/feed-entries.json', { new_entries: [{ title: 'A post', link: 'https://feeds.example.test/a', published: null }] })
       const result = await feedTriage(feedTriageManifest, {}, signal(), CONTEXT)
       return result.needs_llm !== undefined && result.summary.startsWith('[needs-llm]')
+    },
+  },
+  {
+    shape: 4,
+    example: 'draft-writer',
+    // The same act as feed-triage's, on the config-heavy subject: the three
+    // reference files present at the manifest's own defaults (where a
+    // `scaffold --from` copy puts them) and one topic configured. True only if
+    // the structured arm is set, the summary carries the prefix, and it names
+    // a context path. The shipped defaults alone (no topics) are a skip, so
+    // the act has to configure the one thing the plugin will not invent.
+    act: async (home) => {
+      const defaultOf = (key: string) => draftWriterManifest.inputs[key]?.default as string
+      seed(home, defaultOf('voice_rules_path'), '# Example voice rules for the registry act\n- an example rule\n')
+      seed(home, defaultOf('blocklist_path'), { terms: ['example-term'] })
+      seed(home, defaultOf('frontmatter_schema_path'), { fields: { title: 'string' } })
+      const result = await draftWriter(draftWriterManifest, { topics: ['a registry topic'] }, signal(), CONTEXT)
+      return result.needs_llm !== undefined && result.summary.startsWith('[needs-llm]') && result.summary.includes('Context: ')
     },
   },
   {
