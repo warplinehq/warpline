@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CapabilityContext } from 'warpline/unstable-capabilities'
+import { OutputRecordSchema } from 'warpline/schemas/skill-result'
 import { summariseByLabel, handler } from './handler.js'
 import { manifest } from './manifest.js'
 
@@ -127,6 +128,26 @@ describe('github-poll persists what it polled', () => {
     })
   })
 
+  test('the success arm returns exactly one Output that parses at the boundary and declares body or path, not both', async () => {
+    await withHome(async () => {
+      await withStubbedFetch(OK, async () => {
+        const result = await invoke({ repo: REPO })
+
+        // A dependent now declares this plugin, so the snapshot it saw is
+        // returned as an Output — what a digest wants: the identity and the
+        // count, not the payload.
+        expect(result.artifacts_produced).toHaveLength(1)
+        const output = OutputRecordSchema.parse(result.artifacts_produced?.[0])
+        expect(output.body !== undefined).not.toBe(output.path !== undefined)
+        const body = JSON.parse(output.body!)
+        expect(body.open_count).toBe(2)
+        expect(body.newest_number).toBe(12)
+        expect(typeof body.observed_at).toBe('string')
+        expect(Buffer.byteLength(output.body!, 'utf8')).toBeLessThanOrEqual(16_384)
+      })
+    })
+  })
+
   test('a snapshot that cannot be read is a failure, not a first observation', async () => {
     await withHome(async (home) => {
       await mkdir(join(home, 'state'), { recursive: true })
@@ -215,7 +236,10 @@ describe('github-poll handler input guard', () => {
         // the engine writes this summary to the run log whether or not anything
         // went wrong.
         expect(result.status).toBe('success')
+        // JSON.stringify(result) covers the Output body too — a fifth sink,
+        // and one the engine copies into last_output on every success.
         expect(JSON.stringify(result)).not.toContain(sentinel)
+        expect(result.artifacts_produced).toHaveLength(1)
         expect(result.summary).toMatch(/(\d+) open issues/)
         expect(await readFile(SNAPSHOT(home), 'utf-8')).not.toContain(sentinel)
       })

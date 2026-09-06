@@ -35,6 +35,8 @@ import { handler as anomalyIssue } from '../../examples/plugins/anomaly-issue/ha
 import { manifest as anomalyIssueManifest } from '../../examples/plugins/anomaly-issue/manifest.js'
 import { handler as anomalyWatch } from '../../examples/plugins/anomaly-watch/handler.js'
 import { manifest as anomalyWatchManifest } from '../../examples/plugins/anomaly-watch/manifest.js'
+import { handler as dailyDigest } from '../../examples/plugins/daily-digest/handler.js'
+import { manifest as dailyDigestManifest } from '../../examples/plugins/daily-digest/manifest.js'
 import { handler as derivedSummary } from '../../examples/plugins/derived-summary/handler.js'
 import { manifest as derivedSummaryManifest } from '../../examples/plugins/derived-summary/manifest.js'
 import { handler as feedMonitor } from '../../examples/plugins/feed-monitor/handler.js'
@@ -182,6 +184,26 @@ const REGISTRY: readonly ShapeEntry[] = [
       const result = await metricsRollup(metricsRollupManifest, {}, signal(), CONTEXT)
       const state = readJson<{ rows: unknown[]; rollups: unknown[] }>(join(home, 'state', 'metrics-rollup.json'))
       return result.status === 'success' && state.rollups.length > 0 && state.rows.length === 1
+    },
+  },
+  {
+    shape: 3,
+    example: 'daily-digest',
+    // What is asserted: aggregation over two declared dependencies — both
+    // upstream results present, one digest naming both, exactly one Output.
+    // What is NOT asserted: reading a dependency's produced Output through a
+    // runtime-supplied reader. `readDependencyOutput` takes an `EngineState`,
+    // and no handler is handed that value, so the digest reads the two files
+    // a chaining host drops under the home. This act seeds those files; when
+    // the runtime hands a plugin a reader, the seeding here becomes a run of
+    // the producers instead.
+    act: async (home) => {
+      seed(home, 'state/anomalies.json', { anomalies: METRICS.series })
+      seed(home, 'state/github-issues.json', { observed_at: daysAgo(0), open_count: 2, newest_number: 12 })
+      const result = await dailyDigest(dailyDigestManifest, {}, signal(), CONTEXT)
+      return result.status === 'success'
+        && result.summary.includes('anomaly-watch') && result.summary.includes('github-poll')
+        && (result.artifacts_produced?.length ?? 0) === 1
     },
   },
   {
