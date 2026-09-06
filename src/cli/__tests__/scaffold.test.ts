@@ -405,7 +405,7 @@ describe('scaffold --from <example>', () => {
     const realFetch = globalThis.fetch
     globalThis.fetch = (() => {
       throw new Error('scaffold --from must not reach the network')
-    }) as typeof fetch
+    }) as unknown as typeof fetch
     let code: number
     try {
       ;({ code } = await viaDispatcher(['scaffold', 'my-copy', '--from', 'anomaly-watch']))

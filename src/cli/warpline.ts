@@ -36,7 +36,7 @@ Usage: warpline <command> [options]
 
 Commands:
   plan       Preview the next engine advance without executing it
-  scaffold   Generate a new plugin directory from the template
+  scaffold   Generate a plugin directory from the template, or --from a shipped example
   run        Invoke a single plugin handler directly
   approve    Grant a side-effect approval for this session
   deny       Record a no, so the next advance stops asking
@@ -68,15 +68,8 @@ export async function main(argv: string[]): Promise<number> {
       }
 
       case 'scaffold': {
-        const { scaffoldPlugin } = await import('./scaffold.js')
-        const name = rest[0]
-        if (!name) {
-          process.stderr.write('Usage: warpline scaffold <plugin-name>\n')
-          return 1
-        }
-        const result = await scaffoldPlugin(name)
-        process.stdout.write(`${result.message}\n`)
-        return result.created ? 0 : 1
+        const { run } = await import('./scaffold.js')
+        return await run(rest)
       }
 
       case 'run': {
