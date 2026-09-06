@@ -58,9 +58,8 @@ doing.
 Two pieces do the work, and both already exist.
 
 The first is `ttl_hours` on the manifest. It says how long a result stays
-good. Six hours for a metrics check, twelve for a repository poll, a day for a
-digest. The field is documented with the rest in
-[runtime-spec.md](runtime-spec.md).
+good. Six hours for a metrics check, twelve for a repository poll. The field is
+documented with the rest in [runtime-spec.md](runtime-spec.md).
 
 The second is the freshness predicate, `isPluginFresh` in
 [staleness.ts](https://github.com/warplinehq/warpline/blob/main/src/runtime/staleness.ts).
@@ -74,6 +73,13 @@ what lets a refreshed upstream pull its downstream through. A plugin inside its
 That's the whole mechanism. Nothing is kept. "Is it worth recomputing" is
 answered from two timestamps the engine already writes, and the plugin's
 result is derived fresh from the real source every time it's asked for.
+
+The runtime holds itself to the same rule. The run log keeps one entry per
+plugin and no aggregate. A host that wants telemetry derives it from those
+entries, because the runtime doesn't know what an aggregate should mean for
+plugins it's never seen. That's where the spec names this rule, in
+[the run log section](runtime-spec.md#the-run-log), and it's the rule I'm
+asking you to hold your plugin to.
 
 ## When you really do need to look back
 
