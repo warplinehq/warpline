@@ -141,6 +141,7 @@ describe('warpline init', () => {
     const previewed = await capture(() => plan([]))
     expect(previewed.code).toBe(0)
     expect(previewed.stdout).toMatch(/^Due \(/m)
+    expect(previewed.stdout).toContain('Due (1):')
     expect(previewed.stdout).toContain(`${SEED_EXAMPLE} (level 0)`)
     expect(previewed.stdout).not.toContain('No plugins installed.')
   })
@@ -152,6 +153,7 @@ describe('warpline init', () => {
     // The absence of the advance block is the claim; the string is the
     // secondary signal, brittle to a wording change where the absence is not.
     expect(previewed.stdout).not.toMatch(/^Due \(/m)
+    expect(previewed.stdout).not.toContain('Due (')
     expect(previewed.stdout).toContain('No plugins installed.')
     expect(await snapshotHome(home)).toEqual(before)
   })
