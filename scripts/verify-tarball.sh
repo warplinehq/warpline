@@ -3,7 +3,7 @@
 # Verify the packaged artifact end to end, from a checkout, before publish.
 #
 # Packs the tarball, installs it into a throwaway --prefix (never the real
-# global root), and asserts the six things a checkout cannot prove:
+# global root), and asserts the seven things a checkout cannot prove:
 #
 #   1. the `files` whitelist shipped no source, tests or planning artifacts
 #   2. `warpline --help` runs under Node with the tarball's bytes
@@ -21,6 +21,9 @@
 #      `<warplineHome>/node_modules/warpline` symlink into the install
 #   6. Node can import BOTH generated files for real — the assertion that
 #      fails with ERR_MODULE_NOT_FOUND without that symlink
+#   7. EVERY shipped example, copied out of the install by `scaffold --from`,
+#      imports under Node — iterated over the shipped tree, never a roster,
+#      with a vacuity guard against a `files` entry that stopped shipping them
 #
 # Checks 5 and 6 are the whole reason this script exists rather than a test:
 # the scaffold defects do not reproduce from a checkout, where warpline's own
@@ -632,4 +635,61 @@ for f in manifest handler; do
   " || fail "node could not import the generated $f.ts"
 done
 
-echo "OK: $TARBALL installs, runs and scaffolds a working plugin under Node alone"
+# ── 7. Every shipped example loads under Node from OUTSIDE the install ───
+#
+# The examples ship as `.ts` under node_modules/warpline/examples/plugins/,
+# and Node refuses type stripping under a node_modules directory (the
+# section-3 comment), so they cannot be loaded where they ship. An adopter
+# loads one from a copy, which is what `scaffold --from` makes: the copy lands
+# under the home whose symlink and ESM marker check 5 just proved, so this
+# check reuses that home and drives the copy through the installed bin. That
+# exercises the flag on the shipped artifact as well, and the rewritten
+# manifest name is what Node reads back.
+#
+# Why this cannot be the in-tree examples shard: from a checkout every
+# `warpline/*` specifier resolves, so a `files` regression or an unexported
+# subpath is invisible there. Only the packed bytes can show it.
+#
+# Iterated over the shipped tree, never a hardcoded roster, so an example
+# added later is covered on the day it lands. The vacuity guard compares the
+# count against the checkout's own examples/plugins, so a truncated `files`
+# entry reddens here instead of passing by finding nothing. Under node, never
+# Bun: Bun remaps `.ts` specifiers and assumes ESM, which hides exactly the
+# divergences checks 5 and 6 exist to catch.
+
+echo "== every shipped example loads under node from outside the install"
+SHIPPED_EXAMPLES="$PREFIX/lib/node_modules/warpline/examples/plugins"
+[ -d "$SHIPPED_EXAMPLES" ] || fail "the install ships no examples/plugins directory"
+SHIPPED_COUNT="$(find "$SHIPPED_EXAMPLES" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+REPO_COUNT="$(find "$REPO_ROOT/examples/plugins" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+[ "$SHIPPED_COUNT" -gt 0 ] || fail "the install ships zero example directories"
+[ "$SHIPPED_COUNT" -ge "$REPO_COUNT" ] \
+  || fail "the install ships $SHIPPED_COUNT example directories; the checkout holds $REPO_COUNT"
+
+for dir in "$SHIPPED_EXAMPLES"/*/; do
+  name="$(basename "$dir")"
+  copy="$name-copy"
+  WARPLINE_HOME="$WL_HOME" "$BIN" scaffold "$copy" --from "$name" >/dev/null \
+    || fail "warpline scaffold $copy --from $name exited non-zero"
+  COPY_DIR="$WL_HOME/plugins/$copy"
+  [ -f "$COPY_DIR/handler.ts" ] || fail "scaffold --from $name wrote no handler.ts"
+  [ -f "$COPY_DIR/manifest.ts" ] || fail "scaffold --from $name wrote no manifest.ts"
+  # Failure output names the example and, through Node's own message, the
+  # specifier that did not resolve; the only path it can carry is under the
+  # temp home.
+  node -e "
+    import('$COPY_DIR/handler.ts')
+      .then((m) => {
+        if (typeof m.handler !== 'function') { console.error('   $name: handler.ts exports no handler function'); process.exit(1) }
+        return import('$COPY_DIR/manifest.ts')
+      })
+      .then((m) => {
+        if (m.manifest.name !== '$copy') { console.error('   $name: copied manifest is named ' + m.manifest.name + ', expected $copy'); process.exit(1) }
+        console.log('   $name: handler.ts and manifest.ts import under node from outside the install')
+      })
+      .catch((err) => { console.error('   $name: ' + (err.code || '') + ' ' + err.message); process.exit(1) })
+  " || fail "shipped example $name did not load under node from outside the install"
+done
+echo "   $SHIPPED_COUNT shipped examples copied out and loaded"
+
+echo "OK: $TARBALL installs, runs and scaffolds a working plugin under Node alone, and every shipped example loads from outside the install"
