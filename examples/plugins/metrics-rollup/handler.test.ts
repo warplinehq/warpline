@@ -2,8 +2,16 @@ import { describe, test, expect } from 'bun:test'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
+import type { CapabilityContext } from 'warpline/unstable-capabilities'
 import { appendRows, retire, weekStart, rollupWeekly, cutoffDate, handler, isRow, isSeries } from './handler.js'
+import { manifest } from './manifest.js'
+
+/** The handler is four-parameter; a test hands it a context it never reads. */
+const CONTEXT = {} as CapabilityContext
+
+function invoke(args: Record<string, unknown>) {
+  return handler(manifest, args, new AbortController().signal, CONTEXT)
+}
 
 /**
  * Runs `handler` against a throwaway home. `warpline/lib/paths` exports only
@@ -79,7 +87,24 @@ describe('metrics-rollup cutoffDate', () => {
 })
 
 describe('metrics-rollup handler retained state', () => {
-  test('refuses to overwrite a retained store it could not parse', async () => {
+  test('starts empty when the retained store does not exist yet, through the result builder', async () => {
+    await withHome(async home => {
+      const metricsPath = join(home, 'metrics.json')
+      await writeFile(metricsPath, JSON.stringify({ series: [{ name: 'errors', latest: 4 }] }))
+
+      const result = await invoke({ metrics_path: metricsPath })
+
+      expect(result.status).toBe('success')
+      // The builder leaves schema_version to the schema's own default; a
+      // hand-written literal would carry one.
+      expect(result.schema_version).toBeUndefined()
+      expect(handler.length).toBe(4)
+      const state = JSON.parse(await readFile(join(home, 'state', 'metrics-rollup.json'), 'utf-8'))
+      expect(state.rows).toHaveLength(1)
+    })
+  })
+
+  test('refuses to overwrite a retained store it could not parse, without naming the file or the OS error', async () => {
     await withHome(async home => {
       const metricsPath = join(home, 'metrics.json')
       await writeFile(metricsPath, JSON.stringify({ series: [{ name: 'errors', latest: 4 }] }))
@@ -87,25 +112,54 @@ describe('metrics-rollup handler retained state', () => {
       await mkdir(join(home, 'state'), { recursive: true })
       await writeFile(statePath, '{"rows": [{"date": "2026-01-0')
 
-      const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
+      const result = await invoke({ metrics_path: metricsPath })
 
       expect(result.status).toBe('failed')
-      expect(result.errors[0]?.code).toBe('parse_error')
+      expect(result.errors?.[0]?.code).toBe('parse_error')
+      // The path and the parser's message both land in a run log otherwise.
+      expect(JSON.stringify(result)).not.toContain(home)
+      expect(JSON.stringify(result)).not.toContain('JSON')
       // The corrupt file is still there — untouched, recoverable by hand.
       expect(await readFile(statePath, 'utf-8')).toBe('{"rows": [{"date": "2026-01-0')
     })
   })
 
-  test('starts empty when the retained store does not exist yet', async () => {
+  test('the retention window still bounds the rows across runs, and the rollups keep their shape', async () => {
     await withHome(async home => {
       const metricsPath = join(home, 'metrics.json')
       await writeFile(metricsPath, JSON.stringify({ series: [{ name: 'errors', latest: 4 }] }))
+      const statePath = join(home, 'state', 'metrics-rollup.json')
+      const today = new Date().toISOString().slice(0, 10)
+      const stale = cutoffDate(today, 30)
+      await mkdir(join(home, 'state'), { recursive: true })
+      await writeFile(statePath, JSON.stringify({
+        rows: [
+          { date: stale, name: 'errors', value: 1 },
+          { date: cutoffDate(today, 29), name: 'errors', value: 3 },
+        ],
+        rollups: [],
+      }))
 
-      const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
+      const first = await invoke({ metrics_path: metricsPath, retention_days: 7 })
+      expect(first.status).toBe('success')
+      expect(first.summary).toContain('retired 2')
 
-      expect(result.status).toBe('success')
-      const state = JSON.parse(await readFile(join(home, 'state', 'metrics-rollup.json'), 'utf-8'))
-      expect(state.rows).toHaveLength(1)
+      const after = JSON.parse(await readFile(statePath, 'utf-8'))
+      const cutoff = cutoffDate(today, 7)
+      expect(after.rows.every((r: { date: string }) => r.date >= cutoff)).toBe(true)
+      expect(after.rows).toHaveLength(1)
+      expect(after.rollups.length).toBeGreaterThan(0)
+      for (const r of after.rollups) {
+        expect(Object.keys(r).sort()).toEqual(['count', 'max', 'mean', 'min', 'name', 'sum', 'week'])
+      }
+
+      // A second run the same day appends nothing and retires nothing: the
+      // window is a bound, not a growth curve.
+      const second = await invoke({ metrics_path: metricsPath, retention_days: 7 })
+      expect(second.status).toBe('success')
+      const again = JSON.parse(await readFile(statePath, 'utf-8'))
+      expect(again.rows).toEqual(after.rows)
+      expect(again.rollups).toEqual(after.rollups)
     })
   })
 })
@@ -115,16 +169,16 @@ describe('metrics-rollup handler input file', () => {
     await withHome(async home => {
       const metricsPath = join(home, 'metrics.json')
       await writeFile(metricsPath, '{"series": [')
-      const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
+      const result = await invoke({ metrics_path: metricsPath })
       expect(result.status).toBe('failed')
-      expect(result.errors[0]?.code).toBe('parse_error')
+      expect(result.errors?.[0]?.code).toBe('parse_error')
     })
   })
 
   test('a missing metrics file is still a green "nothing to roll up"', async () => {
     await withHome(async home => {
       const metricsPath = join(home, 'absent.json')
-      const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
+      const result = await invoke({ metrics_path: metricsPath })
       expect(result.status).toBe('success')
       expect(result.summary).toContain('nothing to roll up')
     })
@@ -157,7 +211,7 @@ describe('metrics-rollup shape guards', () => {
         rollups: [],
       }))
 
-      const result = await handler({} as PluginManifest, { metrics_path: metricsPath }, new AbortController().signal)
+      const result = await invoke({ metrics_path: metricsPath })
 
       expect(result.status).toBe('success')
       expect(result.summary).toContain('dropped 1 malformed series and 1 malformed retained rows')
@@ -177,17 +231,13 @@ describe('metrics-rollup shape guards', () => {
 describe('metrics-rollup handler input guard', () => {
   test('an invalid retention_days is rejected without the value appearing anywhere in the result', async () => {
     const sentinel = 'sk-do-not-echo-me-71c4be'
-    const result = await handler(
-      {} as PluginManifest,
-      { retention_days: sentinel },
-      new AbortController().signal,
-    )
+    const result = await invoke({ retention_days: sentinel })
 
     expect(result.status).toBe('failed')
-    expect(result.errors[0]?.code).toBe('parse_error')
+    expect(result.errors?.[0]?.code).toBe('parse_error')
     expect(JSON.stringify(result)).not.toContain(sentinel)
-    expect(result.errors[0]?.message).toContain('retention_days')
-    expect(result.errors[0]?.message).toContain('positive number')
+    expect(result.errors?.[0]?.message).toContain('retention_days')
+    expect(result.errors?.[0]?.message).toContain('positive number')
   })
 })
 
@@ -206,11 +256,7 @@ describe('metrics-rollup config value disclosure', () => {
 
   test('a missing metrics file reports nothing to roll up without naming the path', async () => {
     await withHome(async () => {
-      const result = await handler(
-        {} as PluginManifest,
-        { metrics_path: join(tmpdir(), SENTINEL, 'metrics.json') },
-        new AbortController().signal,
-      )
+      const result = await invoke({ metrics_path: join(tmpdir(), SENTINEL, 'metrics.json') })
 
       expect(result.status).toBe('success')
       expect(result.summary).toContain('nothing to roll up')
@@ -221,16 +267,12 @@ describe('metrics-rollup config value disclosure', () => {
   test('an unreadable metrics file names the input key, not the path or the OS error', async () => {
     await withHome(async () => {
       const dir = await mkdtemp(join(tmpdir(), `${SENTINEL}-`))
-      const result = await handler(
-        {} as PluginManifest,
-        { metrics_path: dir },
-        new AbortController().signal,
-      )
+      const result = await invoke({ metrics_path: dir })
 
       expect(result.status).toBe('failed')
-      expect(result.errors[0]?.code).toBe('parse_error')
+      expect(result.errors?.[0]?.code).toBe('parse_error')
       expect(JSON.stringify(result)).not.toContain(SENTINEL)
-      expect(result.errors[0]?.message).toContain('metrics_path')
+      expect(result.errors?.[0]?.message).toContain('metrics_path')
     })
   })
 })
