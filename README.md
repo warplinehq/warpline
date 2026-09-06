@@ -33,20 +33,32 @@ warpline plan — preview only; nothing was executed.
 Grant: none — plugins with side effects would be SKIPPED this run
 Plugins: /tmp/warpline-demo/plugins
 
-Due (3):
+Due (8):
 
+  announce-fanout (level 0)
+    (no declared side effects)
   anomaly-watch (level 0)
+    (no declared side effects)
+  derived-summary (level 0)
+    (no declared side effects)
+  draft-writer (level 0)
     (no declared side effects)
   feed-triage (level 0)
     (no declared side effects)
   metrics-rollup (level 0)
     (no declared side effects)
+  note-intake (level 0)
+    (no declared side effects)
+  daily-digest (level 1)
+    (no declared side effects)
 
-Not due (3):
+Not due (4):
 
   feed-monitor — skipped (unapproved): side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
   github-poll — skipped (unapproved): side effects require session approval
+    external_api: ⚠ unapproved — would be SKIPPED this run
+  link-enrich — skipped (unapproved): side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
   anomaly-issue — skipped (unapproved): side effects require session approval
     creates_issue: ⚠ unapproved — would be SKIPPED this run
@@ -107,12 +119,22 @@ Worked examples in [examples/plugins/](examples/plugins/):
 
 | Example | Demonstrates |
 | --- | --- |
-| `anomaly-watch` | A pure deterministic check — the baseline shape |
-| `github-poll` | `external_api` side effect gating an autonomous plugin |
-| `feed-monitor` | Deterministic fetch/parse that emits the handoff — the producer half of the feed chain |
-| `feed-triage` | The `on_run` consumer half — per-entry judgment handed off via `[needs-llm]`, no declared side effects |
+| `anomaly-watch` | Compare against a prior observation — reads the record it wrote last run, reports what newly breached and what cleared, and returns the breached set as an Output |
+| `github-poll` | `external_api` side effect gating an autonomous plugin; writes one snapshot of what it polled and reports the delta on the next run |
+| `feed-monitor` | Deterministic fetch/parse that reports new entries — the producer half of the feed chain; the judgment handoff is `feed-triage`'s, not this one's |
+| `feed-triage` | The `on_run` consumer half — per-entry judgment handed off via `[needs-llm]` through `skillHandoff`, the payload written under the home; no declared side effects |
 | `metrics-rollup` | `daily` schedule with retained state — append-only rows, a retention window, weekly rollups; writes only under the home |
 | `anomaly-issue` | `dependencies` ordering after `anomaly-watch`, `supervised` autonomy, and a `creates_issue` side effect through the gate — irreversible, so the result says how to undo it |
+| `daily-digest` | Aggregate — declares two producers, lets the engine order them, and folds what they last reported into one digest Output |
+| `derived-summary` | Derive, don't store — reads a source under the home, returns the summary, writes nothing; `ttl_hours` decides whether recomputing is worth it |
+| `note-intake` | Operator text for one run — `schedule: 'manual'` plus a required input supplied with `warpline run note-intake default --input note=<text>`, routed whole to a file under the home |
+| `link-enrich` | Fan in from three sources with per-source isolation — one refused source is a `partial` run that names it, every source refused is a failure; credentials are names on `secrets` |
+| `draft-writer` | Config-heavy writer — every adopter choice is a declared input with a placeholder default, three reference files named by path and refused outside the home, the drafting handed off |
+| `announce-fanout` | Config-heavy fan-out — channels, calls to action and a cadence as declared inputs, per-channel isolation, the per-channel rewrite handed off |
+
+Copy any of them into your own home as a starting point:
+`npx warpline scaffold my-plugin --from <example>` copies the directory with
+only the manifest's name rewritten.
 
 Authoring guide: [docs/plugin-authoring.md](docs/plugin-authoring.md).
 

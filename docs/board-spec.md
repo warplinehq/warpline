@@ -331,10 +331,16 @@ ignored.
 | `review_gate` | `true` | Treat every `autonomous` plugin as `supervised`: it runs, is recorded `gated`, and the run stops after its level — whether or not it declares side effects. Independent of the side-effect gate, which applies regardless |
 | `quiet_hours` | `null` (off) | When set to `{ start, end }` (`HH:MM`, defaulting to `22:00`–`07:00` for the omitted field), nothing notifies or executes inside the window |
 
-On a default install this means the first advance gates at level 0:
-`anomaly-watch` and `metrics-rollup` are both `autonomous` and declare no side
-effects, and both are still recorded `gated`, so `anomaly-issue` at level 1 does
-not run at all until they are reviewed.
+On a default install over the twelve bundled examples, with no grant, this is
+what the first advance does (the README carries the `warpline plan` render it
+is read from). Seven plugins are due at level 0 — `announce-fanout`,
+`anomaly-watch`, `derived-summary`, `draft-writer`, `feed-triage`,
+`metrics-rollup` and `note-intake` — every one `autonomous` with no declared
+side effects, and every one is still recorded `gated`, so the run stops after
+level 0 and `daily-digest` at level 1 does not run until they are reviewed.
+The other four — `feed-monitor`, `github-poll`, `link-enrich` and
+`anomaly-issue` — declare side effects and are skipped as unapproved before
+the review gate is reached, until a session grant covers them.
 
 A fresh install has no quiet window at all — the `22:00`/`07:00` above are the
 field defaults *inside* an object the operator has to add. Once one is set, it
