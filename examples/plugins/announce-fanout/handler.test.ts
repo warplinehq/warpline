@@ -177,7 +177,7 @@ describe('announce-fanout fans one draft out to every configured channel', () =>
       })
       expect(fourth.status).toBe('skipped')
       expect(fourth.needs_llm?.task).toMatch(/message-in-a-bottle/)
-      expect(fourth.needs_llm?.task).toMatch(/held.*3/)
+      expect(fourth.needs_llm?.task).toMatch(/3 held within cadence/)
       const { payload } = await readPayload(fourth)
       expect(Object.keys(payload.channels)).toEqual(['message-in-a-bottle'])
       expect(payload.held).toEqual(CHANNELS)
