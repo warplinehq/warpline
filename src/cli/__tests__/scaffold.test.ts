@@ -23,6 +23,9 @@ import { join } from 'node:path'
 import { scaffoldPlugin } from '../scaffold.js'
 import { _setHome, pluginsDir } from '../../lib/paths.js'
 import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
+import { SkillResultSchema } from '../../schemas/skill-result.js'
+import type { CapabilityContext } from '../../runtime/capabilities.js'
+import type { CapabilityHandlerFn } from '../../runtime/invoke-plugin.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
 
@@ -185,6 +188,30 @@ describe('scaffoldPlugin — the emitted plugin matches the published handler co
       expect(typeof input.description).toBe('string')
       expect(input.default).toBeDefined()
     }
+  })
+
+  test('the emitted pair loads and runs as a unit: the manifest parses, the handler is typed CapabilityHandlerFn, and its result passes the boundary', async () => {
+    freshHome()
+    await scaffoldPlugin('demo')
+    const dir = join(pluginsDir(), 'demo')
+    const { handler: handlerSource } = await generated('demo')
+    // The declared type NAME, from the text: a type leaves no trace in the
+    // loaded module, so the annotation is only checkable as bytes here. The
+    // annotation's reachability from a global install is the tarball gate's
+    // job (checks 5 and 6), not this file's.
+    expect(handlerSource).toMatch(/^export const handler: CapabilityHandlerFn = /m)
+
+    const { manifest } = (await import(join(dir, 'manifest.ts'))) as { manifest: unknown }
+    const parsed = PluginManifestSchema.parse(manifest)
+    const { handler } = (await import(join(dir, 'handler.ts'))) as { handler: CapabilityHandlerFn }
+    // Tier 1 of the resolution order: every declared input at its default,
+    // which is what the runtime hands a plugin nobody has configured yet.
+    const args = Object.fromEntries(Object.entries(parsed.inputs).map(([k, v]) => [k, v.default]))
+    const result = SkillResultSchema.parse(await handler(parsed, args, new AbortController().signal, {} as CapabilityContext))
+    expect(result.status).toBe('success')
+    expect(result.phases_completed).toEqual(['demo'])
+    // The schema's own default, because the handler wrote no version field.
+    expect(result.schema_version).toBe(2)
   })
 
   test('the authoring guide shows one declaration form, and it is the one the scaffold emits', async () => {
