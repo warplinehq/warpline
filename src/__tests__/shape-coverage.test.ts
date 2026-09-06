@@ -31,6 +31,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CapabilityContext } from '../runtime/capabilities.js'
 import { snapshotHome } from '../runtime/__tests__/helpers/snapshot-home.js'
+import { handler as announceFanout } from '../../examples/plugins/announce-fanout/handler.js'
+import { manifest as announceFanoutManifest } from '../../examples/plugins/announce-fanout/manifest.js'
 import { handler as anomalyIssue } from '../../examples/plugins/anomaly-issue/handler.js'
 import { manifest as anomalyIssueManifest } from '../../examples/plugins/anomaly-issue/manifest.js'
 import { handler as anomalyWatch } from '../../examples/plugins/anomaly-watch/handler.js'
@@ -260,6 +262,28 @@ const REGISTRY: readonly ShapeEntry[] = [
       seed(home, defaultOf('frontmatter_schema_path'), { fields: { title: 'string' } })
       const result = await draftWriter(draftWriterManifest, { topics: ['a registry topic'] }, signal(), CONTEXT)
       return result.needs_llm !== undefined && result.summary.startsWith('[needs-llm]') && result.summary.includes('Context: ')
+    },
+  },
+  {
+    shape: 4,
+    example: 'announce-fanout',
+    // A draft at the manifest's own default path, two invented channels and
+    // a call to action for each. True only if the structured handoff arm is
+    // set, the summary carries the prefix, AND it names each configured
+    // channel. The shipped defaults (an empty list) are a skip with no
+    // prefix, so running the handler bare cannot satisfy this: fanning out to
+    // nobody is not a fan-out.
+    act: async (home) => {
+      seed(home, announceFanoutManifest.inputs.draft_path?.default as string, { title: 'A registry draft', body: 'Body' })
+      const channels = ['registry-channel-one', 'registry-channel-two']
+      const result = await announceFanout(
+        announceFanoutManifest,
+        { channels, calls_to_action: { 'registry-channel-one': 'An example call', 'registry-channel-two': 'Another example call' } },
+        signal(),
+        CONTEXT,
+      )
+      return result.needs_llm !== undefined && result.summary.startsWith('[needs-llm]')
+        && channels.every((c) => result.summary.includes(c))
     },
   },
   {
