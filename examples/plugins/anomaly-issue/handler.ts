@@ -158,6 +158,17 @@ export async function handler(
     )
   }
 
+  // A convention, not a seam. `<home>/state/anomalies.json` is a path agreed
+  // with a chaining host; the declared dependency, `anomaly-watch`, does not
+  // write it. That dependency now returns a real Output on its success arm, so
+  // a producer exists — but the reader for it, `readDependencyOutput`, takes an
+  // `EngineState`, and a handler is called `(manifest, args, signal,
+  // capabilities)`: no engine state reaches it, and `CapabilityContext` has no
+  // member that carries one. A plugin cannot call the reader, so this read
+  // succeeds whether or not the producer ran. It stays until the runtime hands
+  // a plugin a way to read what its dependency produced; then this fallback,
+  // the `anomalies_path` input and the manifest's convention paragraph go
+  // together.
   const anomaliesPath = typeof args.anomalies_path === 'string'
     ? args.anomalies_path
     : join(warplineHome(), 'state', 'anomalies.json')
