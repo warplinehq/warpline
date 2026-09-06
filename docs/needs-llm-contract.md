@@ -125,8 +125,8 @@ That is a doctrine question, not a contract detail: see
 
 ## Naming the companion skill
 
-Convention: the skill is named after the plugin (`content-atomiser` plugin →
-`content-atomiser` skill) and documents which `[needs-llm]` payload shape it
+Convention: the skill is named after the plugin (`feed-triage` plugin →
+`feed-triage` skill) and documents which `[needs-llm]` payload shape it
 accepts. The template in `skills/needs-llm-template/` is the starting point.
 
 ## Two roles: scanner and consumer

@@ -198,7 +198,7 @@ function isHandoff(result: SkillResult | null): boolean {
  * `delegated` (2026-08-19): a `skipped` result whose summary carries the
  * `[needs-llm]` prefix is a successful HANDOFF to an LLM skill, not a failure.
  * It previously mapped to `failed`, which painted a red badge on /plugins and
- * made anomaly-watch treat every content-atomiser dispatch as critical.
+ * made a watcher treat every handoff a delegating plugin made as critical.
  * A plain non-needs-llm `skipped` still maps to `failed` — no persisted-run
  * path produces one today; widen deliberately if one appears.
  */
