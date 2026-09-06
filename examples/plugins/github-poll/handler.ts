@@ -128,5 +128,10 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, _capa
   return skillOk(summary, {
     phases_completed: [manifest.name],
     data_freshness: { github_issues: observedAt },
+    // One Output, inline: the snapshot — when, how many, and the newest
+    // number — which is what a digest declaring this plugin as a dependency
+    // wants, and not the issue payload. Three scalars sit far under the
+    // 16 KiB UTF-8 body cap; the configured repo is not in it.
+    artifacts_produced: [{ type: 'issues-snapshot', format: 'json', body: JSON.stringify(now) }],
   })
 }
