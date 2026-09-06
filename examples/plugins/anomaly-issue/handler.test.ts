@@ -3,7 +3,40 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
+import { SkillResultSchema } from 'warpline/schemas/skill-result'
 import { pending, issueFor, fileIssues, handler, type Anomaly } from './handler.js'
+
+/**
+ * Runs `fn` against a throwaway home with a token set. `warpline/lib/paths`
+ * exports only `warplineHome`, which resolves `WARPLINE_HOME` per call — the
+ * seam a plugin author has. Every arm below the token check needs both.
+ */
+async function withHomeAndToken<T>(fn: (home: string) => Promise<T>): Promise<T> {
+  const home = await mkdtemp(join(tmpdir(), 'anomaly-issue-'))
+  const realHome = process.env.WARPLINE_HOME
+  const realToken = process.env.GITHUB_TOKEN
+  process.env.WARPLINE_HOME = home
+  process.env.GITHUB_TOKEN = 'tok-123'
+  try {
+    return await fn(home)
+  } finally {
+    if (realHome === undefined) delete process.env.WARPLINE_HOME
+    else process.env.WARPLINE_HOME = realHome
+    if (realToken === undefined) delete process.env.GITHUB_TOKEN
+    else process.env.GITHUB_TOKEN = realToken
+  }
+}
+
+/** Swaps `globalThis.fetch` for the duration of `fn`. */
+async function withFetch<T>(impl: typeof fetch, fn: () => Promise<T>): Promise<T> {
+  const real = globalThis.fetch
+  globalThis.fetch = impl
+  try {
+    return await fn()
+  } finally {
+    globalThis.fetch = real
+  }
+}
 
 const errors: Anomaly = { name: 'errors', latest: 42, threshold: 10, direction: 'above' }
 const signups: Anomaly = { name: 'signups', latest: 3, threshold: 5, direction: 'below' }
@@ -152,6 +185,11 @@ describe('anomaly-issue handler ledger', () => {
         new AbortController().signal,
       )
       expect(result.status).toBe('partial')
+      // The partial arm is built on the result builder too: no builder emits
+      // `partial`, so the status is set over `skillOk`'s result, and the
+      // handler still writes no schema_version of its own.
+      expect(result.schema_version).toBeUndefined()
+      expect(result.errors?.[0]?.code).toBe('dependency_unavailable')
       const ledger = JSON.parse(await readFile(join(home, 'state', 'anomaly-issue.filed.json'), 'utf-8'))
       expect(ledger.filed).toEqual({ errors: 'https://github.com/o/r/issues/1' })
     } finally {
@@ -213,8 +251,13 @@ describe('anomaly-issue handler ledger', () => {
         new AbortController().signal,
       )
       expect(result.status).toBe('failed')
-      expect(result.errors[0]?.code).toBe('parse_error')
+      expect(result.errors?.[0]?.code).toBe('parse_error')
       expect(result.summary).toContain('would duplicate')
+      // The home path and the parser's words both land in the run log if
+      // forwarded; the refusal names neither.
+      expect(JSON.stringify(result)).not.toContain(home)
+      expect(JSON.stringify(result)).not.toContain('JSON')
+      expect(await readFile(join(home, 'state', 'anomaly-issue.filed.json'), 'utf-8')).toBe('{"filed": {truncat')
     } finally {
       globalThis.fetch = realFetch
       if (realToken === undefined) delete process.env.GITHUB_TOKEN
@@ -222,6 +265,116 @@ describe('anomaly-issue handler ledger', () => {
       if (realHome === undefined) delete process.env.WARPLINE_HOME
       else process.env.WARPLINE_HOME = realHome
     }
+  })
+})
+
+describe('anomaly-issue handler result construction', () => {
+  test('an invalid repo is a failure built by the result builder, with no schema_version written by the handler', async () => {
+    const result = await handler({} as PluginManifest, { repo: 'not-a-repo' }, new AbortController().signal)
+    expect(result.status).toBe('failed')
+    expect(result.errors?.[0]?.code).toBe('parse_error')
+    expect(result.schema_version).toBeUndefined()
+    // The schema's own default applies at the boundary, not a literal here.
+    expect(SkillResultSchema.parse(result).schema_version).toBe(2)
+  })
+
+  test('a missing GITHUB_TOKEN is an auth failure that names the variable and never a token value', async () => {
+    const real = process.env.GITHUB_TOKEN
+    delete process.env.GITHUB_TOKEN
+    try {
+      const result = await handler({} as PluginManifest, { repo: 'o/r' }, new AbortController().signal)
+      expect(result.status).toBe('failed')
+      expect(result.errors?.[0]?.code).toBe('auth_failure')
+      expect(result.errors?.[0]?.message).toContain('GITHUB_TOKEN')
+      expect(JSON.stringify(result)).not.toContain('Bearer')
+      expect(result.schema_version).toBeUndefined()
+    } finally {
+      if (real === undefined) delete process.env.GITHUB_TOKEN
+      else process.env.GITHUB_TOKEN = real
+    }
+  })
+
+  test('a missing anomalies file is a success built by the result builder, never a bare skipped', async () => {
+    await withHomeAndToken(async home => {
+      const result = await handler(
+        {} as PluginManifest,
+        { repo: 'o/r', anomalies_path: join(home, 'absent.json') },
+        new AbortController().signal,
+      )
+      expect(result.status).toBe('success')
+      expect(result.summary).toContain('nothing to file')
+      expect(result.schema_version).toBeUndefined()
+    })
+  })
+
+  test('filing every anomaly is a success with the undo instruction and no schema_version', async () => {
+    await withHomeAndToken(async home => {
+      const anomaliesPath = join(home, 'anomalies.json')
+      await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors] }))
+      const impl = (async () => ({
+        ok: true,
+        status: 201,
+        json: async () => ({ html_url: 'https://github.com/o/r/issues/1' }),
+      })) as unknown as typeof fetch
+
+      const result = await withFetch(impl, () =>
+        handler({} as PluginManifest, { repo: 'o/r', anomalies_path: anomaliesPath }, new AbortController().signal))
+
+      expect(result.status).toBe('success')
+      expect(result.reversible).toBe(false)
+      expect(result.undo_instruction).toContain('https://github.com/o/r/issues/1')
+      expect(result.schema_version).toBeUndefined()
+      expect(SkillResultSchema.parse(result).status).toBe('success')
+    })
+  })
+
+  test('a second run in the same home reads the ledger and files nothing', async () => {
+    await withHomeAndToken(async home => {
+      const anomaliesPath = join(home, 'anomalies.json')
+      await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors] }))
+      let calls = 0
+      const impl = (async () => {
+        calls++
+        return { ok: true, status: 201, json: async () => ({ html_url: 'https://github.com/o/r/issues/1' }) }
+      }) as unknown as typeof fetch
+      const args = { repo: 'o/r', anomalies_path: anomaliesPath }
+
+      const first = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal))
+      const second = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal))
+
+      expect(first.status).toBe('success')
+      expect(calls).toBe(1)
+      expect(second.status).toBe('success')
+      expect(second.summary).toBe('no new anomalies (1 already filed)')
+      expect(second.schema_version).toBeUndefined()
+    })
+  })
+
+  test('a __proto__ anomaly name lands in the ledger as an own property, not on the prototype', async () => {
+    await withHomeAndToken(async home => {
+      const anomaliesPath = join(home, 'anomalies.json')
+      const proto: Anomaly = { name: '__proto__', latest: 1, threshold: 0, direction: 'above' }
+      await writeFile(anomaliesPath, JSON.stringify({ anomalies: [proto] }))
+      const impl = (async () => ({
+        ok: true,
+        status: 201,
+        json: async () => ({ html_url: 'https://github.com/o/r/issues/9' }),
+      })) as unknown as typeof fetch
+      const args = { repo: 'o/r', anomalies_path: anomaliesPath }
+
+      const first = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal))
+      expect(first.status).toBe('success')
+
+      // Serialised as an own key — a plain object would have set the prototype
+      // and written `{}`, re-filing the anomaly on every run.
+      const raw = await readFile(join(home, 'state', 'anomaly-issue.filed.json'), 'utf-8')
+      expect(raw).toContain('"__proto__": "https://github.com/o/r/issues/9"')
+      expect(Object.hasOwn(Object.prototype, 'filed')).toBe(false)
+      expect(({} as Record<string, unknown>).__proto__).toBe(Object.prototype)
+
+      const second = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal))
+      expect(second.summary).toBe('no new anomalies (1 already filed)')
+    })
   })
 })
 
