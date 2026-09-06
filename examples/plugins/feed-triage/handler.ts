@@ -1,8 +1,8 @@
-import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
-import type { SkillResult } from 'warpline/schemas/skill-result'
 import { warplineHome } from 'warpline/lib/paths'
+import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
+import { atomicWriteJson, readJsonOrNull } from 'warpline/unstable-fs'
+import { skillFailure, skillHandoff, skillOk } from 'warpline/unstable-result'
 
 /**
  * Expected feed state file shape — the same element type `feed-monitor`
@@ -25,75 +25,57 @@ export function newEntries(raw: unknown): FeedEntry[] {
   return Array.isArray(entries) ? (entries as FeedEntry[]) : []
 }
 
-export async function handler(
-  _manifest: PluginManifest,
-  args: Record<string, unknown>,
-): Promise<SkillResult> {
-  const path = typeof args.entries_path === 'string'
+export const handler: CapabilityHandlerFn = async (manifest, args, _signal, _capabilities) => {
+  const entriesPath = typeof args.entries_path === 'string'
     ? args.entries_path
     : join(warplineHome(), 'state', 'feed-entries.json')
 
-  let entries: FeedEntry[]
+  // `entries_path` is an operator-configured value and this result lands in
+  // the run log, so no arm below names it. ENOENT is "nothing to triage yet";
+  // anything else is a failure that says which input key, never which path.
+  let raw: unknown
   try {
-    entries = newEntries(JSON.parse(await readFile(path, 'utf-8')))
+    raw = await readJsonOrNull<unknown>(entriesPath)
   } catch {
+    return skillFailure(
+      'parse_error',
+      `${manifest.name}: entries_path is unreadable or not JSON`,
+      { phases_failed: [manifest.name], impact: 'HIGH', retryable: false },
+    )
+  }
+  if (raw === null) {
     // NOT a bare `skipped`. deriveRunStatus maps a prefix-less `skipped` to
     // `failed`, and `warpline run` persists the artifact — "no data yet" would
     // otherwise paint a red run, the false-alarm class `delegated` exists to
-    // kill. (anomaly-watch's catch branch does return `skipped`; that plugin is
-    // not driven through a persisting run in the same way.)
-    return {
-      status: 'success',
-      phases_completed: ['feed-triage'],
-      phases_failed: [],
-      errors: [],
-      data_freshness: {},
-      summary: 'feed-triage: no feed state at the configured path — nothing to triage',
-      artifacts_produced: [],
-      schema_version: 1,
-    }
+    // kill. A success with nothing to say is the honest shape.
+    return skillOk(`${manifest.name}: no feed state at the configured path — nothing to triage`, {
+      phases_completed: [manifest.name],
+    })
   }
 
+  const entries = newEntries(raw)
+  const observedAt = new Date().toISOString()
   if (entries.length === 0) {
-    return {
-      status: 'success',
-      phases_completed: ['feed-triage'],
-      phases_failed: [],
-      errors: [],
-      data_freshness: { feed_entries: new Date().toISOString() },
-      summary: 'feed-triage: no new entries at the configured path — nothing to triage',
-      artifacts_produced: [],
-      schema_version: 1,
-    }
+    return skillOk(`${manifest.name}: no new entries at the configured path — nothing to triage`, {
+      phases_completed: [manifest.name],
+      data_freshness: { feed_entries: observedAt },
+    })
   }
 
-  // The `[needs-llm]` prefix is the entire wire into deriveRunStatus, and the
-  // path after `Context:` is the entire payload channel — RunArtifact persists
-  // `summary` and drops `artifacts_produced`.
-  //
-  // This is the ONE place a resolved config value is written to a run log on
-  // purpose, and the two arms above are the reason it needs saying. Two clauses
-  // hold it:
-  //
-  // 1. docs/needs-llm-contract.md defines the text after `Context:` as a path
-  //    the scanner resolves and reads. A key name there — the fix applied
-  //    above — would leave the scanner nothing to open, so the handoff would
-  //    stop being consumable at all.
-  // 2. The same contract only lets the scanner read paths resolving inside the
-  //    warpline home. That is what bounds the exposure: an operator path that
-  //    is itself sensitive cannot usefully be named here anyway, and the
-  //    manifest input description says so where an author will read it.
-  //
-  // The test beside this file splits the summary on `Context: ` and asserts the
-  // head is sentinel-free, so the exception cannot widen past this one field.
-  return {
-    status: 'skipped',
-    phases_completed: ['feed-triage'],
-    phases_failed: [],
-    errors: [],
-    data_freshness: { feed_entries: new Date().toISOString() },
-    summary: `[needs-llm] Triage ${entries.length} new feed entries. Context: ${path}`,
-    artifacts_produced: [],
-    schema_version: 1,
-  }
+  // The payload the companion skill reads, in the shape it documents. Written
+  // under the home rather than named where it was read from: the handoff
+  // summary carries the path after `Context:` into the run log, and the
+  // contract only lets the scanner open paths inside the home — so the file
+  // the handoff names is one this plugin writes there, and the configured
+  // `entries_path` never reaches the log at all.
+  const contextPath = `state/${manifest.name}.handoff.json`
+  await atomicWriteJson(join(warplineHome(), contextPath), { new_entries: entries })
+
+  // `skillHandoff` resolves the path against the home itself, so the argument
+  // stays RELATIVE — an absolute one would be refused at the parse boundary.
+  // The task carries no full stop: the scanner splits on `Context: `.
+  return skillHandoff(`Triage ${entries.length} new feed entries`, contextPath, {
+    phases_completed: [manifest.name],
+    data_freshness: { feed_entries: observedAt },
+  })
 }

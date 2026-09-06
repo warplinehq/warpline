@@ -9,7 +9,8 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * This is that plugin — it reads the deterministic feed state, resolves
  * everything computable (the count, the payload path, the freshness stamp) and
  * hands the per-entry judgment off via a `[needs-llm]` summary. It never calls
- * a model and it writes nothing. See docs/needs-llm-contract.md.
+ * a model; the one thing it writes is the handoff payload, under the warpline
+ * home. See docs/needs-llm-contract.md.
  */
 export const manifest = PluginManifestSchema.parse({
   name: 'feed-triage',
@@ -23,7 +24,7 @@ export const manifest = PluginManifestSchema.parse({
     entries_path: {
       type: 'string',
       required: false,
-      description: 'Path to a feed-entries JSON file; when absent, the handler computes it from the warpline home, as state/feed-entries.json. This value is written into the [needs-llm] handoff summary after Context: and therefore reaches the run log, so it must name a payload file under the warpline home and never a path that is itself sensitive',
+      description: 'Path to a feed-entries JSON file; when absent, the handler computes it from the warpline home, as state/feed-entries.json. The handler copies the entries it hands off to state/feed-triage.handoff.json under the warpline home and names that file after Context:, so this value never reaches the run log',
     },
   },
   outputs: {
