@@ -15,11 +15,10 @@
  * /usr/bin/grep -hoE "from '[^']+'|import\('[^']+'\)" | sort -u`) and is pinned
  * here in exactly the shape `UNSTABLE_EXPECTED` is pinned in
  * `scripts/verify-tarball.sh`: a list a human reads, never a set computed at
- * run time from the thing being checked. This deliberately does NOT pre-admit
- * the capability subpaths landing elsewhere in this milestone. No file under
- * `examples/` imports one yet, and an allowlist entry nothing exercises is an
- * untested permission. The example rewrite in the next milestone extends this
- * literal, in the commit that first needs it.
+ * run time from the thing being checked. The three `unstable-*` entries were
+ * added in the commit that first needed them — the first example to import
+ * one — and not before: an allowlist entry nothing exercises is an untested
+ * permission.
  *
  * **Scope is all of `examples/`, including the example test files.** CI shards
  * `examples` as a whole, and a lint whose reach stops short of part of what it
@@ -108,6 +107,9 @@ const ALLOWED: readonly string[] = [
   'warpline/lib/paths',
   'warpline/schemas/plugin-manifest',
   'warpline/schemas/skill-result',
+  'warpline/unstable-capabilities',
+  'warpline/unstable-fs',
+  'warpline/unstable-result',
 ]
 
 /** A relative specifier, which the rule above admits on one condition. */
