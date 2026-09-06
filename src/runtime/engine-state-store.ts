@@ -277,12 +277,20 @@ export async function withoutStateBackups<T>(fn: () => Promise<T>): Promise<T> {
  * `atomicWriteText` rather than `atomicWriteJson` only to keep the trailing
  * newline this has always written; the bytes are unchanged.
  *
- * Serialising concurrent writers is a separate, unclosed problem: `engine.ts`,
- * `cli/deny.ts` and `cli/approve.ts` read-modify-write this document with no
- * lock, so last-writer-wins is still reachable. The lock cannot move down into
- * here — `board/state-manager.ts` already calls this from inside
- * `withStateLock`, which is a non-reentrant `O_EXCL` file lock, so a nested
- * acquire would self-deadlock.
+ * Serialising concurrent writers is a separate, partly-closed problem.
+ * `cli/deny.ts` now takes `withStateLock` around its read-modify-write, and
+ * `board/state-manager.ts` always did. `engine.ts` does not: `runAdvance`
+ * reads at the top and writes at the end, so its window spans plugin
+ * execution, and holding the lock across that would block the board for the
+ * length of a run. Closing it means applying the advance's changes as deltas
+ * onto a fresh read inside the lock — tracked in #25.
+ *
+ * `cli/approve.ts` is NOT a writer of this document. It reads it, and writes
+ * only the grant file via `mergeGrant`. It was named here in error.
+ *
+ * The lock still cannot move down into here: `board/state-manager.ts` calls
+ * this from inside `withStateLock`, which is a non-reentrant `O_EXCL` file
+ * lock, so a nested acquire would self-deadlock. It belongs at the call site.
  */
 export async function writeEngineState(state: EngineState, statePath: string): Promise<void> {
   await atomicWriteText(statePath, JSON.stringify(state, null, 2) + '\n')

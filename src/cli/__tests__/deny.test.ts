@@ -568,3 +568,58 @@ describe('warpline deny', () => {
     expect(callers).toEqual([])
   })
 })
+
+
+/**
+ * The lock, demonstrated by the wait it imposes.
+ *
+ * `deny` rewrites the WHOLE state document, so a write landing between its
+ * read and its write is erased. That interleaving cannot be forced from
+ * outside the process — deny is too fast to wedge open — so the assertion is
+ * on the property that prevents it: while another writer holds the state lock,
+ * `deny` has not finished. Unserialised it reads and writes straight through
+ * and is done long before the holder lets go, which is what makes this fail
+ * without the lock rather than pass by luck of scheduling.
+ */
+describe('deny serialises against other state writers', () => {
+  test('a denial waits while another writer holds the state lock', async () => {
+    const { pathsForStateFile, withStateLockAt } = await import('../../board/state-manager.js')
+    const { defaultEngineState } = await import('../../schemas/engine-state.js')
+    await writeFile(statePath, JSON.stringify(defaultEngineState(), null, 2))
+
+    // The same lock deny takes: the one beside the document it writes. Taking
+    // `withStateLock`'s module-global lock instead would contend for a
+    // different file and this test would pass without proving anything.
+    const lockPath = pathsForStateFile(statePath).lockPath
+
+    let holding = false
+    let releaseHolder = (): void => {}
+    const holder = withStateLockAt(lockPath, async () => {
+      holding = true
+      await new Promise<void>((resolve) => {
+        releaseHolder = resolve
+      })
+    })
+    while (!holding) await new Promise((r) => setTimeout(r, 1))
+
+    let denyFinished = false
+    const denying = capture(['digest-sender']).then((r) => {
+      denyFinished = true
+      return r
+    })
+
+    await new Promise((r) => setTimeout(r, 120))
+    expect(denyFinished).toBe(false)
+
+    releaseHolder()
+    await holder
+    const result = await denying
+
+    expect(denyFinished).toBe(true)
+    expect(result.code).toBe(0)
+    const final = JSON.parse(await readFile(statePath, 'utf-8'))
+    expect(Object.keys(final.denials)).toContain('digest-sender')
+    // The holder wrote nothing, so the document deny wrote is the whole story.
+    expect(final.last_run_id).toBeNull()
+  })
+})

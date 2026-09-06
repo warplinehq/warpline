@@ -96,22 +96,22 @@ export function _getPaths(): StatePaths {
 
 const LOCK_TIMEOUT_MS = 10_000
 
-async function acquireLock(): Promise<() => Promise<void>> {
+async function acquireLock(lockPath: string): Promise<() => Promise<void>> {
   const deadline = Date.now() + LOCK_TIMEOUT_MS
   while (true) {
     try {
       // O_EXCL: atomic create — fails if file exists
-      const fd = await open(activePaths().lockPath, 'wx')
+      const fd = await open(lockPath, 'wx')
       await fd.writeFile(String(Date.now()))
       await fd.close()
-      return async () => { try { await unlink(activePaths().lockPath) } catch {} }
+      return async () => { try { await unlink(lockPath) } catch {} }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
       // Check staleness
       try {
-        const written = parseInt(await readFile(activePaths().lockPath, 'utf-8'), 10)
+        const written = parseInt(await readFile(lockPath, 'utf-8'), 10)
         if (!isNaN(written) && Date.now() - written > LOCK_TIMEOUT_MS) {
-          await unlink(activePaths().lockPath) // stale — break it
+          await unlink(lockPath) // stale — break it
           continue
         }
       } catch {}
@@ -121,10 +121,27 @@ async function acquireLock(): Promise<() => Promise<void>> {
   }
 }
 
-export async function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
-  const release = await acquireLock()
+/**
+ * Lock a NAMED state document, for a caller that resolved its own path.
+ *
+ * `withStateLock` below locks whatever `activePaths()` currently points at,
+ * which is right for this module — every function here reads and writes that
+ * same path. It is wrong for a caller that resolved its path some other way:
+ * `cli/deny.ts` writes `engineStatePath()`, and if the two ever disagree it
+ * would lock one file and rewrite another, which is a lock that reports
+ * success and protects nothing.
+ *
+ * The path is captured once, so the release unlinks the lock it took even if
+ * `_setPaths` moves the module's paths while the callback is running.
+ */
+export async function withStateLockAt<T>(lockPath: string, fn: () => Promise<T>): Promise<T> {
+  const release = await acquireLock(lockPath)
   try { return await fn() }
   finally { await release() }
+}
+
+export async function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
+  return withStateLockAt(activePaths().lockPath, fn)
 }
 
 // ── Age badge formatting ─────────────────────────────────────────

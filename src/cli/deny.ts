@@ -45,6 +45,7 @@
 import { parseArgs } from 'node:util'
 import { findPendingGate, loadPluginManifests, proposalFingerprint } from '../runtime/engine.js'
 import { emitDenialRecorded, emitGateInvalidated } from '../board/engine-events.js'
+import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import {
   EngineStateInvalidError,
   readEngineState,
@@ -143,6 +144,9 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   const statePath = engineStatePath()
+  // The lock that guards THIS document, not whatever the state manager's
+  // module paths point at — see `withStateLockAt`.
+  const lockPath = pathsForStateFile(statePath).lockPath
 
   // -- List: read, print, write nothing -----------------------------------
   if (values.list) {
@@ -164,32 +168,37 @@ export async function run(argv: string[]): Promise<number> {
   // A plugin uninstalled after it was denied must still be removable, or its
   // record would be unreachable from the CLI for good.
   if (values.remove) {
-    const state = await loadState(statePath)
-    if (state === null) return 1
+    // Locked, and the read is inside it: this rewrites the WHOLE state
+    // document, so an advance completing between the read and the write would
+    // be erased by a command that only meant to forget a denial.
+    return await withStateLockAt(lockPath, async () => {
+      const state = await loadState(statePath)
+      if (state === null) return 1
 
-    // `Object.hasOwn`, not `!== undefined`. These names come straight from the
-    // operator and are deliberately NOT validated against the manifests, so
-    // `--remove toString` arrives here — and on a plain-object record that
-    // lookup answers with `Object.prototype.toString`. The guard would not
-    // fire, the delete would remove nothing, the state document would be
-    // rewritten anyway, and the operator would be told a denial they never had
-    // was taken back.
-    const missing = positionals.filter((name) => !Object.hasOwn(state.denials, name))
-    if (missing.length > 0) {
-      for (const name of missing) {
-        process.stderr.write(`No denial recorded for ${name}.\n`)
+      // `Object.hasOwn`, not `!== undefined`. These names come straight from the
+      // operator and are deliberately NOT validated against the manifests, so
+      // `--remove toString` arrives here — and on a plain-object record that
+      // lookup answers with `Object.prototype.toString`. The guard would not
+      // fire, the delete would remove nothing, the state document would be
+      // rewritten anyway, and the operator would be told a denial they never had
+      // was taken back.
+      const missing = positionals.filter((name) => !Object.hasOwn(state.denials, name))
+      if (missing.length > 0) {
+        for (const name of missing) {
+          process.stderr.write(`No denial recorded for ${name}.\n`)
+        }
+        process.stderr.write('Nothing was removed.\n')
+        return 1
       }
-      process.stderr.write('Nothing was removed.\n')
-      return 1
-    }
 
-    for (const name of positionals) delete state.denials[name]
-    await writeEngineState(state, statePath)
-    process.stdout.write(
-      `Removed the denial for ${positionals.join(', ')}. ` +
-        `${positionals.length === 1 ? 'It' : 'They'} will be asked about again on the next advance.\n`,
-    )
-    return 0
+      for (const name of positionals) delete state.denials[name]
+      await writeEngineState(state, statePath)
+      process.stdout.write(
+        `Removed the denial for ${positionals.join(', ')}. ` +
+          `${positionals.length === 1 ? 'It' : 'They'} will be asked about again on the next advance.\n`,
+      )
+      return 0
+    })
   }
 
   // -- Deny --------------------------------------------------------------
@@ -218,89 +227,101 @@ export async function run(argv: string[]): Promise<number> {
     return 1
   }
 
-  const state = await loadState(statePath)
-  if (state === null) return 1
-
-  const denied_at = new Date().toISOString()
   const recorded: Denial[] = []
   const discarded: { plugin: string; runId: string }[] = []
 
-  for (const plugin of positionals) {
-    const fingerprint = proposalFingerprint(state, plugin, manifests.get(plugin)!)
-    // Own-property lookup for the same reason as `--remove` above. The
-    // manifest schema already refuses a name off `Object.prototype`, so this
-    // holds independently of that rather than duplicating it.
-    const existing = Object.hasOwn(state.denials, plugin) ? state.denials[plugin] : undefined
+  // Same reason as `--remove`, and one of its own: this arm also filters
+  // `state.pending_gates`, which the advance owns and rewrites wholesale. Both
+  // sides writing the whole document is what makes last-writer-wins reachable,
+  // so the read moves inside the lock and the write follows it directly.
+  //
+  // Nothing that waits on a human is in here. The loop decides and prints; the
+  // board events go out after the lock is released, below.
+  const early = await withStateLockAt(lockPath, async (): Promise<number | null> => {
+const state = await loadState(statePath)
+if (state === null) return 1
 
-    // Denying twice against an unchanged proposal is a no-op, and observably
-    // so: nothing is written, so the state document is byte-identical. The
-    // record's key makes duplicates impossible; this makes re-answering
-    // visible instead of silently restamping the clock.
-    if (existing !== undefined && existing.fingerprint === fingerprint) {
-      process.stdout.write(
-        `${plugin} is already denied (${existing.denied_at}) and its proposal has not changed. ` +
-          `Nothing was written.\n`,
-      )
-      continue
+const denied_at = new Date().toISOString()
+
+    for (const plugin of positionals) {
+      const fingerprint = proposalFingerprint(state, plugin, manifests.get(plugin)!)
+      // Own-property lookup for the same reason as `--remove` above. The
+      // manifest schema already refuses a name off `Object.prototype`, so this
+      // holds independently of that rather than duplicating it.
+      const existing = Object.hasOwn(state.denials, plugin) ? state.denials[plugin] : undefined
+
+      // Denying twice against an unchanged proposal is a no-op, and observably
+      // so: nothing is written, so the state document is byte-identical. The
+      // record's key makes duplicates impossible; this makes re-answering
+      // visible instead of silently restamping the clock.
+      if (existing !== undefined && existing.fingerprint === fingerprint) {
+        process.stdout.write(
+          `${plugin} is already denied (${existing.denied_at}) and its proposal has not changed. ` +
+            `Nothing was written.\n`,
+        )
+        continue
+      }
+
+      // A parked result is what a denial most often answers, so the reason says
+      // which run it was. Without one, the operator is answering the standing
+      // proposal rather than a specific outcome, and the reason says that.
+      //
+      // A LIVE gate, not merely a gate: `findPendingGate` returns already-applied
+      // markers on purpose, and a marker means the operator ACCEPTED that result.
+      // Recording that they declined it puts a false sentence somewhere it is
+      // read back — `deny --list` prints it, `emitDenialRecorded` writes it into
+      // `events.jsonl`, and the evaluator quotes it on every suppressed advance.
+      // A marker now lives up to the gate ceiling, so the window is not a corner.
+      const gate = findPendingGate(state, plugin)
+      const live = gate !== undefined && gate.applied_at === null
+      const reason = live
+        ? `the operator declined the parked result from run ${gate.run_id}`
+        : 'the operator declined this proposal'
+
+      // **The denied gate is discarded, not merely outranked.** Answering a
+      // parked result is what dequeues it, exactly as applying one does — the
+      // sentence above says the operator declined that run, and leaving the run
+      // sitting in `pending_gates` made that sentence describe something that had
+      // not happened.
+      //
+      // It also cannot legitimately be applied afterwards. While the denial
+      // holds, both `approve` arms refuse it. Once the denial is superseded the
+      // proposal has moved, which means `plugin_runs.last_output` changed, which
+      // means the plugin ran again and a newer gate exists — so the old one
+      // answers a question nobody is asking. The only path that ever reached it
+      // was `deny --remove`, which would hand back a stale result the operator
+      // had already declined, in answer to a question they thought they were
+      // re-opening.
+      //
+      // Nothing durable is lost: the run artifact holds the full SkillResult
+      // (`RunLog.result`). The gate is the review queue, not the record.
+      //
+      // Only a LIVE gate. A marker is the trace of a result the operator
+      // ACCEPTED, and a denial recorded later answers the standing proposal
+      // rather than that outcome — discarding it would erase the one thing that
+      // stops a second `approve` re-recording an applied result.
+      if (live) {
+        state.pending_gates = state.pending_gates.filter((g) => g !== gate)
+        discarded.push({ plugin, runId: gate.run_id })
+      }
+
+      const denial = DenialSchema.parse({
+        plugin,
+        reason,
+        denied_at,
+        note: values.note ?? null,
+        fingerprint,
+      })
+      state.denials[plugin] = denial
+      recorded.push(denial)
     }
 
-    // A parked result is what a denial most often answers, so the reason says
-    // which run it was. Without one, the operator is answering the standing
-    // proposal rather than a specific outcome, and the reason says that.
-    //
-    // A LIVE gate, not merely a gate: `findPendingGate` returns already-applied
-    // markers on purpose, and a marker means the operator ACCEPTED that result.
-    // Recording that they declined it puts a false sentence somewhere it is
-    // read back — `deny --list` prints it, `emitDenialRecorded` writes it into
-    // `events.jsonl`, and the evaluator quotes it on every suppressed advance.
-    // A marker now lives up to the gate ceiling, so the window is not a corner.
-    const gate = findPendingGate(state, plugin)
-    const live = gate !== undefined && gate.applied_at === null
-    const reason = live
-      ? `the operator declined the parked result from run ${gate.run_id}`
-      : 'the operator declined this proposal'
+if (recorded.length === 0) return 0
 
-    // **The denied gate is discarded, not merely outranked.** Answering a
-    // parked result is what dequeues it, exactly as applying one does — the
-    // sentence above says the operator declined that run, and leaving the run
-    // sitting in `pending_gates` made that sentence describe something that had
-    // not happened.
-    //
-    // It also cannot legitimately be applied afterwards. While the denial
-    // holds, both `approve` arms refuse it. Once the denial is superseded the
-    // proposal has moved, which means `plugin_runs.last_output` changed, which
-    // means the plugin ran again and a newer gate exists — so the old one
-    // answers a question nobody is asking. The only path that ever reached it
-    // was `deny --remove`, which would hand back a stale result the operator
-    // had already declined, in answer to a question they thought they were
-    // re-opening.
-    //
-    // Nothing durable is lost: the run artifact holds the full SkillResult
-    // (`RunLog.result`). The gate is the review queue, not the record.
-    //
-    // Only a LIVE gate. A marker is the trace of a result the operator
-    // ACCEPTED, and a denial recorded later answers the standing proposal
-    // rather than that outcome — discarding it would erase the one thing that
-    // stops a second `approve` re-recording an applied result.
-    if (live) {
-      state.pending_gates = state.pending_gates.filter((g) => g !== gate)
-      discarded.push({ plugin, runId: gate.run_id })
-    }
-
-    const denial = DenialSchema.parse({
-      plugin,
-      reason,
-      denied_at,
-      note: values.note ?? null,
-      fingerprint,
-    })
-    state.denials[plugin] = denial
-    recorded.push(denial)
-  }
-
-  if (recorded.length === 0) return 0
-
-  await writeEngineState(state, statePath)
+await writeEngineState(state, statePath)
+    return null
+  })
+  if (early !== null) return early
 
   const eventsPath = eventsJsonlPath()
   for (const denial of recorded) {
