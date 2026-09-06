@@ -30,10 +30,13 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CapabilityContext } from '../runtime/capabilities.js'
+import { snapshotHome } from '../runtime/__tests__/helpers/snapshot-home.js'
 import { handler as anomalyIssue } from '../../examples/plugins/anomaly-issue/handler.js'
 import { manifest as anomalyIssueManifest } from '../../examples/plugins/anomaly-issue/manifest.js'
 import { handler as anomalyWatch } from '../../examples/plugins/anomaly-watch/handler.js'
 import { manifest as anomalyWatchManifest } from '../../examples/plugins/anomaly-watch/manifest.js'
+import { handler as derivedSummary } from '../../examples/plugins/derived-summary/handler.js'
+import { manifest as derivedSummaryManifest } from '../../examples/plugins/derived-summary/manifest.js'
 import { handler as feedMonitor } from '../../examples/plugins/feed-monitor/handler.js'
 import { manifest as feedMonitorManifest } from '../../examples/plugins/feed-monitor/manifest.js'
 import { handler as feedTriage } from '../../examples/plugins/feed-triage/handler.js'
@@ -177,6 +180,21 @@ const REGISTRY: readonly ShapeEntry[] = [
       const result = await metricsRollup(metricsRollupManifest, {}, signal(), CONTEXT)
       const state = readJson<{ rows: unknown[]; rollups: unknown[] }>(join(home, 'state', 'metrics-rollup.json'))
       return result.status === 'success' && state.rollups.length > 0 && state.rows.length === 1
+    },
+  },
+  {
+    shape: 5,
+    example: 'derived-summary',
+    // Derives its answer from a source already under the home and keeps
+    // NOTHING: a success, and a whole-home snapshot identical before and
+    // after. A handler that merely returned something would pass over a
+    // plugin that stored everything, which is the failure this act refuses.
+    act: async (home) => {
+      seed(home, 'state/metrics.json', METRICS)
+      const before = await snapshotHome(home)
+      const result = await derivedSummary(derivedSummaryManifest, {}, signal(), CONTEXT)
+      const after = await snapshotHome(home)
+      return result.status === 'success' && after.join('\n') === before.join('\n')
     },
   },
   {
