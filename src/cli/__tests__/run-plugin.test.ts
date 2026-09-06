@@ -317,11 +317,20 @@ describe('runPlugin — --input key=value', () => {
 
   test('a key the config schema refuses is refused here too — the same Object.prototype rule, not a second list', async () => {
     for (const key of ['constructor', '__proto__', 'toString']) {
-      // The existing refusal, asserted on the same key: a null-prototype
-      // record so `__proto__` is an own key the schema can see.
+      // The rule the config file's key schema applies, asserted on the same
+      // key. Measured seam: zod's record parser skips `__proto__` before the
+      // key rule runs, so for that one key the schema reports success and
+      // DROPS it — which is why the CLI applies the predicate itself.
       const record: Record<string, unknown> = Object.create(null)
       record[key] = 'x'
-      expect(PluginConfigSchema.safeParse(record).success).toBe(false)
+      expect(key in Object.prototype).toBe(true)
+      const viaSchema = PluginConfigSchema.safeParse(record)
+      if (key === '__proto__') {
+        expect(viaSchema.success).toBe(true)
+        expect(Object.keys(viaSchema.success ? viaSchema.data : {})).toEqual([])
+      } else {
+        expect(viaSchema.success).toBe(false)
+      }
 
       const rejected = await runPlugin(['input-merge', 'run', '--input', `${key}=x`])
       expect(rejected.code).toBe(1)

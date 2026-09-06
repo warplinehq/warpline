@@ -146,7 +146,21 @@ Three tiers resolve every declared input, lowest precedence first:
 The merge happens inside the runtime before your handler is called, so by the
 time you hold `args` it is already done. § 1 of
 [runtime-spec.md](runtime-spec.md) is the contract; this section is how to
-write against it.
+write against it. In the runtime's own names the order is
+`manifest_default -> config_file -> invocation_args`, and `invocation_args`
+wins.
+
+**Tier 3 from the command line.** `warpline run <plugin> <action> --input
+key=value` supplies a per-invocation argument. The flag is repeatable, and each
+pair is split on its first `=`, so a value may itself contain one. What it
+carries is a **string**, and nothing converts it. An input declared as
+`number`, `boolean`, `array` or `object` given a value this way fails the type
+check with a problem naming the key and the expected type — `input
+'retention_days' must be a number` — the same problem a wrong-typed config
+value produces, and the run fails once without retrying. An input of one of
+those four types takes its value from `<home>/config/<plugin>.json` or from
+its manifest default; the command line is for text. That is the flag's
+ceiling as it stands, and this guide promises nothing past it.
 
 The bundled `github-poll` example is the worked case. Its manifest declares
 `repo` as required *and* gives it a default, which is not the contradiction it
@@ -212,11 +226,13 @@ that files anything.
 positional as a per-invocation argument, which is tier 3 and beats both tiers
 below it. An input you declare under that name therefore resolves to whatever
 the operator typed on the command line, never to your default and never to the
-config file. Pick another name.
+config file, and `--input action=...` does not override the positional. Pick
+another name.
 
-**There is no environment-variable tier**, today. The file is the only channel
-an *input* has, so an input carrying a secret is a secret sitting on disk under
-the operator's home. That is a known limitation rather than an oversight, and it
+**There is no environment-variable tier**, today. The file and the command line
+are the only channels an *input* has, so an input carrying a secret is a secret
+sitting on disk under the operator's home, or in a shell history. That is a
+known limitation rather than an oversight, and it
 is stated here so you meet it before you design around it. A credential does not
 belong in that file: declare its name on `manifest.secrets` and read the value
 from the environment inside your handler. The next section is how.
