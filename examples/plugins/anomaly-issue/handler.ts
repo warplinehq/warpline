@@ -1,9 +1,10 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import type { HandlerFn } from 'warpline'
 import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
-import { makeSkillError, type SkillError, type SkillResult } from 'warpline/schemas/skill-result'
+import { makeSkillError, type SkillError, type SkillResultInput } from 'warpline/schemas/skill-result'
 import { warplineHome } from 'warpline/lib/paths'
+import { atomicWriteJson, readJsonOrNull } from 'warpline/unstable-fs'
+import { skillFailure, skillOk } from 'warpline/unstable-result'
 
 /**
  * Expected anomalies file shape — the element type `anomaly-watch` declares
@@ -122,40 +123,24 @@ export async function fileIssues(
   return { created, error: null }
 }
 
-function fail(error: SkillError, summary: string): SkillResult {
-  return {
-    status: 'failed',
-    phases_completed: [],
-    phases_failed: ['anomaly-issue'],
-    errors: [error],
-    data_freshness: {},
-    summary,
-    artifacts_produced: [],
-    schema_version: 1,
-  }
-}
+/** Every failure here is the plugin's own phase, high impact, and not retried. */
+const FAILED = { phases_failed: ['anomaly-issue'], impact: 'HIGH' as const, retryable: false }
 
 export async function handler(
   _manifest: PluginManifest,
   args: Record<string, unknown>,
   signal: AbortSignal,
-): Promise<SkillResult> {
+): Promise<SkillResultInput> {
   const repo = args.repo
   if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
-    return fail(
-      makeSkillError('parse_error', "input 'repo' must be a string in owner/name form, e.g. oven-sh/bun", { impact: 'HIGH', retryable: false }),
-      'anomaly-issue: invalid repo input',
-    )
+    return skillFailure('parse_error', "input 'repo' must be a string in owner/name form, e.g. oven-sh/bun", FAILED)
   }
 
   // The token goes into the authorization header and nowhere else — never a
   // summary, an error message or a log line.
   const token = process.env.GITHUB_TOKEN
   if (!token) {
-    return fail(
-      makeSkillError('auth_failure', 'GITHUB_TOKEN is not set', { impact: 'HIGH', retryable: false }),
-      'anomaly-issue: GITHUB_TOKEN is not set',
-    )
+    return skillFailure('auth_failure', 'GITHUB_TOKEN is not set', FAILED)
   }
 
   // A convention, not a seam. `<home>/state/anomalies.json` is a path agreed
@@ -172,32 +157,24 @@ export async function handler(
   const anomaliesPath = typeof args.anomalies_path === 'string'
     ? args.anomalies_path
     : join(warplineHome(), 'state', 'anomalies.json')
-  let anomalies: Anomaly[]
+  // `readJsonOrNull` is null for ENOENT and rethrows everything else. A file
+  // that exists but is corrupt is not "no data yet" — reporting it green under
+  // a summary that says "no file" hides it indefinitely — and the rethrown
+  // message embeds the operator-configured path, so the catch names the key.
+  let rawAnomalies: { anomalies?: unknown } | null
   try {
-    const raw = JSON.parse(await readFile(anomaliesPath, 'utf-8'))
-    anomalies = Array.isArray(raw.anomalies) ? raw.anomalies : []
-  } catch (err) {
-    // A file that exists but is corrupt is not "no data yet" — reporting it
-    // green under a summary that says "no file" hides it indefinitely.
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      return fail(
-        makeSkillError('parse_error', "the file named by input 'anomalies_path' is unreadable", { impact: 'HIGH', retryable: false }),
-        'anomaly-issue: the configured anomalies file is unreadable',
-      )
-    }
+    rawAnomalies = await readJsonOrNull<{ anomalies?: unknown }>(anomaliesPath)
+  } catch {
+    return skillFailure('parse_error', "the file named by input 'anomalies_path' is unreadable", FAILED)
+  }
+  if (rawAnomalies === null) {
     // NOT a bare `skipped`: deriveRunStatus persists a prefix-less `skipped`
     // as `failed`, and "no data yet" must not paint a red run.
-    return {
-      status: 'success',
+    return skillOk('anomaly-issue: no anomalies file at the configured path — nothing to file', {
       phases_completed: ['anomaly-issue'],
-      phases_failed: [],
-      errors: [],
-      data_freshness: {},
-      summary: 'anomaly-issue: no anomalies file at the configured path — nothing to file',
-      artifacts_produced: [],
-      schema_version: 1,
-    }
+    })
   }
+  const anomalies: Anomaly[] = Array.isArray(rawAnomalies.anomalies) ? rawAnomalies.anomalies : []
 
   const ledgerPath = join(warplineHome(), 'state', 'anomaly-issue.filed.json')
   // Null prototype throughout: `filed['__proto__'] = url` on a plain object
@@ -205,20 +182,16 @@ export async function handler(
   // that anomaly would then be re-filed on every run.
   let filed: Record<string, string> = Object.create(null)
   try {
-    const raw = JSON.parse(await readFile(ledgerPath, 'utf-8'))
+    const raw = await readJsonOrNull<{ filed?: unknown }>(ledgerPath)
     if (raw && typeof raw.filed === 'object' && raw.filed !== null) {
       filed = Object.assign(Object.create(null), raw.filed)
     }
-  } catch (err) {
-    // ENOENT is "no ledger yet". Everything else — EACCES, EISDIR, a
-    // truncated file — must NOT read as an empty ledger: that re-files every
-    // anomaly AND overwrites the history that would have stopped it.
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      return fail(
-        makeSkillError('parse_error', `cannot read ledger ${ledgerPath}: ${err instanceof Error ? err.message : String(err)}`, { impact: 'HIGH', retryable: false }),
-        'anomaly-issue: ledger unreadable — refusing to file (would duplicate)',
-      )
-    }
+  } catch {
+    // null is "no ledger yet". Everything else — EACCES, EISDIR, a truncated
+    // file — must NOT read as an empty ledger: that re-files every anomaly AND
+    // overwrites the history that would have stopped it. The refusal names
+    // neither the path nor the parser's words; both would land in the run log.
+    return skillFailure('parse_error', 'anomaly-issue: ledger unreadable — refusing to file (would duplicate)', FAILED)
   }
 
   // No per-run cap on issue count: the input file is operator-side, the run
@@ -226,50 +199,44 @@ export async function handler(
   // belong to the runtime's guardrails, not to a plugin.
   const todo = pending(anomalies, filed)
   if (todo.length === 0) {
-    return {
-      status: 'success',
+    return skillOk(`no new anomalies (${Object.keys(filed).length} already filed)`, {
       phases_completed: ['anomaly-issue'],
-      phases_failed: [],
-      errors: [],
       data_freshness: { anomalies: new Date().toISOString() },
-      summary: `no new anomalies (${Object.keys(filed).length} already filed)`,
-      artifacts_produced: [],
-      schema_version: 1,
-    }
+    })
   }
 
   const { created, error } = await fileIssues(repo, todo, token, fetch, signal)
 
   // Ledger FIRST, before any result is built — on every path that filed
   // something. A retry that finds the ledger sees these as already filed.
+  // The atomic writer creates the parent and renames a temp file over the
+  // target, so a crash mid-write leaves the old ledger, never half of one.
   if (created.length > 0) {
     for (const { name, url } of created) filed[name] = url
-    await mkdir(dirname(ledgerPath), { recursive: true })
-    await writeFile(`${ledgerPath}.tmp`, JSON.stringify({ filed }, null, 2))
-    await rename(`${ledgerPath}.tmp`, ledgerPath)
+    await atomicWriteJson(ledgerPath, { filed })
   }
 
-  const status = error === null ? 'success' : created.length > 0 ? 'partial' : 'failed'
   const summary = `filed ${created.length} issues: ${created.map(c => c.name).join(', ')}`
     + (error ? `; stopped at ${todo[created.length]?.name}: ${error.message}` : '')
-  return {
-    status,
-    phases_completed: created.length > 0 ? ['anomaly-issue'] : [],
-    phases_failed: status === 'failed' ? ['anomaly-issue'] : [],
-    errors: error ? [error] : [],
-    data_freshness: { anomalies: new Date().toISOString() },
-    summary,
-    artifacts_produced: [],
-    schema_version: 1,
-    ...(created.length > 0 && {
-      reversible: false,
-      // Documented carve-out from the never-echo rule, one field wide: an issue
-      // URL contains the configured repo, and an undo instruction that does not
-      // name what to close cannot be acted on. See docs/plugin-authoring.md.
-      // Every other field of this result stays free of the configured value.
-      undo_instruction: `Close by hand — GitHub issues cannot be deleted by the API: ${created.map(c => c.url).join(', ')}`,
-    }),
+  if (created.length === 0 && error !== null) {
+    return skillFailure(error.code, summary, { ...FAILED, errors: [error], data_freshness: { anomalies: new Date().toISOString() } })
   }
+  const filedSome = skillOk(summary, {
+    phases_completed: ['anomaly-issue'],
+    data_freshness: { anomalies: new Date().toISOString() },
+    errors: error ? [error] : undefined,
+    reversible: false,
+    // Documented carve-out from the never-echo rule, one field wide: an issue
+    // URL contains the configured repo, and an undo instruction that does not
+    // name what to close cannot be acted on. See docs/plugin-authoring.md.
+    // Every other field of this result stays free of the configured value.
+    undo_instruction: `Close by hand — GitHub issues cannot be deleted by the API: ${created.map(c => c.url).join(', ')}`,
+  })
+  // No builder emits `partial`, and a batch that filed some issues and then
+  // stopped is exactly that: the ledger holds what was filed, the error says
+  // where it stopped. The status is set over the built result rather than by
+  // a fourth hand-written literal.
+  return error === null ? filedSome : { ...filedSome, status: 'partial' }
 }
 
 // The only check anywhere that can see the root barrel's type export. `HandlerFn`

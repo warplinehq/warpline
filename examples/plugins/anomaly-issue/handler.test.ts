@@ -218,7 +218,7 @@ describe('anomaly-issue handler ledger', () => {
         new AbortController().signal,
       )
       expect(result.status).toBe('failed')
-      expect(result.errors[0]?.code).toBe('parse_error')
+      expect(result.errors?.[0]?.code).toBe('parse_error')
     } finally {
       if (realToken === undefined) delete process.env.GITHUB_TOKEN
       else process.env.GITHUB_TOKEN = realToken
@@ -414,12 +414,12 @@ describe('anomaly-issue config value disclosure', () => {
     )
 
     expect(result.status).toBe('failed')
-    expect(result.errors[0]?.code).toBe('parse_error')
+    expect(result.errors?.[0]?.code).toBe('parse_error')
     // The whole result, not one field: summary and errors[].message both reach
     // the run log, and so does whatever a later edit adds beside them.
     expect(JSON.stringify(result)).not.toContain(SENTINEL)
-    expect(result.errors[0]?.message).toContain('repo')
-    expect(result.errors[0]?.message).toContain('owner/name')
+    expect(result.errors?.[0]?.message).toContain('repo')
+    expect(result.errors?.[0]?.message).toContain('owner/name')
   })
 
   test('a missing anomalies file reports nothing to file without naming the path', async () => {
@@ -447,9 +447,9 @@ describe('anomaly-issue config value disclosure', () => {
       )
 
       expect(result.status).toBe('failed')
-      expect(result.errors[0]?.code).toBe('parse_error')
+      expect(result.errors?.[0]?.code).toBe('parse_error')
       expect(JSON.stringify(result)).not.toContain(SENTINEL)
-      expect(result.errors[0]?.message).toContain('anomalies_path')
+      expect(result.errors?.[0]?.message).toContain('anomalies_path')
     })
   })
 
