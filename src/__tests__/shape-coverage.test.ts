@@ -45,6 +45,8 @@ import { handler as feedTriage } from '../../examples/plugins/feed-triage/handle
 import { manifest as feedTriageManifest } from '../../examples/plugins/feed-triage/manifest.js'
 import { handler as githubPoll } from '../../examples/plugins/github-poll/handler.js'
 import { manifest as githubPollManifest } from '../../examples/plugins/github-poll/manifest.js'
+import { handler as linkEnrich } from '../../examples/plugins/link-enrich/handler.js'
+import { manifest as linkEnrichManifest } from '../../examples/plugins/link-enrich/manifest.js'
 import { handler as metricsRollup } from '../../examples/plugins/metrics-rollup/handler.js'
 import { manifest as metricsRollupManifest } from '../../examples/plugins/metrics-rollup/manifest.js'
 import { handler as noteIntake } from '../../examples/plugins/note-intake/handler.js'
@@ -106,6 +108,14 @@ async function withEnv<T>(name: string, value: string, fn: () => Promise<T>): Pr
     if (real === undefined) delete process.env[name]
     else process.env[name] = real
   }
+}
+
+/** Several env vars at once, each restored by its own `withEnv`. */
+function withEnvs<T>(vars: Record<string, string>, fn: () => Promise<T>): Promise<T> {
+  return Object.entries(vars).reduceRight<() => Promise<T>>(
+    (inner, [name, value]) => () => withEnv(name, value, inner),
+    fn,
+  )()
 }
 
 /**
@@ -244,6 +254,37 @@ const REGISTRY: readonly ShapeEntry[] = [
       const inbox = join(home, 'notes', 'note-intake')
       if (result.status !== 'success' || !existsSync(inbox)) return false
       return readdirSync(inbox).some((name) => readFileSync(join(inbox, name), 'utf8').includes(note))
+    },
+  },
+  {
+    shape: 7,
+    example: 'link-enrich',
+    // Three sources, ONE of them refusing: true only if the run is a
+    // non-failure AND the summary names a contributing source and the
+    // refused one. A handler that merely returned would be satisfied by a
+    // loop with no isolation at all, which is the whole thing this shape
+    // demonstrates.
+    act: async (home) => {
+      seed(home, 'state/links.json', { links: ['https://links.example.test/one'] })
+      const urls = {
+        metadata_url: 'https://metadata.example.test/lookup',
+        preview_url: 'https://preview.example.test/lookup',
+        reputation_url: 'https://reputation.example.test/lookup',
+      }
+      const perSource = async (url: unknown) =>
+        String(url) === urls.reputation_url
+          ? { ok: false, status: 503, json: async () => ({}) }
+          : { ok: true, status: 200, json: async () => ({ 'https://links.example.test/one': { field: 'value' } }) }
+      const result = await withEnvs(
+        {
+          LINK_ENRICH_METADATA_TOKEN: 'placeholder-token',
+          LINK_ENRICH_PREVIEW_TOKEN: 'placeholder-token',
+          LINK_ENRICH_REPUTATION_TOKEN: 'placeholder-token',
+        },
+        () => withFetch(perSource, () => linkEnrich(linkEnrichManifest, urls, signal(), CONTEXT)),
+      )
+      return result.status !== 'failed'
+        && result.summary.includes('metadata') && result.summary.includes('refused') && result.summary.includes('reputation')
     },
   },
   {
