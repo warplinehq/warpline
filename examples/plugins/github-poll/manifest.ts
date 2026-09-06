@@ -19,13 +19,13 @@ export const manifest = PluginManifestSchema.parse({
   timeout_ms: 30_000,
   inputs: {
     // Required AND defaulted, which is not a contradiction: the default
-    // satisfies the requirement at the lowest precedence tier. There is no
-    // first-run setup verb, so a clean install has no config file, and a
-    // declared default is the only place the value can come from — without one
-    // the bundled quickstart fails on every advance, forever. An operator
-    // retargets it by writing the plugin's own file under the home's `config`
-    // directory. The repository it polls is the one this package ships from,
-    // so the example demonstrates the config channel instead of demanding it.
+    // satisfies the requirement at the lowest precedence tier. `warpline init`
+    // seeds a different example, so a copy of this one has no config file
+    // until `warpline configure github-poll` writes one, and until then the
+    // declared default is the only value the plugin has — without one a copied
+    // quickstart fails on every advance, forever. The repository it polls is
+    // the one this package ships from, so the example demonstrates the config
+    // channel instead of demanding it.
     repo: {
       type: 'string',
       required: true,

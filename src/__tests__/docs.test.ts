@@ -1179,8 +1179,10 @@ describe('hand-written manifest prose', () => {
 
   // Two dispositions from the 09 verification live only in this section's
   // prose. The first is the single carve-out from the never-echo rule above it
-  // — delete the paragraph and the rule reads as absolute again while
-  // `feed-triage` keeps violating it. The second is an operator instruction the
+  // — delete the paragraph and the rule reads as absolute again, while a
+  // handoff still has to name a path; `feed-triage` is the worked case, and
+  // the path it names is a copy it wrote under the home, never the configured
+  // value. The second is an operator instruction the
   // runtime cannot enforce, because warpline never writes that file: nothing in
   // this codebase can be asserted against it, so the sentence itself is the
   // only artifact there is to pin.
