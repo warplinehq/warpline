@@ -389,8 +389,9 @@ describe('the shape registry', () => {
 
 // Still owed: the completeness assertion, `[...new Set(REGISTRY.filter(e =>
 // !e.partial).map(e => e.shape))].sort()` equal to `[1, 2, 3, 4, 5, 6, 7]`.
-// Every shape now has a dedicated, non-partial entry, so the assertion would
-// be green today. It is added by the plan that closes the example roster,
-// alongside the last examples to land, not here: the shape-3 entry above
-// asserts the half of the aggregate act a handler can perform, and the
-// assertion's own comment should say so where it is asserted.
+// The roster is complete — every directory under examples/plugins has its
+// entry above, and every shape has a dedicated, non-partial one — so the
+// assertion would be green today. It is the one thing this file still owes,
+// and it lands with the plan that closes the roster, not here: the shape-3
+// entry above asserts the half of the aggregate act a handler can perform,
+// and the assertion's own comment should say so where it is asserted.

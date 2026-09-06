@@ -189,7 +189,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true })
 })
 
-async function seed(manifest: ReturnType<typeof makeManifest>): Promise<void> {
+async function seed(manifest: { name: string }): Promise<void> {
   const dir = join(pluginsDir(), manifest.name)
   mkdirSync(dir, { recursive: true })
   await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
@@ -588,5 +588,101 @@ describe('writePluginConfig — the non-interactive core', () => {
     })
     expect((await readFile(pluginConfigPath('core'))).equals(before)).toBe(true)
     expect(configSiblings('core')).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// configure — every shipped example, from its own declared inputs
+// ---------------------------------------------------------------------------
+
+const EXAMPLES_DIR = join(import.meta.dir, '..', '..', '..', 'examples', 'plugins')
+
+/** One declared input as the manifest schema emits it. */
+type ShippedInput = { type?: string; required?: boolean; default?: unknown }
+type ShippedManifest = { name: string; inputs?: Record<string, ShippedInput>; secrets?: string[] }
+
+/** A shipped example's manifest, loaded the way the runtime loads it. */
+async function shippedManifest(name: string): Promise<ShippedManifest> {
+  const mod = (await import(join(EXAMPLES_DIR, name, 'manifest.ts'))) as { manifest: ShippedManifest }
+  return mod.manifest
+}
+
+/**
+ * The body `--from` takes, built from the manifest's OWN declared inputs:
+ * every input carrying a default, at that default. A name in `secrets` is
+ * left out even when it carries one — the verb refuses to persist a secret,
+ * and a loop that fed it one would be testing the refusal, not the walk.
+ */
+function bodyFromDefaults(manifest: ShippedManifest): Record<string, unknown> {
+  const secrets = new Set(manifest.secrets ?? [])
+  const body: Record<string, unknown> = {}
+  for (const [key, input] of Object.entries(manifest.inputs ?? {})) {
+    if (input.default !== undefined && !secrets.has(key)) body[key] = input.default
+  }
+  return body
+}
+
+/**
+ * Seed the manifest as parsed data — the fixture form this file already
+ * uses — run `configure <name> --from <its own defaults>` against the temp
+ * home, and read back what was written through the runtime's own loader.
+ */
+async function configureFromOwnInputs(manifest: ShippedManifest) {
+  await seed(manifest)
+  const { code, stdout, stderr } = await capture([manifest.name, '--from', JSON.stringify(bodyFromDefaults(manifest))])
+  const config = code === 0 ? await loadPluginConfig(pluginConfigPath(manifest.name)) : null
+  return { code, stdout, stderr, config }
+}
+
+describe('configure — every shipped example, from its own declared inputs', () => {
+  test('for EVERY directory under examples/plugins, --from built from the manifest\'s own defaults exits 0 and the written file parses through loadPluginConfig', async () => {
+    // What this loop proves, and what it does NOT. It proves that a config
+    // built from each example's declared defaults PARSES: the resolver
+    // accepts it and `loadPluginConfig` reads it back. It does not prove
+    // where those defaults came from. A default copied out of somebody's
+    // real deployment parses exactly as well as a placeholder, and this loop
+    // is green over it. Provenance is `src/__tests__/example-defaults.test.ts`'s
+    // job — the guard to read before trusting a default. Two checks, two
+    // properties; neither stands in for the other.
+    const dirs = readdirSync(EXAMPLES_DIR, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort()
+    // Iterated over the directory, never a roster, and guarded against an
+    // empty glob: fewer directories than the tree is known to hold is a
+    // wrong path, not a shorter roster.
+    expect(dirs.length).toBeGreaterThanOrEqual(12)
+
+    for (const name of dirs) {
+      const manifest = await shippedManifest(name)
+      const body = bodyFromDefaults(manifest)
+      const { code, stderr, config } = await configureFromOwnInputs(manifest)
+      // The example name in the assertion, so a red names the directory.
+      expect({ name, code, stderr }).toEqual({ name, code: 0, stderr: '' })
+      expect(config).not.toBeNull()
+      // Every defaulted input made it to the file, at its declared value.
+      expect(Object.fromEntries(Object.keys(body).map((k) => [k, config![k]]))).toEqual(body)
+    }
+  })
+
+  test('a plugin declaring a name in both inputs and secrets: the same loop still omits the key from the written file', async () => {
+    // No shipped example declares this shape — a credential is declared in
+    // `secrets` alone — so the case is a fixture, driven through the same
+    // body builder and the same invocation the loop above uses.
+    const manifest = makeManifest(
+      'both',
+      {
+        repo: { type: 'string', default: 'example-owner/example-repo' },
+        token: { type: 'string', default: 'your-token', description: 'An API token.' },
+      },
+      ['token'],
+    )
+    const { code, stdout, config } = await configureFromOwnInputs(manifest)
+    expect(code).toBe(0)
+    expect(config).toEqual({ repo: 'example-owner/example-repo' })
+    expect(Object.hasOwn(config!, 'token')).toBe(false)
+    expect(await readFile(pluginConfigPath('both'), 'utf8')).not.toContain('your-token')
+    expect(stdout).toContain('token')
+    expect(stdout).toMatch(/environment variable/)
   })
 })
