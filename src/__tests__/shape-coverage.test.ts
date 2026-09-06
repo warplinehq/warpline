@@ -290,7 +290,12 @@ const REGISTRY: readonly ShapeEntry[] = [
   {
     shape: 7,
     example: 'anomaly-issue',
-    partial: 'fans in from one source and writes back; several sources with per-source isolation is the enrich example\'s act',
+    // The write-back case: one upstream source, one external system written
+    // to, and a ledger so a retry never files twice. Registered under 7
+    // because writing back is where a fan-in ends up, and kept partial
+    // because the shape's defining act — several sources, each isolated — is
+    // link-enrich's, above.
+    partial: 'writes back to one external system from one source, with a ledger against duplicates; the fan-in act itself is link-enrich\'s',
     act: async (home) => {
       seed(home, 'state/anomalies.json', { anomalies: METRICS.series })
       const result = await withEnv('GITHUB_TOKEN', 'placeholder-token', () =>
@@ -340,9 +345,8 @@ describe('the shape registry', () => {
 
 // Still owed: the completeness assertion, `[...new Set(REGISTRY.filter(e =>
 // !e.partial).map(e => e.shape))].sort()` equal to `[1, 2, 3, 4, 5, 6, 7]`.
-// It cannot be green until a dedicated example exists for each of the shapes
-// that today have only a partial entry (aggregate a declared dependency's
-// Output; fan in from several sources with per-source isolation). Add it in
-// the plan that lands the last of those, not before:
-// a red assertion for work that is not this file's would make every
-// intervening change red for a reason unrelated to its own.
+// Every shape now has a dedicated, non-partial entry, so the assertion would
+// be green today. It is added by the plan that closes the example roster,
+// alongside the last examples to land, not here: the shape-3 entry above
+// asserts the half of the aggregate act a handler can perform, and the
+// assertion's own comment should say so where it is asserted.
