@@ -278,8 +278,8 @@ describe('the shape registry', () => {
 // Still owed: the completeness assertion, `[...new Set(REGISTRY.filter(e =>
 // !e.partial).map(e => e.shape))].sort()` equal to `[1, 2, 3, 4, 5, 6, 7]`.
 // It cannot be green until a dedicated example exists for each of the shapes
-// that today have none or only a partial entry (aggregate a dependency's
-// Output, derive without storing, take operator input, fan in with per-source
-// isolation). Add it in the plan that lands the last of those, not before:
+// that today have only a partial entry (aggregate a declared dependency's
+// Output; fan in from several sources with per-source isolation). Add it in
+// the plan that lands the last of those, not before:
 // a red assertion for work that is not this file's would make every
 // intervening change red for a reason unrelated to its own.
