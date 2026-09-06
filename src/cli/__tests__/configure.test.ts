@@ -12,15 +12,16 @@
  * approve.test.ts uses, so they stay out of the `warpline/*` resolution path.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
 import { isInteractive, lineReader } from '../prompt.js'
 import { run, writePluginConfig } from '../configure.js'
 import { _setHome, pluginConfigPath, pluginsDir } from '../../lib/paths.js'
 import { loadPluginConfig } from '../../lib/plugin-config.js'
+import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 
 // ---------------------------------------------------------------------------
 // Stream helpers
@@ -108,8 +109,9 @@ describe('lineReader', () => {
   })
 
   test('encoding: a non-ASCII, non-normalised line comes back byte for byte', async () => {
-    // `e` + COMBINING ACUTE ACCENT stays decomposed; NFC would fold it to U+00E9.
-    const line = 'café é 日本 \u{1f4a1}'
+    // `e` + COMBINING ACUTE ACCENT, spelled as escapes so no editor can
+    // normalise it away; NFC would fold it to U+00E9.
+    const line = 'caf\u00e9 e\u0301 \u65e5\u672c \u{1f4a1}'
     const out = new Sink()
     const got = await askAll(Readable.from([Buffer.from(`${line}\n`, 'utf8')]), out, ['q? '])
     expect(got).toEqual([line])
@@ -206,28 +208,78 @@ interface Outcome {
   out: string
 }
 
-/** Run `configure` in-process with the process streams captured. */
+/**
+ * Containment: the process working directory and the temp root, before and
+ * after, with the resolved home the ONLY place anything may appear or change.
+ *
+ * The temp root is the mkdtemp parent that CONTAINS the home, not the
+ * system temp dir: other test files and other processes write there and a
+ * walk over it would flake. The root's sibling area beside `home/` is what
+ * catches a write that escaped the home by one level. The cwd is listed one
+ * level deep as name, size and mtime: a file created or removed directly in
+ * the repository shows as a new entry or a changed directory mtime.
+ */
+function cwdListing(): string[] {
+  const cwd = process.cwd()
+  return readdirSync(cwd)
+    .sort()
+    .map((name) => {
+      const s = statSync(join(cwd, name))
+      return `${name}|${s.size}|${s.mtimeMs}`
+    })
+}
+
+async function contained<T>(fn: () => Promise<T>): Promise<T> {
+  const cwdBefore = cwdListing()
+  const rootBefore = await snapshotHome(root)
+  const result = await fn()
+  const rootAfter = await snapshotHome(root)
+  expect(cwdListing()).toEqual(cwdBefore)
+  const changed = [
+    ...rootAfter.filter((line) => !rootBefore.includes(line)),
+    ...rootBefore.filter((line) => !rootAfter.includes(line)),
+  ]
+  expect(changed.filter((line) => !line.startsWith('home/'))).toEqual([])
+  return result
+}
+
+/**
+ * Run `configure` in-process with the process streams captured. Every
+ * invocation in this file goes through here, so every one — the refusals
+ * included — is inside the containment bracket.
+ */
 async function capture(argv: string[], input?: Readable & { isTTY?: boolean }): Promise<Outcome> {
-  const realOut = process.stdout.write
-  const realErr = process.stderr.write
-  let stdout = ''
-  let stderr = ''
-  process.stdout.write = ((chunk: string) => {
-    stdout += chunk
-    return true
-  }) as typeof process.stdout.write
-  process.stderr.write = ((chunk: string) => {
-    stderr += chunk
-    return true
-  }) as typeof process.stderr.write
-  const out = new Sink()
-  try {
-    const code = input ? await run(argv, { input, output: out }) : await run(argv)
-    return { code, stdout, stderr, out: out.text }
-  } finally {
-    process.stdout.write = realOut
-    process.stderr.write = realErr
-  }
+  return contained(async () => {
+    const realOut = process.stdout.write
+    const realErr = process.stderr.write
+    let stdout = ''
+    let stderr = ''
+    process.stdout.write = ((chunk: string) => {
+      stdout += chunk
+      return true
+    }) as typeof process.stdout.write
+    process.stderr.write = ((chunk: string) => {
+      stderr += chunk
+      return true
+    }) as typeof process.stderr.write
+    const out = new Sink()
+    try {
+      const code = input ? await run(argv, { input, output: out }) : await run(argv)
+      return { code, stdout, stderr, out: out.text }
+    } finally {
+      process.stdout.write = realOut
+      process.stderr.write = realErr
+    }
+  })
+}
+
+/** The bytes the atomic writer emits for `value`: pretty-printed, no trailing newline. */
+const jsonBytes = (value: unknown) => Buffer.from(JSON.stringify(value, null, 2), 'utf8')
+
+/** Anything left beside `<plugin>.json` in the config directory: a temp sibling that was never renamed away. */
+function configSiblings(name: string): string[] {
+  const dir = dirname(pluginConfigPath(name))
+  return existsSync(dir) ? readdirSync(dir).filter((f) => f !== `${name}.json`) : []
 }
 
 const readConfig = async (name: string) => JSON.parse(await readFile(pluginConfigPath(name), 'utf8')) as Record<string, unknown>
@@ -293,20 +345,35 @@ describe('configure — the walk', () => {
     for (const text of [raw, out, stdout, stderr]) expect(text).not.toContain(sentinel)
   })
 
-  test('6: a non-ASCII, non-normalised answer round-trips through the written file unchanged', async () => {
+  test('6: a non-ASCII, non-normalised answer round-trips through the written file byte for byte', async () => {
     await seed(makeManifest('uni', { note: { type: 'string' } }))
-    const line = 'café é 日本 \u{1f4a1}'
+    // `e` + COMBINING ACUTE ACCENT stays decomposed: a comparison of decoded
+    // strings can pass while a normalisation has happened, so compare bytes.
+    const line = 'caf\u00e9 e\u0301 \u65e5\u672c \u{1f4a1}'
     const { code } = await capture(['uni'], tty([line]))
     expect(code).toBe(0)
-    expect((await readConfig('uni')).note).toBe(line)
+    const written = await readFile(pluginConfigPath('uni'))
+    expect(written.equals(jsonBytes({ note: line }))).toBe(true)
+    expect(written.includes(Buffer.from('é', 'utf8'))).toBe(true)
+    expect(written.includes(Buffer.from('\u00e9 \u65e5', 'utf8'))).toBe(false)
   })
 
-  test('7: input ending before every question is answered is a refusal, and it leaves no file where none existed', async () => {
+  test('7: input ending before every question is answered is a refusal: no file where none existed, an existing file byte-identical, no temp sibling', async () => {
     await seed(makeManifest('four', FOUR))
     const { code, stderr } = await capture(['four'], tty(['one']))
     expect(code).toBe(1)
     expect(stderr).toMatch(/[Nn]othing was written/)
     expect(existsSync(pluginConfigPath('four'))).toBe(false)
+    expect(configSiblings('four')).toEqual([])
+
+    // Now with a config already on disk: the refusal leaves it byte-identical.
+    const seeded = await capture(['four', '--from', JSON.stringify(FOUR_BODY)])
+    expect(seeded.code).toBe(0)
+    const before = await readFile(pluginConfigPath('four'))
+    const refused = await capture(['four'], tty(['changed']))
+    expect(refused.code).toBe(1)
+    expect((await readFile(pluginConfigPath('four'))).equals(before)).toBe(true)
+    expect(configSiblings('four')).toEqual([])
   })
 
   test('9: an empty answer takes the default; a required input with no default and no answer is reported, not written as undefined', async () => {
@@ -372,6 +439,17 @@ describe('configure — --from <json>', () => {
     expect(bad.stderr).toContain("input 'zulu' must be a string")
     expect(bad.stderr).not.toContain('7')
     expect(existsSync(pluginConfigPath('four'))).toBe(false)
+    expect(configSiblings('four')).toEqual([])
+
+    // The same refusal against a config already on disk leaves it byte-identical.
+    const seeded = await capture(['four', '--from', JSON.stringify(FOUR_BODY)])
+    expect(seeded.code).toBe(0)
+    const before = await readFile(pluginConfigPath('four'))
+    const badAgain = await capture(['four', '--from', JSON.stringify({ ...FOUR_BODY, alpha: ['no'] })])
+    expect(badAgain.code).toBe(1)
+    expect((await readFile(pluginConfigPath('four'))).equals(before)).toBe(true)
+    expect(configSiblings('four')).toEqual([])
+    rmSync(pluginConfigPath('four'))
 
     // A key no input declares.
     const extra = await capture(['four', '--from', JSON.stringify({ ...FOUR_BODY, extra: 'e' })])
@@ -417,12 +495,14 @@ describe('configure — --from <json>', () => {
     expect(({} as { polluted?: unknown }).polluted).toBeUndefined()
   })
 
-  test('6b: a non-ASCII, non-normalised value round-trips through --from unchanged', async () => {
+  test('6b: a non-ASCII, non-normalised value round-trips through --from byte for byte', async () => {
     await seed(makeManifest('uni', { note: { type: 'string' } }))
-    const line = 'café é 日本 \u{1f4a1}'
+    const line = 'caf\u00e9 e\u0301 \u65e5\u672c \u{1f4a1}'
     const { code } = await capture(['uni', '--from', JSON.stringify({ note: line })])
     expect(code).toBe(0)
-    expect((await readConfig('uni')).note).toBe(line)
+    const written = await readFile(pluginConfigPath('uni'))
+    expect(written.equals(jsonBytes({ note: line }))).toBe(true)
+    expect(written.includes(Buffer.from('é', 'utf8'))).toBe(true)
   })
 })
 
@@ -452,16 +532,23 @@ describe('configure — refusals', () => {
     expect(existsSync(join(home, 'config'))).toBe(false)
   })
 
-  test('8: a configure invocation creates nothing outside the resolved home', async () => {
+  test('8: every invocation above ran inside the containment bracket, and the bracket has teeth', async () => {
+    // `capture` brackets every call, refusals included. This case proves the
+    // bracket itself: a write that lands beside the home, not under it, fails.
     await seed(makeManifest('four', FOUR))
-    const before = readdirSync(root).sort()
-    const cwdBefore = readdirSync(process.cwd()).sort()
     const { code } = await capture(['four', '--from', JSON.stringify(FOUR_BODY)])
     expect(code).toBe(0)
-    expect(readdirSync(root).sort()).toEqual(before)
-    expect(readdirSync(process.cwd()).sort()).toEqual(cwdBefore)
-    expect(existsSync(pluginConfigPath('four'))).toBe(true)
-    expect(pluginConfigPath('four').startsWith(home)).toBe(true)
+    expect(pluginConfigPath('four').startsWith(`${home}/`)).toBe(true)
+
+    let caught: unknown
+    try {
+      await contained(async () => {
+        await writeFile(join(root, 'escaped.json'), '{}')
+      })
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toBeDefined()
   })
 })
 
@@ -479,22 +566,27 @@ describe('writePluginConfig — the non-interactive core', () => {
         ['token'],
       ),
     )
-    const result = await writePluginConfig('core', {})
+    const result = await contained(() => writePluginConfig('core', {}))
     expect(result.written).toEqual(['a'])
     expect(result.needed).toEqual(['b'])
+    expect(result.secrets).toEqual(['token'])
     expect(await readConfig('core')).toEqual({ a: 'placeholder-a' })
 
-    const again = await writePluginConfig('core', { b: 3, c: true })
+    const again = await contained(() => writePluginConfig('core', { b: 3, c: true }))
     expect(again.written).toEqual(['a', 'b', 'c'])
     expect(again.needed).toEqual([])
     expect(await readConfig('core')).toEqual({ a: 'placeholder-a', b: 3, c: true })
+    expect(configSiblings('core')).toEqual([])
   })
 
   test('refuses a wrong-typed value through the resolver and leaves an existing file untouched', async () => {
     await seed(makeManifest('core', { a: { type: 'number' } }))
-    await writePluginConfig('core', { a: 1 })
+    await contained(() => writePluginConfig('core', { a: 1 }))
     const before = await readFile(pluginConfigPath('core'))
-    await expect(writePluginConfig('core', { a: 'one' })).rejects.toThrow("input 'a' must be a number")
+    await contained(async () => {
+      await expect(writePluginConfig('core', { a: 'one' })).rejects.toThrow("input 'a' must be a number")
+    })
     expect((await readFile(pluginConfigPath('core'))).equals(before)).toBe(true)
+    expect(configSiblings('core')).toEqual([])
   })
 })
