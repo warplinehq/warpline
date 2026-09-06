@@ -150,14 +150,15 @@ write against it. In the runtime's own names the order is
 `manifest_default -> config_file -> invocation_args`, and `invocation_args`
 wins.
 
-**Tier 3 from the command line.** `warpline run <plugin> <action> --input
-key=value` supplies a per-invocation argument. The flag is repeatable, and each
-pair is split on its first `=`, so a value may itself contain one. What it
-carries is a **string**, and nothing converts it. An input declared as
-`number`, `boolean`, `array` or `object` given a value this way fails the type
-check with a problem naming the key and the expected type — `input
-'retention_days' must be a number` — the same problem a wrong-typed config
-value produces, and the run fails once without retrying. An input of one of
+**Tier 3 from the command line.**
+`warpline run <plugin> <action> --input key=value` supplies a per-invocation
+argument. The flag is repeatable, and each pair is split on its first `=`, so a
+value may itself contain one. What it carries is a **string**, and nothing
+converts it. An input declared as `number`, `boolean`, `array` or `object`
+given a value this way fails the type check with a problem naming the key and
+the expected type — `input 'retention_days' must be a number` — the same
+problem a wrong-typed config value produces, and the run fails once without
+retrying. An input of one of
 those four types takes its value from `<home>/config/<plugin>.json` or from
 its manifest default; the command line is for text. That is the flag's
 ceiling as it stands, and this guide promises nothing past it.
