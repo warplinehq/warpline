@@ -72,7 +72,7 @@ import {
   readEngineState,
   writeEngineState,
 } from './engine-state-store.js'
-import type { Denial, EngineState, PendingGate } from '../schemas/engine-state.js'
+import type { Denial, EngineState, PendingGate, PluginRun } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs, RETENTION_DAYS } from './run-log-store.js'
 import type { RunLog } from '../schemas/run-log.js'
 import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
@@ -1134,13 +1134,18 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // here would let the two disagree by a millisecond and make that
             // anchoring a lie.
             const completedAt = new Date().toISOString()
+            // Read before the overwrite, or the carry-forward has nothing to
+            // carry. There may be no entry yet — a plugin's first run.
+            const priorGatedEntry = state.plugin_runs[pluginName]
             state.plugin_runs[pluginName] = {
               last_run_at: completedAt,
               status: 'gated',
               duration_ms: Date.now() - entryStart,
               // last_output: written here as well as on the autonomous path. A
-              // gated run produced its Outputs before the gate saw them.
-              ...lastOutputOf(result),
+              // gated run produced its Outputs before the gate saw them — and
+              // a gated run that produced none leaves the plugin's prior Output
+              // where it was.
+              ...lastOutputOf(result, priorGatedEntry),
             }
 
             // -- Park the REAL result ------------------------------------
@@ -1185,12 +1190,16 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         onPluginEnd?.(pluginName, finalStatus, autonomousElapsed)
 
         // -- Update plugin_runs in state --
+        // Read before the overwrite, or the carry-forward has nothing to carry.
+        const priorAutonomousEntry = state.plugin_runs[pluginName]
         state.plugin_runs[pluginName] = {
           last_run_at: new Date().toISOString(),
           status: result.status === 'failed' ? 'failed' : result.status === 'partial' ? 'partial' : 'success',
           duration_ms: Date.now() - entryStart,
-          // last_output: absent, not null, when this run produced no Output.
-          ...lastOutputOf(result),
+          // last_output: this run's Output when it produced one, the plugin's
+          // prior Output when it did not, and absent — not null — when there
+          // has never been one.
+          ...lastOutputOf(result, priorAutonomousEntry),
         }
       }),
     )
@@ -1719,6 +1728,31 @@ export async function applyPendingGate(
     //
     // A superseded denial does not protect the entry: it is already stale, and
     // the plugin being due again is the correct outcome.
+    //
+    // **The delete takes `last_output` with it, and that loss is permanent.**
+    // The Output pointer lives inside the entry, so deleting the entry deletes
+    // it. The three write sites carry a plugin's prior Output forward across a
+    // run that produced none, and they do it by reading the entry that is about
+    // to be overwritten — after this delete there is no entry to read, so the
+    // key comes back only from a FRESH Output on a later advance. The destroyed
+    // record itself never returns. An advance that again produces nothing
+    // leaves the plugin reading as having run and never produced, which is
+    // exactly the misreport the carry-forward exists to stop, reached through a
+    // second door.
+    //
+    // The bound is on the TRIGGER, not on the loss. This path fires only on
+    // `dependency_moved` or `expired`, and the delete is already skipped while
+    // a denial is live. The plugin being due again is a re-run OPPORTUNITY and
+    // not a repair: writing that the loss is bounded to one advance would be a
+    // false claim in this docstring.
+    //
+    // The delete stands anyway, because the entry is what makes the plugin due
+    // and dueness is the whole point of the refusal. The change that would
+    // remove the residual is structural rather than local: lifting
+    // `last_output` out of `plugin_runs` into a sibling top-level key, so an
+    // Output's lifetime stops being bound to a run record's. That is a change
+    // to a published schema shape with a migration for every state file on
+    // disk, and it is not made here.
     const standing = denialStanding(state, gate.plugin, manifest)
 
     state.pending_gates = state.pending_gates.filter((g) => g !== gate)
@@ -1757,11 +1791,17 @@ export async function applyPendingGate(
   // and the Output pointer the run already carried. `last_run_at` is the gate's
   // completion, not `now` — a later approval must not move when the work
   // happened.
+  //
+  // The prior entry read here is the `gated` one this same run wrote, so a
+  // gated run that produced no Output has already had the plugin's prior Output
+  // carried through the park — this site reads what is there and carries it one
+  // step further, rather than reconstructing it.
+  const priorApprovedEntry = state.plugin_runs[gate.plugin]
   state.plugin_runs[gate.plugin] = {
     last_run_at: completedAt,
     status: gate.plugin_result.status,
     duration_ms: Math.max(0, new Date(completedAt).getTime() - startedMs),
-    ...lastOutputOf(gate.plugin_result),
+    ...lastOutputOf(gate.plugin_result, priorApprovedEntry),
   }
   // Marked, not deleted. A deleted gate is an invisible one, and the next
   // `approve` would fall through to the Grant path instead of refusing.
@@ -1780,16 +1820,48 @@ export async function applyPendingGate(
 /**
  * The `last_output` slice of a `plugin_runs` entry, spread into the write.
  *
- * Returns an EMPTY object when the result produced no Output, so the key is
- * absent from the JSON rather than present as `null` or `{}` — a reader should
- * not have to tell an unproductive run from a malformed pointer.
+ * The run's own most recent Output when it produced one, otherwise whatever the
+ * entry being overwritten already held, otherwise nothing.
+ *
+ * **Why the carry-forward.** `last_output` is a fact about the PLUGIN — "the
+ * most recent Output this plugin produced", as `PluginRunSchema` defines it in
+ * `schemas/engine-state.ts` — and not a fact about its last run. It only lives
+ * inside the run entry because that is where the pointer was put. So a run that
+ * produced no Output has said nothing about what the plugin produced, and a
+ * write that dropped the key was answering a question it had not been asked.
+ * The same schema comment already argues this for the pruned-log case: deleting
+ * the pointer to avoid a dangling `run_id` would throw away the only record
+ * that the Output existed. An Output-less run is that argument's other half.
+ *
+ * **Status-blind, deliberately.** What survives is keyed on the run producing
+ * nothing, never on how the run ended. A throw, a returned `failed`, and a
+ * SUCCESS carrying an empty `artifacts_produced` are one case here. Gating the
+ * carry-forward on `failed` would make the field mean a fourth thing — "the
+ * last Output, unless the plugin last succeeded without producing one" — which
+ * no reader could state and none of the three writers agree on.
+ *
+ * **This is the lifetime of the seam.** `dependencyOutputs` above projects this
+ * key straight into a declared consumer's `capabilities.dependencies`, so how
+ * long it survives here is exactly how long a consumer can read its producer.
+ * A consumer that reads `null` concludes the producer has never produced, and
+ * the shipped examples say so in their own Output.
+ *
+ * Returns an EMPTY object when there is nothing to write, so the key is absent
+ * from the JSON rather than present as `null` or `{}` — a reader should not
+ * have to tell an unproductive run from a malformed pointer. That contract is
+ * unchanged: a plugin that has never produced still carries no key at all.
  *
  * "Most recent" is the last element: `artifacts_produced` is written in the
  * order the handler produced them.
  */
-function lastOutputOf(result: SkillResult): { last_output?: OutputRecord } {
+function lastOutputOf(
+  result: SkillResult,
+  prior: PluginRun | undefined,
+): { last_output?: OutputRecord } {
   const last = result.artifacts_produced.at(-1)
-  return last === undefined ? {} : { last_output: last }
+  if (last !== undefined) return { last_output: last }
+  const carried = prior?.last_output
+  return carried === undefined ? {} : { last_output: carried }
 }
 
 function getDefaultPluginsDir(): string {

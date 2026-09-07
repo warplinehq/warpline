@@ -1131,6 +1131,16 @@ due on the next advance. The parked result was never accepted, so there is no
 accepted run to hold the work back; the `gated` entry existed to stop the
 effects re-firing during the hold, and the hold is over.
 
+The delete takes `last_output` with it, and that loss is permanent. The pointer
+lives inside the entry, and the carry-forward described in § `last_output` works
+by reading the entry it is about to overwrite — with no entry there is nothing
+to carry, so the key returns only from a fresh Output on a later advance, never
+as the record that was deleted. The plugin being due again is a re-run
+opportunity and not a repair: a re-run that also produces no Output leaves the
+plugin reading as having run and never produced. What IS bounded is the trigger.
+This path fires only on the two refusals above — a dependency moved, or the gate
+expired — and the delete is skipped entirely while a denial is live.
+
 **A denial that was live at the moment of the refusal is re-fingerprinted, not
 stranded.** The fingerprint is read out of `plugin_runs[plugin].last_output`, so
 deleting the entry moves it, and a denial recorded against the parked result
@@ -1299,6 +1309,11 @@ A plugin with no declared side effects and no recorded Output hashes the empty
 sets. That is a stable value scoped by its name — it is denied by name — not an
 error.
 
+A run that produces no Output no longer moves the fingerprint. It leaves
+`last_output` as it was (§ `last_output`), so a denial recorded against a real
+proposal stays bound to it across a producer's failed run, rather than being
+superseded by the empty-set hash the same plugin would otherwise fall back to.
+
 ### `last_output`
 
 A pointer to the most recent Output a plugin produced, so a reader can name it
@@ -1306,14 +1321,28 @@ without scanning the runs directory. It is the Output record shape from § 5,
 reused rather than restated — a second shape would be a second thing that could
 disagree with the first.
 
-It is written wherever `plugin_runs` is written, which is both the autonomous
-completion and the supervised park. A gated run produced its Outputs before the
-gate ever saw them, so it carries a pointer like any other run.
+Every write of a `plugin_runs` entry decides this key — the autonomous
+completion, the supervised park, and the approve verb applying a gate. A gated
+run produced its Outputs before the gate ever saw them, so it carries a pointer
+like any other run.
 
-**Absent, not null.** A run that produced no Output writes no `last_output` key
-at all — not `null`, not `{}`. Reading a missing key is unambiguous; reading an
-empty object means guessing whether the run produced nothing or the writer
-failed.
+What each write records is the run's own most recent Output when the run
+produced one, and otherwise the pointer the entry already held. The field is a
+fact about the PLUGIN — the most recent Output it produced — not about its last
+run, so a run that produced nothing has said nothing about it and does not
+clear it.
+
+**Status-blind.** What survives is keyed on the run producing no Output, never
+on how the run ended. A run that threw, a run that returned `failed`, and a run
+that succeeded carrying an empty `artifacts_produced` are one case here. The
+consequence for a reader: this field cannot be read as a health signal for the
+plugin that produced it, and a consumer that needs to know how its dependency's
+latest run went must ask for that separately.
+
+**Absent, not null.** A plugin that has never produced an Output has no
+`last_output` key at all — not `null`, not `{}`. Reading a missing key is
+unambiguous; reading an empty object means guessing whether the plugin produced
+nothing or the writer failed.
 
 The pointer may dangle. Its `run_id` names a run log, and run logs are pruned at
 30 days by mtime (§ 6), so a pointer can outlive the run it names. That resolves
