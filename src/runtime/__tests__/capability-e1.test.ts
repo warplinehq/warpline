@@ -58,7 +58,7 @@ const DEPS_MANIFEST = PluginManifestSchema.parse({
 
 function depsHandle() {
   return mintContext(
-    { manifest: DEPS_MANIFEST, caller: CALLER, dependencyOutputs: {} },
+    { manifest: DEPS_MANIFEST, caller: CALLER, dependencyRuns: {} },
     { granted: false, reason: 'manual-run' },
   ).context.dependencies
 }
@@ -87,6 +87,18 @@ function _theDependencyCallThatMustNotCompile(): void {
   depsHandle().lastOutput('dep-a')
 }
 
+/**
+ * And again over the run-status member, for the reason stated directly above.
+ * The obligation is per-member: the arm over `lastOutput` would stay green if a
+ * later member forgot the caller parameter, so each member owns its own
+ * directive rather than trusting a neighbour's.
+ */
+function _theRunStatusCallThatMustNotCompile(): void {
+  // @ts-expect-error — the caller argument is required. If this line ever
+  // stops erroring, tsc reports TS2578 here and the build fails.
+  depsHandle().lastRun('dep-a')
+}
+
 describe('a member cannot be called without saying who is calling', () => {
   /**
    * The other side of the boundary. Refusing the no-argument call proves
@@ -99,6 +111,7 @@ describe('a member cannot be called without saying who is calling', () => {
 
   test('the second member takes the caller too, and reads through it', () => {
     expect(depsHandle().lastOutput(CALLER, 'dep-a')).toBeNull()
+    expect(depsHandle().lastRun(CALLER, 'dep-a')).toBeNull()
   })
 
   /**

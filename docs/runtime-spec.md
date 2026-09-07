@@ -278,6 +278,28 @@ them together. The mint and the capability registry are deliberately not behind
 it: the registry is a table designed to grow, and publishing it would owe a
 stability promise on every row anybody adds.
 
+`DependenciesHandle` carries two member functions, both taking the caller and a
+name the reading manifest declares:
+
+- `lastOutput(caller, name)` returns that plugin's most recent Output record, or
+  `null` when it has never produced one. See § `last_output` for why that is a
+  fact about the plugin and not about its last run.
+- `lastRun(caller, name)` returns that plugin's last run status — one of
+  `success`, `partial`, `failed`, `skipped`, `gated` — or `null` when it has
+  never run. It is the same enum § `plugin_runs` records, and it is the whole of
+  what this member returns: the failure TEXT a run may carry is not part of it,
+  and no field of the run record other than these two crosses to a different
+  plugin.
+
+An undeclared name throws from either member, through one shared refusal, and
+the message names the reading plugin, the requested name and the manifest field
+to add it to.
+
+`InvokePluginOptions.dependencyRuns` is what a host fills to supply both facts;
+it was named `dependencyOutputs` and carried only the record until 0.2.x. That
+rename is allowed because the field rides `warpline/unstable-runtime`, whose
+promise about any name behind it is stated above and is exactly nothing.
+
 ## 2. Retry Policy
 
 Retries fire only on a first failure whose `SkillResult.retryable === true`.
@@ -1337,7 +1359,9 @@ on how the run ended. A run that threw, a run that returned `failed`, and a run
 that succeeded carrying an empty `artifacts_produced` are one case here. The
 consequence for a reader: this field cannot be read as a health signal for the
 plugin that produced it, and a consumer that needs to know how its dependency's
-latest run went must ask for that separately.
+latest run went asks `capabilities.dependencies.lastRun` for it instead. The two
+answers come from one projection of this same entry, so they cannot disagree
+about which run they describe.
 
 **Absent, not null.** A plugin that has never produced an Output has no
 `last_output` key at all — not `null`, not `{}`. Reading a missing key is

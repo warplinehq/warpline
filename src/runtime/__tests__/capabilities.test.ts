@@ -32,6 +32,7 @@ import {
   type CapabilityGrantWitness,
   type CapabilityMintInput,
   type DependenciesHandle,
+  type DependencyRun,
   type SecretsHandle,
 } from '../capabilities.js'
 import { invokePlugin } from '../invoke-plugin.js'
@@ -320,16 +321,22 @@ describe('the secrets handle', () => {
 describe('the dependencies handle', () => {
   const CALLER: CapabilityCaller = { plugin: 'fixture-plugin', runId: 'run-1' }
   const REC: OutputRecord = { type: 'brief', format: 'json', body: '{"n":1}' }
+  /** A dependency that ran, succeeded, and produced `REC`. */
+  const PRODUCED: DependencyRun = { status: 'success', last_output: REC }
+  /** A dependency that ran, failed, and still carries its prior Output. */
+  const FAILED_AFTER_PRODUCING: DependencyRun = { status: 'failed', last_output: REC }
+  /** A dependency that ran and has never produced anything. */
+  const RAN_PRODUCING_NOTHING: DependencyRun = { status: 'success' }
 
   function handleFor(
     dependencies: string[],
-    dependencyOutputs?: Readonly<Record<string, OutputRecord | null>>,
+    dependencyRuns?: Readonly<Record<string, DependencyRun | null>>,
     witness = NOT_GRANTED,
   ): DependenciesHandle {
     const input: CapabilityMintInput = {
       manifest: manifestDependingOn(dependencies),
       caller: CALLER,
-      ...(dependencyOutputs === undefined ? {} : { dependencyOutputs }),
+      ...(dependencyRuns === undefined ? {} : { dependencyRuns }),
     }
     return mintContext(input, witness).context.dependencies
   }
@@ -344,66 +351,124 @@ describe('the dependencies handle', () => {
   })
 
   test('a declared dependency that produced an Output reads that record', () => {
-    expect(handleFor(['dep-a'], { 'dep-a': REC }).lastOutput(CALLER, 'dep-a')).toEqual(REC)
+    expect(handleFor(['dep-a'], { 'dep-a': PRODUCED }).lastOutput(CALLER, 'dep-a')).toEqual(REC)
   })
 
   test('a declared dependency that produced none reads null', () => {
     expect(handleFor(['dep-a'], {}).lastOutput(CALLER, 'dep-a')).toBeNull()
+    expect(
+      handleFor(['dep-a'], { 'dep-a': RAN_PRODUCING_NOTHING }).lastOutput(CALLER, 'dep-a'),
+    ).toBeNull()
   })
 
   test('a declared dependency that has never run reads null too', () => {
-    // Same answer as above on purpose. "Produced no Output" is one state from
-    // a reader's side, and splitting it would make the caller branch on a
-    // difference it cannot act on. The record the engine projects carries an
-    // explicit `null` for a dependency it has no run for; a record missing the
-    // key entirely is the same answer through `?? null`.
+    // The record the engine projects carries an explicit `null` for a
+    // dependency it has no run for; a record missing the key entirely is the
+    // same answer through `?? null`. What distinguishes never-run from
+    // ran-and-produced-nothing is `lastRun`, not this member.
     expect(handleFor(['dep-a', 'dep-b'], { 'dep-a': null }).lastOutput(CALLER, 'dep-a')).toBeNull()
-    expect(handleFor(['dep-a', 'dep-b'], { 'dep-a': REC }).lastOutput(CALLER, 'dep-b')).toBeNull()
+    expect(
+      handleFor(['dep-a', 'dep-b'], { 'dep-a': PRODUCED }).lastOutput(CALLER, 'dep-b'),
+    ).toBeNull()
+  })
+
+  /**
+   * The second member, and the reason the pair exists. `lastOutput` alone
+   * cannot separate a producer that has never started from one that produced
+   * yesterday and failed this morning — the second reads its preserved record
+   * either way — and both shipped examples published "nothing yet" in the
+   * second case until the status arrived beside it.
+   */
+  test('a declared dependency that ran reads its last run status', () => {
+    expect(handleFor(['dep-a'], { 'dep-a': PRODUCED }).lastRun(CALLER, 'dep-a')).toBe('success')
+    expect(
+      handleFor(['dep-a'], { 'dep-a': RAN_PRODUCING_NOTHING }).lastRun(CALLER, 'dep-a'),
+    ).toBe('success')
+  })
+
+  test('a failed run reads failed while its preserved Output still reads', () => {
+    // The four-state pair, at the one case the gap was raised for.
+    const handle = handleFor(['dep-a'], { 'dep-a': FAILED_AFTER_PRODUCING })
+    expect(handle.lastRun(CALLER, 'dep-a')).toBe('failed')
+    expect(handle.lastOutput(CALLER, 'dep-a')).toEqual(REC)
+  })
+
+  test('every declared name reads null from lastRun for a plugin that has never run', () => {
+    // Both shapes of "no run": an explicit `null` entry, and a name the record
+    // does not carry at all.
+    const handle = handleFor(['dep-a', 'dep-b'], { 'dep-a': null })
+    expect(handle.lastRun(CALLER, 'dep-a')).toBeNull()
+    expect(handle.lastRun(CALLER, 'dep-b')).toBeNull()
   })
 
   test('a manifest declaring no dependencies can read nothing', () => {
-    const handle = handleFor([], { 'dep-a': REC })
+    const handle = handleFor([], { 'dep-a': PRODUCED })
     expect(() => handle.lastOutput(CALLER, 'dep-a')).toThrow(/dep-a/)
+    expect(() => handle.lastRun(CALLER, 'dep-a')).toThrow(/dep-a/)
   })
 
   test('an undeclared name throws, naming the plugin, the name and the manifest field', () => {
-    const handle = handleFor(['dep-a'], { 'dep-a': REC })
+    const handle = handleFor(['dep-a'], { 'dep-a': PRODUCED })
     expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/fixture-plugin/)
     expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/dep-z/)
     expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/dependencies/)
   })
 
   /**
-   * The refusal keys off the declaration, not off availability. "It happened to
-   * be there" is not an argument: a record delivered under a name the manifest
-   * never declared is still a read the graph does not authorise.
+   * The same refusal, from the second member. Asserted rather than assumed:
+   * both members route through one local function precisely so they cannot
+   * drift into different rules, and this is what would red if a later edit
+   * gave the second member its own laxer copy.
    */
-  test('a name present in the delivered record but undeclared still throws', () => {
-    const handle = handleFor(['dep-a'], { 'dep-a': REC, 'dep-z': REC })
-    expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/dep-z/)
+  test('an undeclared name throws from lastRun exactly as from lastOutput', () => {
+    const handle = handleFor(['dep-a'], { 'dep-a': PRODUCED })
+    expect(() => handle.lastRun(CALLER, 'dep-z')).toThrow(/fixture-plugin/)
+    expect(() => handle.lastRun(CALLER, 'dep-z')).toThrow(/dep-z/)
+    expect(() => handle.lastRun(CALLER, 'dep-z')).toThrow(/dependencies/)
   })
 
   /**
-   * The whole surface, asserted as a set. One method and no enumeration — a
-   * handler cannot walk the record, so the order of `manifest.dependencies` and
-   * the order of the engine's projection are unobservable and are not contract.
+   * The refusal keys off the declaration, not off availability. "It happened to
+   * be there" is not an argument: a record delivered under a name the manifest
+   * never declared is still a read the graph does not authorise — and it must
+   * hold for BOTH members, or one of them keys off the record instead.
    */
-  test('the handle exposes exactly one method and no enumeration', () => {
-    const handle = handleFor(['dep-a'], { 'dep-a': REC })
-    expect(Object.keys(handle).sort()).toEqual(['lastOutput'])
+  test('a name present in the delivered record but undeclared still throws', () => {
+    const handle = handleFor(['dep-a'], { 'dep-a': PRODUCED, 'dep-z': PRODUCED })
+    expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/dep-z/)
+    expect(() => handle.lastRun(CALLER, 'dep-z')).toThrow(/dep-z/)
+  })
+
+  /**
+   * The whole surface, asserted as an EXACT set — never a subset check, which
+   * is what would let a third member appear unannounced. Two methods and no
+   * enumeration: a handler cannot walk the record, so the order of
+   * `manifest.dependencies` and the order of the engine's projection are
+   * unobservable and are not contract. The set moved from one member to two on
+   * 2026-09-07, when the rule against a second method was withdrawn; the
+   * mechanism this assertion mechanises did not change, only its membership.
+   */
+  test('the handle exposes exactly two methods and no enumeration', () => {
+    const handle = handleFor(['dep-a'], { 'dep-a': PRODUCED })
+    expect(Object.keys(handle).sort()).toEqual(['lastOutput', 'lastRun'])
     expect(typeof handle.lastOutput).toBe('function')
+    expect(typeof handle.lastRun).toBe('function')
   })
 
   /**
    * The manual path. `effect: null` skips both withhold arms, so the
    * member is minted on a run carrying no grant and with no record supplied.
-   * Every declared name reads `null`; an undeclared one still throws.
+   * Every declared name reads `null` from both members; an undeclared one
+   * still throws.
    */
   test('on the manual path it is minted, reads null, and still refuses an undeclared name', () => {
     const handle = handleFor(['dep-a', 'dep-b'])
     expect(handle.lastOutput(CALLER, 'dep-a')).toBeNull()
     expect(handle.lastOutput(CALLER, 'dep-b')).toBeNull()
+    expect(handle.lastRun(CALLER, 'dep-a')).toBeNull()
+    expect(handle.lastRun(CALLER, 'dep-b')).toBeNull()
     expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/dep-z/)
+    expect(() => handle.lastRun(CALLER, 'dep-z')).toThrow(/dep-z/)
   })
 
   test('the member gives no second answer about upstream change, and touches no disk', async () => {
@@ -547,6 +612,12 @@ describe('the handle reaches a handler through invokePlugin', () => {
         } catch (error) {
           undeclared = error.message
         }
+        let undeclaredRun = 'no-throw'
+        try {
+          capabilities.dependencies.lastRun(capabilities.caller, 'dep-z')
+        } catch (error) {
+          undeclaredRun = error.message
+        }
         const record = capabilities.dependencies.lastOutput(capabilities.caller, 'dep-a')
         return {
           status: 'success',
@@ -557,8 +628,10 @@ describe('the handle reaches a handler through invokePlugin', () => {
           summary: JSON.stringify({
             type: record === null ? null : record.type,
             body: record === null ? null : JSON.parse(record.body),
+            run: capabilities.dependencies.lastRun(capabilities.caller, 'dep-a'),
             surface: Object.keys(capabilities.dependencies).sort(),
             undeclared,
+            undeclaredRun,
           }),
           artifacts_produced: [],
           schema_version: 1,
@@ -572,7 +645,12 @@ describe('the handle reaches a handler through invokePlugin', () => {
       {},
       {
         pluginsDir: tmpDir,
-        dependencyOutputs: { 'dep-a': { type: 'brief', format: 'json', body: '{"n":1}' } },
+        dependencyRuns: {
+          'dep-a': {
+            status: 'failed',
+            last_output: { type: 'brief', format: 'json', body: '{"n":1}' },
+          },
+        },
       },
       { granted: false, reason: 'manual-run' },
     )
@@ -581,14 +659,23 @@ describe('the handle reaches a handler through invokePlugin', () => {
     const seen = JSON.parse(invocation.result.summary) as {
       type: string | null
       body: { n: number } | null
+      run: string | null
       surface: string[]
       undeclared: string
+      undeclaredRun: string
     }
 
     expect(seen.type).toBe('brief')
     expect(seen.body).toEqual({ n: 1 })
-    expect(seen.surface).toEqual(['lastOutput'])
+    // Both facts through the same hop, and the pair that the seam exists to
+    // deliver: a producer whose LAST run failed, whose record still reads.
+    expect(seen.run).toBe('failed')
+    // An EXACT set, never a subset check — a subset check is what would let a
+    // third member appear unannounced through this tier.
+    expect(seen.surface).toEqual(['lastOutput', 'lastRun'])
     expect(seen.undeclared).toContain('dep-z')
     expect(seen.undeclared).toContain('dependencies')
+    expect(seen.undeclaredRun).toContain('dep-z')
+    expect(seen.undeclaredRun).toContain('dependencies')
   })
 })

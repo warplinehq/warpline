@@ -31,7 +31,7 @@ import {
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { invokePlugin } from './invoke-plugin.js'
-import type { CapabilityGrantWitness } from './capabilities.js'
+import type { CapabilityGrantWitness, DependencyRun } from './capabilities.js'
 
 /**
  * The grant witness for a plugin the engine has already cleared to run.
@@ -1032,26 +1032,38 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // argument drift and the copy that drifts is the one nobody reads.
           const witness = witnessAfterGrantRead(pluginName, manifest.side_effects)
 
-          // What each DECLARED dependency last produced, projected HERE and
-          // not from the state read at the top of the advance. `plugin_runs` is
-          // mutated by each level's own writes below, and level ordering is
-          // what puts a level-0 producer's write before a level-1 consumer's
-          // invocation. A projection hoisted out of this closure is a snapshot
-          // taken before any producer ran: the consumer would read nothing on
-          // every advance while every test handing a literal stayed green.
+          // What each DECLARED dependency last produced and how its last run
+          // ended, projected HERE and not from the state read at the top of the
+          // advance. `plugin_runs` is mutated by each level's own writes below,
+          // and level ordering is what puts a level-0 producer's write before a
+          // level-1 consumer's invocation. A projection hoisted out of this
+          // closure is a snapshot taken before any producer ran: the consumer
+          // would read nothing on every advance while every test handing a
+          // literal stayed green.
           //
           // Declared names only, so the record never carries a key the
-          // consumer's manifest does not list. `last_output` is ABSENT rather
-          // than null for a run that produced none, which the optional chain
-          // and the `?? null` both cover.
-          const dependencyOutputs = Object.fromEntries(
-            manifest.dependencies.map((d) => [d, state.plugin_runs[d]?.last_output ?? null]),
+          // consumer's manifest does not list. `null` for a name with no entry
+          // at all; within an entry, `last_output` is ABSENT rather than null
+          // for a run that produced none, which the member's `?? null` covers.
+          //
+          // ONE projection for both facts. Two would be two reads of a map this
+          // loop mutates, and the one that drifted would be the one nobody
+          // read — the same failure the paragraph above describes for a hoisted
+          // snapshot. `DependencyRun` is a `Pick` of exactly the two fields the
+          // two members expose: this is the boundary where a field is chosen
+          // for exposure to a different plugin, and widening it is what the
+          // leak test watches for.
+          const dependencyRuns = Object.fromEntries(
+            manifest.dependencies.map((d): [string, DependencyRun | null] => {
+              const run = state.plugin_runs[d]
+              return [d, run ? { status: run.status, last_output: run.last_output } : null]
+            }),
           )
 
           invocationResult = await invokePlugin(
             pluginName,
             {},
-            { pluginsDir, runId: run_id, dependencyOutputs },
+            { pluginsDir, runId: run_id, dependencyRuns },
             witness,
           )
         } catch (err) {
@@ -1840,11 +1852,13 @@ export async function applyPendingGate(
  * last Output, unless the plugin last succeeded without producing one" — which
  * no reader could state and none of the three writers agree on.
  *
- * **This is the lifetime of the seam.** `dependencyOutputs` above projects this
+ * **This is the lifetime of the seam.** `dependencyRuns` above projects this
  * key straight into a declared consumer's `capabilities.dependencies`, so how
  * long it survives here is exactly how long a consumer can read its producer.
- * A consumer that reads `null` concludes the producer has never produced, and
- * the shipped examples say so in their own Output.
+ * A consumer that reads `null` from `lastOutput` concludes the producer has
+ * never produced. That conclusion is now sound because of the carry-forward
+ * below, and a consumer that needs to know how the producer's LAST run went
+ * asks `lastRun` for it instead of inferring health from this field.
  *
  * Returns an EMPTY object when there is nothing to write, so the key is absent
  * from the JSON rather than present as `null` or `{}` — a reader should not

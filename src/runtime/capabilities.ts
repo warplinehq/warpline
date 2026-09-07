@@ -21,15 +21,37 @@
  * `src/__tests__/no-grant-recheck.test.ts` is what keeps that true.
  *
  * The registry carries two members, both ungated: the credential-name handle
- * and the reader for what a declared dependency last produced. The apparatus
- * — the required effect field, the projection, the refusal, the witness — was
+ * and the reader for a declared dependency — what it last produced, and how its
+ * last run ended. The apparatus — the required effect field, the projection,
+ * the refusal, the witness — was
  * built and proven before either of them, which is why each arrived already
  * covered by the registry-iterating refusal test and needed no assertion
  * written for it. That is the property the shape was chosen for, and a third
  * member should cost the same.
  */
+import type { PluginRun } from '../schemas/engine-state.js'
 import type { PluginManifest, SideEffectType } from '../schemas/plugin-manifest.js'
 import type { OutputRecord } from '../schemas/skill-result.js'
+
+/**
+ * The two fields of a dependency's last run that may be handed to a different
+ * plugin — and the whole list of them.
+ *
+ * A `Pick`, never the whole `PluginRun`. This type is the boundary where a
+ * field is CHOSEN for exposure across the seam, which makes it the one place a
+ * leak can enter. The free text a producer's failure becomes is built in two
+ * places from whatever a handler threw — `invoke-plugin.ts:771-789` for a
+ * handler throw, which puts it into both the result's `summary` and its
+ * `errors[0].message`, and `engine.ts:1057-1071` for `invokePlugin` itself
+ * throwing. Naming two fields here does not merely leave that text unreturned;
+ * it keeps it out of the mint's scope entirely.
+ *
+ * ONE projection for both facts, and not two. The engine mutates
+ * `state.plugin_runs` during its level loop, so two independent reads of it
+ * could describe two different runs, and the one that drifted would be the one
+ * nobody read.
+ */
+export type DependencyRun = Pick<PluginRun, 'status' | 'last_output'>
 
 /**
  * What the caller learned when it read the Grant, carried forward.
@@ -93,12 +115,13 @@ export interface CapabilityMintInput {
   readonly caller?: CapabilityCaller
   readonly resolvedSecretNames?: readonly string[]
   /**
-   * What each of this plugin's declared dependencies last produced, already
-   * resolved by the caller. A plain record and never a function: the mint runs
-   * once per invocation, above the retry loop, so a closure here could hand two
-   * attempts of one invocation different answers.
+   * What each of this plugin's declared dependencies last produced, and how
+   * that dependency's last run ended — already resolved by the caller, and
+   * `null` for a name the caller has no run for. A plain record and never a
+   * function: the mint runs once per invocation, above the retry loop, so a
+   * closure here could hand two attempts of one invocation different answers.
    */
-  readonly dependencyOutputs?: Readonly<Record<string, OutputRecord | null>>
+  readonly dependencyRuns?: Readonly<Record<string, DependencyRun | null>>
 }
 
 /** What a member's mint function receives, with the optional fields settled. */
@@ -106,7 +129,7 @@ export interface CapabilityMintArgs {
   readonly manifest: PluginManifest
   readonly caller: CapabilityCaller
   readonly resolvedSecretNames: readonly string[]
-  readonly dependencyOutputs: Readonly<Record<string, OutputRecord | null>>
+  readonly dependencyRuns: Readonly<Record<string, DependencyRun | null>>
 }
 
 /**
@@ -159,23 +182,39 @@ export const CAPABILITY_REGISTRY: Readonly<Record<string, CapabilityEntry>> = {
   dependencies: {
     effect: null,
     description:
-      'Reads the Output a plugin this manifest declared as a dependency last produced. Declared names only — an undeclared one throws.',
-    mint: (args): DependenciesHandle => ({
-      lastOutput: (caller: CapabilityCaller, dependencyName: string): OutputRecord | null => {
-        // The caller is required and unread, for the reason `SecretsHandle`
-        // states. `void` keeps it from being deleted as dead code.
-        void caller
+      'Reads the Output a plugin this manifest declared as a dependency last produced, and how its last run ended. Declared names only — an undeclared one throws.',
+    mint: (args): DependenciesHandle => {
+      // ONE refusal, shared by both members. Two copies would be two rules
+      // about the same declaration, and the second could drift into the laxer
+      // one without anything noticing. It interpolates the manifest name, the
+      // requested name and the literal manifest field name, and never a value
+      // read from the record or from state — the message discipline stated
+      // once instead of per member.
+      const requireDeclared = (dependencyName: string, asked: string): void => {
         if (!args.manifest.dependencies.includes(dependencyName)) {
           throw new Error(
-            `Plugin '${args.manifest.name}' requested the Output of '${dependencyName}', which it does not ` +
+            `Plugin '${args.manifest.name}' requested ${asked} of '${dependencyName}', which it does not ` +
               `declare: add '${dependencyName}' to manifest.dependencies, an array of plugin names, ` +
               `before reading it.`,
           )
         }
+      }
 
-        return args.dependencyOutputs[dependencyName] ?? null
-      },
-    }),
+      return {
+        lastOutput: (caller, dependencyName): OutputRecord | null => {
+          // The caller is required and unread, for the reason `SecretsHandle`
+          // states. `void` keeps it from being deleted as dead code.
+          void caller
+          requireDeclared(dependencyName, 'the Output')
+          return args.dependencyRuns[dependencyName]?.last_output ?? null
+        },
+        lastRun: (caller, dependencyName): PluginRun['status'] | null => {
+          void caller
+          requireDeclared(dependencyName, 'the run status')
+          return args.dependencyRuns[dependencyName]?.status ?? null
+        },
+      }
+    },
   },
 }
 
@@ -248,9 +287,33 @@ export interface SecretsHandle {
  * sanctioned way — and doing it here is how this member would acquire the disk
  * access the sentence above rules out.
  *
- * `null` covers both "has never run" and "ran and produced nothing" on purpose:
- * from a reader's side those are one state, and splitting them would make a
- * handler branch on a difference it cannot act on.
+ * **What `null` means from each member, and what the pair answers together.**
+ * `lastOutput` returns `null` for exactly one thing: this plugin has never
+ * produced an Output. That is a fact about the PLUGIN, not about its last run —
+ * a run producing none carries the prior record forward (`lastOutputOf` in
+ * `engine.ts`), so a producer that succeeded yesterday and failed this morning
+ * still reads as having produced. `lastRun` returns `null` for one thing too:
+ * this plugin has never run. Between them a consumer can name four states —
+ * never run; ran and has never produced; produced, and its latest run failed;
+ * produced, and its latest run is healthy — and a supervised producer parked at
+ * a gate reads `gated`, which is an answer rather than an error.
+ *
+ * An earlier version of this docstring argued that collapsing "has never run"
+ * into "produced nothing" was deliberate, because a handler could not act on
+ * the difference. Both halves of that argument were wrong and the argument was
+ * withdrawn on 2026-09-07: a handler CAN act on the difference between a
+ * producer that has not started and one whose last attempt failed, and both
+ * shipped examples were publishing the first claim in the second case.
+ *
+ * **The status is a closed enum, and the failure TEXT is deliberately not
+ * here.** A producer's thrown message becomes free text in two places —
+ * `invoke-plugin.ts:771-789` for a handler throw, into both the result's
+ * `summary` and its `errors[0].message`, and `engine.ts:1057-1071` for
+ * `invokePlugin` itself throwing — and that text carries whatever the handler
+ * was holding, operator paths included. `DependencyRun` is the boundary that
+ * keeps it out of scope, and `dependency-run-status-leak.test.ts` is the alarm.
+ * A change that hands the mint a whole `PluginRun`, or anything read from the
+ * run log, is the change both exist to stop.
  *
  * An **undeclared** name is a different matter and throws. Returning `null` for
  * it would make a typo in `manifest.dependencies` indistinguishable from a
@@ -261,15 +324,26 @@ export interface SecretsHandle {
  * message names the requested dependency and the manifest field that must list
  * it, and never a value read from the record.
  *
- * One method, and no enumeration. A handler cannot walk what it was handed, so
- * the order of `manifest.dependencies` and the order of the caller's projection
- * are unobservable here and are not contract.
+ * Two methods, and still no enumeration. A handler cannot walk what it was
+ * handed, so the order of `manifest.dependencies` and the order of the caller's
+ * projection are unobservable here and are not contract.
+ *
+ * The second method is not a widening, and the distinction is the whole reason
+ * a rule against one was withdrawn rather than broken: it is the SAME declared
+ * read answering a second fact about the same name, and the two constraints
+ * that matter are untouched. It cannot be asked about a name this manifest does
+ * not declare, and it hands over no way to walk what was delivered. A third
+ * member that could do either would be a widening no matter how it was spelled.
  */
 export interface DependenciesHandle {
   readonly lastOutput: (
     caller: CapabilityCaller,
     dependencyName: string,
   ) => OutputRecord | null
+  readonly lastRun: (
+    caller: CapabilityCaller,
+    dependencyName: string,
+  ) => PluginRun['status'] | null
 }
 
 /**
@@ -357,7 +431,7 @@ export function mintContext(
     manifest: input.manifest,
     caller: input.caller ?? { plugin: input.manifest.name },
     resolvedSecretNames: input.resolvedSecretNames ?? [],
-    dependencyOutputs: input.dependencyOutputs ?? {},
+    dependencyRuns: input.dependencyRuns ?? {},
   }
 
   // `caller` first, so it is present whatever the registry does. It is data,

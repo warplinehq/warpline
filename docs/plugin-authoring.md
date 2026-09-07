@@ -344,7 +344,7 @@ error, not a convention.
 | Member | Requires `side_effects` entry | What it does |
 |---|---|---|
 | `secrets` | **ungated** | Lists the credential names this plugin declared and the runtime resolved. Names only — never a value. |
-| `dependencies` | **ungated** | Reads the Output a plugin this manifest declared as a dependency last produced. Declared names only — an undeclared one throws. |
+| `dependencies` | **ungated** | Reads the Output a plugin this manifest declared as a dependency last produced, and how its last run ended. Declared names only — an undeclared one throws. |
 
 <!-- /generated -->
 
@@ -356,16 +356,42 @@ import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
 export const handler: CapabilityHandlerFn = async (manifest, args, signal, capabilities) => {
   const declared = capabilities.secrets.resolvedNames(capabilities.caller)
 
-  // A plugin listed in this manifest's `dependencies`. `null` means it has
-  // produced nothing — never run, or ran and produced none; from here those
-  // are one state. A name this manifest does not declare throws instead.
+  // A plugin listed in this manifest's `dependencies`, read for both facts.
+  // `lastOutput` is `null` when that plugin has never produced an Output — a
+  // fact about the plugin, not about its last run, because a run that produces
+  // none leaves the previous record in place. `lastRun` is `null` when the
+  // plugin has never run at all, and otherwise is its last run's status. A name
+  // this manifest does not declare throws from either one.
   const upstream = capabilities.dependencies.lastOutput(capabilities.caller, 'anomaly-watch')
-  if (upstream !== null && upstream.body !== undefined) {
+  const upstreamRun = capabilities.dependencies.lastRun(capabilities.caller, 'anomaly-watch')
+
+  if (upstream === null) {
+    // Nothing produced yet. `upstreamRun` says whether that is because
+    // anomaly-watch has not run (`null`) or ran and produced none.
+  } else if (upstreamRun === 'failed') {
+    // A record IS here and it predates a failed run. Say that, rather than
+    // publishing the record as if it were current.
+  } else if (upstream.body !== undefined) {
     const payload: unknown = JSON.parse(upstream.body)
     // ...guard the shape before trusting it: another plugin wrote this.
   }
 }
 ```
+
+The two members answer two different questions about the same declared name,
+and reading only the first is how a plugin ends up publishing "nothing yet"
+about a dependency that produced last week. Together they name four states:
+
+| `lastOutput` | `lastRun` | What it means |
+|---|---|---|
+| `null` | `null` | Never run. |
+| `null` | `'success'` | Ran, and has never produced an Output. |
+| a record | `'failed'` | Produced before; its latest run failed. The record stands, and it is older than that run. |
+| a record | `'success'` | Produced, and its latest run is healthy. |
+
+`lastRun` can also read `'gated'`, `'partial'` or `'skipped'`. `'gated'` is the
+ordinary answer for a supervised dependency parked waiting for an approval —
+a real state to report, not an error to handle.
 
 An Output carries **either** a `body` or a `path`, never both. When it carries a
 `path`, resolving it is your handler's business — `readJsonOrNull` from

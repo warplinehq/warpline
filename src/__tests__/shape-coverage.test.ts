@@ -242,7 +242,13 @@ const REGISTRY: readonly ShapeEntry[] = [
       const context = mintContext(
         {
           manifest: dailyDigestManifest,
-          dependencyOutputs: { 'anomaly-watch': anomaliesRecord, 'github-poll': issuesRecord },
+          // The two-field shape the engine projects: what each dependency last
+          // produced, and how its last run ended. Both producers just ran here
+          // and both succeeded, so `success` is the honest status for each.
+          dependencyRuns: {
+            'anomaly-watch': { status: 'success', last_output: anomaliesRecord },
+            'github-poll': { status: 'success', last_output: issuesRecord },
+          },
         },
         { granted: false, reason: 'manual-run' },
       ).context
@@ -391,7 +397,10 @@ const REGISTRY: readonly ShapeEntry[] = [
       // The record the runtime would deliver, delivered by the runtime's own
       // mint. This file may reach `src/`; an example test may not.
       const context = mintContext(
-        { manifest: anomalyIssueManifest, dependencyOutputs: { 'anomaly-watch': record } },
+        {
+          manifest: anomalyIssueManifest,
+          dependencyRuns: { 'anomaly-watch': { status: 'success', last_output: record } },
+        },
         { granted: false, reason: 'manual-run' },
       ).context
       const result = await withEnv('GITHUB_TOKEN', 'placeholder-token', () =>

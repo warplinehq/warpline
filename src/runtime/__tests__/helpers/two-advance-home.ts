@@ -55,7 +55,7 @@ export interface TwoAdvanceHome {
   producer(mode: ProducerMode, thrownMessage?: string): string
   /** Write the marker, so the next advance takes the producer's mode arm. */
   setMarker(): Promise<void>
-  advance(): Promise<{ run_log_path: string; [key: string]: unknown }>
+  advance(): Promise<{ run_log_path: string }>
   /** One plugin's row in a persisted run log, or `null` when it did not run. */
   entryFor(runLogPath: string, plugin: string): Promise<RunLogEntry | null>
   /** One plugin's persisted `plugin_runs` entry, straight from the state file. */

@@ -49,6 +49,7 @@ const _caller: CapabilityCaller = { plugin: 'some-plugin', runId: 'some-run' }
 const _handle: SecretsHandle = { resolvedNames: (_c: CapabilityCaller) => ['SOME_TOKEN'] }
 const _depsHandle: DependenciesHandle = {
   lastOutput: (_c: CapabilityCaller, _d: string) => null,
+  lastRun: (_c: CapabilityCaller, _d: string) => null,
 }
 const context: CapabilityContext = {
   caller: _caller,

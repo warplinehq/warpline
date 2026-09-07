@@ -30,13 +30,13 @@ import { pluginsDir, pluginConfigPath } from '../lib/paths.js'
 import { loadPluginConfig, PluginConfigError } from '../lib/plugin-config.js'
 import { resolvePluginArgs } from '../schemas/plugin-config.js'
 import { SkillResultSchema, makeSkillError } from '../schemas/skill-result.js'
-import type { OutputRecord, SkillResult, SkillResultInput } from '../schemas/skill-result.js'
+import type { SkillResult, SkillResultInput } from '../schemas/skill-result.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { emitAttemptFailed } from '../board/engine-events.js'
 import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
 import { resolveSecrets, scrubSecrets } from './secrets.js'
 import { mintContext } from './capabilities.js'
-import type { CapabilityContext, CapabilityGrantWitness } from './capabilities.js'
+import type { CapabilityContext, CapabilityGrantWitness, DependencyRun } from './capabilities.js'
 
 /**
  * Resolve the default plugins directory via canonical paths.ts.
@@ -167,11 +167,18 @@ export interface InvokePluginOptions {
   runsDir?: string
   /** Override events.jsonl path for retry notices — same leak class as runsDir. */
   eventsPath?: string
-  /** What this plugin's declared dependencies last produced, already resolved by
-   *  the caller. Optional, like every field here: the manual CLI path reads no
-   *  runtime state and omits it, and a caller that omits it hands its handler a
-   *  member that reads `null` for every declared name rather than no member. */
-  dependencyOutputs?: Readonly<Record<string, OutputRecord | null>>
+  /** What this plugin's declared dependencies last produced and how their last
+   *  runs ended, already resolved by the caller. Optional, like every field
+   *  here: the manual CLI path reads no runtime state and omits it, and a
+   *  caller that omits it hands its handler a member that reads `null` for
+   *  every declared name rather than no member.
+   *
+   *  Renamed from `dependencyOutputs` when the second fact landed, rather than
+   *  gaining a sibling: two projections of a map the engine mutates during its
+   *  level loop can disagree about which run they describe. This field rides
+   *  `warpline/unstable-runtime`, whose specifier promises nothing about any
+   *  name behind it, which is what makes renaming it the available choice. */
+  dependencyRuns?: Readonly<Record<string, DependencyRun | null>>
 }
 
 /**
@@ -434,7 +441,7 @@ export async function invokePlugin(
       manifest,
       caller: { plugin: pluginName, runId },
       resolvedSecretNames: Object.keys(secrets.values),
-      dependencyOutputs: options.dependencyOutputs,
+      dependencyRuns: options.dependencyRuns,
     },
     witness,
   )

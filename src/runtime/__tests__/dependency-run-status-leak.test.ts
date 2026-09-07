@@ -42,13 +42,16 @@ import {
   mintContext,
   type CapabilityCaller,
   type CapabilityEntry,
+  type DependencyRun,
 } from '../capabilities.js'
 import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
 
 /**
  * The forbidden string, in ONE binding, on ONE unbroken line. Every use below
- * derives from this const — a literal split across a line wrap has already
- * failed an acceptance check in this project (Phase 07, the POS-08 sentence).
+ * derives from this const. A literal that a formatter wraps across two lines
+ * stops matching the thing it was written to match, and the assertion goes
+ * green because it can no longer see — which is the failure mode this whole
+ * file exists to refuse.
  *
  * Shaped like a path an operator actually configures, because that is the shape
  * the leak takes when it takes one: the message a handler throws carries
@@ -155,10 +158,13 @@ export async function handler(manifest, args, signal, capabilities) {
 
     const consumerEntry = await home.entryFor(r2.run_log_path, 'consumer')
     expect(consumerEntry).not.toBeNull()
-    // A healthy consumer reading a failed producer succeeds on its own terms.
-    // Asserted before the parse below so a consumer that could not call the
-    // member fails HERE, on an assertion, rather than crashing the parse.
-    expect(consumerEntry!.status).toBe('success')
+    // A healthy consumer reading a failed producer completes on its own terms.
+    // `completed` is the run-LOG vocabulary (`run-log.ts:26`), not the
+    // `plugin_runs` one — the two enums differ at exactly this value and the
+    // difference is easy to write past. Asserted before the parse below so a
+    // consumer that could not call the member fails HERE, on an assertion,
+    // rather than crashing the parse on prose.
+    expect(consumerEntry!.status).toBe('completed')
 
     // ABSENCE.
     expect(consumerEntry!.result_summary).not.toContain(SENTINEL)
@@ -186,12 +192,11 @@ export async function handler(manifest, args, signal, capabilities) {
       side_effects: [],
       dependencies: ['prod'],
     })
-    const RUNS = {
-      prod: {
-        status: 'failed' as const,
-        last_output: { type: 'brief', format: 'json', body: '{"advance":1}' },
-      },
+    const PROD_RUN: DependencyRun = {
+      status: 'failed',
+      last_output: { type: 'brief', format: 'json', body: '{"advance":1}' },
     }
+    const RUNS: Readonly<Record<string, DependencyRun | null>> = { prod: PROD_RUN }
 
     test('it reports clean for the real minted handle', () => {
       const handle = mintContext(
@@ -213,7 +218,7 @@ export async function handler(manifest, args, signal, capabilities) {
           effect: null,
           description: 'a planted widening of the real entry',
           mint: () => ({
-            lastOutput: () => RUNS.prod.last_output,
+            lastOutput: () => PROD_RUN.last_output,
             lastRun: () => ({
               status: 'failed',
               summary: `prod handler threw: ${SENTINEL}`,

@@ -31,6 +31,11 @@ function contextWith(record: OutputRecord | null): CapabilityContext {
         }
         return record
       },
+      // Present so the fixture satisfies the handle's shape, and answering
+      // nothing: this file models what the handler was HANDED, and the handler
+      // does not read a run status yet. The handler rewrite that branches on
+      // the pair owns making this fixture say something.
+      lastRun: () => null,
     },
   } as CapabilityContext
 }
