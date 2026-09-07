@@ -36,7 +36,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { pluginConfigPath, pluginsDir, warplineHome } from '../lib/paths.js'
-import { ConfigureError, type ConfigureIo, walkPluginInputs, writePluginConfig } from './configure.js'
+import { ConfigureError, type ConfigureIo, WALK_ENDED, walkPluginInputs, writePluginConfig } from './configure.js'
 import { isInteractive } from './prompt.js'
 import { prepareHome, scaffoldPlugin } from './scaffold.js'
 
@@ -126,7 +126,7 @@ export async function run(
         lines.length = 0
         const walked = await walkPluginInputs(SEED_EXAMPLE, io)
         if (walked === null) {
-          process.stderr.write('Input ended before every input was answered. No config was written.\n')
+          process.stderr.write(`${WALK_ENDED} No config was written.\n`)
           return 1
         }
         answers = walked

@@ -87,6 +87,13 @@ export interface WriteResult {
   secrets: string[]
 }
 
+/**
+ * The lead sentence of a mid-walk refusal. A property of the walk, which has
+ * one implementation in `walkPluginInputs`, so it lives beside it; each verb
+ * appends its own tail saying what it did not write.
+ */
+export const WALK_ENDED = 'Input ended before every input was answered.'
+
 const secretNote = (key: string): string =>
   `${key}: declared in secrets, so it is read at run time as the ${key} environment ` +
   `variable and never written to the config file.\n`
@@ -382,7 +389,7 @@ export async function run(
       }
       const walked = await walkPluginInputs(name, io)
       if (walked === null) {
-        process.stderr.write('Input ended before every input was answered. Nothing was written.\n')
+        process.stderr.write(`${WALK_ENDED} Nothing was written.\n`)
         return 1
       }
       body = walked
