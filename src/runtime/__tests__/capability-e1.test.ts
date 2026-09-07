@@ -46,6 +46,23 @@ function handle() {
   ).context.secrets
 }
 
+const DEPS_MANIFEST = PluginManifestSchema.parse({
+  name: 'e1-fixture',
+  version: '1.0.0',
+  description: 'a fixture manifest, used only to mint against',
+  autonomy_level: 'autonomous',
+  ttl_hours: 24,
+  side_effects: [],
+  dependencies: ['dep-a'],
+})
+
+function depsHandle() {
+  return mintContext(
+    { manifest: DEPS_MANIFEST, caller: CALLER, dependencyOutputs: {} },
+    { granted: false, reason: 'manual-run' },
+  ).context.dependencies
+}
+
 /**
  * Never invoked. It exists to be READ by `tsc`, and calling it would run the
  * one call in this repository that is deliberately wrong. The directive below
@@ -58,6 +75,18 @@ function _theCallThatMustNotCompile(): void {
   handle().resolvedNames()
 }
 
+/**
+ * The same directive over the second member. The obligation is per-member and
+ * not per-file: a new member that forgot the caller parameter would leave the
+ * arm above green, because that one sits over the secrets handle. This is the
+ * arm that would go red.
+ */
+function _theDependencyCallThatMustNotCompile(): void {
+  // @ts-expect-error — the caller argument is required. If this line ever
+  // stops erroring, tsc reports TS2578 here and the build fails.
+  depsHandle().lastOutput('dep-a')
+}
+
 describe('a member cannot be called without saying who is calling', () => {
   /**
    * The other side of the boundary. Refusing the no-argument call proves
@@ -66,6 +95,10 @@ describe('a member cannot be called without saying who is calling', () => {
    */
   test('the call with the caller argument compiles and returns the names', () => {
     expect(handle().resolvedNames(CALLER)).toEqual(['E1_TOKEN'])
+  })
+
+  test('the second member takes the caller too, and reads through it', () => {
+    expect(depsHandle().lastOutput(CALLER, 'dep-a')).toBeNull()
   })
 
   /**

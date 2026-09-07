@@ -425,13 +425,15 @@ for (const name of ['atomicWriteJson', 'atomicWriteText', 'readJsonOrNull']) {
 // own promise. Exact set, same reason: the barrel re-exports from two runtime
 // modules, either of which may grow a helper that has no business being public.
 //
-// One entry rather than two, because the reader returns an `OutputRecord` — the
-// same schema family the builders construct — so producing a result and reading
-// one are two halves of one subject. The literal below and
-// `src/unstable-result.ts` are edited together, or this reddens.
+// The result builders, and nothing beside them. A reader for a declared
+// dependency's Output was published here and removed: it took an `EngineState`
+// no published specifier could construct, so no plugin could call it, and the
+// `dependencies` capability member replaced it on the handler's fourth
+// parameter. The literal below and `src/unstable-result.ts` are edited
+// together, or this reddens.
 const unstableResult = await import('warpline/unstable-result')
 
-const UNSTABLE_RESULT_EXPECTED = 'readDependencyOutput,skillFailure,skillHandoff,skillOk'
+const UNSTABLE_RESULT_EXPECTED = 'skillFailure,skillHandoff,skillOk'
 
 const unstableResultExports = Object.keys(unstableResult).filter((k) => k !== 'default').sort().join(',')
 console.log('   warpline/unstable-result exports: ' + unstableResultExports)
@@ -449,7 +451,7 @@ if (resultNeverReachable.length) {
   process.exit(1)
 }
 
-for (const name of ['readDependencyOutput', 'skillFailure', 'skillHandoff', 'skillOk']) {
+for (const name of ['skillFailure', 'skillHandoff', 'skillOk']) {
   if (typeof unstableResult[name] !== 'function') {
     console.error('warpline/unstable-result: ' + name + ' is not callable')
     process.exit(1)

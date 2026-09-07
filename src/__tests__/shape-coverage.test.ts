@@ -206,11 +206,10 @@ const REGISTRY: readonly ShapeEntry[] = [
     // What is asserted: aggregation over two declared dependencies — both
     // upstream results present, one digest naming both, exactly one Output.
     // What is NOT asserted: reading a dependency's produced Output through a
-    // runtime-supplied reader. `readDependencyOutput` takes an `EngineState`,
-    // and no handler is handed that value, so the digest reads the two files
-    // a chaining host drops under the home. This act seeds those files; when
-    // the runtime hands a plugin a reader, the seeding here becomes a run of
-    // the producers instead.
+    // runtime-supplied reader. No handler here is handed one, so the digest
+    // reads the two files a chaining host drops under the home. This act seeds
+    // those files; when the runtime hands a plugin a reader, the seeding here
+    // becomes a run of the producers instead.
     act: async (home) => {
       seed(home, 'state/anomalies.json', { anomalies: METRICS.series })
       seed(home, 'state/github-issues.json', { observed_at: daysAgo(0), open_count: 2, newest_number: 12 })

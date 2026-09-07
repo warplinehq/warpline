@@ -19,9 +19,10 @@
  * empty today, so on its own it would report clean forever.
  */
 import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   CAPABILITY_EFFECTS,
   CAPABILITY_REGISTRY,
@@ -350,6 +351,21 @@ describe('the dependencies handle', () => {
     expect(handleFor(['dep-a'], {}).lastOutput(CALLER, 'dep-a')).toBeNull()
   })
 
+  test('a declared dependency that has never run reads null too', () => {
+    // Same answer as above on purpose. "Produced no Output" is one state from
+    // a reader's side, and splitting it would make the caller branch on a
+    // difference it cannot act on. The record the engine projects carries an
+    // explicit `null` for a dependency it has no run for; a record missing the
+    // key entirely is the same answer through `?? null`.
+    expect(handleFor(['dep-a', 'dep-b'], { 'dep-a': null }).lastOutput(CALLER, 'dep-a')).toBeNull()
+    expect(handleFor(['dep-a', 'dep-b'], { 'dep-a': REC }).lastOutput(CALLER, 'dep-b')).toBeNull()
+  })
+
+  test('a manifest declaring no dependencies can read nothing', () => {
+    const handle = handleFor([], { 'dep-a': REC })
+    expect(() => handle.lastOutput(CALLER, 'dep-a')).toThrow(/dep-a/)
+  })
+
   test('an undeclared name throws, naming the plugin, the name and the manifest field', () => {
     const handle = handleFor(['dep-a'], { 'dep-a': REC })
     expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/fixture-plugin/)
@@ -388,6 +404,27 @@ describe('the dependencies handle', () => {
     expect(handle.lastOutput(CALLER, 'dep-a')).toBeNull()
     expect(handle.lastOutput(CALLER, 'dep-b')).toBeNull()
     expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/dep-z/)
+  })
+
+  test('the member gives no second answer about upstream change, and touches no disk', async () => {
+    // Asserted on the source rather than on behaviour, because both failures
+    // are additions nothing here would call — they would be green under every
+    // case above. `src/runtime/staleness.ts` already answers "has anything
+    // changed upstream" from `plugin_runs[dep].last_run_at`, and a second
+    // answer that could disagree with it is the whole thing being refused.
+    // The three refusal paragraphs are asserted too: they are what a plugin
+    // author reads before deciding this member is a store, and deleting them
+    // is how the module drifts back into being one.
+    const source = await readFile(
+      fileURLToPath(new URL('../capabilities.ts', import.meta.url)),
+      'utf8',
+    )
+
+    expect(source).not.toMatch(/from 'node:(fs|path)/)
+    expect(source).not.toContain('staleness')
+    expect(source).toContain('**It is not a store.**')
+    expect(source).toContain('**It is not a freshness check.**')
+    expect(source).toContain('**It does not read the filesystem.**')
   })
 })
 

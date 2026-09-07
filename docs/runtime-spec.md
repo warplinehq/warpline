@@ -246,7 +246,9 @@ versions; nothing else here claims to be.
 
 Seven specifiers are published: `warpline`, `warpline/schemas/*`,
 `warpline/lib/paths`, `warpline/unstable-runtime`, `warpline/unstable-fs`,
-`warpline/unstable-result` and `warpline/unstable-capabilities`.
+`warpline/unstable-result` — the three result builders `skillOk`,
+`skillFailure` and `skillHandoff`, and nothing beside them — and
+`warpline/unstable-capabilities`.
 Nothing else in the package is reachable — the `exports` map is an allowlist,
 and an import of any other subpath fails at resolution rather than resolving to
 something internal.
