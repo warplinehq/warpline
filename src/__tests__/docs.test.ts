@@ -1222,6 +1222,23 @@ describe('hand-written manifest prose', () => {
     expect(doc).not.toMatch(/There is no `warpline config\s+set` command/)
     expect(doc).not.toContain('plugin-config.json')
   })
+
+  // The prior-state paragraph once told authors to name that file "through
+  // your config file", the opposite of what every shipped example does and
+  // of what derive-dont-store.md argues: the path is derived from the
+  // manifest name and never from an input, so nothing an operator configures
+  // can point it somewhere else. Two documents in one tarball must not give
+  // opposite advice on the same question.
+  test('plugin-authoring tells authors to derive the prior-state path from the manifest name, and points at derive-dont-store', () => {
+    const doc = read('docs/plugin-authoring.md')
+    const paragraph = doc.slice(doc.indexOf('**There is no snapshot store'))
+    expect(paragraph).toContain('<home>/state/')
+    expect(paragraph).toMatch(/derived\s+from your manifest's name/)
+    expect(paragraph).toMatch(/never\s+from an input/)
+    expect(paragraph).toContain('anomaly-watch')
+    expect(paragraph).toContain('derive-dont-store.md')
+    expect(doc).not.toMatch(/named through your\s+config/)
+  })
 })
 
 // ── The published surface and the document describing it must agree ───────
