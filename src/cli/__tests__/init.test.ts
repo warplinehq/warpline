@@ -432,4 +432,24 @@ describe('warpline init', () => {
     const raw = readFileSync(configFile(), 'utf8')
     for (const text of [raw, stdout, stderr, out]) expect(text).not.toContain(sentinel)
   })
+
+  test('16: on a terminal, Enter at a required input with no default is reported, not fatal: exit 0, the defaulted key written, the rest named', async () => {
+    // The terminal twin of test 6. Test 15's Enter lands on a defaulted
+    // optional input, so nothing else exercises the walk breaking with no
+    // value on a REQUIRED key and the "Still needed" line on this branch.
+    placeSeedManifest('fixture with one undefaulted required input', {
+      address: { type: 'string', required: true, description: 'No default on purpose.' },
+      limit: { type: 'number', required: false, default: 10, description: 'Defaulted.' },
+    })
+    const { code, stdout, stderr, out } = await runInit([], tty(['', '']))
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    expect(out).toContain('address>')
+    expect(out).toContain('limit>')
+    expect(readConfig()).toEqual({ limit: 10 })
+    expect(readFileSync(configFile(), 'utf8')).not.toContain('undefined')
+    expect(stdout).toContain('Still needed')
+    expect(stdout).toContain('address')
+    expect(stdout).toContain(`warpline configure ${SEED_EXAMPLE}`)
+  })
 })
