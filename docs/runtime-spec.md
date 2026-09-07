@@ -288,17 +288,18 @@ name the reading manifest declares:
   `success`, `partial`, `failed`, `skipped`, `gated` — or `null` when it has
   never run. It is the same enum § `plugin_runs` records, and it is the whole of
   what this member returns: the failure TEXT a run may carry is not part of it,
-  and no field of the run record other than these two crosses to a different
-  plugin.
+  and no field of the run record other than these two is delivered through this
+  handle.
 
 An undeclared name throws from either member, through one shared refusal, and
 the message names the reading plugin, the requested name and the manifest field
 to add it to.
 
-`InvokePluginOptions.dependencyRuns` is what a host fills to supply both facts;
-it was named `dependencyOutputs` and carried only the record until 0.2.x. That
-rename is allowed because the field rides `warpline/unstable-runtime`, whose
-promise about any name behind it is stated above and is exactly nothing.
+`InvokePluginOptions.dependencyRuns` is what a host fills to supply both facts.
+It was briefly named `dependencyOutputs` and carried only the record; no
+published release ever shipped that name. Renaming it would have been allowed
+regardless, because the field rides `warpline/unstable-runtime`, whose promise
+about any name behind it is stated above and is exactly nothing.
 
 ## 2. Retry Policy
 
