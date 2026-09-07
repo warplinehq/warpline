@@ -422,15 +422,17 @@ for (const name of ['atomicWriteJson', 'atomicWriteText', 'readJsonOrNull']) {
 
 // `warpline/unstable-result` is the third deliberately-unstable subpath, and it
 // inherits the same paragraph in docs/runtime-spec.md rather than inventing its
-// own promise. Exact set, same reason: the barrel re-exports from two runtime
-// modules, either of which may grow a helper that has no business being public.
+// own promise. Exact set, same reason: the barrel re-exports from one runtime
+// module, which may grow a helper that has no business being public.
 //
 // The result builders, and nothing beside them. A reader for a declared
-// dependency's Output was published here and removed: it took an `EngineState`
-// no published specifier could construct, so no plugin could call it, and the
-// `dependencies` capability member replaced it on the handler's fourth
-// parameter. The literal below and `src/unstable-result.ts` are edited
-// together, or this reddens.
+// dependency's Output was published here and removed: the runtime never handed
+// a handler the `EngineState` it took, so calling it meant a plugin loading the
+// state document itself — a second source of truth that can disagree with the
+// first, since run-log pruning applies by mtime to the runs directory and not
+// to the state document. The `dependencies` capability member replaced it on
+// the handler's fourth parameter. The literal below and
+// `src/unstable-result.ts` are edited together, or this reddens.
 const unstableResult = await import('warpline/unstable-result')
 
 const UNSTABLE_RESULT_EXPECTED = 'skillFailure,skillHandoff,skillOk'

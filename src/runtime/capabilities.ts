@@ -262,10 +262,12 @@ export interface SecretsHandle {
 /**
  * The handle reading what a declared dependency last produced.
  *
- * `plugin_runs[name].last_output` already exists. The engine writes it on both
- * arms, the Board reads it to name an Output without scanning the runs
- * directory, and until this member landed no plugin could see it at all. This
- * is that read and nothing else, so it is worth saying plainly what it is not.
+ * `plugin_runs[name].last_output` already exists. The engine writes it on every
+ * arm, and it is there so a reader can name an Output without scanning the runs
+ * directory — today that reader is `proposalFingerprint` and this member, and no
+ * Board code reads the field at all. Until this member landed no plugin could
+ * see it. This is that read and nothing else, so it is worth saying plainly what
+ * it is not.
  *
  * **It is not a store.** The records are handed to the mint by the caller
  * rather than loaded here. A member that loaded state would be a second place

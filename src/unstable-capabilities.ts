@@ -41,11 +41,15 @@
  * `CapabilityCaller`, `SecretsHandle` and `DependenciesHandle` are here for the
  * same reason the witness is: every member takes a caller as its required first
  * parameter, so a plugin author calling one cannot name the argument's type
- * without them — and `DependenciesHandle` returns an `OutputRecord | null`,
- * which a handler cannot narrow without naming the handle it came from.
- * Publishing a member's shape while withholding the type of what it demands, or
- * of what it answers with, would be publishing a call nobody outside this
- * package could write down.
+ * without them. `DependenciesHandle` carries two members, and neither return
+ * type is published here because both already have a home: `lastOutput` answers
+ * `OutputRecord | null`, from `warpline/schemas/skill-result`, and `lastRun`
+ * answers `PluginRun['status'] | null`, from `warpline/schemas/engine-state` —
+ * or from `ReturnType<DependenciesHandle['lastRun']>`, which is the form an
+ * example under `examples/` must use, since `import-direction.test.ts` does not
+ * admit that schemas specifier there. Publishing a member's shape while
+ * withholding the type of what it demands, or of what it answers with, would be
+ * publishing a call nobody outside this package could write down.
  *
  * Do not widen this re-export without a decision record.
  */
