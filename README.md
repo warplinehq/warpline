@@ -149,6 +149,7 @@ npx warpline scaffold my-plugin
 
 # Write a plugin's config from the inputs its manifest declares. Prompts on a
 # terminal; takes --from '<json>' when stdin is not one. Never writes a secret.
+# Safe to run again: a value already in the file is kept unless you replace it.
 npx warpline configure my-plugin
 
 # Preview what the next engine advance would do. Executes nothing.

@@ -3,11 +3,19 @@
  * `<home>/config/<plugin>.json`, so an operator never hand-authors that file.
  *
  * Two ways in, one write. The TTY walk asks for each declared input in the
- * order the manifest declares them; `--from <json>` takes the whole record at
- * once and never prompts. Both route through `writePluginConfig`, which is
- * exported for exactly that reason: a later verb that needs "write this
- * plugin's config" calls it in-process, and the secrets rule below then has
- * one implementation rather than two that drift.
+ * order the manifest declares them; `--from <json>` takes some or all of the
+ * values at once and never prompts. Both route through `writePluginConfig`,
+ * which is exported for exactly that reason: a later verb that needs "write
+ * this plugin's config" calls it in-process, and the secrets rule below then
+ * has one implementation rather than two that drift.
+ *
+ * A RE-RUN STARTS FROM THE FILE, not from the manifest. Every value already
+ * on disk is kept unless this run replaces it: Enter at a prompt keeps the
+ * current value (shown beside the prompt), and a `--from` body is a patch
+ * over the file rather than the whole record. The verb's own "Still needed"
+ * line sends an operator back here, and that advice must not cost them the
+ * inputs they answered last time. A key the file holds that the manifest no
+ * longer declares is carried over as it is.
  *
  * SECRETS are never persisted. A name in `manifest.secrets` is skipped by the
  * walk and refused by `--from`; the message names the environment variable
@@ -34,6 +42,7 @@
 import { parseArgs } from 'node:util'
 import * as fsAtomic from '../lib/fs-atomic.js'
 import { pluginConfigPath, pluginsDir } from '../lib/paths.js'
+import { loadPluginConfig, PluginConfigError } from '../lib/plugin-config.js'
 import { loadPluginManifests } from '../runtime/engine.js'
 import { resolvePluginArgs, type DeclaredInput } from '../schemas/plugin-config.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
@@ -45,11 +54,14 @@ const USAGE = `Usage: warpline configure <plugin> [--from <json>]
 
 Walks the inputs the plugin's manifest declares and writes
 <home>/config/<plugin>.json. Names declared in the manifest's secrets are
-never written; set them in the environment instead.
+never written; set them in the environment instead. Safe to run again: a
+value already in the file is kept unless you replace it, and Enter at a
+prompt keeps it.
 
 Options:
-  --from <json>  A JSON object of input names to values. Writes the same file
-                 with no prompts, for a stdin that is not a terminal.
+  --from <json>  A JSON object of input names to values, some or all of them.
+                 Patches the same file with no prompts, for a stdin that is
+                 not a terminal; keys left out keep what the file holds.
 `
 
 /** The streams a walk prompts on. Parameters, so a test can inject them. */
@@ -106,23 +118,51 @@ async function resolvePlugin(pluginName: string): Promise<PluginManifest> {
 }
 
 /**
+ * The config already on disk, or `{}` when there is none.
+ *
+ * A file that exists and cannot be parsed is a refusal, not a blank slate:
+ * writing over it would discard whatever the operator meant it to hold. The
+ * path is named because it is what they need to fix it; the reason describes
+ * the shape of the problem and never a value, by `PluginConfigError`'s own
+ * contract.
+ */
+async function currentConfig(pluginName: string): Promise<Record<string, unknown>> {
+  const path = pluginConfigPath(pluginName)
+  try {
+    return await loadPluginConfig(path)
+  } catch (err) {
+    if (!(err instanceof PluginConfigError)) throw err
+    throw new ConfigureError([`The config already at ${path} cannot be read: ${err.reason}. Fix it or remove it, then run again.`])
+  }
+}
+
+/**
  * The non-interactive core: validate everything, then write once.
  *
- * Declared defaults fill any key `values` leaves out, so a call with `{}`
- * writes exactly what the manifest defaults. A required key with neither a
- * value nor a default is reported in `needed` and omitted from the file — the
- * file stays valid and the runtime names the gap at run time — rather than
- * refused, because the caller may be a first-run setup that never asked.
+ * Each declared key takes the first of: the caller's value, the value the
+ * file already holds, the manifest default. So a call with `{}` over no file
+ * writes exactly what the manifest defaults, and the same call over a
+ * configured file writes it back unchanged. A required key with none of the
+ * three is reported in `needed` and omitted from the file — the file stays
+ * valid and the runtime names the gap at run time — rather than refused,
+ * because the caller may be a first-run setup that never asked.
  *
- * Refuses, with nothing written: a key the manifest does not declare, a key
- * that is an `Object.prototype` member, a value for a declared secret, and
- * any value the resolver rejects.
+ * A key the file holds that the manifest does not declare is carried over as
+ * it is, after the declared keys. The one exception is a name the manifest
+ * now declares in `secrets`: that is never written, whoever put it there.
+ *
+ * Refuses, with nothing written: a key the manifest does not declare in
+ * `values`, a key that is an `Object.prototype` member, a value for a
+ * declared secret, an existing file that cannot be parsed, and any value the
+ * resolver rejects — including one already on disk, so a file the manifest
+ * has moved away from is named rather than silently rewritten.
  */
 export async function writePluginConfig(
   pluginName: string,
   values: Record<string, unknown>,
 ): Promise<WriteResult> {
   const manifest = await resolvePlugin(pluginName)
+  const current = await currentConfig(pluginName)
   const declared: Record<string, DeclaredInput> = manifest.inputs ?? {}
   const secretNames = new Set(manifest.secrets ?? [])
 
@@ -151,13 +191,25 @@ export async function writePluginConfig(
       secrets.push(key)
       continue
     }
-    const value = Object.hasOwn(values, key) && values[key] !== undefined ? values[key] : input.default
+    const value = Object.hasOwn(values, key) && values[key] !== undefined
+      ? values[key]
+      : Object.hasOwn(current, key) && current[key] !== undefined
+        ? current[key]
+        : input.default
     if (value === undefined) {
       if (input.required ?? true) needed.push(key)
       continue
     }
     config[key] = value
     checked[key] = input
+    written.push(key)
+  }
+  // What the file holds beyond the declaration, kept as it is: a re-run must
+  // not be the thing that loses it. `current` came through the config
+  // schema, so none of these keys is an `Object.prototype` member.
+  for (const [key, value] of Object.entries(current)) {
+    if (Object.hasOwn(declared, key) || secretNames.has(key)) continue
+    config[key] = value
     written.push(key)
   }
 
@@ -169,11 +221,16 @@ export async function writePluginConfig(
   return { written, needed, secrets }
 }
 
-/** The line shown above each prompt: key, type, whether it is required, the default if any. */
-function describeInput(key: string, input: DeclaredInput): string {
+/**
+ * The line shown above each prompt: key, type, whether it is required, the
+ * value the file already holds if any, the default if any. The current value
+ * is shown because Enter keeps it, and an operator must see what Enter does.
+ */
+function describeInput(key: string, input: DeclaredInput, current: unknown): string {
   const facts = [
     input.type ?? 'value',
     (input.required ?? true) ? 'required' : 'optional',
+    ...(current !== undefined ? [`current ${JSON.stringify(current)}`] : []),
     ...(input.default !== undefined ? [`default ${JSON.stringify(input.default)}`] : []),
   ]
   const description = input.description ? `  ${input.description}\n` : ''
@@ -197,9 +254,15 @@ function parseAnswer(answer: string, input: DeclaredInput): { ok: true; value: u
 /**
  * Ask for each declared input in declaration order. Returns the answered
  * values, or `null` when the input ended before the walk did — a refusal, so
- * the caller writes nothing.
+ * the caller writes nothing. `current` is what the file already holds, shown
+ * beside each prompt; the write is what keeps it.
  */
-async function walk(manifest: PluginManifest, reader: LineReader, output: NodeJS.WritableStream): Promise<Record<string, unknown> | null> {
+async function walk(
+  manifest: PluginManifest,
+  reader: LineReader,
+  output: NodeJS.WritableStream,
+  current: Record<string, unknown>,
+): Promise<Record<string, unknown> | null> {
   const secretNames = new Set(manifest.secrets ?? [])
   const values: Record<string, unknown> = Object.create(null) as Record<string, unknown>
   for (const [key, input] of Object.entries(manifest.inputs ?? {})) {
@@ -207,11 +270,12 @@ async function walk(manifest: PluginManifest, reader: LineReader, output: NodeJS
       output.write(`\n${secretNote(key)}`)
       continue
     }
-    output.write(describeInput(key, input))
+    output.write(describeInput(key, input, Object.hasOwn(current, key) ? current[key] : undefined))
     for (;;) {
       const answer = await reader.ask(`${key}> `)
       if (answer === null) return null
-      // Empty: the default if there is one, else reported after the write.
+      // Empty: no value from this walk, so the write keeps the current one,
+      // else the default, else reports the key as still needed.
       if (answer === '') break
       const parsed = parseAnswer(answer, input)
       if (!parsed.ok) {
@@ -244,9 +308,12 @@ async function walk(manifest: PluginManifest, reader: LineReader, output: NodeJS
  */
 export async function walkPluginInputs(pluginName: string, io: ConfigureIo): Promise<Record<string, unknown> | null> {
   const manifest = await resolvePlugin(pluginName)
+  // Before the first prompt: a file that cannot be read refuses the whole
+  // walk, rather than asking every question and refusing at the write.
+  const current = await currentConfig(pluginName)
   const reader = lineReader(io.input, io.output)
   try {
-    return await walk(manifest, reader, io.output)
+    return await walk(manifest, reader, io.output, current)
   } finally {
     reader.close()
   }

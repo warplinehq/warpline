@@ -376,6 +376,48 @@ describe('configure — the walk', () => {
     expect(configSiblings('four')).toEqual([])
   })
 
+  test('10: a re-run shows the current value at each prompt, Enter keeps it, and an answer replaces that key alone', async () => {
+    await seed(makeManifest('four', FOUR))
+    expect((await capture(['four'], tty(FOUR_ANSWERS))).code).toBe(0)
+    const before = await readFile(pluginConfigPath('four'))
+
+    // Enter at every prompt: the file is byte-identical, and the prompt said
+    // what Enter would keep.
+    const kept = await capture(['four'], tty(['', '', '', '']))
+    expect(kept.code).toBe(0)
+    for (const value of FOUR_ANSWERS) expect(kept.out).toContain(`current ${JSON.stringify(value)}`)
+    expect((await readFile(pluginConfigPath('four'))).equals(before)).toBe(true)
+    expect(kept.stdout).not.toContain('Still needed')
+
+    const changed = await capture(['four'], tty(['', 'new-alpha', '', '']))
+    expect(changed.code).toBe(0)
+    expect(await readConfig('four')).toEqual({ ...FOUR_BODY, alpha: 'new-alpha' })
+  })
+
+  test('11: following the "Still needed" advice costs nothing: the re-run keeps the answered key and the defaulted one', async () => {
+    await seed(
+      makeManifest('def', {
+        a: { type: 'string', required: true, default: 'placeholder-a' },
+        b: { type: 'string', required: true },
+      }),
+    )
+    // First run: a takes its default, b is still needed.
+    const first = await capture(['def'], tty(['', '']))
+    expect(first.code).toBe(0)
+    expect(first.stdout).toContain('Still needed')
+    // Answer b alone; a is kept from the file, not reset from the manifest.
+    const second = await capture(['def'], tty(['', 'answered-b']))
+    expect(second.code).toBe(0)
+    expect(second.stdout).not.toContain('Still needed')
+    expect(await readConfig('def')).toEqual({ a: 'placeholder-a', b: 'answered-b' })
+    const before = await readFile(pluginConfigPath('def'))
+    // And a third run with Enter everywhere changes nothing.
+    const third = await capture(['def'], tty(['', '']))
+    expect(third.code).toBe(0)
+    expect(third.out).toContain('current "answered-b"')
+    expect((await readFile(pluginConfigPath('def'))).equals(before)).toBe(true)
+  })
+
   test('9: an empty answer takes the default; a required input with no default and no answer is reported, not written as undefined', async () => {
     await seed(
       makeManifest('def', {
@@ -464,6 +506,21 @@ describe('configure — --from <json>', () => {
     const array = await capture(['four', '--from', '["one"]'])
     expect(array.code).toBe(1)
     expect(existsSync(pluginConfigPath('four'))).toBe(false)
+  })
+
+  test('12: --from over an existing file patches the keys it names and keeps every other value on disk, in declaration order', async () => {
+    await seed(makeManifest('four', FOUR))
+    expect((await capture(['four', '--from', JSON.stringify(FOUR_BODY)])).code).toBe(0)
+
+    const { code } = await capture(['four', '--from', JSON.stringify({ mike: 'patched' })])
+    expect(code).toBe(0)
+    expect(await readConfig('four')).toEqual({ ...FOUR_BODY, mike: 'patched' })
+    expect(Object.keys(await readConfig('four'))).toEqual(['zulu', 'alpha', 'mike', 'bravo'])
+
+    // An empty body over a full file is a no-op, byte for byte.
+    const before = await readFile(pluginConfigPath('four'))
+    expect((await capture(['four', '--from', '{}'])).code).toBe(0)
+    expect((await readFile(pluginConfigPath('four'))).equals(before)).toBe(true)
   })
 
   test('3b: a secret value supplied through --from is refused, the env var is named, and the value reaches neither the file nor a stream', async () => {
@@ -577,6 +634,57 @@ describe('writePluginConfig — the non-interactive core', () => {
     expect(again.needed).toEqual([])
     expect(await readConfig('core')).toEqual({ a: 'placeholder-a', b: 3, c: true })
     expect(configSiblings('core')).toEqual([])
+  })
+
+  test('merges over the file on disk: caller values, then the current file, then the manifest default; a secret in the file is dropped; an undeclared key is kept', async () => {
+    await seed(
+      makeManifest(
+        'core',
+        {
+          a: { type: 'string', default: 'placeholder-a' },
+          b: { type: 'number' },
+          token: { type: 'string' },
+          c: { type: 'boolean', required: false },
+        },
+        ['token'],
+      ),
+    )
+    // A hand-written file: b answered, a secret pasted in against the rule,
+    // and a key the manifest no longer declares.
+    mkdirSync(dirname(pluginConfigPath('core')), { recursive: true })
+    await writeFile(pluginConfigPath('core'), JSON.stringify({ b: 3, token: 'do-not-carry', legacy: 'kept' }))
+
+    const result = await contained(() => writePluginConfig('core', { c: true }))
+    expect(result.written).toEqual(['a', 'b', 'c', 'legacy'])
+    expect(result.needed).toEqual([])
+    expect(result.secrets).toEqual(['token'])
+    expect(await readConfig('core')).toEqual({ a: 'placeholder-a', b: 3, c: true, legacy: 'kept' })
+    expect(Object.keys(await readConfig('core'))).toEqual(['a', 'b', 'c', 'legacy'])
+    expect(await readFile(pluginConfigPath('core'), 'utf8')).not.toContain('do-not-carry')
+
+    // A caller value beats the file; the file beats the default.
+    await contained(() => writePluginConfig('core', { b: 4 }))
+    expect(await readConfig('core')).toEqual({ a: 'placeholder-a', b: 4, c: true, legacy: 'kept' })
+  })
+
+  test('refuses over an existing file that is not valid JSON, naming the path and writing nothing', async () => {
+    await seed(makeManifest('core', { a: { type: 'number' } }))
+    mkdirSync(dirname(pluginConfigPath('core')), { recursive: true })
+    await writeFile(pluginConfigPath('core'), '{"a": 1')
+    await contained(async () => {
+      await expect(writePluginConfig('core', { a: 2 })).rejects.toThrow(pluginConfigPath('core'))
+    })
+    expect(await readFile(pluginConfigPath('core'), 'utf8')).toBe('{"a": 1')
+    expect(configSiblings('core')).toEqual([])
+
+    // Through the verb, on both ways in: exit 1, nothing written, no prompt.
+    const viaFrom = await capture(['core', '--from', '{"a": 2}'])
+    expect(viaFrom.code).toBe(1)
+    expect(viaFrom.stderr).toContain('Nothing was written')
+    const viaWalk = await capture(['core'], tty(['2']))
+    expect(viaWalk.code).toBe(1)
+    expect(viaWalk.out).not.toContain('a>')
+    expect(await readFile(pluginConfigPath('core'), 'utf8')).toBe('{"a": 1')
   })
 
   test('refuses a wrong-typed value through the resolver and leaves an existing file untouched', async () => {
