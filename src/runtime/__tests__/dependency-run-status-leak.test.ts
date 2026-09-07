@@ -7,13 +7,14 @@
  * must stay one. The free text it must never carry is built in two places from
  * whatever a handler threw:
  *
- *   - `invoke-plugin.ts:771-789` — a HANDLER throw. It is caught there and
- *     turned into a failed `SkillResult` whose `summary` AND whose
+ *   - `executeHandler`'s catch in `invoke-plugin.ts` — a HANDLER throw. It is
+ *     caught there and turned into a failed `SkillResult` whose `summary` AND whose
  *     `errors[0].message` both carry the thrown message. This is the arm a
  *     producer that throws actually reaches, and it is the arm arm 1 exercises.
- *   - `engine.ts:1057-1071` — `invokePlugin` ITSELF throwing, which builds
- *     `invocation threw: <message>`. Named so the sentence above is not read as
- *     covering it. This file does not exercise that arm.
+ *   - the `catch` around `invokePlugin` in `runAdvance` — `invokePlugin` ITSELF
+ *     throwing, which builds `invocation threw: <message>`. Named so the
+ *     sentence above is not read as covering it. This file does not exercise
+ *     that arm.
  *
  * Two arms, one file, the shape `no-dependency-path-fallback.test.ts` uses:
  *

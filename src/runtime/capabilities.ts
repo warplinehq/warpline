@@ -40,11 +40,12 @@ import type { OutputRecord } from '../schemas/skill-result.js'
  * A `Pick`, never the whole `PluginRun`. This type is the boundary where a
  * field is CHOSEN for exposure across the seam, which makes it the one place a
  * leak can enter. The free text a producer's failure becomes is built in two
- * places from whatever a handler threw — `invoke-plugin.ts:771-789` for a
- * handler throw, which puts it into both the result's `summary` and its
- * `errors[0].message`, and `engine.ts:1057-1071` for `invokePlugin` itself
- * throwing. Naming two fields here does not merely leave that text unreturned;
- * it keeps it out of the mint's scope entirely.
+ * places from whatever a handler threw — `executeHandler`'s catch in
+ * `invoke-plugin.ts` for a handler throw, which puts it into both the result's
+ * `summary` and its `errors[0].message`, and the `catch` around `invokePlugin`
+ * in `runAdvance` for `invokePlugin` itself throwing. Naming two fields here
+ * does not merely leave that text unreturned; it keeps it out of the mint's
+ * scope entirely.
  *
  * ONE projection for both facts, and not two. The engine mutates
  * `state.plugin_runs` during its level loop, so two independent reads of it
@@ -319,11 +320,12 @@ export interface SecretsHandle {
  *
  * **The status is a closed enum, and the failure TEXT is deliberately not
  * here.** A producer's thrown message becomes free text in two places —
- * `invoke-plugin.ts:771-789` for a handler throw, into both the result's
- * `summary` and its `errors[0].message`, and `engine.ts:1057-1071` for
- * `invokePlugin` itself throwing — and that text carries whatever the handler
- * was holding, operator paths included. `DependencyRun` is the boundary that
- * keeps it out of scope, and `dependency-run-status-leak.test.ts` is the alarm.
+ * `executeHandler`'s catch in `invoke-plugin.ts` for a handler throw, into both
+ * the result's `summary` and its `errors[0].message`, and the `catch` around
+ * `invokePlugin` in `runAdvance` for `invokePlugin` itself throwing — and that
+ * text carries whatever the handler was holding, operator paths included.
+ * `DependencyRun` is the boundary that keeps it out of scope, and
+ * `dependency-run-status-leak.test.ts` is the alarm.
  * A change that hands the mint a whole `PluginRun`, or anything read from the
  * run log, is the change both exist to stop.
  *
