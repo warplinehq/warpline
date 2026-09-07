@@ -39,17 +39,65 @@
  * calls inside handlers this file does not control.
  */
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+const REPO_ROOT = join(import.meta.dir, '..', '..')
+const EXAMPLES = join(REPO_ROOT, 'examples', 'plugins')
+
+/**
+ * Block comments only, and deliberately not line comments: a `//` rule would
+ * truncate any line holding a `https://` inside a string literal, which every
+ * handler that talks to an API has. Stripping the block comments is what stops
+ * a manifest docstring quoting its own declaration from standing in for the
+ * declaration.
+ */
+const stripBlockComments = (source: string): string => source.replace(/\/\*[\s\S]*?\*\//g, '')
+
+/** An array with at least one quoted entry. `dependencies: []` does not match. */
+const DECLARES_DEPENDENCY = /\bdependencies\s*:\s*\[\s*['"]/
+
+/**
+ * Quoted string literals ending in `.json`.
+ *
+ * Template literals are out of reach by construction and that is the ceiling:
+ * a handler building `` `${manifest.name}.last.json` `` is invisible here. It
+ * is the own-state form, which is exempt anyway, so the miss is on the side
+ * that costs nothing; a foreign path would have to be interpolated to hide,
+ * and no example does that. Widen to backticks if one ever does.
+ */
+const JSON_LITERAL = /(['"])([^'"\n]*\.json)\1/g
 
 /**
  * `<plugin>/handler.ts: <literal>` for every JSON path literal in a handler
  * whose manifest declares at least one dependency and which does not name the
- * plugin's own directory.
+ * plugin's own directory. A directory missing either file is skipped, not an
+ * offender.
  */
-export function offenders(_root: string): string[] {
-  return []
+export function offenders(root: string): string[] {
+  const out: string[] = []
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    let manifest: string
+    let handler: string
+    try {
+      manifest = readFileSync(join(root, entry.name, 'manifest.ts'), 'utf8')
+      handler = readFileSync(join(root, entry.name, 'handler.ts'), 'utf8')
+    } catch {
+      continue
+    }
+    if (!DECLARES_DEPENDENCY.test(stripBlockComments(manifest))) continue
+    let match: RegExpExecArray | null
+    const re = new RegExp(JSON_LITERAL)
+    while ((match = re.exec(handler)) !== null) {
+      const literal = match[2]!
+      // The own-name exemption: a path derived from the plugin's own manifest
+      // name is its own prior state, which the authoring guide sanctions.
+      if (!literal.includes(entry.name)) out.push(`${entry.name}/handler.ts: ${literal}`)
+    }
+  }
+  return out.sort()
 }
 
 describe('no example reaches past the dependency member for a path', () => {
@@ -80,5 +128,12 @@ describe('no example reaches past the dependency member for a path', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  test('the real examples tree has no offender', () => {
+    // Guarded against a wrong path: fewer directories than the tree is known
+    // to hold is a mistaken root, not a shorter roster.
+    expect(readdirSync(EXAMPLES).length).toBeGreaterThanOrEqual(12)
+    expect(offenders(EXAMPLES)).toEqual([])
   })
 })
