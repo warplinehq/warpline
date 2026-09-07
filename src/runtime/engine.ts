@@ -1031,10 +1031,27 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // `witnessAfterGrantRead` — one copy, because two copies of an
           // argument drift and the copy that drifts is the one nobody reads.
           const witness = witnessAfterGrantRead(pluginName, manifest.side_effects)
+
+          // What each DECLARED dependency last produced, projected HERE and
+          // not from the state read at the top of the advance. `plugin_runs` is
+          // mutated by each level's own writes below, and level ordering is
+          // what puts a level-0 producer's write before a level-1 consumer's
+          // invocation. A projection hoisted out of this closure is a snapshot
+          // taken before any producer ran: the consumer would read nothing on
+          // every advance while every test handing a literal stayed green.
+          //
+          // Declared names only, so the record never carries a key the
+          // consumer's manifest does not list. `last_output` is ABSENT rather
+          // than null for a run that produced none, which the optional chain
+          // and the `?? null` both cover.
+          const dependencyOutputs = Object.fromEntries(
+            manifest.dependencies.map((d) => [d, state.plugin_runs[d]?.last_output ?? null]),
+          )
+
           invocationResult = await invokePlugin(
             pluginName,
             {},
-            { pluginsDir, runId: run_id },
+            { pluginsDir, runId: run_id, dependencyOutputs },
             witness,
           )
         } catch (err) {
