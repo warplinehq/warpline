@@ -18,12 +18,16 @@
  * present is left as it is, and a config file already present — which an
  * operator may have edited — is not touched. Nothing is ever deleted.
  *
- * NON-INTERACTIVE by design, and it does not fail over what it cannot fill.
- * The defaults the seed's manifest declares are written; a required input
- * with no default is NAMED on stdout with the verb that fills it. `plan`
- * renders without a complete config and the runtime names the gap at run
- * time, so failing here over a plugin the operator has not chosen to
- * configure yet would be worse than the message.
+ * ON A TERMINAL the seed's declared inputs are asked for, in declaration
+ * order, through the same walk `configure` runs — reached through its export,
+ * so the prompt format and the secrets rule have one implementation and
+ * cannot drift between the two verbs. OFF a terminal nothing is asked: the
+ * defaults the manifest declares are written, a required input with no
+ * default is NAMED on stdout with the verb that fills it, and the exit is 0.
+ * `plan` renders without a complete config and the runtime names the gap at
+ * run time, so failing here over a plugin the operator has not chosen to
+ * configure yet would be worse than the message. Either way a config file
+ * already present is never touched, so a second `init` asks nothing.
  *
  * Never terminates the process — it returns a code to the dispatcher.
  */
@@ -32,7 +36,8 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { pluginConfigPath, pluginsDir, warplineHome } from '../lib/paths.js'
-import { ConfigureError, type ConfigureIo, writePluginConfig } from './configure.js'
+import { ConfigureError, type ConfigureIo, walkPluginInputs, writePluginConfig } from './configure.js'
+import { isInteractive } from './prompt.js'
 import { prepareHome, scaffoldPlugin } from './scaffold.js'
 
 /**
@@ -58,7 +63,8 @@ const USAGE = `Usage: warpline init
 
 Creates the warpline home (WARPLINE_HOME, else the nearest .warpline/, else
 <cwd>/.warpline), copies the '${SEED_EXAMPLE}' example into its plugins
-directory, and writes that plugin's config from the defaults its manifest
+directory, and writes that plugin's config: on a terminal it asks for each
+input the manifest declares, otherwise it writes the defaults the manifest
 declares. Safe to run again: nothing already present is changed.
 `
 
@@ -107,7 +113,20 @@ export async function run(
     let written: string[]
     let needed: string[]
     try {
-      ;({ written, needed } = await writePluginConfig(SEED_EXAMPLE, {}))
+      let answers: Record<string, unknown> = {}
+      if (isInteractive(io.input)) {
+        // What was collected so far goes out first, so the prompts follow
+        // the Home and seed lines rather than precede them.
+        process.stdout.write(`${lines.join('\n')}\n`)
+        lines.length = 0
+        const walked = await walkPluginInputs(SEED_EXAMPLE, io)
+        if (walked === null) {
+          process.stderr.write('Input ended before every input was answered. No config was written.\n')
+          return 1
+        }
+        answers = walked
+      }
+      ;({ written, needed } = await writePluginConfig(SEED_EXAMPLE, answers))
     } catch (err) {
       if (!(err instanceof ConfigureError)) throw err
       process.stderr.write(`${err.message}\nNo config was written.\n`)
