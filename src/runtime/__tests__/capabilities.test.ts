@@ -29,11 +29,14 @@ import {
   type CapabilityCaller,
   type CapabilityEntry,
   type CapabilityGrantWitness,
+  type CapabilityMintInput,
+  type DependenciesHandle,
   type SecretsHandle,
 } from '../capabilities.js'
 import { invokePlugin } from '../invoke-plugin.js'
 import { PluginManifestSchema, SideEffectType } from '../../schemas/plugin-manifest.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
+import type { OutputRecord } from '../../schemas/skill-result.js'
 
 /** A real manifest, parsed by the live schema so every default is the real one. */
 function manifestDeclaring(sideEffects: SideEffectType[]): PluginManifest {
@@ -44,6 +47,19 @@ function manifestDeclaring(sideEffects: SideEffectType[]): PluginManifest {
     autonomy_level: 'autonomous',
     ttl_hours: 24,
     side_effects: sideEffects,
+  })
+}
+
+/** The same fixture manifest, declaring a dependency graph rather than effects. */
+function manifestDependingOn(dependencies: string[]): PluginManifest {
+  return PluginManifestSchema.parse({
+    name: 'fixture-plugin',
+    version: '1.0.0',
+    description: 'a fixture manifest, used only to mint against',
+    autonomy_level: 'autonomous',
+    ttl_hours: 24,
+    side_effects: [],
+    dependencies,
   })
 }
 
@@ -287,6 +303,95 @@ describe('the secrets handle', () => {
 })
 
 /**
+ * The second registered member: the Output a declared dependency last produced.
+ *
+ * The property that carries the weight is the one the refusal keys off. It
+ * reads `manifest.dependencies` — the DECLARATION — and never the key set of
+ * the record it was handed. A member that answered from what happened to be
+ * delivered would erode a dependency graph into a suggestion, one convenient
+ * read at a time, and nothing downstream would notice.
+ *
+ * It is UNGATED, like `secrets`, and for the same kind of reason: projecting a
+ * value the runtime already holds is none of the five effects `side_effects`
+ * is drawn from. The consequence is D-03 — a run started by hand still
+ * receives the member, and reads `null` through it.
+ */
+describe('the dependencies handle', () => {
+  const CALLER: CapabilityCaller = { plugin: 'fixture-plugin', runId: 'run-1' }
+  const REC: OutputRecord = { type: 'brief', format: 'json', body: '{"n":1}' }
+
+  function handleFor(
+    dependencies: string[],
+    dependencyOutputs?: Readonly<Record<string, OutputRecord | null>>,
+    witness = NOT_GRANTED,
+  ): DependenciesHandle {
+    const input: CapabilityMintInput = {
+      manifest: manifestDependingOn(dependencies),
+      caller: CALLER,
+      ...(dependencyOutputs === undefined ? {} : { dependencyOutputs }),
+    }
+    return mintContext(input, witness).context.dependencies
+  }
+
+  test('it is registered ungated, so every plugin receives it', () => {
+    expect(CAPABILITY_EFFECTS['dependencies']).toBeNull()
+    const minted = mintContext(
+      { manifest: manifestDependingOn(['dep-a']), caller: CALLER },
+      NOT_GRANTED,
+    )
+    expect('dependencies' in minted.context).toBe(true)
+  })
+
+  test('a declared dependency that produced an Output reads that record', () => {
+    expect(handleFor(['dep-a'], { 'dep-a': REC }).lastOutput(CALLER, 'dep-a')).toEqual(REC)
+  })
+
+  test('a declared dependency that produced none reads null', () => {
+    expect(handleFor(['dep-a'], {}).lastOutput(CALLER, 'dep-a')).toBeNull()
+  })
+
+  test('an undeclared name throws, naming the plugin, the name and the manifest field', () => {
+    const handle = handleFor(['dep-a'], { 'dep-a': REC })
+    expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/fixture-plugin/)
+    expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/dep-z/)
+    expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/dependencies/)
+  })
+
+  /**
+   * The refusal keys off the declaration, not off availability. "It happened to
+   * be there" is not an argument: a record delivered under a name the manifest
+   * never declared is still a read the graph does not authorise.
+   */
+  test('a name present in the delivered record but undeclared still throws', () => {
+    const handle = handleFor(['dep-a'], { 'dep-a': REC, 'dep-z': REC })
+    expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/dep-z/)
+  })
+
+  /**
+   * The whole surface, asserted as a set. One method and no enumeration — a
+   * handler cannot walk the record, so the order of `manifest.dependencies` and
+   * the order of the engine's projection are unobservable and are not contract.
+   */
+  test('the handle exposes exactly one method and no enumeration', () => {
+    const handle = handleFor(['dep-a'], { 'dep-a': REC })
+    expect(Object.keys(handle).sort()).toEqual(['lastOutput'])
+    expect(typeof handle.lastOutput).toBe('function')
+  })
+
+  /**
+   * D-03: the manual path. `effect: null` skips both withhold arms, so the
+   * member is minted on a run carrying no grant and with no record supplied.
+   * Every declared name reads `null`; an undeclared one still throws.
+   */
+  test('on the manual path it is minted, reads null, and still refuses an undeclared name', () => {
+    const handle = handleFor(['dep-a', 'dep-b'])
+    expect(handle.lastOutput(CALLER, 'dep-a')).toBeNull()
+    expect(handle.lastOutput(CALLER, 'dep-b')).toBeNull()
+    expect(() => handle.lastOutput(CALLER, 'dep-z')).toThrow(/dep-z/)
+  })
+})
+
+/**
  * One end-to-end case, because everything above mints directly.
  *
  * What this adds over the unit cases is the wiring: that `invokePlugin`'s
@@ -370,5 +475,83 @@ describe('the handle reaches a handler through invokePlugin', () => {
     expect(seen.plugin).toBe('handle-fixture')
     expect(seen.hasRunId).toBe(true)
     expect(JSON.stringify(invocation)).not.toContain('SENTINEL-DO-NOT-LEAK')
+  })
+
+  /**
+   * The delivery half, and the only case that proves the runtime carries the
+   * record rather than a test handing a handler a literal.
+   *
+   * The record enters through `invokePlugin`'s third argument, is settled into
+   * the mint args, is closed over by the member, and is read by a handler that
+   * never saw it written. Break any hop and every direct-mint case above stays
+   * green while production reads nothing.
+   */
+  test('a four-parameter handler reads the record its declared dependency produced', async () => {
+    tmpDir = join(
+      tmpdir(),
+      `warpline-cap-deps-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    )
+    const pluginDir = join(tmpDir, 'deps-fixture')
+    await mkdir(pluginDir, { recursive: true })
+    await writeFile(
+      join(pluginDir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify({
+        ...manifestDependingOn(['dep-a']),
+        name: 'deps-fixture',
+      })}`,
+    )
+    await writeFile(
+      join(pluginDir, 'handler.ts'),
+      `
+      export async function handler(manifest, args, signal, capabilities) {
+        let undeclared = 'no-throw'
+        try {
+          capabilities.dependencies.lastOutput(capabilities.caller, 'dep-z')
+        } catch (error) {
+          undeclared = error.message
+        }
+        const record = capabilities.dependencies.lastOutput(capabilities.caller, 'dep-a')
+        return {
+          status: 'success',
+          phases_completed: ['deps-fixture'],
+          phases_failed: [],
+          errors: [],
+          data_freshness: {},
+          summary: JSON.stringify({
+            type: record === null ? null : record.type,
+            body: record === null ? null : JSON.parse(record.body),
+            surface: Object.keys(capabilities.dependencies).sort(),
+            undeclared,
+          }),
+          artifacts_produced: [],
+          schema_version: 1,
+        }
+      }
+    `,
+    )
+
+    const invocation = await invokePlugin(
+      'deps-fixture',
+      {},
+      {
+        pluginsDir: tmpDir,
+        dependencyOutputs: { 'dep-a': { type: 'brief', format: 'json', body: '{"n":1}' } },
+      },
+      { granted: false, reason: 'manual-run' },
+    )
+
+    expect(invocation.result.status).toBe('success')
+    const seen = JSON.parse(invocation.result.summary) as {
+      type: string | null
+      body: { n: number } | null
+      surface: string[]
+      undeclared: string
+    }
+
+    expect(seen.type).toBe('brief')
+    expect(seen.body).toEqual({ n: 1 })
+    expect(seen.surface).toEqual(['lastOutput'])
+    expect(seen.undeclared).toContain('dep-z')
+    expect(seen.undeclared).toContain('dependencies')
   })
 })
