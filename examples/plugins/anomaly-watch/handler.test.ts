@@ -171,7 +171,7 @@ describe('anomaly-watch produces an Output', () => {
 
       expect(output.body).toBeDefined()
       expect(Buffer.byteLength(output.body!, 'utf8')).toBeLessThan(OUTPUT_BODY_CAP_BYTES)
-      expect(JSON.parse(output.body!).breached.map((s: { name: string }) => s.name)).toEqual(['errors', 'signups'])
+      expect(JSON.parse(output.body!).anomalies.map((s: { name: string }) => s.name)).toEqual(['errors', 'signups'])
     })
   })
 })

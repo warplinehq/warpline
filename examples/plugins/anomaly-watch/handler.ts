@@ -122,7 +122,7 @@ export const handler: CapabilityHandlerFn = async (manifest, args, _signal, _cap
     // hundred breached series; a metrics file larger than that wants `path`
     // plus an atomicWriteJson under the home instead, never both.
     artifacts_produced: [
-      { type: 'anomalies', format: 'json', body: JSON.stringify({ observed_at: observedAt, breached: anomalies }) },
+      { type: 'anomalies', format: 'json', body: JSON.stringify({ observed_at: observedAt, anomalies }) },
     ],
   })
 }
