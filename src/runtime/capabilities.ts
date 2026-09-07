@@ -280,6 +280,16 @@ export interface SecretsHandle {
  * nothing that could compute one. Two answers to that question is the failure
  * being refused; one of them being subtly better is not a defence.
  *
+ * **What it hands back is yours.** The record is a copy, cloned at the
+ * projection site in `engine.ts` before it ever reaches this handle, so writing
+ * to it is safe and changes nothing outside your handler. It has to be a copy:
+ * the original lives in `state.plugin_runs`, which is persisted unvalidated at
+ * the end of the advance, so handing over the live object would let one
+ * plugin's in-place edit rewrite its producer's entry — and because
+ * `proposalFingerprint` hashes that field, move the producer's fingerprint with
+ * it. Do not rely on writing to the record to communicate anything; nothing
+ * reads it back.
+ *
  * **It does not read the filesystem.** It closes over a value the caller
  * supplied, which is also what makes it testable from a literal. Note that an
  * Output may carry a `path` rather than a `body`; resolving that path is the

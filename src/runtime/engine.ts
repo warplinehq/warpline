@@ -1056,7 +1056,31 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           const dependencyRuns = Object.fromEntries(
             manifest.dependencies.map((d): [string, DependencyRun | null] => {
               const run = state.plugin_runs[d]
-              return [d, run ? { status: run.status, last_output: run.last_output } : null]
+              return [
+                d,
+                run
+                  ? {
+                      status: run.status,
+                      // A COPY, and the copy is the point. The record lives in
+                      // `state.plugin_runs`, `writeEngineState` persists that
+                      // map unvalidated at the end of the advance, and
+                      // `capabilities.ts` hands whatever is here straight to
+                      // the handler. Passing the live object made a consumer's
+                      // in-place edit — `rec.body = JSON.stringify(patched)` is
+                      // the obvious shape — the engine's persisted state: a
+                      // body over the 16 KiB `OutputRecordSchema` cap bricks
+                      // every later fail-closed read, and because
+                      // `proposalFingerprint` hashes this field, the edit moves
+                      // the PRODUCER's fingerprint and re-arms side effects an
+                      // operator already denied. `status` needs no copy; it is
+                      // a string.
+                      last_output:
+                        run.last_output === undefined
+                          ? undefined
+                          : structuredClone(run.last_output),
+                    }
+                  : null,
+              ]
             }),
           )
 
