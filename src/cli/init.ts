@@ -115,8 +115,13 @@ export async function run(
     try {
       let answers: Record<string, unknown> = {}
       if (isInteractive(io.input)) {
-        // What was collected so far goes out first, so the prompts follow
-        // the Home and seed lines rather than precede them.
+        // What was collected so far goes out first, so that when `io.output`
+        // is the process stdout — the production default — the prompts
+        // follow the Home and seed lines rather than precede them. With an
+        // injected `io.output` (a test, the tarball gate) only the prompts
+        // land there; these lines, `Wrote` and `Next:` stay on the process
+        // stdout. `ConfigureIo` is the streams a walk prompts on, not the
+        // verb's whole output, and `configure.run` has the same split.
         process.stdout.write(`${lines.join('\n')}\n`)
         lines.length = 0
         const walked = await walkPluginInputs(SEED_EXAMPLE, io)
