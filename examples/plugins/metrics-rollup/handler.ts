@@ -48,13 +48,19 @@ interface State {
 }
 
 /**
- * Shape guards for the two things that arrive as JSON.
+ * Shape guards for the three things that arrive as JSON.
  *
  * Not optional politeness: `rollupWeekly` does `sum += row.value`, so one
  * `latest: "3"` or one missing field turns a rollup into a string
  * concatenation or `NaN` — and `retire` has already deleted the rows it was
  * computed from, so the (week, name) entry is wrong permanently. `weekStart`
  * throws `RangeError` on a malformed date, which fails the whole run.
+ *
+ * The same arithmetic runs over an EXISTING rollup: `cur.sum += row.value`
+ * with a `sum` of `"15"` writes `"151"`, atomically. So the retained rollups
+ * are guarded too, and a malformed one is refused rather than dropped — a
+ * dropped row costs one sample, but a rollup is the only trace left of the
+ * rows it was folded from, and nothing can rebuild it.
  */
 export function isRow(r: unknown): r is Row {
   const v = r as Row
@@ -65,6 +71,13 @@ export function isRow(r: unknown): r is Row {
 export function isSeries(s: unknown): s is Series {
   const v = s as Series
   return !!v && typeof v.name === 'string' && Number.isFinite(v.latest)
+}
+
+export function isRollup(r: unknown): r is Rollup {
+  const v = r as Rollup
+  return !!v && typeof v.name === 'string'
+    && typeof v.week === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.week)
+    && [v.count, v.sum, v.mean, v.min, v.max].every(n => Number.isFinite(n))
 }
 
 /** One row per series for `today`, unless (today, name) is already present. */
@@ -169,21 +182,32 @@ export const handler: CapabilityHandlerFn = async (manifest, args, _signal, _cap
   // So the catch refuses rather than proceeds, and says so without the path
   // or the parser's words, both of which would land in the run log.
   const statePath = join(warplineHome(), 'state', `${manifest.name}.json`)
-  let state: State = { rows: [], rollups: [] }
-  let droppedRows = 0
+  let raw: { rows?: unknown; rollups?: unknown } | null
   try {
-    const raw = await readJsonOrNull<{ rows?: unknown; rollups?: unknown }>(statePath)
-    if (raw !== null) {
-      const rawRows: unknown[] = Array.isArray(raw.rows) ? raw.rows : []
-      state = { rows: rawRows.filter(isRow), rollups: Array.isArray(raw.rollups) ? (raw.rollups as Rollup[]) : [] }
-      droppedRows = rawRows.length - state.rows.length
-    }
+    raw = await readJsonOrNull<{ rows?: unknown; rollups?: unknown }>(statePath)
   } catch {
     return skillFailure('parse_error', `${manifest.name}: retained state unreadable — refusing to overwrite it`, {
       phases_failed: [manifest.name],
       impact: 'HIGH',
       retryable: false,
     })
+  }
+  let state: State = { rows: [], rollups: [] }
+  let droppedRows = 0
+  if (raw !== null) {
+    const rawRows: unknown[] = Array.isArray(raw.rows) ? raw.rows : []
+    const rawRollups: unknown[] = Array.isArray(raw.rollups) ? raw.rollups : []
+    // See the guards above: a malformed rollup refuses the run, before the
+    // write below would make the fold permanent.
+    if (!rawRollups.every(isRollup)) {
+      return skillFailure('parse_error', `${manifest.name}: a retained rollup is not in the shape this plugin writes — refusing to overwrite the store`, {
+        phases_failed: [manifest.name],
+        impact: 'HIGH',
+        retryable: false,
+      })
+    }
+    state = { rows: rawRows.filter(isRow), rollups: rawRollups.filter(isRollup) }
+    droppedRows = rawRows.length - state.rows.length
   }
 
   const today = new Date().toISOString().slice(0, 10)

@@ -148,6 +148,24 @@ describe('github-poll persists what it polled', () => {
     })
   })
 
+  test('a snapshot in the wrong shape is a parse_error that leaves the file as it is, never "open undefined -> 2"', async () => {
+    await withHome(async (home) => {
+      await mkdir(join(home, 'state'), { recursive: true })
+      for (const wrong of ['{}', '{"observed_at": "x", "open_count": "2", "newest_number": 1}', '[]']) {
+        await writeFile(SNAPSHOT(home), wrong)
+        await withStubbedFetch(OK, async () => {
+          const result = await invoke({ repo: REPO })
+
+          expect(result.status).toBe('failed')
+          expect(result.errors?.[0]?.code).toBe('parse_error')
+          expect(JSON.stringify(result)).not.toContain('undefined')
+          expect(JSON.stringify(result)).not.toContain(home)
+        })
+        expect(await readFile(SNAPSHOT(home), 'utf-8')).toBe(wrong)
+      }
+    })
+  })
+
   test('a snapshot that cannot be read is a failure, not a first observation', async () => {
     await withHome(async (home) => {
       await mkdir(join(home, 'state'), { recursive: true })

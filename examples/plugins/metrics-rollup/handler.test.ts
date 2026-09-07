@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CapabilityContext } from 'warpline/unstable-capabilities'
-import { appendRows, retire, weekStart, rollupWeekly, cutoffDate, handler, isRow, isSeries } from './handler.js'
+import { appendRows, retire, weekStart, rollupWeekly, cutoffDate, handler, isRollup, isRow, isSeries } from './handler.js'
 import { manifest } from './manifest.js'
 
 /** The handler is four-parameter; a test hands it a context it never reads. */
@@ -197,6 +197,43 @@ describe('metrics-rollup shape guards', () => {
     expect(isRow({ date: '2026-08-27', name: 'a', value: 3 })).toBe(true)
     expect(isRow({ date: 'not-a-date', name: 'a', value: 3 })).toBe(false)
     expect(isRow({ date: '2026-08-27', name: 'a', value: null })).toBe(false)
+  })
+
+  test('isRollup rejects a string sum, a malformed week, or a missing field', () => {
+    const good = { week: '2026-08-24', name: 'a', count: 3, sum: 15, mean: 5, min: 2, max: 9 }
+    expect(isRollup(good)).toBe(true)
+    expect(isRollup({ ...good, sum: '15' })).toBe(false)
+    expect(isRollup({ ...good, week: 'w34' })).toBe(false)
+    expect(isRollup({ ...good, max: undefined })).toBe(false)
+    expect(isRollup({ ...good, name: 7 })).toBe(false)
+    expect(isRollup(null)).toBe(false)
+  })
+
+  test('a retained rollup in the wrong shape refuses the run and leaves the store as it is, rather than folding a number into a string', async () => {
+    await withHome(async home => {
+      const metricsPath = join(home, 'metrics.json')
+      await writeFile(metricsPath, JSON.stringify({ series: [{ name: 'errors', latest: 4 }] }))
+      const statePath = join(home, 'state', 'metrics-rollup.json')
+      const today = new Date().toISOString().slice(0, 10)
+      const stale = cutoffDate(today, 30)
+      // The row about to be retired folds into this rollup's week, and the
+      // rollup's sum is the string "15": `"15" + 1` is `"151"`, and the
+      // atomic write would make it permanent while `retire` has already
+      // discarded the row it came from.
+      const store = JSON.stringify({
+        rows: [{ date: stale, name: 'errors', value: 1 }],
+        rollups: [{ week: weekStart(stale), name: 'errors', count: 3, sum: '15', mean: 5, min: 2, max: 9 }],
+      })
+      await mkdir(join(home, 'state'), { recursive: true })
+      await writeFile(statePath, store)
+
+      const result = await invoke({ metrics_path: metricsPath, retention_days: 7 })
+
+      expect(result.status).toBe('failed')
+      expect(result.errors?.[0]?.code).toBe('parse_error')
+      expect(JSON.stringify(result)).not.toContain(home)
+      expect(await readFile(statePath, 'utf-8')).toBe(store)
+    })
   })
 
   test('malformed series and retained rows are dropped and counted, not folded in', async () => {

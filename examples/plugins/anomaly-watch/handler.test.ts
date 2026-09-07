@@ -117,6 +117,33 @@ describe('anomaly-watch reads what it wrote', () => {
   })
 })
 
+/**
+ * The last-observation file is this plugin's own, so the trigger is a hand
+ * edit or a truncated write — but derive-dont-store.md points at this handler
+ * as the shape to copy, so an unguarded read here is what every author copies.
+ * A prior in the wrong shape is refused the way an unreadable one is, never
+ * compared against (`prior.breached.includes` on a non-array throws) and
+ * never overwritten.
+ */
+describe('anomaly-watch refuses a prior observation it did not write', () => {
+  test('a last-observation file in the wrong shape is a parse_error, not a throw, and is left as it is', async () => {
+    await withHome(async (home) => {
+      await seedMetrics(home)
+      const path = join(home, 'state', 'anomaly-watch.last.json')
+      for (const wrong of ['{}', '{"observed_at": 1, "breached": "errors"}', '[]', '{"observed_at": "x", "breached": [1]}']) {
+        await writeFile(path, wrong)
+        const result = await invoke({})
+
+        expect(result.status).toBe('failed')
+        expect(result.errors?.[0]?.code).toBe('parse_error')
+        expect(result.summary).not.toContain('undefined')
+        expect(JSON.stringify(result)).not.toContain(home)
+        expect(await readFile(path, 'utf-8')).toBe(wrong)
+      }
+    })
+  })
+})
+
 describe('anomaly-watch produces an Output', () => {
   test('the success arm returns exactly one Output that parses at the boundary', async () => {
     await withHome(async (home) => {

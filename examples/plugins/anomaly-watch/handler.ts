@@ -31,6 +31,18 @@ interface Observation {
   breached: string[]
 }
 
+/**
+ * The shape this plugin writes. Anything else in that file was not written
+ * by it — a hand edit, a truncated write — and is refused rather than
+ * compared against: `delta` reads `prior.breached.includes`, and a thrown
+ * `TypeError` there turns the observation into a stack trace.
+ */
+function isObservation(v: unknown): v is Observation {
+  const o = v as Observation
+  return !!o && typeof o === 'object' && typeof o.observed_at === 'string'
+    && Array.isArray(o.breached) && o.breached.every(b => typeof b === 'string')
+}
+
 export function findAnomalies(series: Series[]): Series[] {
   return series.filter(s =>
     s.direction === 'above' ? s.latest > s.threshold : s.latest < s.threshold,
@@ -81,8 +93,18 @@ export const handler: CapabilityHandlerFn = async (manifest, args, _signal, _cap
   // before. The path is derived from the manifest name, never from `args`.
   // Not caught: a null is a first run, and any other failure is a real one —
   // swallowing it would report "no data yet" over a file that cannot be read.
+  // A file that parses but is not this plugin's shape is the same failure
+  // one step later, and it is refused before the write below replaces it.
   const observationPath = join(warplineHome(), 'state', `${manifest.name}.last.json`)
-  const prior = await readJsonOrNull<Observation>(observationPath)
+  const priorRaw = await readJsonOrNull<unknown>(observationPath)
+  if (priorRaw !== null && !isObservation(priorRaw)) {
+    return skillFailure(
+      'parse_error',
+      `${manifest.name}: the last observation is not in the shape this plugin writes — refusing to compare against it`,
+      { phases_failed: [manifest.name], impact: 'HIGH', retryable: false },
+    )
+  }
+  const prior = priorRaw as Observation | null
 
   const anomalies = findAnomalies(series)
   const breached = anomalies.map(a => a.name)

@@ -24,6 +24,18 @@ interface Snapshot {
   newest_number: number | null
 }
 
+/**
+ * The shape this plugin writes. Anything else in that file was not written
+ * by it and is refused rather than compared against: `delta` would render
+ * `open undefined -> 2` over a record with no `open_count`.
+ */
+function isSnapshot(v: unknown): v is Snapshot {
+  const s = v as Snapshot
+  return !!s && typeof s === 'object' && typeof s.observed_at === 'string'
+    && Number.isFinite(s.open_count)
+    && (s.newest_number === null || Number.isFinite(s.newest_number))
+}
+
 export function summariseByLabel(issues: Issue[]): Record<string, number> {
   const counts: Record<string, number> = {}
   for (const issue of issues) {
@@ -78,9 +90,19 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, _capa
   // before. The path is derived from the manifest name, never from `args`.
   // Not caught: a null is a first run, and any other failure is a real one —
   // swallowing it would report a first observation over a file that exists
-  // and cannot be read.
+  // and cannot be read. A file that parses but is not this plugin's shape is
+  // the same failure one step later, refused before the request and before
+  // the write below replaces it.
   const snapshotPath = join(warplineHome(), 'state', `${manifest.name}.last.json`)
-  const prior = await readJsonOrNull<Snapshot>(snapshotPath)
+  const priorRaw = await readJsonOrNull<unknown>(snapshotPath)
+  if (priorRaw !== null && !isSnapshot(priorRaw)) {
+    return skillFailure(
+      'parse_error',
+      `${manifest.name}: the last snapshot is not in the shape this plugin writes — refusing to compare against it`,
+      { phases_failed: [manifest.name], impact: 'HIGH', retryable: false },
+    )
+  }
+  const prior = priorRaw as Snapshot | null
 
   // Forward the runtime's AbortSignal so the per-attempt timeout can cancel
   // the request instead of orphaning it.
