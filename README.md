@@ -139,7 +139,9 @@ only the manifest's name rewritten.
 Authoring guide: [docs/plugin-authoring.md](docs/plugin-authoring.md).
 
 ```bash
-# First run: create the home, copy one example plugin in, write its config
+# First run: create the home, copy one example plugin in, write its config.
+# Asks for each input the plugin declares on a terminal; writes the declared
+# defaults when stdin is not one. Safe to run again.
 npx warpline init
 
 # Scaffold a plugin — also prepares the home directory

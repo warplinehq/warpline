@@ -6,7 +6,10 @@
 # global root), and asserts the seven things a checkout cannot prove:
 #
 #   1. the `files` whitelist shipped no source, tests or planning artifacts
-#   2. `warpline --help` runs under Node with the tarball's bytes
+#   2. `warpline --help` runs under Node with the tarball's bytes, and
+#      `warpline init` runs BOTH its branches from the installed bin — piped
+#      (the declared defaults, idempotent) and the in-process walk with an
+#      injected terminal — each in its own scratch home
 #   3. the `exports` map resolves every published specifier — under Node AND
 #      Bun — exposes exactly one path accessor, ships no filesystem helper and
 #      no removed field behind `schemas/run-log`, exposes exactly the decided
@@ -48,10 +51,12 @@ cd "$REPO_ROOT"
 PREFIX="$(mktemp -d)"
 CONSUMER="$(mktemp -d)"
 WL_HOME="$(mktemp -d)"
+INIT_HOME="$(mktemp -d)"
+INIT_HOME_TTY="$(mktemp -d)"
 TARBALL=""
 
 cleanup() {
-  rm -rf "$PREFIX" "$CONSUMER" "$WL_HOME"
+  rm -rf "$PREFIX" "$CONSUMER" "$WL_HOME" "$INIT_HOME" "$INIT_HOME_TTY"
   [ -n "$TARBALL" ] && rm -f "$REPO_ROOT/$TARBALL"
   return 0
 }
@@ -97,6 +102,63 @@ BOGUS_OUT="$("$BIN" bogus 2>"$CONSUMER/bogus.err")" && fail "warpline bogus exit
 [ -z "$BOGUS_OUT" ] || fail "warpline bogus wrote to stdout: $BOGUS_OUT"
 grep -q 'Unknown command' "$CONSUMER/bogus.err" \
   || fail "warpline bogus wrote no error to stderr"
+
+# ── 2b. The first-run verb, both branches, from the installed bin ────────
+#
+# `init` asks for the seed's declared inputs on a terminal and writes the
+# declared defaults when stdin is not one. Both branches run here from the
+# packed bytes under Node, each in its OWN scratch home and never in WL_HOME:
+# section 5 asserts that `scaffold demo` is what created the
+# node_modules/warpline link there, and an init that ran first through the
+# same home preparation would make that assertion vacuous.
+
+echo "== init from the install, stdin not a terminal"
+INIT_CFG="$INIT_HOME/config/metrics-rollup.json"
+INIT_OUT="$(WARPLINE_HOME="$INIT_HOME" "$BIN" init </dev/null)" \
+  || fail "warpline init </dev/null exited non-zero"
+[ -f "$INIT_CFG" ] || fail "$INIT_CFG was not written by a piped init"
+grep -qF '"retention_days": 90' "$INIT_CFG" \
+  || fail "piped init did not write the declared default:"$'\n'"$(cat "$INIT_CFG")"
+if echo "$INIT_OUT" | grep -qF 'metrics_path>'; then
+  fail "piped init wrote a prompt to a stdin that is not a terminal: $INIT_OUT"
+fi
+echo "$INIT_OUT" | grep -qF 'Next: warpline plan' \
+  || fail "piped init did not print the next step: $INIT_OUT"
+
+# A second run from the same bytes leaves the file byte-identical.
+cp "$INIT_CFG" "$CONSUMER/init-first.json"
+WARPLINE_HOME="$INIT_HOME" "$BIN" init </dev/null >/dev/null \
+  || fail "a second piped init exited non-zero"
+cmp -s "$INIT_CFG" "$CONSUMER/init-first.json" \
+  || fail "a second piped init changed $INIT_CFG"
+
+# The walk, in-process under Node with injected streams: an input flagged as a
+# terminal carrying an empty line (metrics_path, optional and undefaulted, so
+# left out) and then `30` (retention_days, parsed as a number by the walk).
+# Nothing here launches a child process and pipes answers into it — that is
+# the path the reader module records as unreliable. The subpath is not on the
+# exports map, so the installed file is imported by absolute path; the
+# delimiter is unquoted so the prefix interpolates, and the JS carries no `$`.
+INIT_JS="$PREFIX/lib/node_modules/warpline/dist/cli/init.js"
+[ -f "$INIT_JS" ] || fail "$INIT_JS is not in the install"
+cat > "$CONSUMER/init-walk.mjs" <<INITWALK
+import { Readable, Writable } from 'node:stream'
+const { run } = await import('${INIT_JS}')
+const input = Object.assign(Readable.from(['\n', '30\n']), { isTTY: true })
+const output = new Writable({ write(_chunk, _enc, cb) { cb() } })
+process.exit(await run([], { input, output }))
+INITWALK
+
+echo "== init from the install, the walk under node"
+INIT_TTY_CFG="$INIT_HOME_TTY/config/metrics-rollup.json"
+WARPLINE_HOME="$INIT_HOME_TTY" node "$CONSUMER/init-walk.mjs" >/dev/null \
+  || fail "the in-process init walk under node exited non-zero"
+[ -f "$INIT_TTY_CFG" ] || fail "$INIT_TTY_CFG was not written by the walk"
+grep -qF '"retention_days": 30' "$INIT_TTY_CFG" \
+  || fail "the walk did not write the typed answer as a number:"$'\n'"$(cat "$INIT_TTY_CFG")"
+if grep -qF 'metrics_path' "$INIT_TTY_CFG"; then
+  fail "an empty answer for an optional, undefaulted input was written:"$'\n'"$(cat "$INIT_TTY_CFG")"
+fi
 
 # ── 3. The exports map, from a consumer that only sees the install ───────
 #
