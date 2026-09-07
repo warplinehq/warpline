@@ -1182,19 +1182,23 @@ describe('hand-written manifest prose', () => {
   // — delete the paragraph and the rule reads as absolute again, while a
   // handoff still has to name a path; `feed-triage` is the worked case, and
   // the path it names is a copy it wrote under the home, never the configured
-  // value. The second is an operator instruction the
-  // runtime cannot enforce, because warpline never writes that file: nothing in
-  // this codebase can be asserted against it, so the sentence itself is the
-  // only artifact there is to pin.
-  test('plugin-authoring carries the handoff carve-out and the atomic-write instruction', () => {
+  // value. The second is the hand-edit instruction. `warpline configure` is
+  // the supported writer of that file and the guide has to say so — for one
+  // phase it said the opposite, that nothing writes it, and this test held
+  // that sentence in place — but an operator who edits by hand is outside
+  // anything the runtime can enforce, so the rename instruction is the only
+  // artifact there is to pin for that path.
+  test('plugin-authoring carries the handoff carve-out, names configure as the writer, and keeps the atomic-write instruction', () => {
     const doc = read('docs/plugin-authoring.md')
     expect(doc).toContain('Two exceptions, each one field wide')
     expect(doc).toContain('undo_instruction')
     expect(doc).toContain('anomaly-issue')
     expect(doc).toContain('needs-llm-contract.md')
     expect(doc).toContain('feed-triage')
+    expect(doc).toContain('warpline configure <plugin>')
     expect(doc).toContain('rename it over the target')
-    expect(doc).toContain('never writes it')
+    expect(doc).not.toContain('never writes it')
+    expect(doc).not.toMatch(/There is no `warpline config\s+set` command/)
     expect(doc).not.toContain('plugin-config.json')
   })
 })

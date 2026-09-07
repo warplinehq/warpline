@@ -127,10 +127,14 @@ A flat JSON object of input names to values:
 One file per plugin rather than one document for all of them, so a single bad
 edit fails a single plugin instead of every plugin in the same advance.
 
-**Warpline reads that file and never writes it.** There is no `warpline config
-set` command today, so nothing in the runtime can make your edit atomic on your
-behalf — that part is the operator's own responsibility. Write a temporary file
-in the same directory and rename it over the target. A rename within one
+**`warpline configure <plugin>` is the supported way to write that file.** It
+walks the inputs your manifest declares on a terminal, takes `--from '<json>'`
+when stdin is not one, never writes a name declared in `secrets`, and writes
+once, atomically, after every value has validated — so a refused value leaves
+the previous file untouched, and a re-run keeps every value already on disk
+unless you replace it. `warpline init` writes the seed plugin's config the same
+way. You can still edit the file by hand; if you do, write a temporary file in
+the same directory and rename it over the target. A rename within one
 filesystem is atomic, so an advance that reads the file mid-edit sees the old
 contents rather than half the new ones; editing the target in place hands a
 concurrent run a torn document instead.
