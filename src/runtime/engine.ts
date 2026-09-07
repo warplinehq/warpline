@@ -1102,6 +1102,28 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             result_summary: `invocation threw: ${errMsg}`,
             retried: false,
           })
+          // The run happened and it ended failed, so it is recorded like any
+          // other. Returning here without this write left the PREVIOUS run's
+          // entry in place, and `lastRun` answered with it — "how its last run
+          // ended" naming a run two advances back. `failed` is right for every
+          // path in, not just the invocation: the try also covers
+          // `witnessAfterGrantRead` and the dependency projection, and a throw
+          // out of either is as much a failed run as one out of `invokePlugin`.
+          // Note what does NOT arrive here — a handler that throws is caught
+          // inside `invokePlugin` and comes back as a `failed` result, which
+          // the autonomous write below handles; the reachable `invokePlugin`
+          // case is `loadPluginConfig` rethrowing a non-`PluginConfigError`.
+          //
+          // `lastOutputOf` takes the same carry-forward as the other three
+          // write sites: this run produced nothing, and an Output is a fact
+          // about the plugin rather than about its latest run.
+          const priorThrownEntry = state.plugin_runs[pluginName]
+          state.plugin_runs[pluginName] = {
+            last_run_at: new Date().toISOString(),
+            status: 'failed',
+            duration_ms: failedElapsed,
+            ...lastOutputOf(null, priorThrownEntry),
+          }
           await emitPluginFailed(pluginName, errMsg, run_id, eventsPath)
           onPluginEnd?.(pluginName, 'failed', failedElapsed, errMsg)
           return
@@ -1230,7 +1252,32 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         const priorAutonomousEntry = state.plugin_runs[pluginName]
         state.plugin_runs[pluginName] = {
           last_run_at: new Date().toISOString(),
-          status: result.status === 'failed' ? 'failed' : result.status === 'partial' ? 'partial' : 'success',
+          // The plugin's own terminal status, carried through rather than
+          // narrowed. `skipped` is the one that used to be lost: it is every
+          // dispatched `[needs-llm]` handoff, and the `else` arm folded it to
+          // `success`. That was internal until `lastRun` published the field —
+          // after which a consumer following the four-state table read
+          // "produced, and its latest run is healthy" for a producer that had
+          // handed its work to an LLM and produced nothing, beside a
+          // carried-forward record that made the claim look corroborated.
+          // `PluginRunSchema` has always admitted `skipped`; only this mapping
+          // refused to emit it.
+          //
+          // Deliberately NOT `delegated`: that value belongs to
+          // `deriveRunStatus`, which feeds the RunArtifact and the board events
+          // and answers a different question. A plain `skipped` and a handoff
+          // lead a consumer to the same action — read the carried-forward
+          // Output, do not treat it as a failure — so a second value here would
+          // be a distinction nothing acts on. Widen if a caller ever needs to
+          // tell them apart.
+          status:
+            result.status === 'failed'
+              ? 'failed'
+              : result.status === 'partial'
+                ? 'partial'
+                : result.status === 'skipped'
+                  ? 'skipped'
+                  : 'success',
           duration_ms: Date.now() - entryStart,
           // last_output: this run's Output when it produced one, the plugin's
           // prior Output when it did not, and absent — not null — when there
@@ -1893,10 +1940,14 @@ export async function applyPendingGate(
  * order the handler produced them.
  */
 function lastOutputOf(
-  result: SkillResult,
+  result: SkillResult | null,
   prior: PluginRun | undefined,
 ): { last_output?: OutputRecord } {
-  const last = result.artifacts_produced.at(-1)
+  // `null` is the third caller: an invocation that threw has no result at all,
+  // which is the strongest form of "this run produced nothing" and takes the
+  // carry-forward for the same reason the other two do. Widened here rather
+  // than inlined at that site, so all three writers keep sharing one rule.
+  const last = result?.artifacts_produced.at(-1)
   if (last !== undefined) return { last_output: last }
   const carried = prior?.last_output
   return carried === undefined ? {} : { last_output: carried }

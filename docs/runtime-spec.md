@@ -1053,6 +1053,24 @@ happened. A parked run that recorded nothing left the plugin due on the next
 advance, so its side effects fired again — every advance, for the whole grant
 window, on one approval.
 
+`skipped` records a run whose handler returned `skipped` — in practice every
+dispatched `[needs-llm]` handoff, since that is the only path producing one
+today. The plugin's own terminal status is written through unnarrowed, so a
+handoff is not folded into `success`: a consumer reading `lastRun` beside a
+carried-forward `last_output` would otherwise be told "produced, and its latest
+run is healthy" about a plugin that handed its work to an LLM and produced
+nothing. This is not the `delegated` of `deriveRunStatus`, which answers a
+different question for the run artifact and the board events; a plain `skipped`
+and a handoff lead a consumer to the same action, so this field does not
+distinguish them.
+
+A run whose invocation threw is recorded here too, as `failed`. Only
+`invokePlugin` throwing out of itself reaches that path — a handler that throws
+is caught inside and returns a `failed` result through the ordinary write — and
+the reachable cause is a config file that exists but cannot be read. Recording
+it is what keeps `status` a fact about the last run: without the write, the
+previous run's entry stayed and `lastRun` named a run two advances back.
+
 The status set is closed. Adding a member fans out into this document, and
 into every operator state file written afterwards, which is why it is not
 extended casually.
@@ -1345,9 +1363,11 @@ reused rather than restated — a second shape would be a second thing that coul
 disagree with the first.
 
 Every write of a `plugin_runs` entry decides this key — the autonomous
-completion, the supervised park, and the approve verb applying a gate. A gated
-run produced its Outputs before the gate ever saw them, so it carries a pointer
-like any other run.
+completion, the supervised park, the approve verb applying a gate, and the
+invocation that threw. A gated run produced its Outputs before the gate ever
+saw them, so it carries a pointer like any other run. A run that threw has no
+result to read one from, which is the strongest form of "produced nothing" and
+takes the same carry-forward as the rest.
 
 What each write records is the run's own most recent Output when the run
 produced one, and otherwise the pointer the entry already held. The field is a

@@ -391,7 +391,10 @@ about a dependency that produced last week. Together they name four states:
 
 `lastRun` can also read `'gated'`, `'partial'` or `'skipped'`. `'gated'` is the
 ordinary answer for a supervised dependency parked waiting for an approval —
-a real state to report, not an error to handle.
+a real state to report, not an error to handle. `'skipped'` is your dependency
+handing its work to an LLM: it returned `status: 'skipped'` with a `[needs-llm]`
+summary, so it ran and produced nothing this time. Treat it the way you treat
+`'failed'` here — the record you are holding is real and is older than that run.
 
 An Output carries **either** a `body` or a `path`, never both. When it carries a
 `path`, resolving it is your handler's business — `readJsonOrNull` from
