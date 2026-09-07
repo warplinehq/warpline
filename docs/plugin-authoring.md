@@ -312,6 +312,13 @@ a free-text array of informational tags describing what a plugin does. It grants
 nothing, the mint never reads it, and no member is keyed off it. The table below
 is keyed off `side_effects`.
 
+**`manifest.dependencies` and `capabilities.dependencies` share a name
+deliberately** — which is the opposite of the case above, and worth saying so
+that a reader does not have to guess which pattern applies. The member delivers
+exactly what the manifest field declares: the plugins you listed there, and no
+others. Asking it for a name you did not list throws, and the message tells you
+which manifest line to add.
+
 Members reach a handler as a fourth parameter, after `signal`. The runtime calls
 handlers with four arguments, and a handler declared with three keeps working
 unchanged — the widening is on the parameter type, so a three-parameter function
@@ -337,6 +344,7 @@ error, not a convention.
 | Member | Requires `side_effects` entry | What it does |
 |---|---|---|
 | `secrets` | **ungated** | Lists the credential names this plugin declared and the runtime resolved. Names only — never a value. |
+| `dependencies` | **ungated** | Reads the Output a plugin this manifest declared as a dependency last produced. Declared names only — an undeclared one throws. |
 
 <!-- /generated -->
 
@@ -347,9 +355,22 @@ import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
 
 export const handler: CapabilityHandlerFn = async (manifest, args, signal, capabilities) => {
   const declared = capabilities.secrets.resolvedNames(capabilities.caller)
-  // ...
+
+  // A plugin listed in this manifest's `dependencies`. `null` means it has
+  // produced nothing — never run, or ran and produced none; from here those
+  // are one state. A name this manifest does not declare throws instead.
+  const upstream = capabilities.dependencies.lastOutput(capabilities.caller, 'anomaly-watch')
+  if (upstream !== null && upstream.body !== undefined) {
+    const payload: unknown = JSON.parse(upstream.body)
+    // ...guard the shape before trusting it: another plugin wrote this.
+  }
 }
 ```
+
+An Output carries **either** a `body` or a `path`, never both. When it carries a
+`path`, resolving it is your handler's business — `readJsonOrNull` from
+`warpline/unstable-fs` is the sanctioned way. The member hands you the record
+and reads no filesystem itself.
 
 Three rules, and they are the whole model:
 

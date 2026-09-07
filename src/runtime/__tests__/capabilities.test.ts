@@ -313,8 +313,8 @@ describe('the secrets handle', () => {
  *
  * It is UNGATED, like `secrets`, and for the same kind of reason: projecting a
  * value the runtime already holds is none of the five effects `side_effects`
- * is drawn from. The consequence is D-03 — a run started by hand still
- * receives the member, and reads `null` through it.
+ * is drawn from. The consequence is the one that matters at the seams: a run
+ * started by hand still receives the member, and reads `null` through it.
  */
 describe('the dependencies handle', () => {
   const CALLER: CapabilityCaller = { plugin: 'fixture-plugin', runId: 'run-1' }
@@ -379,7 +379,7 @@ describe('the dependencies handle', () => {
   })
 
   /**
-   * D-03: the manual path. `effect: null` skips both withhold arms, so the
+   * The manual path. `effect: null` skips both withhold arms, so the
    * member is minted on a run carrying no grant and with no record supplied.
    * Every declared name reads `null`; an undeclared one still throws.
    */

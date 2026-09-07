@@ -88,6 +88,6 @@ describe('a member cannot be called without saying who is calling', () => {
    */
   test('the caller on the context is not a registered member', () => {
     expect('caller' in CAPABILITY_REGISTRY).toBe(false)
-    expect(Object.keys(CAPABILITY_REGISTRY)).toEqual(['secrets'])
+    expect(Object.keys(CAPABILITY_REGISTRY)).toEqual(['secrets', 'dependencies'])
   })
 })

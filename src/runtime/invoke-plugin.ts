@@ -30,7 +30,7 @@ import { pluginsDir, pluginConfigPath } from '../lib/paths.js'
 import { loadPluginConfig, PluginConfigError } from '../lib/plugin-config.js'
 import { resolvePluginArgs } from '../schemas/plugin-config.js'
 import { SkillResultSchema, makeSkillError } from '../schemas/skill-result.js'
-import type { SkillResult, SkillResultInput } from '../schemas/skill-result.js'
+import type { OutputRecord, SkillResult, SkillResultInput } from '../schemas/skill-result.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { emitAttemptFailed } from '../board/engine-events.js'
 import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
@@ -167,6 +167,11 @@ export interface InvokePluginOptions {
   runsDir?: string
   /** Override events.jsonl path for retry notices — same leak class as runsDir. */
   eventsPath?: string
+  /** What this plugin's declared dependencies last produced, already resolved by
+   *  the caller. Optional, like every field here: the manual CLI path reads no
+   *  runtime state and omits it, and a caller that omits it hands its handler a
+   *  member that reads `null` for every declared name rather than no member. */
+  dependencyOutputs?: Readonly<Record<string, OutputRecord | null>>
 }
 
 /**
@@ -429,6 +434,7 @@ export async function invokePlugin(
       manifest,
       caller: { plugin: pluginName, runId },
       resolvedSecretNames: Object.keys(secrets.values),
+      dependencyOutputs: options.dependencyOutputs,
     },
     witness,
   )

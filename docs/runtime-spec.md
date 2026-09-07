@@ -269,9 +269,10 @@ than inventing its own.
 `warpline/unstable-capabilities` is **type-only**. Every name behind it is
 erased at build time, so the module it resolves to exports no runtime value at
 all, and importing it for a value gets you nothing. It carries the shape of the
-capability context a handler is handed, the shape of the grant witness a caller
-of the runtime must supply, and the four-parameter handler type that ties the
-two together. The mint and the capability registry are deliberately not behind
+capability context a handler is handed, the shape of each member on it —
+`SecretsHandle` and `DependenciesHandle` — the shape of the grant witness a
+caller of the runtime must supply, and the four-parameter handler type that ties
+them together. The mint and the capability registry are deliberately not behind
 it: the registry is a table designed to grow, and publishing it would owe a
 stability promise on every row anybody adds.
 

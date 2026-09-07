@@ -20,12 +20,16 @@
  * wrong, and the second one would sit inside code a plugin author is holding.
  * `src/__tests__/no-grant-recheck.test.ts` is what keeps that true.
  *
- * The registry carries one member: the credential-name handle. The apparatus
+ * The registry carries two members, both ungated: the credential-name handle
+ * and the reader for what a declared dependency last produced. The apparatus
  * — the required effect field, the projection, the refusal, the witness — was
- * built and proven before it, which is why it arrived already covered by the
- * registry-iterating refusal test and needed no assertion written for it.
+ * built and proven before either of them, which is why each arrived already
+ * covered by the registry-iterating refusal test and needed no assertion
+ * written for it. That is the property the shape was chosen for, and a third
+ * member should cost the same.
  */
 import type { PluginManifest, SideEffectType } from '../schemas/plugin-manifest.js'
+import type { OutputRecord } from '../schemas/skill-result.js'
 
 /**
  * What the caller learned when it read the Grant, carried forward.
@@ -88,6 +92,13 @@ export interface CapabilityMintInput {
   readonly manifest: PluginManifest
   readonly caller?: CapabilityCaller
   readonly resolvedSecretNames?: readonly string[]
+  /**
+   * What each of this plugin's declared dependencies last produced, already
+   * resolved by the caller. A plain record and never a function: the mint runs
+   * once per invocation, above the retry loop, so a closure here could hand two
+   * attempts of one invocation different answers.
+   */
+  readonly dependencyOutputs?: Readonly<Record<string, OutputRecord | null>>
 }
 
 /** What a member's mint function receives, with the optional fields settled. */
@@ -95,6 +106,7 @@ export interface CapabilityMintArgs {
   readonly manifest: PluginManifest
   readonly caller: CapabilityCaller
   readonly resolvedSecretNames: readonly string[]
+  readonly dependencyOutputs: Readonly<Record<string, OutputRecord | null>>
 }
 
 /**
@@ -116,14 +128,18 @@ export interface CapabilityEntry {
  * Every capability member, keyed by the name it appears under in a handler's
  * context.
  *
- * One member: the credential-name handle. It is UNGATED — `effect: null` —
- * and that is a measured decision rather than a convenience. The unit it
- * stands for is a pre-flight read of the process environment, which is none of
- * the five values `side_effects` is drawn from, so keying it on one of them
- * would be a declaration nobody could truthfully make. The consequence is the
- * one that matters at the seams: a run started by hand through the CLI, which
- * reads no grant and passes an explicit not-granted witness, still receives it
- * — so no existing behaviour changed on the day it landed.
+ * Two members, and both are UNGATED — `effect: null` — which in each case is a
+ * measured decision rather than a convenience. The unit `secrets` stands for is
+ * a pre-flight read of the process environment; the unit `dependencies` stands
+ * for is a projection of a value the runtime is already holding. Neither is any
+ * of the five values `side_effects` is drawn from, so keying either on one of
+ * them would be a declaration nobody could truthfully make.
+ *
+ * The consequence is the one that matters at the seams, and it is the same
+ * consequence for both: a run started by hand through the CLI, which reads no
+ * grant and passes an explicit not-granted witness, still receives them. No
+ * existing behaviour changed on the day either landed, and a handler never
+ * branches on whether it was handed a member at all.
  */
 export const CAPABILITY_REGISTRY: Readonly<Record<string, CapabilityEntry>> = {
   secrets: {
@@ -137,6 +153,27 @@ export const CAPABILITY_REGISTRY: Readonly<Record<string, CapabilityEntry>> = {
         // dead, which would take the entry criterion with it.
         void caller
         return args.resolvedSecretNames
+      },
+    }),
+  },
+  dependencies: {
+    effect: null,
+    description:
+      'Reads the Output a plugin this manifest declared as a dependency last produced. Declared names only — an undeclared one throws.',
+    mint: (args): DependenciesHandle => ({
+      lastOutput: (caller: CapabilityCaller, dependencyName: string): OutputRecord | null => {
+        // The caller is required and unread, for the reason `SecretsHandle`
+        // states. `void` keeps it from being deleted as dead code.
+        void caller
+        if (!args.manifest.dependencies.includes(dependencyName)) {
+          throw new Error(
+            `Plugin '${args.manifest.name}' requested the Output of '${dependencyName}', which it does not ` +
+              `declare: add '${dependencyName}' to manifest.dependencies, an array of plugin names, ` +
+              `before reading it.`,
+          )
+        }
+
+        return args.dependencyOutputs[dependencyName] ?? null
       },
     }),
   },
@@ -184,15 +221,67 @@ export interface SecretsHandle {
 }
 
 /**
+ * The handle reading what a declared dependency last produced.
+ *
+ * `plugin_runs[name].last_output` already exists. The engine writes it on both
+ * arms, the Board reads it to name an Output without scanning the runs
+ * directory, and until this member landed no plugin could see it at all. This
+ * is that read and nothing else, so it is worth saying plainly what it is not.
+ *
+ * **It is not a store.** The records are handed to the mint by the caller
+ * rather than loaded here. A member that loaded state would be a second place
+ * the answer to "what did my dependency produce" comes from, and the two could
+ * disagree — the run-log pruning rule applies by mtime to the runs directory
+ * and not to the state document, so the disagreement would be a real one and
+ * would arrive on a schedule nobody was watching.
+ *
+ * **It is not a freshness check.** `isPluginFresh` already answers "has
+ * anything changed upstream" from `plugin_runs[dep].last_run_at`. The record
+ * returned here carries no verdict about its own age and this module imports
+ * nothing that could compute one. Two answers to that question is the failure
+ * being refused; one of them being subtly better is not a defence.
+ *
+ * **It does not read the filesystem.** It closes over a value the caller
+ * supplied, which is also what makes it testable from a literal. Note that an
+ * Output may carry a `path` rather than a `body`; resolving that path is the
+ * handler's business — `readJsonOrNull` from `warpline/unstable-fs` is the
+ * sanctioned way — and doing it here is how this member would acquire the disk
+ * access the sentence above rules out.
+ *
+ * `null` covers both "has never run" and "ran and produced nothing" on purpose:
+ * from a reader's side those are one state, and splitting them would make a
+ * handler branch on a difference it cannot act on.
+ *
+ * An **undeclared** name is a different matter and throws. Returning `null` for
+ * it would make a typo in `manifest.dependencies` indistinguishable from a
+ * dependency that has not run yet — the same value, two unrelated fixes, and
+ * the wrong one is the one that looks like waiting. The refusal keys off the
+ * DECLARATION and never off the keys of the record handed in: a name that
+ * happened to be delivered is still a read the graph does not authorise. The
+ * message names the requested dependency and the manifest field that must list
+ * it, and never a value read from the record.
+ *
+ * One method, and no enumeration. A handler cannot walk what it was handed, so
+ * the order of `manifest.dependencies` and the order of the caller's projection
+ * are unobservable here and are not contract.
+ */
+export interface DependenciesHandle {
+  readonly lastOutput: (
+    caller: CapabilityCaller,
+    dependencyName: string,
+  ) => OutputRecord | null
+}
+
+/**
  * The object a handler is handed: the members this plugin is entitled to, the
  * caller they were minted for, and nothing else.
  *
  * The index signature stays — a member's value is `unknown` until a handler
  * narrows it, and the fixture-registry test seam mints members this type has
- * never heard of. The two named keys are what a plugin author can reach
- * without a cast, and they are named because both are always present in
- * production: `secrets` is ungated, so it is minted for every plugin on every
- * run, and `caller` is written unconditionally.
+ * never heard of. The three named keys are what a plugin author can reach
+ * without a cast, and they are named because all three are always present in
+ * production: `secrets` and `dependencies` are ungated, so they are minted for
+ * every plugin on every run, and `caller` is written unconditionally.
  *
  * **`caller` is not a capability member.** It performs nothing, it is keyed off
  * no effect, and it appears in no row of the generated table. It is the
@@ -206,6 +295,7 @@ export interface SecretsHandle {
 export type CapabilityContext = Readonly<Record<string, unknown>> & {
   readonly caller: CapabilityCaller
   readonly secrets: SecretsHandle
+  readonly dependencies: DependenciesHandle
 }
 
 /** What `mintContext` returns: the handler's members, and what was held back. */
@@ -267,6 +357,7 @@ export function mintContext(
     manifest: input.manifest,
     caller: input.caller ?? { plugin: input.manifest.name },
     resolvedSecretNames: input.resolvedSecretNames ?? [],
+    dependencyOutputs: input.dependencyOutputs ?? {},
   }
 
   // `caller` first, so it is present whatever the registry does. It is data,
@@ -290,8 +381,9 @@ export function mintContext(
   }
 
   // The cast is the one place this module asserts something the compiler
-  // cannot see. Production always mints `secrets` — it is ungated, so no
-  // manifest and no witness can withhold it — and `caller` is written above
+  // cannot see. Production always mints every ungated member — `secrets` and
+  // `dependencies` today, and no manifest and no witness can withhold either,
+  // because a `null` effect skips both arms above — and `caller` is written
   // unconditionally, so a production context always satisfies the named keys.
   // Only the `registry` test seam can produce a context missing them, and a
   // test that mints against fixture members is already reading its own
