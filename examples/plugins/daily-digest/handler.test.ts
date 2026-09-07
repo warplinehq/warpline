@@ -43,8 +43,10 @@ function contextWith(
     secrets: { resolvedNames: () => [] },
     dependencies: {
       lastOutput: (_caller: unknown, name: string) => (declared(name) ? records[name] ?? null : null),
+      // `name in runs`, not `runs[name] ?? …`: a case stating `null` on purpose
+      // means it, and `??` would silently promote that to the default instead.
       lastRun: (_caller: unknown, name: string) =>
-        declared(name) ? runs[name] ?? (records[name] ? 'success' : null) : null,
+        declared(name) ? (name in runs ? runs[name] ?? null : records[name] ? 'success' : null) : null,
     },
   } as CapabilityContext
 }
