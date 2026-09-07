@@ -157,6 +157,29 @@ describe('announce-fanout fans one draft out to every configured channel', () =>
     })
   })
 
+  test('a channel listed twice counts once: the task, the payload and the unconfigured arm all agree', async () => {
+    await withHome(async (home) => {
+      await seedDraft(home)
+      const twice = await invoke({ channels: ['town-crier', 'town-crier', 'carrier-pigeon'], calls_to_action: CALLS })
+      expect(twice.status).toBe('skipped')
+      expect(twice.needs_llm?.task).toContain('2 channels (town-crier, carrier-pigeon)')
+      const { payload } = await readPayload(twice)
+      expect(Object.keys(payload.channels)).toEqual(['town-crier', 'carrier-pigeon'])
+
+      // Every listed name unconfigured, one of them twice: still the
+      // by-key skip, and the name appears once in it.
+      const none = await invoke({ channels: ['semaphore-tower', 'semaphore-tower'], calls_to_action: {} })
+      expect(none.status).toBe('success')
+      expect(none.summary).toContain("'calls_to_action'")
+
+      // One configured, one unconfigured twice: the unconfigured count is 1.
+      const mixed = await invoke({ channels: ['town-crier', 'semaphore-tower', 'semaphore-tower'], calls_to_action: { 'town-crier': CALLS['town-crier'] }, cadence_hours: 0 })
+      expect(mixed.status).toBe('skipped')
+      expect(mixed.needs_llm?.task).toContain('1 unconfigured (semaphore-tower)')
+      expect((await readPayload(mixed)).payload.unconfigured).toEqual(['semaphore-tower'])
+    })
+  })
+
   test('the cadence holds a channel handed off within the window, and releases it when the window is shorter', async () => {
     await withHome(async (home) => {
       await seedDraft(home)

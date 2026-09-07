@@ -68,8 +68,11 @@ export const handler: CapabilityHandlerFn = async (manifest, args, _signal, _cap
   // NOT a bare `skipped`: a prefix-less `skipped` is persisted as `failed`,
   // and an unconfigured plugin is not a broken one. Not a success either —
   // fanning out to nobody is not a fan-out.
+  // A name listed twice is one channel: an operator's typo, but without the
+  // dedup the task would say "2 channels (a, a)" over a payload holding one
+  // key, and an unconfigured name would be reported twice.
   const listed = configured(manifest, args, 'channels')
-  const channels = (Array.isArray(listed) ? listed : []).filter((c): c is string => typeof c === 'string')
+  const channels = [...new Set((Array.isArray(listed) ? listed : []).filter((c): c is string => typeof c === 'string'))]
   if (channels.length === 0) {
     return skillOk(`${manifest.name}: input 'channels' is empty — nothing to fan out; run: warpline configure ${manifest.name}`, {
       phases_completed: [manifest.name],
