@@ -149,19 +149,38 @@ export const handler: CapabilityHandlerFn = async (_manifest, args, signal, capa
   }
 
   // The seam, not a convention. The runtime hands a handler what each of its
-  // DECLARED dependencies last produced; `anomaly-watch` is declared in
-  // `manifest.dependencies`, and a name that is not throws here rather than
-  // reading `null` — a typo and a dependency that has not run are two unrelated
-  // fixes, and the wrong one is the one that looks like waiting.
+  // DECLARED dependencies last produced AND how that plugin's last run ended;
+  // `anomaly-watch` is declared in `manifest.dependencies`, and a name that is
+  // not throws from either member rather than reading `null` — a typo and a
+  // dependency that has not run are two unrelated fixes, and the wrong one is
+  // the one that looks like waiting.
+  //
+  // Both facts, because neither answers alone. `lastOutput` is `null` for one
+  // thing only — this plugin has never produced an Output — and that is a fact
+  // about the PLUGIN, not about its last run: a run producing none carries the
+  // previous record forward. `lastRun` is `null` only when the plugin has never
+  // run. Read together they name four states, and this handler reports each.
   const record = capabilities.dependencies.lastOutput(capabilities.caller, 'anomaly-watch')
+  const run = capabilities.dependencies.lastRun(capabilities.caller, 'anomaly-watch')
   if (record === null) {
     // NOT a bare `skipped`: deriveRunStatus persists a prefix-less `skipped`
     // as `failed`, and "the producer has not run yet" must not paint a red run.
     // NOT `skillFailure('dependency_unavailable', …)` either — that reddens the
-    // ordinary first-advance case and pre-empts the engine-level gate. And NO
-    // Output: an empty one would become this plugin's `last_output`, and a
-    // downstream reader would take it for real work.
-    return skillOk('anomaly-issue: anomaly-watch has produced nothing yet — nothing to file', {
+    // ordinary first-advance case and pre-empts a runtime-level gate that is
+    // the runtime's to add, not this plugin's. And NO Output: an empty one
+    // would become this plugin's `last_output`, and a downstream reader would
+    // take it for real work.
+    //
+    // What changed is the sentence, not the arm. It used to claim the producer
+    // "has produced nothing yet" whatever state it was in, which is a different
+    // thing to chase depending on which of these two it is: one waits for a
+    // schedule, the other wants somebody to look at a producer that runs and
+    // returns nothing. Only the declared name and the closed status enum are
+    // interpolated — never a value read from a record.
+    const state = run === null
+      ? 'anomaly-watch has not run yet'
+      : `anomaly-watch has run (last run: ${run}) and has never produced an Output`
+    return skillOk(`anomaly-issue: ${state} — nothing to file`, {
       phases_completed: ['anomaly-issue'],
     })
   }
@@ -184,6 +203,18 @@ export const handler: CapabilityHandlerFn = async (_manifest, args, signal, capa
   // The parsed shape is not trusted either: the body is a string another plugin
   // authored, and anything but an array of anomalies is nothing to file.
   const anomalies: Anomaly[] = Array.isArray(raw?.anomalies) ? raw.anomalies : []
+
+  // A record IS here and it predates a failed run — so say so, rather than
+  // reporting it as though it were current.
+  //
+  // Reported, and deliberately NOT acted on: filing is not gated on the run
+  // status. The record is real work the producer really produced, and the
+  // ledger below dedupes by anomaly name, so a record carried across a failed
+  // run re-files nothing that was already filed. A guard here would throw away
+  // the one thing preserving the record bought. What a reader sees change is
+  // the wording — where the handler used to see nothing at all, it now files
+  // whatever is genuinely new and names the record's age.
+  const stale = run === 'failed' ? ' — this record is from an earlier run of anomaly-watch, whose latest run failed' : ''
 
   const ledgerPath = join(warplineHome(), 'state', 'anomaly-issue.filed.json')
   // Null prototype throughout: `filed['__proto__'] = url` on a plain object
@@ -208,7 +239,7 @@ export const handler: CapabilityHandlerFn = async (_manifest, args, signal, capa
   // belong to the runtime's guardrails, not to a plugin.
   const todo = pending(anomalies, filed)
   if (todo.length === 0) {
-    return skillOk(`no new anomalies (${Object.keys(filed).length} already filed)`, {
+    return skillOk(`no new anomalies (${Object.keys(filed).length} already filed)${stale}`, {
       phases_completed: ['anomaly-issue'],
       data_freshness: { anomalies: new Date().toISOString() },
     })
@@ -227,6 +258,7 @@ export const handler: CapabilityHandlerFn = async (_manifest, args, signal, capa
 
   const summary = `filed ${created.length} issues: ${created.map(c => c.name).join(', ')}`
     + (error ? `; stopped at ${stoppedAt}: ${error.message}` : '')
+    + stale
   if (created.length === 0 && error !== null) {
     return skillFailure(error.code, summary, { ...FAILED, errors: [error], data_freshness: { anomalies: new Date().toISOString() } })
   }
