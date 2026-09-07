@@ -1,11 +1,11 @@
 import { describe, test, expect } from 'bun:test'
-import type { CapabilityContext } from 'warpline/unstable-capabilities'
+import type { CapabilityContext, DependenciesHandle } from 'warpline/unstable-capabilities'
 import { OutputRecordSchema, type OutputRecord } from 'warpline/schemas/skill-result'
 import { handler } from './handler.js'
 import { manifest } from './manifest.js'
 
 /**
- * The fourth parameter, carrying the one member this handler reads.
+ * The fourth parameter, carrying the two members this handler reads.
  *
  * A hand-written literal and not the runtime's mint: an example may import
  * only the three `warpline/unstable-*` specifiers, so `src/` is out of reach
@@ -14,31 +14,46 @@ import { manifest } from './manifest.js'
  * right digest, and the runtime's DELIVERY of those records is proven under
  * `src/`.
  *
- * `lastOutput` throws for any name this plugin does not declare, mirroring the
- * runtime's refusal, so the handler is never written against a `null` it would
- * not receive.
+ * Both members throw for any name this plugin does not declare, mirroring the
+ * runtime's shared refusal, so the handler is never written against a `null` it
+ * would not receive.
+ *
+ * A source with a record and no stated status models a producer that
+ * succeeded; a source with neither models one that has never run. Every case
+ * that means something else states its status.
  */
 const RECORDS = ['anomaly-watch', 'github-poll'] as const
 
-function invoke(records: Partial<Record<(typeof RECORDS)[number], OutputRecord | null>>) {
-  const context = {
+type Dependency = (typeof RECORDS)[number]
+/** The closed status vocabulary, named through the published handle type. */
+type RunStatus = ReturnType<DependenciesHandle['lastRun']>
+
+function contextWith(
+  records: Partial<Record<Dependency, OutputRecord | null>>,
+  runs: Partial<Record<Dependency, RunStatus>> = {},
+): CapabilityContext {
+  const declared = (name: string): name is Dependency => {
+    if (name !== 'anomaly-watch' && name !== 'github-poll') {
+      throw new Error(`daily-digest does not declare '${name}' in manifest.dependencies`)
+    }
+    return true
+  }
+  return {
     caller: { plugin: 'daily-digest' },
     secrets: { resolvedNames: () => [] },
     dependencies: {
-      lastOutput: (_caller: unknown, name: string) => {
-        if (name !== 'anomaly-watch' && name !== 'github-poll') {
-          throw new Error(`daily-digest does not declare '${name}' in manifest.dependencies`)
-        }
-        return records[name] ?? null
-      },
-      // Present so the fixture satisfies the handle's shape, and answering
-      // nothing: this file models what the handler was HANDED, and the handler
-      // does not read a run status yet. The handler rewrite that branches on
-      // the pair owns making this fixture say something.
-      lastRun: () => null,
+      lastOutput: (_caller: unknown, name: string) => (declared(name) ? records[name] ?? null : null),
+      lastRun: (_caller: unknown, name: string) =>
+        declared(name) ? runs[name] ?? (records[name] ? 'success' : null) : null,
     },
   } as CapabilityContext
-  return handler(manifest, {}, new AbortController().signal, context)
+}
+
+function invoke(
+  records: Partial<Record<Dependency, OutputRecord | null>>,
+  runs: Partial<Record<Dependency, RunStatus>> = {},
+) {
+  return handler(manifest, {}, new AbortController().signal, contextWith(records, runs))
 }
 
 /** An inline-body Output in the shape each producer returns. */
@@ -134,21 +149,93 @@ describe('daily-digest aggregates its declared dependencies', () => {
   })
 
   test('a dependency this plugin does not declare throws rather than reading null', async () => {
-    const context = {
-      caller: { plugin: 'daily-digest' },
-      secrets: { resolvedNames: () => [] },
-      dependencies: {
-        lastOutput: (_caller: unknown, name: string) => {
-          if (name !== 'anomaly-watch' && name !== 'github-poll') {
-            throw new Error(`daily-digest does not declare '${name}' in manifest.dependencies`)
-          }
-          return null
-        },
-        lastRun: () => null,
-      },
-    } as CapabilityContext
+    const context = contextWith({})
 
     expect(() => context.dependencies.lastOutput(context.caller, 'feed-monitor')).toThrow(/manifest.dependencies/)
+    // Per member, because the obligation is: an arm asserting only the first
+    // stays green over a second member that answers for anything asked of it.
+    expect(() => context.dependencies.lastRun(context.caller, 'feed-monitor')).toThrow(/manifest.dependencies/)
     expect(RECORDS.every(name => context.dependencies.lastOutput(context.caller, name) === null)).toBe(true)
+    expect(RECORDS.every(name => context.dependencies.lastRun(context.caller, name) === null)).toBe(true)
+  })
+})
+
+/**
+ * The four states each source can be in, and the one sentence that used to
+ * cover three of them.
+ *
+ * This digest publishes an Output, so its wording is not a log line: the
+ * per-source lines are joined into `digest.digest`, which becomes this
+ * plugin's own `last_output` and travels to whatever reads it next. That is
+ * where the claim "nothing yet" about a source that produced last week did its
+ * damage, and it is where every assertion below looks — the PUBLISHED BODY,
+ * read back out of `artifacts_produced`. An assertion on the summary alone
+ * would let the body keep the false claim and stay green.
+ */
+describe('daily-digest names the state each source is in', () => {
+  /** The two per-source lines, read back out of the published Output. */
+  function publishedLines(artifacts: readonly unknown[] | undefined): string[] {
+    const output = OutputRecordSchema.parse(artifacts?.at(-1))
+    return (JSON.parse(output.body!) as { digest: string }).digest.split('; ')
+  }
+
+  test('both sources never run: each is named, and neither is claimed to have produced nothing', async () => {
+    const result = await invoke({})
+
+    expect(result.status).toBe('success')
+    expect(result.summary).toContain('anomaly-watch: has not run yet')
+    expect(result.summary).toContain('github-poll: has not run yet')
+    // The early return used to answer for both at once. Two sources can be in
+    // two different states, so it reports each by name.
+    expect(result.summary).not.toContain('neither dependency has produced anything')
+    // The arm's refusals are unchanged: no Output from a digest with nothing
+    // to digest, and never a bare `skipped`.
+    expect(result.artifacts_produced ?? []).toHaveLength(0)
+    expect(result.status).not.toBe('skipped')
+  })
+
+  test('never-run and ran-and-produced-nothing are two different sentences', async () => {
+    const result = await invoke({}, { 'github-poll': 'success' })
+
+    expect(result.summary).toContain('anomaly-watch: has not run yet')
+    expect(result.summary).toContain('github-poll: has run and produced nothing this digest can use')
+    expect(result.artifacts_produced ?? []).toHaveLength(0)
+  })
+
+  test('a record preserved across a failed run is marked stale IN THE PUBLISHED BODY, and its healthy neighbour is not', async () => {
+    const result = await invoke({ 'anomaly-watch': ANOMALIES, 'github-poll': ISSUES }, { 'anomaly-watch': 'failed' })
+
+    const [anomalyLine, issuesLine] = publishedLines(result.artifacts_produced)
+    // The record IS still described — it is real work that was really
+    // produced — and it is described as older than the run that followed it.
+    expect(anomalyLine).toContain('2 breached')
+    expect(anomalyLine).toContain('its latest run failed')
+    // The negative control: the marker is not a decoration every line wears.
+    expect(issuesLine).toContain('7 open issues')
+    expect(issuesLine).not.toContain('its latest run failed')
+    // Same lines, so the summary cannot describe a state the body does not.
+    expect(result.summary).toContain('its latest run failed')
+  })
+
+  test('the raw upstream records under `sources` are untouched by the marker', async () => {
+    const result = await invoke({ 'anomaly-watch': ANOMALIES, 'github-poll': ISSUES }, { 'anomaly-watch': 'failed' })
+
+    const output = OutputRecordSchema.parse(result.artifacts_produced?.at(-1))
+    const body = JSON.parse(output.body!) as { sources: Record<string, { anomalies?: unknown[]; open_count?: number }> }
+    // A consumer that wants the facts reads `sources`; the line is the
+    // sentence an operator reads. The marker belongs to the second only.
+    expect(body.sources['anomaly-watch']?.anomalies).toHaveLength(2)
+    expect(body.sources['github-poll']?.open_count).toBe(7)
+    expect(JSON.stringify(body.sources)).not.toContain('its latest run failed')
+  })
+
+  test('a source parked at a gate keeps its record and is not called stale', async () => {
+    const result = await invoke({ 'anomaly-watch': ANOMALIES, 'github-poll': ISSUES }, { 'anomaly-watch': 'gated' })
+
+    const [anomalyLine] = publishedLines(result.artifacts_produced)
+    // A supervised producer waiting for an approval has not failed, and the
+    // record it produced is the current one.
+    expect(anomalyLine).toContain('2 breached')
+    expect(anomalyLine).not.toContain('its latest run failed')
   })
 })
