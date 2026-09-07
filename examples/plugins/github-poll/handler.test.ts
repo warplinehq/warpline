@@ -167,6 +167,32 @@ describe('github-poll persists what it polled', () => {
     })
   })
 
+  test('a 200 whose body is not JSON, or not an issue list, is a parse_error result — never a throw — and writes no snapshot', async () => {
+    await withHome(async (home) => {
+      // A proxy error page, a truncated response: `res.json()` rejects.
+      const notJson = { ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token <') } }
+      await withStubbedFetch(notJson, async () => {
+        const result = await invoke({ repo: REPO })
+        expect(result.status).toBe('failed')
+        expect(result.errors?.[0]?.code).toBe('parse_error')
+        expect(result.errors?.[0]?.retryable).toBe(true)
+        expect(JSON.stringify(result)).not.toContain('Unexpected token')
+      })
+
+      // Valid JSON that is not a list: `for (const issue of issues)` would throw.
+      const notList = { ok: true, status: 200, json: async () => ({ message: 'Not Found' }) }
+      await withStubbedFetch(notList, async () => {
+        const result = await invoke({ repo: REPO })
+        expect(result.status).toBe('failed')
+        expect(result.errors?.[0]?.code).toBe('parse_error')
+        expect(result.errors?.[0]?.retryable).toBe(false)
+      })
+
+      // `node:fs` is outside the examples allowlist; a rejecting read is the check.
+      await expect(readFile(SNAPSHOT(home))).rejects.toThrow()
+    })
+  })
+
   test('a snapshot that cannot be read is a failure, not a first observation', async () => {
     await withHome(async (home) => {
       await mkdir(join(home, 'state'), { recursive: true })

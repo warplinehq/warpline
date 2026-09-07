@@ -133,7 +133,29 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, _capa
     )
   }
 
-  const issues = (await res.json()) as Issue[]
+  // A 200 whose body is not JSON — a proxy error page, a truncated response
+  // — or is JSON but not a list, is a result rather than a throw: the
+  // authoring guide says a handler never throws, and `for (const issue of
+  // issues)` over a non-array would. The parser's message is dropped: it
+  // quotes the body. `anomaly-issue` guards the same call the same way.
+  let body: unknown
+  try {
+    body = await res.json()
+  } catch {
+    return skillFailure(
+      'parse_error',
+      `${manifest.name}: GitHub returned a body that is not JSON`,
+      { phases_failed: [manifest.name], impact: 'MEDIUM', retryable: true },
+    )
+  }
+  if (!Array.isArray(body)) {
+    return skillFailure(
+      'parse_error',
+      `${manifest.name}: GitHub returned something other than an issue list`,
+      { phases_failed: [manifest.name], impact: 'MEDIUM', retryable: false },
+    )
+  }
+  const issues = body as Issue[]
   const counts = summariseByLabel(issues)
   const observedAt = new Date().toISOString()
   const now: Snapshot = {
