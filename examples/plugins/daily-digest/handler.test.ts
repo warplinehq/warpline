@@ -90,10 +90,12 @@ describe('daily-digest aggregates its declared dependencies', () => {
     const result = await invoke({ 'anomaly-watch': ANOMALIES })
 
     // A missing upstream is not a failure of the digest. The source that had
-    // nothing is named, so the digest does not read as complete when it is not.
+    // nothing is named, AND the state it is in is named — a source that has
+    // never run is a different thing to chase from one that runs and returns
+    // nothing, so the digest no longer answers both with one word.
     expect(result.status).toBe('success')
     expect(result.summary).toContain('2 breached')
-    expect(result.summary).toMatch(/github-poll: nothing/)
+    expect(result.summary).toContain('github-poll: has not run yet')
     expect(result.artifacts_produced).toHaveLength(1)
   })
 
@@ -122,7 +124,7 @@ describe('daily-digest aggregates its declared dependencies', () => {
     expect(body.sources['github-poll'].open_count).toBe(7)
   })
 
-  test('a record whose body is not JSON reads as "nothing yet", never as a failed run', async () => {
+  test('a record whose body is not JSON reads as produced-nothing-usable for that source, never as a failed run', async () => {
     // A body is a string another plugin authored. The parse is caught and the
     // per-source shape guard reads the result as "that source has nothing
     // usable", because a throw out of a handler is a failed run with no
@@ -133,11 +135,15 @@ describe('daily-digest aggregates its declared dependencies', () => {
     })
 
     expect(result.status).toBe('success')
-    expect(result.summary).toMatch(/anomaly-watch: nothing/)
+    // The source HAS run — the fixture handed over a record — so the line says
+    // so and names what the digest could not use it for. That conflation with
+    // a shape-guard rejection is honest at this tier: either way there is no
+    // line to write from the record.
+    expect(result.summary).toContain('anomaly-watch: has run and produced nothing this digest can use')
     expect(result.summary).toContain('7 open issues')
   })
 
-  test('a record in a shape this digest does not read is "nothing yet" for that source alone', async () => {
+  test('a record in a shape this digest does not read is produced-nothing-usable for that source alone', async () => {
     const result = await invoke({
       'anomaly-watch': ANOMALIES,
       'github-poll': outputOf('issues-snapshot', { unexpected: true }),
@@ -145,7 +151,7 @@ describe('daily-digest aggregates its declared dependencies', () => {
 
     expect(result.status).toBe('success')
     expect(result.summary).toContain('2 breached')
-    expect(result.summary).toMatch(/github-poll: nothing/)
+    expect(result.summary).toContain('github-poll: has run and produced nothing this digest can use')
   })
 
   test('a dependency this plugin does not declare throws rather than reading null', async () => {

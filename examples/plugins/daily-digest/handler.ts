@@ -1,4 +1,4 @@
-import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
+import type { CapabilityHandlerFn, DependenciesHandle } from 'warpline/unstable-capabilities'
 import type { OutputRecord } from 'warpline/schemas/skill-result'
 import { readJsonOrNull } from 'warpline/unstable-fs'
 import { skillOk } from 'warpline/unstable-result'
@@ -24,7 +24,7 @@ interface IssuesSnapshot {
   newest_number?: unknown
 }
 
-/** One line per source, in the words an operator reads. */
+/** What one source's record SAYS, in the words an operator reads. `lineFor` below turns it into the line. */
 function describeAnomalies(raw: Anomalies): string {
   const names = (Array.isArray(raw.anomalies) ? raw.anomalies : [])
     .map((a: { name?: unknown }) => a?.name)
@@ -61,8 +61,11 @@ async function readOutput(record: OutputRecord | null): Promise<unknown> {
 
 /**
  * The bodies are strings other plugins authored, so each is checked against the
- * one field this digest reads from it rather than trusted. Anything else is the
- * same state as "has produced nothing yet": there is no line to write.
+ * one field this digest reads from it rather than trusted. Anything else lands
+ * where a producer that never produced lands: `null`, meaning there is no line
+ * to write FROM THE RECORD. Which sentence gets written instead is `lineFor`'s
+ * business, and it depends on the source's run status — the two are the same
+ * state only from this function's side of the fence.
  */
 function asAnomalies(raw: unknown): Anomalies | null {
   return typeof raw === 'object' && raw !== null && Array.isArray((raw as Anomalies).anomalies) ? (raw as Anomalies) : null
@@ -74,14 +77,68 @@ function asIssues(raw: unknown): IssuesSnapshot | null {
     : null
 }
 
+/** How a dependency's last run ended, or `null` when it has never run. */
+type RunStatus = ReturnType<DependenciesHandle['lastRun']>
+
+/**
+ * The one line for one source, from both facts about it.
+ *
+ * ONE helper, used by every path that writes a line — the early return and the
+ * digest alike. A second wording table beside this one is how the claim being
+ * removed here got written in the first place: two places describing the same
+ * state, and only one of them corrected.
+ *
+ * `description` is `null` when this digest has no line to write from the
+ * record: never produced, a body that would not parse, or a body that parsed
+ * and failed the shape guard. The last two are conflated with the first, and
+ * honestly so at this tier — from the digest's side there is no line either
+ * way. What is NOT conflated is the pair, which is the whole point:
+ *
+ *   - a record, and a healthy last run → today's description, unchanged
+ *   - a record, and a FAILED last run  → the description, marked as older
+ *     than the run that followed it. The record still stands: a run that
+ *     produces nothing carries the previous one forward, so this is real work
+ *     that was really produced — it is just not current.
+ *   - no line, and no run at all       → it has not started
+ *   - no line, and a run               → it ran and produced nothing usable
+ *
+ * Only the dependency's declared name, the closed status enum and this file's
+ * own literals reach the string. No value read from an upstream body, no error
+ * text, no path.
+ */
+function lineFor(name: string, description: string | null, run: RunStatus): string {
+  if (description === null) {
+    return `${name}: ${run === null ? 'has not run yet' : 'has run and produced nothing this digest can use'}`
+  }
+  // No `; ` inside the marker: the lines are joined on that separator, and a
+  // reader splitting the digest back into lines would cut this one in half.
+  return run === 'failed' ? `${name}: ${description} (from an earlier run — its latest run failed)` : `${name}: ${description}`
+}
+
 export const handler: CapabilityHandlerFn = async (manifest, _args, _signal, capabilities) => {
   // The seam, not a convention. The runtime hands a handler what each of its
-  // DECLARED dependencies last produced; both names below are declared in
-  // `manifest.dependencies`, and a name that is not throws here rather than
-  // reading `null` — a typo and a producer that has not run are two unrelated
-  // fixes, and the wrong one is the one that looks like waiting.
+  // DECLARED dependencies last produced AND how that plugin's last run ended;
+  // both names below are declared in `manifest.dependencies`, and a name that
+  // is not throws from either member rather than reading `null` — a typo and a
+  // producer that has not run are two unrelated fixes, and the wrong one is
+  // the one that looks like waiting.
+  //
+  // Both facts, because neither answers alone: `lastOutput` is `null` only
+  // when the producer has never produced an Output, which is a fact about the
+  // PLUGIN and not about its last run, and `lastRun` is `null` only when it has
+  // never run.
   const anomalies = asAnomalies(await readOutput(capabilities.dependencies.lastOutput(capabilities.caller, 'anomaly-watch')))
   const issues = asIssues(await readOutput(capabilities.dependencies.lastOutput(capabilities.caller, 'github-poll')))
+  const anomaliesRun = capabilities.dependencies.lastRun(capabilities.caller, 'anomaly-watch')
+  const issuesRun = capabilities.dependencies.lastRun(capabilities.caller, 'github-poll')
+
+  // A missing upstream is not a failure of the digest: the digest says which
+  // source had nothing and what state it is in, so it never reads as complete
+  // when it is not.
+  const lines = [
+    lineFor('anomaly-watch', anomalies === null ? null : describeAnomalies(anomalies), anomaliesRun),
+    lineFor('github-poll', issues === null ? null : describeIssues(issues), issuesRun),
+  ]
 
   if (anomalies === null && issues === null) {
     // NOT a bare `skipped`: a prefix-less `skipped` is persisted as `failed`,
@@ -89,20 +146,24 @@ export const handler: CapabilityHandlerFn = async (manifest, _args, _signal, cap
     // digest returned as one would become the engine's last_output for this
     // plugin, and a downstream reader would take a day that was never
     // digested for one that was.
-    return skillOk(`${manifest.name}: neither dependency has produced anything yet — nothing to digest`, {
+    //
+    // It used to answer for both sources at once. Two sources can be in two
+    // different states, so it reports each by name — from the same helper the
+    // digest path uses, which is what stops the two describing one state in
+    // two different sets of words.
+    return skillOk(`${manifest.name}: ${lines.join('; ')} — nothing to digest`, {
       phases_completed: [manifest.name],
     })
   }
 
-  // A missing upstream is not a failure of the digest: the digest says which
-  // source had nothing, so it never reads as complete when it is not.
-  const lines = [
-    `anomaly-watch: ${anomalies === null ? 'nothing yet' : describeAnomalies(anomalies)}`,
-    `github-poll: ${issues === null ? 'nothing yet' : describeIssues(issues)}`,
-  ]
   const observedAt = new Date().toISOString()
   const digest = {
     observed_at: observedAt,
+    // `sources` is the raw upstream records and stays that way: a consumer
+    // that wants the facts reads those. The staleness marker belongs to the
+    // LINE, which is the sentence an operator reads — and it rides the
+    // published body, not only the summary, because the body is what a
+    // downstream reader parses and where the claim it replaces did its damage.
     sources: { 'anomaly-watch': anomalies, 'github-poll': issues },
     digest: lines.join('; '),
   }
