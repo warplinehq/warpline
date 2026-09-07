@@ -4,11 +4,41 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
 import type { CapabilityContext } from 'warpline/unstable-capabilities'
-import { SkillResultSchema } from 'warpline/schemas/skill-result'
+import { SkillResultSchema, type OutputRecord } from 'warpline/schemas/skill-result'
 import { pending, issueFor, fileIssues, handler, type Anomaly } from './handler.js'
 
-/** The fourth parameter. Nothing here reads a member, so an empty context is enough. */
-const CONTEXT = {} as CapabilityContext
+/**
+ * The fourth parameter, carrying the one member this handler reads.
+ *
+ * A hand-written literal and not the runtime's mint: an example may import
+ * only the three `warpline/unstable-*` specifiers, so `src/` is out of reach
+ * from here on purpose. What that costs is stated rather than hidden — this
+ * file proves the HANDLER does the right thing with each of the three states,
+ * and the runtime's DELIVERY of the same three is proven under `src/`.
+ *
+ * `lastOutput` throws for any name but `anomaly-watch`, mirroring the
+ * runtime's refusal, so the handler is never written against a `null` it would
+ * not receive.
+ */
+function contextWith(record: OutputRecord | null): CapabilityContext {
+  return {
+    caller: { plugin: 'anomaly-issue' },
+    secrets: { resolvedNames: () => [] },
+    dependencies: {
+      lastOutput: (_caller, name: string) => {
+        if (name !== 'anomaly-watch') {
+          throw new Error(`anomaly-issue does not declare '${name}' in manifest.dependencies`)
+        }
+        return record
+      },
+    },
+  } as CapabilityContext
+}
+
+/** An inline-body Output in the shape `anomaly-watch` returns. */
+function outputOf(body: unknown): OutputRecord {
+  return { type: 'anomalies', format: 'json', body: JSON.stringify(body) }
+}
 
 /**
  * Runs `fn` against a throwaway home with a token set. `warpline/lib/paths`
@@ -179,10 +209,6 @@ describe('anomaly-issue handler ledger', () => {
     process.env.WARPLINE_HOME = home
     process.env.GITHUB_TOKEN = 'tok-123'
 
-    const anomaliesPath = join(home, 'anomalies.json')
-    await mkdir(home, { recursive: true })
-    await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors, signups] }))
-
     let n = 0
     globalThis.fetch = (async () => {
       if (n++ === 0) return { ok: true, status: 201, json: async () => ({ html_url: 'https://github.com/o/r/issues/1' }) }
@@ -192,9 +218,9 @@ describe('anomaly-issue handler ledger', () => {
     try {
       const result = await handler(
         {} as PluginManifest,
-        { repo: 'o/r', anomalies_path: anomaliesPath },
+        { repo: 'o/r' },
         new AbortController().signal,
-        CONTEXT,
+        contextWith(outputOf({ anomalies: [errors, signups] })),
       )
       expect(result.status).toBe('partial')
       // The partial arm is built on the result builder too: no builder emits
@@ -216,34 +242,6 @@ describe('anomaly-issue handler ledger', () => {
     }
   })
 
-  test('a corrupt anomalies file fails rather than reporting "no anomalies file"', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'anomaly-issue-'))
-    const realToken = process.env.GITHUB_TOKEN
-    const realHome = process.env.WARPLINE_HOME
-    process.env.WARPLINE_HOME = home
-    process.env.GITHUB_TOKEN = 'tok-123'
-
-    const anomaliesPath = join(home, 'anomalies.json')
-    await writeFile(anomaliesPath, '{"anomalies": [')
-
-    try {
-      const result = await handler(
-        {} as PluginManifest,
-        { repo: 'o/r', anomalies_path: anomaliesPath },
-        new AbortController().signal,
-        CONTEXT,
-      )
-      expect(result.status).toBe('failed')
-      expect(result.errors?.[0]?.code).toBe('parse_error')
-    } finally {
-      if (realToken === undefined) delete process.env.GITHUB_TOKEN
-      else process.env.GITHUB_TOKEN = realToken
-      if (realHome === undefined) delete process.env.WARPLINE_HOME
-      else process.env.WARPLINE_HOME = realHome
-      await rm(home, { recursive: true, force: true })
-    }
-  })
-
   test('refuses to file when the ledger exists but cannot be parsed', async () => {
     const home = await mkdtemp(join(tmpdir(), 'anomaly-issue-'))
     const realFetch = globalThis.fetch
@@ -252,8 +250,6 @@ describe('anomaly-issue handler ledger', () => {
     process.env.WARPLINE_HOME = home
     process.env.GITHUB_TOKEN = 'tok-123'
 
-    const anomaliesPath = join(home, 'anomalies.json')
-    await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors] }))
     await mkdir(join(home, 'state'), { recursive: true })
     await writeFile(join(home, 'state', 'anomaly-issue.filed.json'), '{"filed": {truncat')
 
@@ -264,9 +260,9 @@ describe('anomaly-issue handler ledger', () => {
     try {
       const result = await handler(
         {} as PluginManifest,
-        { repo: 'o/r', anomalies_path: anomaliesPath },
+        { repo: 'o/r' },
         new AbortController().signal,
-        CONTEXT,
+        contextWith(outputOf({ anomalies: [errors] })),
       )
       expect(result.status).toBe('failed')
       expect(result.errors?.[0]?.code).toBe('parse_error')
@@ -289,7 +285,7 @@ describe('anomaly-issue handler ledger', () => {
 
 describe('anomaly-issue handler result construction', () => {
   test('an invalid repo is a failure built by the result builder, with no schema_version written by the handler', async () => {
-    const result = await handler({} as PluginManifest, { repo: 'not-a-repo' }, new AbortController().signal, CONTEXT)
+    const result = await handler({} as PluginManifest, { repo: 'not-a-repo' }, new AbortController().signal, contextWith(null))
     expect(result.status).toBe('failed')
     expect(result.errors?.[0]?.code).toBe('parse_error')
     expect(result.schema_version).toBeUndefined()
@@ -301,7 +297,7 @@ describe('anomaly-issue handler result construction', () => {
     const real = process.env.GITHUB_TOKEN
     delete process.env.GITHUB_TOKEN
     try {
-      const result = await handler({} as PluginManifest, { repo: 'o/r' }, new AbortController().signal, CONTEXT)
+      const result = await handler({} as PluginManifest, { repo: 'o/r' }, new AbortController().signal, contextWith(null))
       expect(result.status).toBe('failed')
       expect(result.errors?.[0]?.code).toBe('auth_failure')
       expect(result.errors?.[0]?.message).toContain('GITHUB_TOKEN')
@@ -313,24 +309,23 @@ describe('anomaly-issue handler result construction', () => {
     }
   })
 
-  test('a missing anomalies file is a success built by the result builder, never a bare skipped', async () => {
-    await withHomeAndToken(async home => {
+  test('a dependency that has produced nothing is a success built by the result builder, never a bare skipped', async () => {
+    await withHomeAndToken(async () => {
       const result = await handler(
         {} as PluginManifest,
-        { repo: 'o/r', anomalies_path: join(home, 'absent.json') },
+        { repo: 'o/r' },
         new AbortController().signal,
-        CONTEXT,
+        contextWith(null),
       )
       expect(result.status).toBe('success')
+      expect(result.summary).toContain('anomaly-watch')
       expect(result.summary).toContain('nothing to file')
       expect(result.schema_version).toBeUndefined()
     })
   })
 
   test('filing every anomaly is a success with the undo instruction and no schema_version', async () => {
-    await withHomeAndToken(async home => {
-      const anomaliesPath = join(home, 'anomalies.json')
-      await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors] }))
+    await withHomeAndToken(async () => {
       const impl = (async () => ({
         ok: true,
         status: 201,
@@ -338,7 +333,7 @@ describe('anomaly-issue handler result construction', () => {
       })) as unknown as typeof fetch
 
       const result = await withFetch(impl, () =>
-        handler({} as PluginManifest, { repo: 'o/r', anomalies_path: anomaliesPath }, new AbortController().signal, CONTEXT))
+        handler({} as PluginManifest, { repo: 'o/r' }, new AbortController().signal, contextWith(outputOf({ anomalies: [errors] }))))
 
       expect(result.status).toBe('success')
       expect(result.reversible).toBe(false)
@@ -350,17 +345,15 @@ describe('anomaly-issue handler result construction', () => {
 
   test('an issue created without an html_url is a partial run whose summary names THAT anomaly as where it stopped', async () => {
     await withHomeAndToken(async home => {
-      const anomaliesPath = join(home, 'anomalies.json')
       // The failing anomaly is the LAST one, so a count-derived name is
       // `undefined` rather than merely the wrong neighbour.
-      await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors, signups] }))
       const { impl } = fakeFetch([
         { ok: true, status: 201, html_url: 'https://github.com/o/r/issues/1' },
         { ok: true, status: 201 },
       ])
 
       const result = await withFetch(impl, () =>
-        handler({} as PluginManifest, { repo: 'o/r', anomalies_path: anomaliesPath }, new AbortController().signal, CONTEXT))
+        handler({} as PluginManifest, { repo: 'o/r' }, new AbortController().signal, contextWith(outputOf({ anomalies: [errors, signups] }))))
 
       expect(result.status).toBe('partial')
       expect(result.summary).toContain('filed 2 issues: errors, signups')
@@ -373,18 +366,17 @@ describe('anomaly-issue handler result construction', () => {
   })
 
   test('a second run in the same home reads the ledger and files nothing', async () => {
-    await withHomeAndToken(async home => {
-      const anomaliesPath = join(home, 'anomalies.json')
-      await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors] }))
+    await withHomeAndToken(async () => {
       let calls = 0
       const impl = (async () => {
         calls++
         return { ok: true, status: 201, json: async () => ({ html_url: 'https://github.com/o/r/issues/1' }) }
       }) as unknown as typeof fetch
-      const args = { repo: 'o/r', anomalies_path: anomaliesPath }
+      const args = { repo: 'o/r' }
+      const context = contextWith(outputOf({ anomalies: [errors] }))
 
-      const first = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, CONTEXT))
-      const second = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, CONTEXT))
+      const first = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, context))
+      const second = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, context))
 
       expect(first.status).toBe('success')
       expect(calls).toBe(1)
@@ -396,17 +388,16 @@ describe('anomaly-issue handler result construction', () => {
 
   test('a __proto__ anomaly name lands in the ledger as an own property, not on the prototype', async () => {
     await withHomeAndToken(async home => {
-      const anomaliesPath = join(home, 'anomalies.json')
       const proto: Anomaly = { name: '__proto__', latest: 1, threshold: 0, direction: 'above' }
-      await writeFile(anomaliesPath, JSON.stringify({ anomalies: [proto] }))
       const impl = (async () => ({
         ok: true,
         status: 201,
         json: async () => ({ html_url: 'https://github.com/o/r/issues/9' }),
       })) as unknown as typeof fetch
-      const args = { repo: 'o/r', anomalies_path: anomaliesPath }
+      const args = { repo: 'o/r' }
+      const context = contextWith(outputOf({ anomalies: [proto] }))
 
-      const first = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, CONTEXT))
+      const first = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, context))
       expect(first.status).toBe('success')
 
       // Serialised as an own key — a plain object would have set the prototype
@@ -416,15 +407,15 @@ describe('anomaly-issue handler result construction', () => {
       expect(Object.hasOwn(Object.prototype, 'filed')).toBe(false)
       expect(({} as Record<string, unknown>).__proto__).toBe(Object.prototype)
 
-      const second = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, CONTEXT))
+      const second = await withFetch(impl, () => handler({} as PluginManifest, args, new AbortController().signal, context))
       expect(second.summary).toBe('no new anomalies (1 already filed)')
     })
   })
 })
 
 /**
- * `repo` and `anomalies_path` both arrive from `<home>/config/anomaly-issue.json`,
- * and every `SkillResult` field this handler returns is written to a run log —
+ * `repo` arrives from `<home>/config/anomaly-issue.json`, and every
+ * `SkillResult` field this handler returns is written to a run log —
  * `engine.ts` copies `summary` into `plugin_entries[].result_summary` on every
  * run, success included. So an arm that quotes the value it was handed is a
  * disclosure path from the operator's config file to a document that gets
@@ -455,7 +446,7 @@ describe('anomaly-issue config value disclosure', () => {
       {} as PluginManifest,
       { repo: SENTINEL },
       new AbortController().signal,
-      CONTEXT,
+      contextWith(null),
     )
 
     expect(result.status).toBe('failed')
@@ -467,40 +458,20 @@ describe('anomaly-issue config value disclosure', () => {
     expect(result.errors?.[0]?.message).toContain('owner/name')
   })
 
-  test('a missing anomalies file reports nothing to file without naming the path', async () => {
+  test('a dependency that produced nothing reports it without naming the configured repo', async () => {
     await withToken(async () => {
       const result = await handler(
         {} as PluginManifest,
-        { repo: sentinelRepo, anomalies_path: join(tmpdir(), SENTINEL, 'anomalies.json') },
+        { repo: sentinelRepo },
         new AbortController().signal,
-        CONTEXT,
+        contextWith(null),
       )
 
       expect(result.status).toBe('success')
+      // The dependency IS named — a green run that filed nothing has to be
+      // legible in the run log — and the configured value still is not.
+      expect(result.summary).toContain('anomaly-watch')
       expect(JSON.stringify(result)).not.toContain(SENTINEL)
-    })
-  })
-
-  test('an unreadable anomalies file names the input key, not the path or the OS error', async () => {
-    await withToken(async () => {
-      // A directory reaches the non-ENOENT arm; a Node fs error embeds the full
-      // path, so forwarding its message re-opens the leak the key naming closes.
-      const dir = await mkdtemp(join(tmpdir(), `${SENTINEL}-`))
-      try {
-        const result = await handler(
-          {} as PluginManifest,
-          { repo: sentinelRepo, anomalies_path: dir },
-          new AbortController().signal,
-          CONTEXT,
-        )
-
-        expect(result.status).toBe('failed')
-        expect(result.errors?.[0]?.code).toBe('parse_error')
-        expect(JSON.stringify(result)).not.toContain(SENTINEL)
-        expect(result.errors?.[0]?.message).toContain('anomalies_path')
-      } finally {
-        await rm(dir, { recursive: true, force: true })
-      }
     })
   })
 
@@ -531,8 +502,6 @@ describe('anomaly-issue config value disclosure', () => {
   test('a filed issue URL reaches undo_instruction and nothing else', async () => {
     const realFetch = globalThis.fetch
     const dir = await mkdtemp(join(tmpdir(), 'anomaly-issue-undo-'))
-    const anomaliesPath = join(dir, 'anomalies.json')
-    await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors] }))
     const priorToken = process.env.GITHUB_TOKEN
     const priorHome = process.env.WARPLINE_HOME
     process.env.GITHUB_TOKEN = 'tok-123'
@@ -550,9 +519,9 @@ describe('anomaly-issue config value disclosure', () => {
 
       const result = await handler(
         {} as PluginManifest,
-        { repo: sentinelRepo, anomalies_path: anomaliesPath },
+        { repo: sentinelRepo },
         new AbortController().signal,
-        CONTEXT,
+        contextWith(outputOf({ anomalies: [errors] })),
       )
 
       // The carve-out itself: the URL is here, because a human needs it.

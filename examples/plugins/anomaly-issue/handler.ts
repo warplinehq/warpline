@@ -6,8 +6,8 @@ import { atomicWriteJson, readJsonOrNull } from 'warpline/unstable-fs'
 import { skillFailure, skillOk } from 'warpline/unstable-result'
 
 /**
- * Expected anomalies file shape — the element type `anomaly-watch` declares
- * as its `anomalies` output:
+ * Expected shape of the Output `anomaly-watch` last produced — the element
+ * type it declares as its `anomalies` output:
  * {
  *   "anomalies": [
  *     { "name": "error_count", "latest": 42, "threshold": 10, "direction": "above" }
@@ -135,7 +135,7 @@ const FAILED = { phases_failed: ['anomaly-issue'], impact: 'HIGH' as const, retr
 
 // The form docs/plugin-authoring.md shows and `warpline scaffold` emits: the
 // annotation supplies all four parameter types and the return type.
-export const handler: CapabilityHandlerFn = async (_manifest, args, signal, _capabilities) => {
+export const handler: CapabilityHandlerFn = async (_manifest, args, signal, capabilities) => {
   const repo = args.repo
   if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
     return skillFailure('parse_error', "input 'repo' must be a string in owner/name form, e.g. oven-sh/bun", FAILED)
@@ -148,38 +148,42 @@ export const handler: CapabilityHandlerFn = async (_manifest, args, signal, _cap
     return skillFailure('auth_failure', 'GITHUB_TOKEN is not set', FAILED)
   }
 
-  // A convention, not a seam. `<home>/state/anomalies.json` is a path agreed
-  // with a chaining host; the declared dependency, `anomaly-watch`, does not
-  // write it. That dependency now returns a real Output on its success arm, so
-  // a producer exists — but the reader for it, `readDependencyOutput`, takes an
-  // `EngineState`, and a handler is called `(manifest, args, signal,
-  // capabilities)`: no engine state reaches it, and `CapabilityContext` has no
-  // member that carries one. A plugin cannot call the reader, so this read
-  // succeeds whether or not the producer ran. It stays until the runtime hands
-  // a plugin a way to read what its dependency produced; then this fallback,
-  // the `anomalies_path` input and the manifest's convention paragraph go
-  // together.
-  const anomaliesPath = typeof args.anomalies_path === 'string'
-    ? args.anomalies_path
-    : join(warplineHome(), 'state', 'anomalies.json')
-  // `readJsonOrNull` is null for ENOENT and rethrows everything else. A file
-  // that exists but is corrupt is not "no data yet" — reporting it green under
-  // a summary that says "no file" hides it indefinitely — and the rethrown
-  // message embeds the operator-configured path, so the catch names the key.
-  let rawAnomalies: { anomalies?: unknown } | null
-  try {
-    rawAnomalies = await readJsonOrNull<{ anomalies?: unknown }>(anomaliesPath)
-  } catch {
-    return skillFailure('parse_error', "the file named by input 'anomalies_path' is unreadable", FAILED)
-  }
-  if (rawAnomalies === null) {
+  // The seam, not a convention. The runtime hands a handler what each of its
+  // DECLARED dependencies last produced; `anomaly-watch` is declared in
+  // `manifest.dependencies`, and a name that is not throws here rather than
+  // reading `null` — a typo and a dependency that has not run are two unrelated
+  // fixes, and the wrong one is the one that looks like waiting.
+  const record = capabilities.dependencies.lastOutput(capabilities.caller, 'anomaly-watch')
+  if (record === null) {
     // NOT a bare `skipped`: deriveRunStatus persists a prefix-less `skipped`
-    // as `failed`, and "no data yet" must not paint a red run.
-    return skillOk('anomaly-issue: no anomalies file at the configured path — nothing to file', {
+    // as `failed`, and "the producer has not run yet" must not paint a red run.
+    // NOT `skillFailure('dependency_unavailable', …)` either — that reddens the
+    // ordinary first-advance case and pre-empts the engine-level gate. And NO
+    // Output: an empty one would become this plugin's `last_output`, and a
+    // downstream reader would take it for real work.
+    return skillOk('anomaly-issue: anomaly-watch has produced nothing yet — nothing to file', {
       phases_completed: ['anomaly-issue'],
     })
   }
-  const anomalies: Anomaly[] = Array.isArray(rawAnomalies.anomalies) ? rawAnomalies.anomalies : []
+  // An Output carries exactly one of `body` or `path`, and the schema refuses
+  // anything else. `readJsonOrNull` covers the `path` form and is null for a
+  // file that is not there.
+  //
+  // Caught, because both halves can throw on content this plugin did not
+  // author: `JSON.parse` on a body that is not JSON, and `readJsonOrNull` on a
+  // path it cannot read. A thrown error out of a handler is a failed run with
+  // no structure, which the runtime tells you not to return.
+  let raw: { anomalies?: unknown } | null
+  try {
+    raw = record.body !== undefined
+      ? (JSON.parse(record.body) as { anomalies?: unknown } | null)
+      : await readJsonOrNull<{ anomalies?: unknown }>(record.path!)
+  } catch {
+    raw = null
+  }
+  // The parsed shape is not trusted either: the body is a string another plugin
+  // authored, and anything but an array of anomalies is nothing to file.
+  const anomalies: Anomaly[] = Array.isArray(raw?.anomalies) ? raw.anomalies : []
 
   const ledgerPath = join(warplineHome(), 'state', 'anomaly-issue.filed.json')
   // Null prototype throughout: `filed['__proto__'] = url` on a plain object

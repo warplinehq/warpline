@@ -29,7 +29,8 @@ import { describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { CapabilityContext } from '../runtime/capabilities.js'
+import { mintContext, type CapabilityContext } from '../runtime/capabilities.js'
+import { SkillResultSchema } from '../schemas/skill-result.js'
 import { snapshotHome } from '../runtime/__tests__/helpers/snapshot-home.js'
 import { handler as announceFanout } from '../../examples/plugins/announce-fanout/handler.js'
 import { manifest as announceFanoutManifest } from '../../examples/plugins/announce-fanout/manifest.js'
@@ -77,7 +78,13 @@ interface ShapeEntry {
 
 // ── Act plumbing ─────────────────────────────────────────────────────────
 
-/** The handler is four-parameter; no act reads a member, so an empty context is enough. */
+/**
+ * The handler is four-parameter. This constant serves the acts whose handlers
+ * read no member: the cast satisfies the compiler and produces an empty object
+ * at run time, which is enough right up until something dereferences a member.
+ * The acts whose handlers DO reach one build a real context through
+ * `mintContext` instead, inside the act — see `anomaly-issue` below.
+ */
 const CONTEXT = {} as CapabilityContext
 const signal = () => new AbortController().signal
 
@@ -340,9 +347,29 @@ const REGISTRY: readonly ShapeEntry[] = [
     // link-enrich's, above.
     partial: 'writes back to one external system from one source, with a ledger against duplicates; the fan-in act itself is link-enrich\'s',
     act: async (home) => {
-      seed(home, 'state/anomalies.json', { anomalies: METRICS.series })
+      // The producer runs FIRST, and for real: bare, it finds no metrics, takes
+      // its own no-data arm and produces no Output at all, and the consumer
+      // would then take the "produced nothing" arm with everything else here
+      // done right. `state/metrics.json` is the producer's own INPUT, not
+      // anyone's Output — seeding it is not the seeding this act tore out.
+      seed(home, 'state/metrics.json', METRICS)
+      // Parsed at the boundary the engine parses at: `artifacts_produced` also
+      // admits a bare string, which normalises to a path Output there and never
+      // reaches `last_output` in the handler's own shape.
+      const produced = SkillResultSchema.parse(await anomalyWatch(anomalyWatchManifest, {}, signal(), CONTEXT))
+      const record = produced.artifacts_produced.at(-1)
+      // Asserted, not assumed — and it is the narrowing too: `undefined` is not
+      // assignable to the option's value type, so an act that skips this check
+      // does not compile.
+      if (record === undefined) return false
+      // The record the runtime would deliver, delivered by the runtime's own
+      // mint. This file may reach `src/`; an example test may not.
+      const context = mintContext(
+        { manifest: anomalyIssueManifest, dependencyOutputs: { 'anomaly-watch': record } },
+        { granted: false, reason: 'manual-run' },
+      ).context
       const result = await withEnv('GITHUB_TOKEN', 'placeholder-token', () =>
-        withFetch(okJson({ html_url: ISSUE_URL }), () => anomalyIssue(anomalyIssueManifest, { repo: REPO }, signal(), CONTEXT)))
+        withFetch(okJson({ html_url: ISSUE_URL }), () => anomalyIssue(anomalyIssueManifest, { repo: REPO }, signal(), context)))
       const ledger = readJson<{ filed: Record<string, string> }>(join(home, 'state', 'anomaly-issue.filed.json'))
       return result.status === 'success' && ledger.filed.errors === ISSUE_URL
     },
