@@ -32,7 +32,7 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { pluginConfigPath, pluginsDir, warplineHome } from '../lib/paths.js'
-import { ConfigureError, writePluginConfig } from './configure.js'
+import { ConfigureError, type ConfigureIo, writePluginConfig } from './configure.js'
 import { prepareHome, scaffoldPlugin } from './scaffold.js'
 
 /**
@@ -62,7 +62,10 @@ directory, and writes that plugin's config from the defaults its manifest
 declares. Safe to run again: nothing already present is changed.
 `
 
-export async function run(argv: string[]): Promise<number> {
+export async function run(
+  argv: string[],
+  io: ConfigureIo = { input: process.stdin, output: process.stdout },
+): Promise<number> {
   try {
     const { positionals } = parseArgs({ args: argv, options: {}, allowPositionals: true, strict: true })
     if (positionals.length > 0) {

@@ -230,6 +230,28 @@ async function walk(manifest: PluginManifest, reader: LineReader, output: NodeJS
   return values
 }
 
+/**
+ * The walk for one plugin, from resolving its manifest to closing the reader.
+ * Returns the answered values, or `null` when the input ended before the walk
+ * did — a refusal, so the caller writes nothing.
+ *
+ * Exported because a second verb runs the same walk in-process: `init` asks
+ * for the seed's inputs on a terminal, and reaching this function is how the
+ * prompt format and the secrets rule keep one implementation rather than two
+ * that drift. Two things stay with the callers: the terminal check, because
+ * each falls back differently when stdin is not one, and the write, because
+ * each says something different about what it wrote.
+ */
+export async function walkPluginInputs(pluginName: string, io: ConfigureIo): Promise<Record<string, unknown> | null> {
+  const manifest = await resolvePlugin(pluginName)
+  const reader = lineReader(io.input, io.output)
+  try {
+    return await walk(manifest, reader, io.output)
+  } finally {
+    reader.close()
+  }
+}
+
 /** The `--from` body as a null-prototype record, or the refusal. */
 function parseBody(body: string): Record<string, unknown> {
   let parsed: unknown
@@ -291,14 +313,7 @@ export async function run(
         )
         return 1
       }
-      const manifest = await resolvePlugin(name)
-      const reader = lineReader(io.input, io.output)
-      let walked: Record<string, unknown> | null
-      try {
-        walked = await walk(manifest, reader, io.output)
-      } finally {
-        reader.close()
-      }
+      const walked = await walkPluginInputs(name, io)
       if (walked === null) {
         process.stderr.write('Input ended before every input was answered. Nothing was written.\n')
         return 1
