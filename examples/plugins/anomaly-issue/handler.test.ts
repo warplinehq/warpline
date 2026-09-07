@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
@@ -28,6 +28,7 @@ async function withHomeAndToken<T>(fn: (home: string) => Promise<T>): Promise<T>
     else process.env.WARPLINE_HOME = realHome
     if (realToken === undefined) delete process.env.GITHUB_TOKEN
     else process.env.GITHUB_TOKEN = realToken
+    await rm(home, { recursive: true, force: true })
   }
 }
 
@@ -211,6 +212,7 @@ describe('anomaly-issue handler ledger', () => {
       else process.env.GITHUB_TOKEN = realToken
       if (realHome === undefined) delete process.env.WARPLINE_HOME
       else process.env.WARPLINE_HOME = realHome
+      await rm(home, { recursive: true, force: true })
     }
   })
 
@@ -238,6 +240,7 @@ describe('anomaly-issue handler ledger', () => {
       else process.env.GITHUB_TOKEN = realToken
       if (realHome === undefined) delete process.env.WARPLINE_HOME
       else process.env.WARPLINE_HOME = realHome
+      await rm(home, { recursive: true, force: true })
     }
   })
 
@@ -279,6 +282,7 @@ describe('anomaly-issue handler ledger', () => {
       else process.env.GITHUB_TOKEN = realToken
       if (realHome === undefined) delete process.env.WARPLINE_HOME
       else process.env.WARPLINE_HOME = realHome
+      await rm(home, { recursive: true, force: true })
     }
   })
 })
@@ -482,17 +486,21 @@ describe('anomaly-issue config value disclosure', () => {
       // A directory reaches the non-ENOENT arm; a Node fs error embeds the full
       // path, so forwarding its message re-opens the leak the key naming closes.
       const dir = await mkdtemp(join(tmpdir(), `${SENTINEL}-`))
-      const result = await handler(
-        {} as PluginManifest,
-        { repo: sentinelRepo, anomalies_path: dir },
-        new AbortController().signal,
-        CONTEXT,
-      )
+      try {
+        const result = await handler(
+          {} as PluginManifest,
+          { repo: sentinelRepo, anomalies_path: dir },
+          new AbortController().signal,
+          CONTEXT,
+        )
 
-      expect(result.status).toBe('failed')
-      expect(result.errors?.[0]?.code).toBe('parse_error')
-      expect(JSON.stringify(result)).not.toContain(SENTINEL)
-      expect(result.errors?.[0]?.message).toContain('anomalies_path')
+        expect(result.status).toBe('failed')
+        expect(result.errors?.[0]?.code).toBe('parse_error')
+        expect(JSON.stringify(result)).not.toContain(SENTINEL)
+        expect(result.errors?.[0]?.message).toContain('anomalies_path')
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
     })
   })
 
@@ -562,6 +570,7 @@ describe('anomaly-issue config value disclosure', () => {
       else process.env.GITHUB_TOKEN = priorToken
       if (priorHome === undefined) delete process.env.WARPLINE_HOME
       else process.env.WARPLINE_HOME = priorHome
+      await rm(dir, { recursive: true, force: true })
     }
   })
 })

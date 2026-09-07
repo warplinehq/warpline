@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CapabilityContext } from 'warpline/unstable-capabilities'
@@ -27,6 +27,7 @@ async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   } finally {
     if (real === undefined) delete process.env.WARPLINE_HOME
     else process.env.WARPLINE_HOME = real
+    await rm(home, { recursive: true, force: true })
   }
 }
 
@@ -304,12 +305,16 @@ describe('metrics-rollup config value disclosure', () => {
   test('an unreadable metrics file names the input key, not the path or the OS error', async () => {
     await withHome(async () => {
       const dir = await mkdtemp(join(tmpdir(), `${SENTINEL}-`))
-      const result = await invoke({ metrics_path: dir })
+      try {
+        const result = await invoke({ metrics_path: dir })
 
-      expect(result.status).toBe('failed')
-      expect(result.errors?.[0]?.code).toBe('parse_error')
-      expect(JSON.stringify(result)).not.toContain(SENTINEL)
-      expect(result.errors?.[0]?.message).toContain('metrics_path')
+        expect(result.status).toBe('failed')
+        expect(result.errors?.[0]?.code).toBe('parse_error')
+        expect(JSON.stringify(result)).not.toContain(SENTINEL)
+        expect(result.errors?.[0]?.message).toContain('metrics_path')
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
     })
   })
 })

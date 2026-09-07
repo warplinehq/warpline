@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { mkdtemp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { CapabilityContext } from 'warpline/unstable-capabilities'
@@ -28,6 +28,7 @@ async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
   } finally {
     if (realHome === undefined) delete process.env.WARPLINE_HOME
     else process.env.WARPLINE_HOME = realHome
+    await rm(home, { recursive: true, force: true })
   }
 }
 
