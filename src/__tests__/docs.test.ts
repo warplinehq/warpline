@@ -135,6 +135,27 @@ describe('CLI surface', () => {
     // The sentence is the claim; the count inside it is what goes stale.
     expect(readme).toContain(`Those ${WORD_FOR[n] ?? n} subcommands are the whole CLI surface`)
   })
+
+  /**
+   * `scaffold --from` and `init` copy the whole example directory, test file
+   * included — a recorded choice, pinned by scaffold.test.ts. The consequence
+   * is not enforced anywhere: nothing in warpline loads the copied test, the
+   * default `.warpline/` is a dot-directory `bun test` does not descend into,
+   * but a home placed as a plain directory inside a project is on that
+   * project's discovery path. So the README and the scaffold docstring both
+   * have to say it, and this pins that they do.
+   */
+  test('the README and the scaffold docstring say the copied example carries its test file and where bun test finds it', () => {
+    const readme = read('README.md')
+    const from = readme.slice(readme.indexOf('--from <example>` copies'))
+    expect(from).toContain('`handler.test.ts`')
+    expect(from).toContain('`bun test`')
+    expect(from).toContain('WARPLINE_HOME=./warpline-home')
+    const scaffold = read('src/cli/scaffold.ts')
+    const section = scaffold.slice(scaffold.indexOf('## `--from` is a copy'), scaffold.indexOf('## Why the generated imports'))
+    expect(section).toContain('`handler.test.ts`')
+    expect(section).toContain('`bun test`')
+  })
 })
 
 // ── Documented commands must exist ───────────────────────────────────────

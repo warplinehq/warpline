@@ -24,6 +24,15 @@
  * day it is made, and nothing here tracks it afterwards. An author who wants
  * a later fix to the source example reads the diff and takes it by hand.
  *
+ * The copy is the whole example directory, `handler.test.ts` included, so a
+ * copied plugin arrives with its tests and with any reference file beside
+ * them. Nothing in warpline loads that test file. The default `.warpline/`
+ * home is a dot-directory, which `bun test` does not descend into; a home
+ * placed as a plain directory inside a project (`WARPLINE_HOME=./warpline-home`)
+ * is on that project's discovery path, and its own `bun test` will run the
+ * copied file. Recorded because copying everything is the deliberate
+ * choice, and that consequence is the price of it; the README says the same.
+ *
  * ## Why the generated imports look the way they do
  *
  * Generated plugins live under <warplineHome>/plugins/, outside both this repo

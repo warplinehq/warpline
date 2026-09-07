@@ -134,7 +134,12 @@ Worked examples in [examples/plugins/](examples/plugins/):
 
 Copy any of them into your own home as a starting point:
 `npx warpline scaffold my-plugin --from <example>` copies the directory with
-only the manifest's name rewritten.
+only the manifest's name rewritten. That includes the example's
+`handler.test.ts`, so the copy arrives with its tests. Nothing in warpline
+runs that file, and the default `.warpline/` home is a dot-directory that
+`bun test` does not descend into; a home placed as a plain directory inside a
+project (`WARPLINE_HOME=./warpline-home`) is on that project's discovery path,
+and its own `bun test` will run the copied file.
 
 Authoring guide: [docs/plugin-authoring.md](docs/plugin-authoring.md).
 
