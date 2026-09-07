@@ -291,6 +291,15 @@ name the reading manifest declares:
   and no field of the run record other than these two is delivered through this
   handle.
 
+Both members answer from the dependency state the HOST supplied, and a host may
+supply none: `invokePlugin`'s `dependencyRuns` is optional, and a caller that
+omits it hands the handler a member reading `null` for every declared name
+whatever `engine-state.json` holds. `warpline run` is such a caller — it invokes
+one plugin standalone and reads no runtime state. So `null` distinguishes "never
+run" from "produced nothing" only on an engine advance, and a handler that must
+run correctly under both should not publish "has not run yet" on the strength of
+a `null`.
+
 An undeclared name throws from either member, through one shared refusal, and
 the message names the reading plugin, the requested name and the manifest field
 to add it to.
@@ -1181,17 +1190,6 @@ opportunity and not a repair: a re-run that also produces no Output leaves the
 plugin reading as having run and never produced. What IS bounded is the trigger.
 This path fires only on the two refusals above — a dependency moved, or the gate
 expired — and the delete is skipped entirely while a denial is live.
-
-**A denial that was live at the moment of the refusal is re-fingerprinted, not
-stranded.** The fingerprint is read out of `plugin_runs[plugin].last_output`, so
-deleting the entry moves it, and a denial recorded against the parked result
-would stop matching — the plugin would be due again and re-fire the side effects
-the operator said no to, silently, since the superseded-denial note only rides
-the unapproved arm. So the fingerprint is measured before the delete and, if it
-still matched, recomputed after it. The denial then answers the plugin's
-Output-less proposal: it is denied by name until the operator takes it back.
-A denial that was already stale is left alone — re-stamping it would revive an
-answer to a proposal that no longer exists.
 
 **The `plugin_runs` entry is kept while a denial is live, and the denial is left
 exactly as it was.** Deleting the entry is what makes a plugin due again after

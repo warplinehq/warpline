@@ -97,7 +97,7 @@ describe('daily-digest aggregates its declared dependencies', () => {
     // nothing, so the digest no longer answers both with one word.
     expect(result.status).toBe('success')
     expect(result.summary).toContain('2 breached')
-    expect(result.summary).toContain('github-poll: has not run yet')
+    expect(result.summary).toContain('github-poll: no data from it yet')
     expect(result.artifacts_produced).toHaveLength(1)
   })
 
@@ -191,8 +191,8 @@ describe('daily-digest names the state each source is in', () => {
     const result = await invoke({})
 
     expect(result.status).toBe('success')
-    expect(result.summary).toContain('anomaly-watch: has not run yet')
-    expect(result.summary).toContain('github-poll: has not run yet')
+    expect(result.summary).toContain('anomaly-watch: no data from it yet')
+    expect(result.summary).toContain('github-poll: no data from it yet')
     // The early return used to answer for both at once. Two sources can be in
     // two different states, so it reports each by name.
     expect(result.summary).not.toContain('neither dependency has produced anything')
@@ -205,7 +205,7 @@ describe('daily-digest names the state each source is in', () => {
   test('never-run and ran-and-produced-nothing are two different sentences', async () => {
     const result = await invoke({}, { 'github-poll': 'success' })
 
-    expect(result.summary).toContain('anomaly-watch: has not run yet')
+    expect(result.summary).toContain('anomaly-watch: no data from it yet')
     expect(result.summary).toContain('github-poll: has run and produced nothing this digest can use')
     expect(result.artifacts_produced ?? []).toHaveLength(0)
   })

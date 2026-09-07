@@ -721,8 +721,8 @@ describe('anomaly-issue names the state its dependency is in', () => {
       // because "ran and produced nothing" is a different thing to chase than
       // "has not started".
       expect(never.summary).not.toBe(ranAndProducedNone.summary)
-      expect(never.summary).toContain('has not run yet')
-      expect(ranAndProducedNone.summary).not.toContain('has not run yet')
+      expect(never.summary).toContain('no data from anomaly-watch yet')
+      expect(ranAndProducedNone.summary).not.toContain('no data from anomaly-watch yet')
       expect(ranAndProducedNone.summary).toContain('success')
       // Both keep the arm's existing properties: named dependency, no Output.
       for (const result of [never, ranAndProducedNone]) {
@@ -745,7 +745,7 @@ describe('anomaly-issue names the state its dependency is in', () => {
       // report, not an error and not silence.
       expect(result.status).toBe('success')
       expect(result.summary).toContain('gated')
-      expect(result.summary).not.toContain('has not run yet')
+      expect(result.summary).not.toContain('no data from anomaly-watch yet')
     })
   })
 

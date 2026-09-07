@@ -368,12 +368,15 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
   if (upstream === null) {
     // Nothing produced yet. `upstreamRun` says whether that is because
     // anomaly-watch has not run (`null`) or ran and produced none.
-  } else if (upstreamRun === 'failed') {
-    // A record IS here and it predates a failed run. Say that, rather than
-    // publishing the record as if it were current.
   } else if (upstream.body !== undefined) {
     const payload: unknown = JSON.parse(upstream.body)
     // ...guard the shape before trusting it: another plugin wrote this.
+    //
+    // `upstreamRun === 'failed'` (or `'skipped'`) means this record predates
+    // that run. Annotate what you publish with it — do NOT branch away from
+    // the read. The record is real work the producer really produced, and the
+    // carry-forward exists to keep it reachable; a guard here would throw away
+    // the one thing it bought you. Both shipped examples do it this way.
   }
 }
 ```
@@ -388,6 +391,21 @@ about a dependency that produced last week. Together they name four states:
 | `null` | `'success'` | Ran, and has never produced an Output. |
 | a record | `'failed'` | Produced before; its latest run failed. The record stands, and it is older than that run. |
 | a record | `'success'` | Produced, and its latest run is healthy. |
+
+**A record beside `'success'` does not mean the record came from that run.** A
+run that produced nothing carries the previous record forward, so this row also
+covers "succeeded today, produced nothing, and what you are holding is
+yesterday's". When currency matters, read `produced_at` or `run_id` on the
+record itself — the runtime stamps both, and they are the only currency signal
+the pair does not give you.
+
+**These four states describe an engine advance.** A host may supply no
+dependency state at all, and both members then answer `null` for every declared
+name whatever `engine-state.json` holds — so `null` means "never run" only on a
+host that supplies it. `warpline run` is a host that does not: it invokes one
+plugin standalone and reads no runtime state, by design. Say "no data from
+`<name>`" rather than "`<name>` has not run yet" in anything a handler
+publishes, unless you know your host supplies the state.
 
 `lastRun` can also read `'gated'`, `'partial'` or `'skipped'`. `'gated'` is the
 ordinary answer for a supervised dependency parked waiting for an approval —

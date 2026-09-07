@@ -102,13 +102,24 @@ type RunStatus = ReturnType<DependenciesHandle['lastRun']>
  *   - no line, and no run at all       → it has not started
  *   - no line, and a run               → it ran and produced nothing usable
  *
- * Only the dependency's declared name, the closed status enum and this file's
- * own literals reach the string. No value read from an upstream body, no error
- * text, no path.
+ * What THIS function adds to the string is the dependency's declared name, the
+ * closed status enum and this file's own literals — no error text and no path.
+ * The `description` it is handed is a different matter: `describeAnomalies`
+ * builds it from upstream body values (the producer's anomaly names), so
+ * foreign text does reach the line, and the claim is scoped accordingly rather
+ * than stated of the whole string. That is why the published digest carries
+ * `lines` as an array as well as joined: a reader must never have to re-split
+ * foreign text on a separator it does not control.
  */
 function lineFor(name: string, description: string | null, run: RunStatus): string {
   if (description === null) {
-    return `${name}: ${run === null ? 'has not run yet' : 'has run and produced nothing this digest can use'}`
+    // Says "no data from it yet" rather than "has not run yet": a `null` run
+    // does not only mean the producer never ran. A host may supply no
+    // dependency state at all — `warpline run` is such a host — and then every
+    // declared name reads `null` whatever the state document holds. The
+    // specific claim would be false on a shipped path; this one is true on
+    // both.
+    return `${name}: ${run === null ? 'no data from it yet' : 'has run and produced nothing this digest can use'}`
   }
   // No `; ` inside the marker: the lines are joined on that separator, and a
   // reader splitting the digest back into lines would cut this one in half.
@@ -143,9 +154,16 @@ export const handler: CapabilityHandlerFn = async (manifest, _args, _signal, cap
   if (anomalies === null && issues === null) {
     // NOT a bare `skipped`: a prefix-less `skipped` is persisted as `failed`,
     // and "no data yet" must not paint a red run. And NO Output: an empty
-    // digest returned as one would become the engine's last_output for this
-    // plugin, and a downstream reader would take a day that was never
-    // digested for one that was.
+    // digest returned as one would OVERWRITE a real digest this plugin
+    // produced earlier, and the empty one would be what every downstream
+    // reader gets from then on.
+    //
+    // What this does NOT buy, since 13.1-04: it does not stop a downstream
+    // reader taking a stale digest for today's. Withholding the Output leaves
+    // the PREVIOUS digest in place as `last_output`, and this arm returns
+    // `skillOk`, so a consumer reads a record beside `'success'` either way.
+    // The currency signal is inside the record — `produced_at` and `run_id`,
+    // stamped by the runtime — and a consumer that cares reads those.
     //
     // It used to answer for both sources at once. Two sources can be in two
     // different states, so it reports each by name — from the same helper the
@@ -165,6 +183,13 @@ export const handler: CapabilityHandlerFn = async (manifest, _args, _signal, cap
     // published body, not only the summary, because the body is what a
     // downstream reader parses and where the claim it replaces did its damage.
     sources: { 'anomaly-watch': anomalies, 'github-poll': issues },
+    // Both forms, deliberately. `digest` is the sentence an operator reads;
+    // `lines` is what a downstream reader consumes. A line carries upstream
+    // text — an anomaly named `a; b` puts the join separator inside a line —
+    // so a reader recovering the lines by splitting `digest` on `'; '` would
+    // cut one in half, and no sanitising of foreign text fixes that as
+    // reliably as not asking anyone to re-split it.
+    lines,
     digest: lines.join('; '),
   }
 

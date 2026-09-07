@@ -177,8 +177,14 @@ export const handler: CapabilityHandlerFn = async (_manifest, args, signal, capa
     // schedule, the other wants somebody to look at a producer that runs and
     // returns nothing. Only the declared name and the closed status enum are
     // interpolated — never a value read from a record.
+    // Says "no data from anomaly-watch yet" rather than "has not run yet": a
+    // `null` run does not only mean the producer never ran. A host may supply
+    // no dependency state at all — `warpline run` is such a host — and then
+    // every declared name reads `null` whatever the state document holds. The
+    // specific claim would be false on a shipped path; this one is true on
+    // both.
     const state = run === null
-      ? 'anomaly-watch has not run yet'
+      ? 'no data from anomaly-watch yet'
       : `anomaly-watch has run (last run: ${run}) and has never produced an Output`
     return skillOk(`anomaly-issue: ${state} — nothing to file`, {
       phases_completed: ['anomaly-issue'],
