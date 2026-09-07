@@ -1752,6 +1752,86 @@ export async function handler(manifest, args) {
     expect(second.outcome).toBe('already_applied')
   })
 
+  /**
+   * The supervised half of the preservation invariant that
+   * `dependency-output-preservation.test.ts` proves on the autonomous path.
+   * Those arms all land on the autonomous `plugin_runs` write, so on their own
+   * they leave the park and the approve claimed and unchecked — two further
+   * writes of the same field, each able to drop it.
+   *
+   * It reuses this describe's gate fixture rather than standing up a second
+   * one, but it cannot BE Test 43: that case's plugin produces an Output, and
+   * the precondition here is a gated run that produced none.
+   *
+   * The prior Output is seeded rather than earned by a first advance, because
+   * a supervised plugin's first advance parks a gate instead of completing —
+   * earning it would mean approving one gate to set up a second, and the
+   * assertion would then rest on the very write it is trying to check.
+   */
+  test('Test 47: a supervised plugin\'s prior Output survives a gated run that produced none, through the park and through the approve', async () => {
+    const { runAdvance, applyPendingGate, findPendingGate, loadPluginManifests } = await import(
+      '../engine.js'
+    )
+    const { readEngineState, writeEngineState } = await import('../engine-state-store.js')
+    await createOutputPlugin('gated-keeper', '[]', 'supervised')
+
+    const approvalPath = join(ctx.root, '.session-approval-test47')
+    await grantApproval('gated-keeper', 4 * 60 * 60 * 1000, approvalPath)
+
+    // Stamped the way the runtime stamps one, so the seed is a record the
+    // schema would have accepted from a real run rather than a shape invented
+    // for the fixture.
+    const priorOutput = {
+      type: 'brief',
+      format: 'markdown' as const,
+      run_id: 'run-that-produced-it',
+      produced_at: new Date(Date.now() - 60_000).toISOString(),
+      body: '# what this plugin produced before the gated run',
+    }
+    const seeded = await readEngineState(statePath)
+    seeded.plugin_runs['gated-keeper'] = {
+      // Well outside the fixture's 0.001h TTL, so the plugin is due and the
+      // advance below actually runs it.
+      last_run_at: new Date(Date.now() - 60_000).toISOString(),
+      status: 'success',
+      duration_ms: 5,
+      last_output: priorOutput,
+    }
+    await writeEngineState(seeded, statePath)
+
+    await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+      approvalPath,
+    })
+
+    // Write site 1 — the supervised park.
+    const parked = await readEngineState(statePath)
+    expect(parked.plugin_runs['gated-keeper']?.status).toBe('gated')
+    expect(parked.plugin_runs['gated-keeper']?.last_output).toEqual(priorOutput)
+
+    // Write site 2 — the approve verb applying the gate.
+    const { manifests } = await loadPluginManifests(ctx.pluginsDir)
+    const gate = findPendingGate(parked, 'gated-keeper')
+    expect(gate).toBeDefined()
+    const applied = await applyPendingGate(
+      parked,
+      gate as NonNullable<typeof gate>,
+      manifests.get('gated-keeper') as PluginManifest,
+      { statePath },
+    )
+    expect(applied.outcome).toBe('applied')
+
+    const after = await readEngineState(statePath)
+    // Both, in one assertion set: the run's real terminal status AND the
+    // preserved record. A fix that kept the Output by declining to write the
+    // status would satisfy the second and falsify the first.
+    expect(after.plugin_runs['gated-keeper']?.status).toBe('success')
+    expect(after.plugin_runs['gated-keeper']?.last_output).toEqual(priorOutput)
+  })
+
   test('Test 44: an applied marker past the gate ceiling is dropped by the advance, one inside it is kept', async () => {
     const { runAdvance, GATE_MAX_AGE_MS } = await import('../engine.js')
     await createOutputPlugin('quiet-writer', '[]')
