@@ -1,16 +1,16 @@
-import { resolve } from 'node:path'
-import { warplineHome } from 'warpline/lib/paths'
 import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
+import type { OutputRecord } from 'warpline/schemas/skill-result'
 import { readJsonOrNull } from 'warpline/unstable-fs'
-import { skillFailure, skillOk } from 'warpline/unstable-result'
+import { skillOk } from 'warpline/unstable-result'
 
 /**
- * The two upstream shapes, one per declared dependency.
+ * The two upstream shapes, one per declared dependency — each read from the
+ * Output record that producer last returned, handed over by the runtime.
  *
- * anomaly-watch, dropped at `anomalies_path` in the shape anomaly-issue reads:
- * { "anomalies": [ { "name": "error_count", "latest": 42, "threshold": 10, "direction": "above" } ] }
+ * anomaly-watch's Output body, the `anomalies` output it declares:
+ * { "observed_at": "...", "anomalies": [ { "name": "error_count", "latest": 42, "threshold": 10, "direction": "above" } ] }
  *
- * github-poll, dropped at `issues_path` in the shape its Output body carries:
+ * github-poll's Output body, the snapshot it declares:
  * { "observed_at": "...", "open_count": 7, "newest_number": 12 }
  *
  * Only the fields the digest names are read; the rest passes through untouched.
@@ -39,59 +39,57 @@ function describeIssues(raw: IssuesSnapshot): string {
 }
 
 /**
- * Read one upstream file, or `null` when the producer has left nothing yet.
- * The path is operator-configured and this result lands in the run log, so a
- * read that fails for any reason other than ENOENT names the input KEY.
+ * The parsed content of one dependency's last Output, or `null`.
+ *
+ * An Output carries exactly one of `body` or `path`, and the schema refuses
+ * anything else; `readJsonOrNull` covers the `path` form and is null for a file
+ * that is not there. Both halves can throw on content this plugin did not
+ * author — `JSON.parse` on a body that is not JSON, `readJsonOrNull` on a path
+ * it cannot read — and a throw out of a handler is a failed run with no
+ * structure, which the runtime tells you not to return. So it is caught and
+ * settles to `null`, which the per-source shape guards below then read as
+ * "that source has nothing usable yet".
  */
-async function readUpstream<T>(key: string, path: string): Promise<{ ok: true; value: T | null } | { ok: false; key: string }> {
+async function readOutput(record: OutputRecord | null): Promise<unknown> {
+  if (record === null) return null
   try {
-    return { ok: true, value: await readJsonOrNull<T>(path) }
+    return record.body !== undefined ? (JSON.parse(record.body) as unknown) : await readJsonOrNull<unknown>(record.path!)
   } catch {
-    return { ok: false, key }
+    return null
   }
 }
 
-export const handler: CapabilityHandlerFn = async (manifest, args, _signal, _capabilities) => {
-  // A convention, not a seam. `anomalies_path` and `issues_path` are files a
-  // chaining host drops under the home; the declared dependencies,
-  // `anomaly-watch` and `github-poll`, do not write them. Both dependencies
-  // now return a real Output on their success arm, so producers exist — but
-  // the reader for them, `readDependencyOutput`, takes an `EngineState`, and a
-  // handler is called `(manifest, args, signal, capabilities)`: no engine
-  // state reaches it, and `CapabilityContext` has no member that carries one.
-  // A plugin cannot call the reader, so these reads succeed whether or not the
-  // producers ran. They stay until the runtime hands a plugin a way to read
-  // what its dependencies produced; then these two reads, both inputs and the
-  // manifest's convention paragraph go together. The file shapes are the
-  // Output shapes, so what replaces the read is the read alone.
-  const home = warplineHome()
-  const anomaliesPath = resolve(home, typeof args.anomalies_path === 'string' ? args.anomalies_path : 'state/anomalies.json')
-  const issuesPath = resolve(home, typeof args.issues_path === 'string' ? args.issues_path : 'state/github-issues.json')
+/**
+ * The bodies are strings other plugins authored, so each is checked against the
+ * one field this digest reads from it rather than trusted. Anything else is the
+ * same state as "has produced nothing yet": there is no line to write.
+ */
+function asAnomalies(raw: unknown): Anomalies | null {
+  return typeof raw === 'object' && raw !== null && Array.isArray((raw as Anomalies).anomalies) ? (raw as Anomalies) : null
+}
 
-  const anomalies = await readUpstream<Anomalies>('anomalies_path', anomaliesPath)
-  if (!anomalies.ok) {
-    return skillFailure('parse_error', `${manifest.name}: the file named by input '${anomalies.key}' is unreadable or not JSON`, {
-      phases_failed: [manifest.name],
-      impact: 'HIGH',
-      retryable: false,
-    })
-  }
-  const issues = await readUpstream<IssuesSnapshot>('issues_path', issuesPath)
-  if (!issues.ok) {
-    return skillFailure('parse_error', `${manifest.name}: the file named by input '${issues.key}' is unreadable or not JSON`, {
-      phases_failed: [manifest.name],
-      impact: 'HIGH',
-      retryable: false,
-    })
-  }
+function asIssues(raw: unknown): IssuesSnapshot | null {
+  return typeof raw === 'object' && raw !== null && typeof (raw as IssuesSnapshot).open_count === 'number'
+    ? (raw as IssuesSnapshot)
+    : null
+}
 
-  if (anomalies.value === null && issues.value === null) {
+export const handler: CapabilityHandlerFn = async (manifest, _args, _signal, capabilities) => {
+  // The seam, not a convention. The runtime hands a handler what each of its
+  // DECLARED dependencies last produced; both names below are declared in
+  // `manifest.dependencies`, and a name that is not throws here rather than
+  // reading `null` — a typo and a producer that has not run are two unrelated
+  // fixes, and the wrong one is the one that looks like waiting.
+  const anomalies = asAnomalies(await readOutput(capabilities.dependencies.lastOutput(capabilities.caller, 'anomaly-watch')))
+  const issues = asIssues(await readOutput(capabilities.dependencies.lastOutput(capabilities.caller, 'github-poll')))
+
+  if (anomalies === null && issues === null) {
     // NOT a bare `skipped`: a prefix-less `skipped` is persisted as `failed`,
     // and "no data yet" must not paint a red run. And NO Output: an empty
     // digest returned as one would become the engine's last_output for this
     // plugin, and a downstream reader would take a day that was never
     // digested for one that was.
-    return skillOk(`${manifest.name}: no upstream data at either configured path — nothing to digest`, {
+    return skillOk(`${manifest.name}: neither dependency has produced anything yet — nothing to digest`, {
       phases_completed: [manifest.name],
     })
   }
@@ -99,13 +97,13 @@ export const handler: CapabilityHandlerFn = async (manifest, args, _signal, _cap
   // A missing upstream is not a failure of the digest: the digest says which
   // source had nothing, so it never reads as complete when it is not.
   const lines = [
-    `anomaly-watch: ${anomalies.value === null ? 'nothing yet' : describeAnomalies(anomalies.value)}`,
-    `github-poll: ${issues.value === null ? 'nothing yet' : describeIssues(issues.value)}`,
+    `anomaly-watch: ${anomalies === null ? 'nothing yet' : describeAnomalies(anomalies)}`,
+    `github-poll: ${issues === null ? 'nothing yet' : describeIssues(issues)}`,
   ]
   const observedAt = new Date().toISOString()
   const digest = {
     observed_at: observedAt,
-    sources: { 'anomaly-watch': anomalies.value, 'github-poll': issues.value },
+    sources: { 'anomaly-watch': anomalies, 'github-poll': issues },
     digest: lines.join('; '),
   }
 

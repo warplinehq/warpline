@@ -83,7 +83,9 @@ interface ShapeEntry {
  * read no member: the cast satisfies the compiler and produces an empty object
  * at run time, which is enough right up until something dereferences a member.
  * The acts whose handlers DO reach one build a real context through
- * `mintContext` instead, inside the act — see `anomaly-issue` below.
+ * `mintContext` instead, inside the act — see `daily-digest` and
+ * `anomaly-issue` below. Both still pass this constant to the PRODUCERS they
+ * run first, which read no member either.
  */
 const CONTEXT = {} as CapabilityContext
 const signal = () => new AbortController().signal
@@ -210,17 +212,41 @@ const REGISTRY: readonly ShapeEntry[] = [
   {
     shape: 3,
     example: 'daily-digest',
-    // What is asserted: aggregation over two declared dependencies — both
-    // upstream results present, one digest naming both, exactly one Output.
-    // What is NOT asserted: reading a dependency's produced Output through a
-    // runtime-supplied reader. No handler here is handed one, so the digest
-    // reads the two files a chaining host drops under the home. This act seeds
-    // those files; when the runtime hands a plugin a reader, the seeding here
-    // becomes a run of the producers instead.
+    // Aggregation over two declared dependencies, end to end: BOTH producers
+    // run for real, each given the input it actually needs, and the digest is
+    // built from the Output records they returned rather than from files this
+    // test wrote. Seeding those two bodies by hand was the shortcut this act
+    // used to take, and it proved the fold while assuming the delivery.
+    //
+    // `state/metrics.json` is anomaly-watch's own INPUT, not anyone's Output —
+    // bare, that producer finds no metrics, takes its no-data arm and returns
+    // nothing for the digest to name. github-poll needs both its `repo` input
+    // and a stubbed fetch for the same reason, which is why this act borrows
+    // the github-poll act's exact call shape.
     act: async (home) => {
-      seed(home, 'state/anomalies.json', { anomalies: METRICS.series })
-      seed(home, 'state/github-issues.json', { observed_at: daysAgo(0), open_count: 2, newest_number: 12 })
-      const result = await dailyDigest(dailyDigestManifest, {}, signal(), CONTEXT)
+      seed(home, 'state/metrics.json', METRICS)
+      // Parsed at the boundary the engine parses at: `artifacts_produced` also
+      // admits a bare string, which normalises to a path Output there and never
+      // reaches `last_output` in either handler's own shape.
+      const watched = SkillResultSchema.parse(await anomalyWatch(anomalyWatchManifest, {}, signal(), CONTEXT))
+      const polled = SkillResultSchema.parse(
+        await withFetch(okJson(ISSUES), () => githubPoll(githubPollManifest, { repo: REPO }, signal(), CONTEXT)))
+      const anomaliesRecord = watched.artifacts_produced.at(-1)
+      const issuesRecord = polled.artifacts_produced.at(-1)
+      // Asserted, not assumed — and it is the narrowing too: `undefined` is not
+      // assignable to the option's value type, so an act that skips this check
+      // does not compile.
+      if (anomaliesRecord === undefined || issuesRecord === undefined) return false
+      // The records the runtime would deliver, delivered by the runtime's own
+      // mint. This file may reach `src/`; an example test may not.
+      const context = mintContext(
+        {
+          manifest: dailyDigestManifest,
+          dependencyOutputs: { 'anomaly-watch': anomaliesRecord, 'github-poll': issuesRecord },
+        },
+        { granted: false, reason: 'manual-run' },
+      ).context
+      const result = await dailyDigest(dailyDigestManifest, {}, signal(), context)
       return result.status === 'success'
         && result.summary.includes('anomaly-watch') && result.summary.includes('github-poll')
         && (result.artifacts_produced?.length ?? 0) === 1
