@@ -3,39 +3,53 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
-import type { CapabilityContext } from 'warpline/unstable-capabilities'
+import type { CapabilityContext, DependenciesHandle } from 'warpline/unstable-capabilities'
 import { SkillResultSchema, type OutputRecord } from 'warpline/schemas/skill-result'
 import { pending, issueFor, fileIssues, handler, type Anomaly } from './handler.js'
 
 /**
- * The fourth parameter, carrying the one member this handler reads.
+ * The closed status vocabulary, named through the published handle type rather
+ * than restated here — a second copy of an enum is a second thing that can go
+ * out of date.
+ */
+type RunStatus = ReturnType<DependenciesHandle['lastRun']>
+
+/**
+ * The fourth parameter, carrying the two members this handler reads.
  *
  * A hand-written literal and not the runtime's mint: an example may import
  * only the three `warpline/unstable-*` specifiers, so `src/` is out of reach
  * from here on purpose. What that costs is stated rather than hidden — this
- * file proves the HANDLER does the right thing with each of the three states,
- * and the runtime's DELIVERY of the same three is proven under `src/`.
+ * file proves the HANDLER does the right thing with each of the four states,
+ * and the runtime's DELIVERY of them is proven under `src/`.
  *
- * `lastOutput` throws for any name but `anomaly-watch`, mirroring the
- * runtime's refusal, so the handler is never written against a `null` it would
+ * Both members throw for any name but `anomaly-watch`, mirroring the runtime's
+ * shared refusal, so the handler is never written against a `null` it would
  * not receive.
+ *
+ * The default pairs the two facts coherently: a fixture handing over a record
+ * without saying how the last run ended models a producer that succeeded, and
+ * one handing over nothing models a producer that has never run. Every case
+ * that means something else says so.
  */
-function contextWith(record: OutputRecord | null): CapabilityContext {
+function contextWith(record: OutputRecord | null, run: RunStatus = record === null ? null : 'success'): CapabilityContext {
+  const declared = (name: string): void => {
+    if (name !== 'anomaly-watch') {
+      throw new Error(`anomaly-issue does not declare '${name}' in manifest.dependencies`)
+    }
+  }
   return {
     caller: { plugin: 'anomaly-issue' },
     secrets: { resolvedNames: () => [] },
     dependencies: {
       lastOutput: (_caller, name: string) => {
-        if (name !== 'anomaly-watch') {
-          throw new Error(`anomaly-issue does not declare '${name}' in manifest.dependencies`)
-        }
+        declared(name)
         return record
       },
-      // Present so the fixture satisfies the handle's shape, and answering
-      // nothing: this file models what the handler was HANDED, and the handler
-      // does not read a run status yet. The handler rewrite that branches on
-      // the pair owns making this fixture say something.
-      lastRun: () => null,
+      lastRun: (_caller, name: string) => {
+        declared(name)
+        return run
+      },
     },
   } as CapabilityContext
 }
@@ -657,6 +671,127 @@ describe('anomaly-issue against what its dependency produced', () => {
     // dependency that has not run are two unrelated fixes, and returning `null`
     // for both would make the wrong one look like waiting.
     expect(() => context.dependencies.lastOutput(context.caller, 'anomaly-wach')).toThrow('anomaly-wach')
+    // Per member, because the obligation is: an arm asserting only the first
+    // stays green over a second member that answers for anything asked of it.
+    expect(() => context.dependencies.lastRun(context.caller, 'anomaly-wach')).toThrow('anomaly-wach')
     expect(context.dependencies.lastOutput(context.caller, 'anomaly-watch')).not.toBeNull()
+    expect(context.dependencies.lastRun(context.caller, 'anomaly-watch')).toBe('success')
+  })
+})
+
+/**
+ * The four states the pair names, and the three the handler used to answer
+ * with one sentence.
+ *
+ * Reading `lastOutput` alone cannot tell a producer that has never started
+ * from one that ran and produced nothing, and it cannot tell a current record
+ * from one that predates a failed run. Each case below asserts the SENTENCE,
+ * because the sentence is what reaches the run log and, for the digest one
+ * tier down, what reaches a downstream reader.
+ */
+describe('anomaly-issue names the state its dependency is in', () => {
+  const ISSUE = 'https://github.com/o/r/issues/1'
+  const OBSERVED_AT = '2026-01-01T00:00:00.000Z'
+
+  const creates = (bump: () => void): typeof fetch =>
+    (async () => {
+      bump()
+      return { ok: true, status: 201, json: async () => ({ html_url: ISSUE }) }
+    }) as unknown as typeof fetch
+
+  /** Writes the ledger under an existing home, without creating a temp dir of its own. */
+  async function seedLedger(home: string, filed: Record<string, string>): Promise<string> {
+    const path = join(home, 'state', 'anomaly-issue.filed.json')
+    await mkdir(join(home, 'state'), { recursive: true })
+    await writeFile(path, JSON.stringify({ filed }))
+    return path
+  }
+
+  test('a producer that has never run reads differently from one that ran and produced nothing', async () => {
+    await withHomeAndToken(async () => {
+      const args = { repo: 'o/r' }
+      const signal = new AbortController().signal
+      const never = await handler({} as PluginManifest, args, signal, contextWith(null, null))
+      const ranAndProducedNone = await handler({} as PluginManifest, args, signal, contextWith(null, 'success'))
+
+      expect(never.status).toBe('success')
+      expect(ranAndProducedNone.status).toBe('success')
+      // The distinction is the whole reason the second fact is read. Two
+      // states, two sentences — and the second one names the status it read,
+      // because "ran and produced nothing" is a different thing to chase than
+      // "has not started".
+      expect(never.summary).not.toBe(ranAndProducedNone.summary)
+      expect(never.summary).toContain('has not run yet')
+      expect(ranAndProducedNone.summary).not.toContain('has not run yet')
+      expect(ranAndProducedNone.summary).toContain('success')
+      // Both keep the arm's existing properties: named dependency, no Output.
+      for (const result of [never, ranAndProducedNone]) {
+        expect(result.summary).toContain('anomaly-watch')
+        expect(result.artifacts_produced ?? []).toHaveLength(0)
+        expect(result.status).not.toBe('skipped')
+      }
+    })
+  })
+
+  test('a producer parked at a gate is reported as gated, not as never having run', async () => {
+    await withHomeAndToken(async () => {
+      const result = await handler(
+        {} as PluginManifest,
+        { repo: 'o/r' },
+        new AbortController().signal,
+        contextWith(null, 'gated'),
+      )
+      // A supervised producer waiting for an approval is a real state to
+      // report, not an error and not silence.
+      expect(result.status).toBe('success')
+      expect(result.summary).toContain('gated')
+      expect(result.summary).not.toContain('has not run yet')
+    })
+  })
+
+  test('a record preserved across a failed producer run still files, re-files nothing, and is reported as stale', async () => {
+    await withHomeAndToken(async home => {
+      const path = await seedLedger(home, { errors: ISSUE })
+      const before = await readFile(path, 'utf-8')
+      let calls = 0
+
+      const result = await withFetch(creates(() => { calls++ }), () =>
+        handler(
+          {} as PluginManifest,
+          { repo: 'o/r' },
+          new AbortController().signal,
+          contextWith(outputOf({ observed_at: OBSERVED_AT, anomalies: [errors] }), 'failed'),
+        ))
+
+      // Filing is NOT gated on the run status: the record is real work the
+      // producer really produced, and the ledger dedupes by anomaly name, so
+      // a carried-forward record re-files nothing. Both halves are asserted —
+      // the sentence names the staleness, and the ledger proves the arm is
+      // safe by the property that already existed.
+      expect(result.status).toBe('success')
+      expect(calls).toBe(0)
+      expect(await readFile(path, 'utf-8')).toBe(before)
+      expect(result.summary).toContain('whose latest run failed')
+      expect(result.summary).toContain('anomaly-watch')
+    })
+  })
+
+  test('a healthy producer is reported with no staleness marker at all', async () => {
+    await withHomeAndToken(async home => {
+      await seedLedger(home, { errors: ISSUE })
+      let calls = 0
+      const result = await withFetch(creates(() => { calls++ }), () =>
+        handler(
+          {} as PluginManifest,
+          { repo: 'o/r' },
+          new AbortController().signal,
+          contextWith(outputOf({ observed_at: OBSERVED_AT, anomalies: [errors] }), 'success'),
+        ))
+
+      expect(calls).toBe(0)
+      // The negative control for the marker: the healthy path's wording is
+      // unchanged, so the marker cannot be a decoration every run carries.
+      expect(result.summary).toBe('no new anomalies (1 already filed)')
+    })
   })
 })
