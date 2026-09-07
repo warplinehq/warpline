@@ -543,3 +543,115 @@ describe('anomaly-issue config value disclosure', () => {
     }
   })
 })
+
+/**
+ * The negative control: the same handler, the same home, the same injected
+ * `fetch` — and four different answers from the one member it reads.
+ *
+ * Every case asserts the ACT, never the status. The handler returns `skillOk`
+ * on BOTH "the dependency produced nothing" and "nothing new to file", so a
+ * test asserting only `status === 'success'` is green over a handler that
+ * reads nothing at all and calls out to nothing. What tells those apart is the
+ * `fetch` count and the ledger: three negatives asserting zero prove nothing
+ * on their own, which is why the positive asserts the count went up.
+ *
+ * What this file cannot do is prove the RUNTIME delivers these three states —
+ * an example may import only the three `warpline/unstable-*` specifiers, so
+ * the mint is out of reach from here. That tier lives under `src/`.
+ */
+describe('anomaly-issue against what its dependency produced', () => {
+  const ISSUE = 'https://github.com/o/r/issues/1'
+  const OBSERVED_AT = '2026-01-01T00:00:00.000Z'
+
+  /** A fetch that always creates an issue, and says how many times it was asked. */
+  const creates = (bump: () => void): typeof fetch =>
+    (async () => {
+      bump()
+      return { ok: true, status: 201, json: async () => ({ html_url: ISSUE }) }
+    }) as unknown as typeof fetch
+
+  /** The ledger as bytes, or `null` when the handler never wrote one. */
+  const ledgerOf = (home: string): Promise<string | null> =>
+    readFile(join(home, 'state', 'anomaly-issue.filed.json'), 'utf-8').catch(() => null)
+
+  test('an Output carrying anomalies files one issue per anomaly', async () => {
+    await withHomeAndToken(async home => {
+      let calls = 0
+      const result = await withFetch(creates(() => { calls++ }), () =>
+        handler(
+          {} as PluginManifest,
+          { repo: 'o/r' },
+          new AbortController().signal,
+          contextWith(outputOf({ observed_at: OBSERVED_AT, anomalies: [errors, signups] })),
+        ))
+
+      expect(calls).toBeGreaterThanOrEqual(1)
+      expect(result.status).toBe('success')
+      const ledger = await ledgerOf(home)
+      expect(ledger).not.toBeNull()
+      expect(Object.keys(JSON.parse(ledger!).filed)).toEqual(['errors', 'signups'])
+    })
+  })
+
+  test('no Output at all files nothing, and says which dependency produced none', async () => {
+    await withHomeAndToken(async home => {
+      let calls = 0
+      const result = await withFetch(creates(() => { calls++ }), () =>
+        handler({} as PluginManifest, { repo: 'o/r' }, new AbortController().signal, contextWith(null)))
+
+      expect(calls).toBe(0)
+      expect(await ledgerOf(home)).toBeNull()
+      expect(result.status).toBe('success')
+      // Named, so a green run that filed nothing is legible in the run log
+      // rather than indistinguishable from a run with nothing new.
+      expect(result.summary).toContain('anomaly-watch')
+    })
+  })
+
+  test('an Output carrying an empty anomalies array files nothing', async () => {
+    await withHomeAndToken(async home => {
+      let calls = 0
+      const result = await withFetch(creates(() => { calls++ }), () =>
+        handler(
+          {} as PluginManifest,
+          { repo: 'o/r' },
+          new AbortController().signal,
+          contextWith(outputOf({ observed_at: OBSERVED_AT, anomalies: [] })),
+        ))
+
+      expect(calls).toBe(0)
+      expect(await ledgerOf(home)).toBeNull()
+      expect(result.status).toBe('success')
+    })
+  })
+
+  test('an Output in the pre-rename shape files nothing and does not throw', async () => {
+    // The one-advance upgrade window: a home where the producer last ran under
+    // 0.3.x holds a body keyed for the series-name-list concept. It self-heals
+    // on the producer's next run. Asserting this is also what proves no
+    // tolerance branch accepts both keys — one that did would file here.
+    await withHomeAndToken(async home => {
+      let calls = 0
+      const result = await withFetch(creates(() => { calls++ }), () =>
+        handler(
+          {} as PluginManifest,
+          { repo: 'o/r' },
+          new AbortController().signal,
+          contextWith(outputOf({ observed_at: OBSERVED_AT, breached: [errors, signups] })),
+        ))
+
+      expect(calls).toBe(0)
+      expect(await ledgerOf(home)).toBeNull()
+      expect(result.status).toBe('success')
+    })
+  })
+
+  test('a name the manifest does not declare throws rather than reading as null', () => {
+    const context = contextWith(outputOf({ observed_at: OBSERVED_AT, anomalies: [errors] }))
+    // The runtime's refusal, mirrored: a typo in `manifest.dependencies` and a
+    // dependency that has not run are two unrelated fixes, and returning `null`
+    // for both would make the wrong one look like waiting.
+    expect(() => context.dependencies.lastOutput(context.caller, 'anomaly-wach')).toThrow('anomaly-wach')
+    expect(context.dependencies.lastOutput(context.caller, 'anomaly-watch')).not.toBeNull()
+  })
+})
