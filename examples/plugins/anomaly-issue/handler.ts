@@ -57,6 +57,11 @@ export function issueFor(a: Anomaly): { title: string; body: string } {
  * Every error here is `retryable: false`: the runtime's retry loop re-invokes
  * the whole handler, and the filed-state ledger is the only thing between a
  * retry and a duplicate issue.
+ *
+ * `stoppedAt` names the anomaly the loop stopped on, set by the arm that
+ * stopped. It is not `created.length` counted back into the list: the
+ * no-`html_url` arm records the issue as created AND stops, so that count
+ * points one past it, at the next anomaly or at nothing.
  */
 export async function fileIssues(
   repo: string,
@@ -64,7 +69,7 @@ export async function fileIssues(
   token: string,
   fetchImpl: FetchImpl,
   signal: AbortSignal,
-): Promise<{ created: { name: string; url: string }[]; error: SkillError | null }> {
+): Promise<{ created: { name: string; url: string }[]; error: SkillError | null; stoppedAt: string | null }> {
   const created: { name: string; url: string }[] = []
   for (const a of anomalies) {
     // Nothing here may throw: a throw skips the caller's ledger write, and
@@ -94,6 +99,7 @@ export async function fileIssues(
           `${aborted ? 'aborted' : 'request failed'} filing ${a.name}`,
           { impact: 'HIGH', retryable: false },
         ),
+        stoppedAt: a.name,
       }
     }
     if (!res.ok) {
@@ -101,6 +107,7 @@ export async function fileIssues(
       return {
         created,
         error: makeSkillError(code, `GitHub API ${res.status} filing ${a.name}`, { impact: 'HIGH', retryable: false }),
+        stoppedAt: a.name,
       }
     }
     let html_url: unknown
@@ -115,11 +122,12 @@ export async function fileIssues(
       return {
         created,
         error: makeSkillError('parse_error', `GitHub API returned no html_url for ${a.name}`, { impact: 'HIGH', retryable: false }),
+        stoppedAt: a.name,
       }
     }
     created.push({ name: a.name, url: html_url })
   }
-  return { created, error: null }
+  return { created, error: null, stoppedAt: null }
 }
 
 /** Every failure here is the plugin's own phase, high impact, and not retried. */
@@ -202,7 +210,7 @@ export const handler: CapabilityHandlerFn = async (_manifest, args, signal, _cap
     })
   }
 
-  const { created, error } = await fileIssues(repo, todo, token, fetch, signal)
+  const { created, error, stoppedAt } = await fileIssues(repo, todo, token, fetch, signal)
 
   // Ledger FIRST, before any result is built — on every path that filed
   // something. A retry that finds the ledger sees these as already filed.
@@ -214,7 +222,7 @@ export const handler: CapabilityHandlerFn = async (_manifest, args, signal, _cap
   }
 
   const summary = `filed ${created.length} issues: ${created.map(c => c.name).join(', ')}`
-    + (error ? `; stopped at ${todo[created.length]?.name}: ${error.message}` : '')
+    + (error ? `; stopped at ${stoppedAt}: ${error.message}` : '')
   if (created.length === 0 && error !== null) {
     return skillFailure(error.code, summary, { ...FAILED, errors: [error], data_freshness: { anomalies: new Date().toISOString() } })
   }

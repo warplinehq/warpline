@@ -110,6 +110,7 @@ describe('anomaly-issue fileIssues', () => {
         { name: 'signups', url: 'https://github.com/o/r/issues/2' },
       ],
       error: null,
+      stoppedAt: null,
     })
   })
 
@@ -127,6 +128,7 @@ describe('anomaly-issue fileIssues', () => {
     expect(out.error?.retryable).toBe(false)
     expect(out.error?.message).toContain('500')
     expect(out.error?.message).toContain('signups')
+    expect(out.stoppedAt).toBe('signups')
   })
 
   test('401 and 403 are auth failures', async () => {
@@ -151,13 +153,17 @@ describe('anomaly-issue fileIssues', () => {
     // the request URL, which embeds the configured repo.
     expect(out.error?.message).toContain('request failed')
     expect(out.error?.message).toContain('signups')
+    expect(out.stoppedAt).toBe('signups')
   })
 
-  test('a response without html_url still records the issue as created', async () => {
+  test('a response without html_url still records the issue as created, and names it as where the loop stopped', async () => {
     const { impl } = fakeFetch([{ ok: true, status: 201 }])
     const out = await fileIssues('o/r', [errors], 'tok-123', impl, signal)
     expect(out.created).toHaveLength(1)
     expect(out.error?.code).toBe('parse_error')
+    // This arm pushes to `created` AND returns an error, so a count-derived
+    // name would point one past it: at the next anomaly, or at nothing.
+    expect(out.stoppedAt).toBe('errors')
   })
 })
 
@@ -195,6 +201,8 @@ describe('anomaly-issue handler ledger', () => {
       // handler still writes no schema_version of its own.
       expect(result.schema_version).toBeUndefined()
       expect(result.errors?.[0]?.code).toBe('dependency_unavailable')
+      expect(result.summary).toContain('filed 1 issues: errors')
+      expect(result.summary).toContain('stopped at signups')
       const ledger = JSON.parse(await readFile(join(home, 'state', 'anomaly-issue.filed.json'), 'utf-8'))
       expect(ledger.filed).toEqual({ errors: 'https://github.com/o/r/issues/1' })
     } finally {
@@ -333,6 +341,30 @@ describe('anomaly-issue handler result construction', () => {
       expect(result.undo_instruction).toContain('https://github.com/o/r/issues/1')
       expect(result.schema_version).toBeUndefined()
       expect(SkillResultSchema.parse(result).status).toBe('success')
+    })
+  })
+
+  test('an issue created without an html_url is a partial run whose summary names THAT anomaly as where it stopped', async () => {
+    await withHomeAndToken(async home => {
+      const anomaliesPath = join(home, 'anomalies.json')
+      // The failing anomaly is the LAST one, so a count-derived name is
+      // `undefined` rather than merely the wrong neighbour.
+      await writeFile(anomaliesPath, JSON.stringify({ anomalies: [errors, signups] }))
+      const { impl } = fakeFetch([
+        { ok: true, status: 201, html_url: 'https://github.com/o/r/issues/1' },
+        { ok: true, status: 201 },
+      ])
+
+      const result = await withFetch(impl, () =>
+        handler({} as PluginManifest, { repo: 'o/r', anomalies_path: anomaliesPath }, new AbortController().signal, CONTEXT))
+
+      expect(result.status).toBe('partial')
+      expect(result.summary).toContain('filed 2 issues: errors, signups')
+      expect(result.summary).toContain('stopped at signups')
+      expect(result.summary).not.toContain('undefined')
+      // Both are in the ledger: the second issue exists on GitHub too.
+      const ledger = JSON.parse(await readFile(join(home, 'state', 'anomaly-issue.filed.json'), 'utf-8'))
+      expect(Object.keys(ledger.filed)).toEqual(['errors', 'signups'])
     })
   })
 
