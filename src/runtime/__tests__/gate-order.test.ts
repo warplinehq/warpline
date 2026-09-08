@@ -42,6 +42,7 @@ const DECLARED_ORDER = [
   'manual',
   'fresh',
   'task_locked',
+  'dependency_failed',
   'denied',
   'unapproved',
 ]

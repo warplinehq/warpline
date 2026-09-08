@@ -19,14 +19,31 @@
  * Two arms, one file, the shape `no-dependency-path-fallback.test.ts` uses:
  *
  *   ARM 1, end to end. A real two-advance home. The producer throws an
- *   operator-path-shaped sentinel on advance 2; a declared consumer serialises
- *   everything the seam handed it into its own `result_summary`. The sentinel is
- *   asserted PRESENT in the producer's own run-log entry FIRST, then ABSENT from
- *   what the consumer received. Presence first is the whole point: absence alone
- *   is green when the value never resolved at all, which is the blindness that
- *   let the 0.2.0 config leak ship. A third assertion checks the status DID
- *   arrive, because a member returning `null` for everything would satisfy
- *   absence and deliver nothing.
+ *   operator-path-shaped sentinel on advance 2, and a declared consumer is
+ *   watched for it. The sentinel is asserted PRESENT in the producer's own
+ *   run-log entry FIRST, then ABSENT from the consumer's. Presence first is the
+ *   whole point: absence alone is green when the value never resolved at all,
+ *   which is the blindness that let the 0.2.0 config leak ship.
+ *
+ *   What the consumer's row is has changed, and the arm is stronger for it.
+ *   The `dependency_failed` gate means a plugin whose declared dependency's last
+ *   run failed is never invoked, so the consumer's row is now the GATE's row —
+ *   a `skipped` status and the gate's own summary. That summary is the newest
+ *   operator-visible string in this runtime and it is built one field away from
+ *   the thrown text: the gate reads `plugin_runs[prod]`, and the record whose
+ *   `status` it reads sits beside the `summary` and `errors[0].message` that
+ *   carry the throw. An interpolation slip there publishes the sentinel into
+ *   every run log. So the absence assertion still has a real subject, and now
+ *   guards the string most likely to leak next.
+ *
+ *   The positive anchor moves with it: the row must NAME `prod`, so a row that
+ *   resolved nothing at all cannot pass by carrying nothing. It is asserted as a
+ *   substring and never as the exact sentence — `dependency-failed.test.ts`
+ *   pins that wording, and pinning it twice makes one of the two the copy that
+ *   goes stale. What the seam DELIVERS under an advance is proved by
+ *   `plugin-run-status-honesty.test.ts` arm 1 and by
+ *   `dependency-output-preservation.test.ts` arm 3, whose producers do not arm
+ *   the gate; arm 2 below proves it at the mint.
  *
  *   ARM 2, the planted offender. One predicate, two handles: the real minted
  *   one, which must come back clean, and one minted from a planted registry
@@ -119,6 +136,11 @@ describe("a producer's failure text cannot reach a consumer through the seam", (
    * Serialises EVERYTHING it was handed for `prod` — the record and the run
    * status, both, in full. Anything the seam leaks therefore lands in this
    * plugin's own persisted `result_summary`, where the assertion reads it.
+   *
+   * It is kept, unrun, on purpose. Under the gate this handler is never
+   * invoked, and a fixture written to serialise the whole seam is the thing
+   * that would catch a leak the day the gate is narrowed or removed. Deleting
+   * it would leave nothing to re-point.
    */
   const consumer = `
 export async function handler(manifest, args, signal, capabilities) {
@@ -159,27 +181,25 @@ export async function handler(manifest, args, signal, capabilities) {
 
     const consumerEntry = await home.entryFor(r2.run_log_path, 'consumer')
     expect(consumerEntry).not.toBeNull()
-    // A healthy consumer reading a failed producer completes on its own terms.
-    // `completed` is the run-LOG vocabulary (`run-log.ts:26`), not the
-    // `plugin_runs` one — the two enums differ at exactly this value and the
-    // difference is easy to write past. Asserted before the parse below so a
-    // consumer that could not call the member fails HERE, on an assertion,
-    // rather than crashing the parse on prose.
-    expect(consumerEntry!.status).toBe('completed')
+    // The consumer never ran: its declared dependency's last run failed, so the
+    // gate filed it `skipped` and this row is the gate's own. `skipped` is the
+    // run-LOG vocabulary (`run-log.ts:26`), not the `plugin_runs` one — the two
+    // enums differ and the difference is easy to write past.
+    expect(consumerEntry!.status).toBe('skipped')
 
-    // ABSENCE.
+    // POSITIVE, before absence. The row resolved the producer's NAME, so a row
+    // that resolved nothing at all cannot satisfy the absence below by being
+    // empty. A substring and not the exact sentence: `dependency-failed.test.ts`
+    // owns that wording.
+    expect(consumerEntry!.result_summary).toContain("'prod'")
+
+    // ABSENCE. The gate read the record the throw is stored in and published a
+    // sentence about it; nothing of the throw came along.
     expect(consumerEntry!.result_summary).not.toContain(SENTINEL)
 
-    // POSITIVE. The enum did arrive: a member returning `null` for everything
-    // would satisfy the absence assertion and deliver nothing.
-    const seen = JSON.parse(consumerEntry!.result_summary) as {
-      record: unknown
-      run: string | null
-    }
-    expect(seen.run).toBe('failed')
-    // And the record survived the failed run — plan 04's invariant, restated
-    // here because it is what makes the pair of facts worth reading together.
-    expect(seen.record).not.toBeNull()
+    // And the record survived the failed run — plan 04's invariant, still true
+    // and still where a consumer would read it from if it ran.
+    expect((await home.persistedRun('prod'))?.last_output).not.toBeUndefined()
   })
 
   describe('the predicate that says so', () => {

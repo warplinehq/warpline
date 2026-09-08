@@ -11,10 +11,13 @@
  *   Advance 1: no marker  → the producer succeeds and records a `last_output`.
  *   Advance 2: marker set → the producer takes the mode it was built with.
  *
- * Extracted here on its second caller, not its first: `dependency-output-
+ * Extracted on its second caller, not its first: `dependency-output-
  * preservation.test.ts` drives it for the preservation invariant and
  * `dependency-run-status-leak.test.ts` drives it for the leak constraint. One
- * caller is a local function; two is a helper.
+ * caller is a local function; two is a helper. It has four now —
+ * `plugin-run-status-honesty.test.ts` and `dependency-failed.test.ts` joined
+ * them — and the two modes that record a `failed` run are what the last of
+ * those needs, which is why they are a closed union rather than a flag.
  *
  * What is deliberately NOT here: the consumer handler. The two callers read
  * different members through it and serialise different things, so a shared

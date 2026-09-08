@@ -23,6 +23,19 @@
  *      reachable case is `loadPluginConfig` rethrowing a non-`PluginConfigError`
  *      (`invoke-plugin.ts:378`) — here a config path that is a directory, so
  *      `readFile` raises EISDIR rather than ENOENT.
+ *
+ * Arm 2 no longer reads the status through a consumer, because it cannot: the
+ * `dependency_failed` gate means a plugin whose declared dependency's last run
+ * failed is never invoked. It reads the gate instead, and the substitution is
+ * an upgrade rather than a concession. The gate fires on `plugin_runs[prod]
+ * .status === 'failed'` and on nothing else, so if the catch had skipped its
+ * write the record would still hold advance 1's `success`, the consumer would
+ * run, and the assertion would fail — the same defect caught through a
+ * shorter chain.
+ *
+ * Arm 1 is untouched, and it doubles as a negative case for that gate: a
+ * `[needs-llm]` handoff records `skipped`, which does not arm it, so the
+ * consumer runs and reads the status exactly as before.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir } from 'node:fs/promises'
@@ -133,6 +146,13 @@ export async function handler(manifest, args, signal, capabilities) {
     // The Output is a fact about the PLUGIN and survives a run that produced
     // none — the same carry-forward the normal write performs.
     expect(entry.last_output).toMatchObject({ type: 'brief', body: '{"advance":1}' })
-    expect((await consumerSaw(r2.run_log_path))!.ran).toBe('failed')
+
+    // Read through the gate, not through the consumer. The gate reads exactly
+    // the field this test is about, so a catch that skipped its write leaves
+    // advance 1's `success` in place, the consumer runs, and this fails.
+    const consumerEntry = await home.entryFor(r2.run_log_path, 'consumer')
+    expect(consumerEntry).not.toBeNull()
+    expect(consumerEntry!.status).toBe('skipped')
+    expect(consumerEntry!.result_summary).toContain("'prod'")
   })
 })

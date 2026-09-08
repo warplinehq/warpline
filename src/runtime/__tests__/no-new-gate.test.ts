@@ -59,7 +59,7 @@ const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
 const ENGINE = join(REPO_ROOT, 'src', 'runtime', 'engine.ts')
 
 /**
- * The eight reasons a plugin can be not due, as of this release. Written out
+ * The nine reasons a plugin can be not due, as of this release. Written out
  * here rather than derived, because a derived expectation would agree with
  * whatever the source says and pin nothing.
  */
@@ -71,6 +71,7 @@ const NOT_DUE_REASONS = [
   'fresh',
   'denied',
   'task_locked',
+  'dependency_failed',
   'unapproved',
 ]
 
@@ -102,7 +103,7 @@ function readNotDueReasons(): string[] {
 }
 
 describe('invalid config grows no new gate', () => {
-  test('NotDueReason declares exactly its eight members', () => {
+  test('NotDueReason declares exactly its nine members', () => {
     const found = readNotDueReasons()
     // Non-empty first: a scan that matched nothing would otherwise only fail
     // the comparison below by being empty, which reads like a deleted union

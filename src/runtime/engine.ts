@@ -376,6 +376,7 @@ export type NotDueReason =
   | 'fresh'
   | 'denied'
   | 'task_locked'
+  | 'dependency_failed'
   | 'unapproved'
 
 export type EvalResult =
@@ -431,6 +432,32 @@ export interface Gate {
   /** True = the plugin is not due, for this entry's reason. */
   applies: (g: GateInput) => boolean | Promise<boolean>
   detail: (g: GateInput) => string
+}
+
+/**
+ * The declared dependencies whose LAST RECORDED RUN failed, in the order the
+ * manifest declares them.
+ *
+ * `manifest.dependencies` order and not sorted order, because that is the order
+ * the dependency-run projection below already preserves and the order the author
+ * wrote; two orderings of the same list is one more place for two answers to
+ * disagree.
+ *
+ * The read is `plugin_runs[d]?.status` and nothing else. There is no second
+ * check for "did this dependency legitimately not run": the run record is
+ * written only where a run actually happened, so no not-due reason can ever
+ * appear in it, and a defensive check would imply a second source of truth for
+ * a fact this record already holds alone. Nor is there a roster check for a
+ * declared name that is not installed — that would be a second dependency
+ * signal, and the case is named in `docs/runtime-spec.md` instead.
+ *
+ * A name with no entry answers `undefined`, which is not `'failed'`, so a
+ * dependency that never ran cannot gate anything. That is also what makes the
+ * plain index read safe on an inherited key: `plugin_runs['toString']` answers
+ * with a function whose `.status` is `undefined`, and `undefined !== 'failed'`.
+ */
+function failedDependencies(manifest: PluginManifest, state: EngineState): string[] {
+  return manifest.dependencies.filter((d) => state.plugin_runs[d]?.status === 'failed')
 }
 
 /**
@@ -493,6 +520,44 @@ export const GATES: readonly Gate[] = [
     reason: 'task_locked',
     applies: ({ plugin }) => smCheckTaskLock(plugin),
     detail: () => 'task locked — active on board',
+  },
+
+  // -- Dependency failed: it ran, and its last run ended failed ------
+  // Ordered after the staleness check and after the task lock, and BEFORE the
+  // denial entry.
+  //
+  // After staleness, because a plugin that is still fresh is not going to read
+  // anything this cycle and "still fresh" is the smaller, older answer; putting
+  // this above it would relabel every fresh dependent of a failed producer.
+  //
+  // Before the denial entry for the same shape of reason the denial sits above
+  // the approval gate: this plugin will not run either way, and the fact the
+  // operator can act on is the failed dependency, not an answer to a proposal
+  // that is not being made this cycle. It only ever moves a plugin from due to
+  // not-due, so it is well above the approval gate and cannot admit a side
+  // effect nobody approved.
+  //
+  // What arms it is one status on one existing record, and only that one.
+  // `skipped` does not: a plain skip and a `[needs-llm]` handoff lead a consumer
+  // to the same action, which is to read the carried-forward Output, and gating
+  // on it would break every judgment chain in the repository. `gated` does not:
+  // the gated arm writes a real Output, and a level holding a gate stops the
+  // advance, so no dependent is evaluated behind it. `partial` does not: the
+  // dependency published data and the authoring guide tells consumers to read
+  // it. An absent entry does not: a dependency that never ran cannot invalidate
+  // anything.
+  {
+    reason: 'dependency_failed',
+    applies: ({ manifest, ctx }) => failedDependencies(manifest, ctx.state).length > 0,
+    // Declared plugin names and one closed enum value. Nothing else may be
+    // interpolated here: this string is the run log's `result_summary`, which is
+    // read and shared, and this repository has twice paid for an operator-
+    // configured value reaching a result summary. The test asserts it as an
+    // exact string rather than a substring, so an appended leak fails.
+    detail: ({ manifest, ctx }) =>
+      `skipped: dependency failed — ${failedDependencies(manifest, ctx.state)
+        .map((d) => `'${d}'`)
+        .join(', ')} last recorded status 'failed'`,
   },
 
   // -- Denial: a human already said no to this exact proposal --------
@@ -1026,6 +1091,48 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               return
             }
 
+            // -- Dependency failed: it ran, it failed, and this plugin would
+            //    otherwise read what it left behind on an earlier cycle --
+            // The detail is written through verbatim, unlike the freshness arm
+            // above: the evaluator already produced the whole sentence, naming
+            // every failed dependency, and a prefix added here would be a
+            // second author for one string.
+            //
+            // The second not-due arm to call the progress end hook, and the
+            // reason is the approval gate's reason: a dependency failure is
+            // actionable in the way a missing Grant is actionable and unlike
+            // "still fresh", so the operator watching a long advance gets a line
+            // for the plugin they were waiting on instead of silence.
+            //
+            // Not the older rationale, which does not survive a read of source:
+            // that the plan-versus-run harness keys its attempted-set off the
+            // end hook. It keys off `onPluginStart` only (`plan.test.ts`,
+            // `attemptedByRun`), and a gated plugin is correctly outside the
+            // attempted set either way, because this arm returns before the
+            // start hook fires.
+            //
+            // No `plugin_runs` write, for the reason spelled out on the denial
+            // arm below: `runAdvance` has exactly three write sites for that
+            // record and this is not a fourth. A write here would move
+            // `last_run_at` for a plugin that never ran, re-arm the freshness
+            // latch against a run that did not happen, and make a plugin that
+            // never ran indistinguishable from one that ran and produced
+            // nothing — which is the exact confusion this gate exists to end.
+            case 'dependency_failed': {
+              const dependencyFailedElapsed = Date.now() - entryStart
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'skipped',
+                started_at: entryStartedAt,
+                elapsed_ms: dependencyFailedElapsed,
+                result_summary: ev.detail,
+                retried: false,
+              })
+              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+              onPluginEnd?.(pluginName, 'skipped', dependencyFailedElapsed, 'dependency failed')
+              return
+            }
+
             // -- Denied: a human answered, and the answer still applies --
             // The only arm here that does not write `status: 'skipped'`. A
             // denial is an outcome of supervision, like `gated`, and filing it
@@ -1037,8 +1144,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // left the two logs disagreeing about the same advance.
             //
             // No `plugin_runs` write: the plugin did not run. `runAdvance` has
-            // exactly two write sites for that record — the gated arm and the
-            // autonomous arm below — and this is not a third. (`applyPendingGate`
+            // exactly three write sites for that record — the catch around
+            // `invokePlugin`, the gated arm and the autonomous arm, all below —
+            // and neither this arm nor the dependency-failed one above is a
+            // fourth. (`applyPendingGate`
             // holds the only other one, plus the delete in its discard closure;
             // both are outside this function and answer a parked gate rather than
             // an advance.)
@@ -1058,8 +1167,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // -- Side-effect approval gate ---------------------------------
             // The run log names the specific effects; the board event does not.
             // Guarded now, where it used to be the block everything unmatched
-            // fell into; it is also the only not-due arm that ends the progress
-            // hook, which is why it must never inherit another reason's run.
+            // fell into, which is why it must never inherit another reason's
+            // run: it ends the progress hook, and it is one of the two not-due
+            // arms that do — the dependency-failed arm above is the other, on
+            // the same argument that an actionable skip earns the operator a
+            // line where "still fresh" does not.
             case 'unapproved': {
               const unapprovedElapsed = Date.now() - entryStart
               plugin_entries.push({

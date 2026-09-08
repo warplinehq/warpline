@@ -389,7 +389,7 @@ about a dependency that produced last week. Together they name four states:
 |---|---|---|
 | `null` | `null` | Never run. |
 | `null` | `'success'` | Ran, and has never produced an Output. |
-| a record | `'failed'` | Produced before; its latest run failed. The record stands, and it is older than that run. |
+| a record | `'failed'` | Produced before; its latest run failed. The record stands, and it is older than that run. **Not reachable under a full advance** — see below. |
 | a record | `'success'` | Produced, and its latest run is healthy. |
 
 **A record beside `'success'` does not mean the record came from that run.** A
@@ -398,6 +398,16 @@ covers "succeeded today, produced nothing, and what you are holding is
 yesterday's". When currency matters, read `produced_at` or `run_id` on the
 record itself — the runtime stamps both, and they are the only currency signal
 the pair does not give you.
+
+**`'failed'` does not reach your handler under a full advance.** The engine gates
+a plugin whose declared dependency's last run failed: it is not due, it is
+recorded `skipped`, and it is never invoked. So under a full engine advance,
+every dependency your handler is told about has passed that gate by construction,
+and
+the `'failed'` row above is unreachable. It stays in the table because it is
+still reachable elsewhere — the carve-out below is the same one — and because a
+handler that drops the branch is wrong on any host that supplies dependency state
+without running the gate.
 
 **These four states describe an engine advance.** A host may supply no
 dependency state at all, and both members then answer `null` for every declared
@@ -412,7 +422,9 @@ ordinary answer for a supervised dependency parked waiting for an approval —
 a real state to report, not an error to handle. `'skipped'` is your dependency
 handing its work to an LLM: it returned `status: 'skipped'` with a `[needs-llm]`
 summary, so it ran and produced nothing this time. Treat it the way you treat
-`'failed'` here — the record you are holding is real and is older than that run.
+`'failed'` — the record you are holding is real and is older than that run. None
+of these three is gated: only `'failed'` is, and only under a full advance, so
+`'skipped'`, `'gated'` and `'partial'` all arrive at your handler normally.
 
 An Output carries **either** a `body` or a `path`, never both. When it carries a
 `path`, resolving it is your handler's business — `readJsonOrNull` from

@@ -590,7 +590,7 @@ set is closed — an unlisted value fails validation rather than being dropped.
 |--------|---------|
 | `completed` | The handler ran and returned a result the engine accepted |
 | `failed` | The handler threw, returned a failed result, or the plugin's manifest never loaded |
-| `skipped` | The plugin was not due — fresh, filtered, locked, or without a session Grant |
+| `skipped` | The plugin was not due — fresh, filtered, locked, without a session Grant, or holding a declared dependency whose last run failed |
 | `gated` | Supervised: the handler ran and its result was parked pending a human answer |
 | `denied` | A human answered no, and the answer still applies to what is being proposed |
 
@@ -1043,6 +1043,21 @@ A record keyed by plugin name, holding the last run of each. It is what the
 TTL staleness check reads, and the only field that check consults is
 `last_run_at`.
 
+The dueness evaluator is a second reader of the record, and the first reader for
+which `status` decides whether a plugin runs at all. A plugin holding a declared
+dependency whose entry here records `failed` is not due, for the reason
+`dependency_failed`, and is recorded `skipped` with a summary naming every such
+dependency in manifest-declared order. Until that gate existed, the dependent ran
+and read whatever the failed producer had left behind on an earlier cycle — a
+diff-against-history consumer then reported "no change" for a cycle in which
+nothing was observed, and no field distinguished the two.
+
+There is no data migration. The field is read, never written or reshaped, and no
+schema changed. What does change on upgrade: an existing home already carrying a
+`failed` status for a scheduled dependency begins gating that dependency's
+dependents on the first advance afterwards. That is the correct behaviour and it
+arrives without a migration step, so it arrives unannounced.
+
 | Field | Type | Meaning |
 |-------|------|---------|
 | `last_run_at` | ISO 8601 string | When the run ended |
@@ -1083,6 +1098,44 @@ previous run's entry stayed and `lastRun` named a run two advances back.
 The status set is closed. Adding a member fans out into this document, and
 into every operator state file written afterwards, which is why it is not
 extended casually.
+
+#### What the dependency gate does not cover
+
+Four limitations, written down here rather than left for a reader to discover.
+
+**The latch, and how it clears.** The gate reads the LAST run's status, so a
+dependency whose last run failed gates its dependents until it runs again
+without failing. In the ordinary case it self-clears on the very next advance:
+the dependency is due, it runs, its entry is overwritten, and its dependents are
+due again. It cannot be cleared by hand — `warpline run` invokes one plugin
+standalone and writes no run record, so a manual run of the failed dependency
+leaves the latch exactly where it was. It is genuinely sticky only for a
+dependency that has stopped being scheduled at all: a `manual` dependency nobody
+invokes under an advance, one filtered out by the active profile or tier, and —
+the worst case — one deleted from the plugin directory outright, whose stale
+`failed` record outlives its manifest and can never be overwritten. A dependent
+declaring a dropped dependency is then gated permanently. Editing
+`engine-state.json` is the only way out.
+
+**One hop only.** In a chain A → B → C, a B gated by this reason writes no run
+record, so B's own recorded status stays whatever it last was — very likely
+`success`. C is therefore not gated, and once C's own freshness window expires it
+runs against B's stale data, which is exactly the failure the gate closes one
+level up. Every one-hop edge is covered; the second hop is not.
+
+**A manifest that never loaded is a blind spot.** A plugin whose `manifest.ts`
+fails to import is recorded as a `failed` run-log entry and a failed engine
+state, but it writes no `plugin_runs` record at all — nothing ran. Its dependents
+are therefore not gated. Fixing it here would mean writing a run record for a
+plugin that never ran, moving a `last_run_at` for a run that did not happen, so
+the gap is named rather than closed.
+
+**A declared dependency that is not installed does not gate.** A name in
+`dependencies` with no plugin behind it has no run record, and an absent record
+is not a failed one. The engine warns about the unresolved name at load time and
+`topoSort` ignores it for ordering; the gate deliberately adds no second roster
+check of its own, because that would be a second dependency signal answering the
+same question.
 
 ### `pending_gates`
 

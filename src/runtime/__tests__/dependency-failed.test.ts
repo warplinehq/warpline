@@ -203,6 +203,69 @@ describe('a plugin whose dependency failed does not run against what it left beh
     expect(await home.persistedRun('consumer')).toBeDefined()
   })
 
+  /**
+   * A producer that hands its work to an LLM, and one that publishes some of
+   * what it was asked for. Written out here rather than taken from the helper,
+   * whose three modes are the failure paths this file's positive cases need.
+   *
+   * The two statuses are the ones a reader assumes are covered by "the
+   * dependency did not really work". They are not, and the reasons differ: a
+   * `[needs-llm]` handoff and a plain skip lead a consumer to the same action —
+   * read the carried-forward Output — so gating on `skipped` would stop every
+   * judgment chain in the repository; and a `partial` producer published data
+   * the authoring guide tells consumers to read.
+   *
+   * `gated` has no case here and cannot have one. A level holding a gate stops
+   * the advance, so a supervised dependency's dependents are never evaluated at
+   * all and there is no verdict to assert.
+   */
+  const producerReturning = (status: 'skipped' | 'partial', summary: string) => `
+export async function handler(manifest, args, signal, capabilities) {
+  return {
+    status: ${JSON.stringify(status)},
+    phases_completed: [],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: ${JSON.stringify(summary)},
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`
+
+  test('a dependency that handed its work to an LLM does not gate its consumer', async () => {
+    await home.writePlugin('prod', {
+      outputs: { brief: {} },
+      handlerBody: producerReturning('skipped', '[needs-llm] summarise the brief'),
+    })
+    await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: CONSUMER })
+
+    const r1 = await home.advance()
+
+    expect((await home.persistedRun('prod'))?.status).toBe('skipped')
+
+    const entry = await home.entryFor(r1.run_log_path, 'consumer')
+    expect(entry).not.toBeNull()
+    expect(entry!.status).toBe('completed')
+  })
+
+  test('a dependency that ended partial does not gate its consumer', async () => {
+    await home.writePlugin('prod', {
+      outputs: { brief: {} },
+      handlerBody: producerReturning('partial', 'prod published half of it'),
+    })
+    await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: CONSUMER })
+
+    const r1 = await home.advance()
+
+    expect((await home.persistedRun('prod'))?.status).toBe('partial')
+
+    const entry = await home.entryFor(r1.run_log_path, 'consumer')
+    expect(entry).not.toBeNull()
+    expect(entry!.status).toBe('completed')
+  })
+
   test('a declared dependency with no run record at all does not gate its consumer', async () => {
     // `ghost` is declared and never installed. `topoSort` ignores a dependency
     // that is not in the plugin map, so the consumer is a root and `ghost` has
