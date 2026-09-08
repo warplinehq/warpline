@@ -1,6 +1,5 @@
 import { describe, test, expect, afterEach } from 'bun:test'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SkillResultSchema } from 'warpline/schemas/skill-result'
@@ -82,6 +81,9 @@ async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
 
 /** Where a run leaves what it found. Derived exactly as the handler derives it. */
 const entriesPath = (home: string) => join(home, 'state', `${manifest.name}.entries.json`)
+
+/** `node:fs/promises` is the only fs specifier an example test may reach for. */
+const exists = (path: string) => stat(path).then(() => true, () => false)
 
 /**
  * Swap `globalThis.fetch` for `stub`, run `body`, restore the real one whatever
@@ -165,12 +167,70 @@ describe('feed-monitor publishes what it found', () => {
       expect(output.body).toBeUndefined()
       expect(output.path).toBe(entriesPath(home))
 
-      expect(existsSync(output.path!)).toBe(true)
+      expect(await exists(output.path!)).toBe(true)
       const written = JSON.parse(await readFile(output.path!, 'utf-8')) as { new_entries: unknown }
       // The shape feed-triage's degrader already tolerates: the entries this
       // run reported as new, in the element type its docstring documents.
       expect(written.new_entries).toEqual(parseFeed(RSS))
     }))
+  })
+
+  test('the Output survives the boundary the engine parses at, in the path arm', async () => {
+    await withHome(home => withFetch(okWith(RSS), async () => {
+      const result = await invoke({ feed_url: FEED_URL })
+
+      // `artifacts_produced` also admits a bare string, which normalises to a
+      // path Output HERE and nowhere else. Parsing at the boundary the engine
+      // parses at is what proves the record reaches `last_output` intact.
+      const parsed = SkillResultSchema.parse(result)
+      expect(parsed.artifacts_produced).toHaveLength(1)
+      const output = parsed.artifacts_produced[0]!
+      expect(output.body).toBeUndefined()
+      expect(output.path).toBe(entriesPath(home))
+      expect(output.format).toBe('json')
+
+      const written = JSON.parse(await readFile(output.path!, 'utf-8')) as { fetched_at: string; new_entries: unknown }
+      expect(written.new_entries).toEqual(parseFeed(RSS))
+      // A reader of the file alone can tell when it was produced.
+      expect(written.fetched_at).toBe(parsed.data_freshness.feed!)
+    }))
+  })
+
+  test('a quiet day writes the file with an empty entry list and is still a success', async () => {
+    // ATOM, not RSS: an undated entry always surfaces, so only a fully dated
+    // feed can be entirely older than `since`.
+    await withHome(home => withFetch(okWith(ATOM), async () => {
+      const result = await invoke({ feed_url: FEED_URL, since: '2027-01-01T00:00:00Z' })
+
+      expect(result.status).toBe('success')
+      // An empty result is an observation, not the absence of one: a consumer
+      // that reads `[]` learns the poll happened and found nothing, which is
+      // not what it learns from a file that was never written.
+      const written = JSON.parse(await readFile(entriesPath(home), 'utf-8')) as { new_entries: unknown[] }
+      expect(written.new_entries).toEqual([])
+      expect(SkillResultSchema.parse(result).artifacts_produced[0]!.path).toBe(entriesPath(home))
+    }))
+  })
+
+  test('a failed poll writes nothing, so the previous file is left alone', async () => {
+    await withHome(home => withFetch(async () => ({ ok: false, status: 503 }), async () => {
+      const result = await invoke({ feed_url: FEED_URL })
+
+      expect(result.status).toBe('failed')
+      // The premise of the gate this phase builds: a dependency that failed
+      // must not overwrite what the last good run published.
+      expect(await exists(entriesPath(home))).toBe(false)
+      expect(result.artifacts_produced ?? []).toHaveLength(0)
+    }))
+  })
+
+  test('an unusable feed_url is refused before any write', async () => {
+    await withHome(async home => {
+      const result = await invoke({ feed_url: 'not-a-url' })
+
+      expect(result.status).toBe('failed')
+      expect(await exists(entriesPath(home))).toBe(false)
+    })
   })
 })
 
@@ -230,7 +290,7 @@ describe('feed-monitor config value disclosure', () => {
       // The written path is derived from the home and the manifest name, so
       // the configured URL cannot reach it either.
       expect(JSON.stringify(result.artifacts_produced ?? [])).not.toContain(SENTINEL)
-      expect(existsSync(entriesPath(home))).toBe(true)
+      expect(await exists(entriesPath(home))).toBe(true)
     }))
   })
 })
