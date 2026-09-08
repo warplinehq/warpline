@@ -56,8 +56,25 @@
  * `handler.ts` is never re-read between advances and a hand-rolled version gets
  * that wrong silently.
  */
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
+import { describe, test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
+import { existsSync } from 'node:fs'
+import { join, resolve, sep } from 'node:path'
 import { createTwoAdvanceHome, type TwoAdvanceHome } from './helpers/two-advance-home.js'
+import { _setPaths } from '../../board/state-manager.js'
+import { installStatePathIsolation } from '../../../test-utils/state-path-isolation.js'
+import { warplineHome } from '../../lib/paths.js'
+import { denialFingerprint } from '../engine.js'
+
+/** The evaluator's whole detail for the task-lock arm, copied from `engine.ts`. */
+const LOCK_DETAIL = 'task locked — active on board'
+
+/** The evaluator's whole detail for a single failed dependency named `prod`. */
+const DEPENDENCY_FAILED_DETAIL =
+  "skipped: dependency failed — 'prod' last recorded status 'failed'"
+
+/** What the approval arm writes for a consumer declaring one effect. */
+const UNAPPROVED_SUMMARY =
+  'skipped (unapproved): side effects [sends_email] require session approval'
 
 /**
  * A consumer that does nothing but succeed.
@@ -281,5 +298,251 @@ export async function handler(manifest, args, signal, capabilities) {
     expect(entry).not.toBeNull()
     expect(entry!.status).toBe('completed')
     expect(await home.persistedRun('consumer')).toBeDefined()
+  })
+})
+
+/**
+ * Where the gate sits in the chain, proved pairwise against each of its three
+ * neighbours, on the row the engine emitted.
+ *
+ * The chain's declared order is pinned as a list by `gate-order.test.ts`. That
+ * proves `GATES` says what it says; it cannot prove the orchestrator agrees,
+ * because a scan that returns the right reason and an arm that files it under
+ * the wrong heading are two different mistakes and only the second one reaches
+ * an operator. So every case here arms TWO guards on one plugin at once and
+ * reads which of them the run log names — the one observation that separates
+ * them.
+ *
+ * Three pairs, one per neighbour:
+ *
+ *   AFTER the task lock. A task lock is a human holding the plugin open on the
+ *   board, and that answer outranks a statement about the plugin's inputs. A
+ *   locked-and-dependency-failed plugin must read as locked.
+ *
+ *   BEFORE the denial. A denial answers a proposal this plugin is not making
+ *   this cycle, so the failed dependency is the fact the operator can act on.
+ *
+ *   BEFORE the approval check, which is the security-relevant one. Moving a
+ *   gate ahead of the approval check is the class of change that can admit an
+ *   ungranted side effect, so this case asserts the outcome as well as the
+ *   reason: the side-effecting consumer holds no grant, gets no run record, and
+ *   its handler is never entered. The operator sees a different reason; nobody
+ *   sees a different outcome.
+ *
+ * NON-VACUITY. Two of the three cases would pass over the wrong ordering if
+ * their second guard were never armed at all — an unmatched denial fingerprint
+ * or an approval gate that let the plugin through would leave the dependency
+ * failure as the only reason in play, and the assertion would prove nothing.
+ * Both run a control advance FIRST, with the producer healthy, and assert the
+ * other guard fires on its own. Only then is the marker set and the dependency
+ * failed. The task-lock case needs no such control: it asserts the LOCK detail,
+ * so a lock that never armed fails it directly.
+ *
+ * Presence-first throughout, as in the block above: the producer's `failed`
+ * status is asserted in state before any skip is attributed to it.
+ */
+describe('the dependency gate sits where the chain declares it', () => {
+  installStatePathIsolation()
+
+  let home: TwoAdvanceHome
+  /** The home this process resolved BEFORE any fixture pointed the env var elsewhere. */
+  let realHome: string
+
+  beforeAll(() => {
+    realHome = warplineHome()
+  })
+
+  beforeEach(async () => {
+    // Undo whatever a sibling file pinned on the state-manager global, so
+    // `activePaths()` resolves lazily from `WARPLINE_HOME` again. `_getPaths`
+    // MATERIALISES a snapshot rather than reporting that no override is
+    // installed, so a sibling restoring its own capture pins this process at
+    // paths that have nothing to do with us — and `checkTaskLock` is the one
+    // guard in the chain that reads that global.
+    _setPaths(null)
+    home = await createTwoAdvanceHome()
+  })
+
+  afterEach(async () => {
+    await home.cleanup()
+  })
+
+  /**
+   * One advance with the fixture home exported, so `checkTaskLock` reads the
+   * same `engine-state.json` the engine does.
+   *
+   * `checkTaskLock` takes no path parameter — it reads `activePaths()`, which
+   * with no override installed derives from `stateDir()`, which joins
+   * `WARPLINE_HOME`. The fixture's own `statePath` IS `<root>/state/engine-
+   * state.json`, so the env var and the helper's explicit `stateDir` option
+   * resolve to one file and there is no split brain. Routing the state-manager
+   * global at a different path instead is what would create one: the engine
+   * would read the option's file while the lock check read the override's, and
+   * both the assertion and its control would go vacuous.
+   */
+  async function advanceInFixtureHome(): Promise<{ run_log_path: string }> {
+    const root = resolve(home.root)
+    // Two homes that overlap would let one engine's grant authorise the
+    // other's side effects. Asserted in both directions before anything runs.
+    const within = (a: string, b: string) => a === b || a.startsWith(b.endsWith(sep) ? b : b + sep)
+    expect(within(root, realHome)).toBe(false)
+    expect(within(realHome, root)).toBe(false)
+
+    const real = process.env.WARPLINE_HOME
+    process.env.WARPLINE_HOME = root
+    try {
+      // If a sibling file left a `paths.ts` override installed it beats the env
+      // var inside `resolveHome`, and this is how that is detected without
+      // installing one of our own.
+      expect(warplineHome()).toBe(root)
+      return await home.advance()
+    } finally {
+      if (real === undefined) delete process.env.WARPLINE_HOME
+      else process.env.WARPLINE_HOME = real
+    }
+  }
+
+  test('a plugin that is both task-locked and dependency-failed is recorded as task-locked', async () => {
+    await home.writePlugin('prod', {
+      outputs: { brief: {} },
+      handlerBody: home.producer('failed'),
+    })
+    await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: CONSUMER })
+    await home.seedState({
+      task_aging: [
+        {
+          task_id: 'locked-task',
+          first_flagged: new Date(Date.now() - 86_400_000).toISOString(),
+          description: 'an open task locking the consumer',
+          // 'critical' deliberately: a degraded tier auto-defers info-severity
+          // tasks, and a deferred task is not an active lock — the fixture
+          // would release its own lock partway through.
+          severity: 'critical',
+          source_check: 'consumer',
+        },
+      ],
+    })
+
+    // The marker before the first advance, so the producer fails immediately
+    // and both guards are armed on the same evaluation.
+    await home.setMarker()
+    const r1 = await advanceInFixtureHome()
+
+    expect((await home.persistedRun('prod'))?.status).toBe('failed')
+
+    const entry = await home.entryFor(r1.run_log_path, 'consumer')
+    expect(entry).not.toBeNull()
+    expect(entry!.status).toBe('skipped')
+    expect(entry!.result_summary).toBe(LOCK_DETAIL)
+    // Stated the other way round too, so a future value that is neither still
+    // names which mistake it made.
+    expect(entry!.result_summary).not.toBe(DEPENDENCY_FAILED_DETAIL)
+  })
+
+  test('a plugin that is both dependency-failed and denied is recorded as dependency-failed', async () => {
+    await home.writePlugin('prod', {
+      outputs: { brief: {} },
+      handlerBody: home.producer('failed'),
+    })
+    await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: CONSUMER })
+    await home.seedState({
+      denials: {
+        consumer: {
+          plugin: 'consumer',
+          reason: 'the operator said no to this proposal',
+          denied_at: new Date(Date.now() - 3_600_000).toISOString(),
+          note: null,
+          // Computed, never hardcoded: the value the evaluator recomputes on
+          // every advance is the value that has to match, and a literal hex
+          // string would go stale the day the hashed object changes shape.
+          // The consumer declares no side effects and has no run record, so the
+          // proposal hashes the empty sets scoped by its name.
+          fingerprint: denialFingerprint('consumer', [], []),
+        },
+      },
+    })
+
+    // CONTROL. Producer healthy, so the denial is the only guard armed. If this
+    // row is not `denied`, the fingerprint does not match and the case below
+    // would pass over the wrong ordering for want of a second guard.
+    const control = await home.advance()
+    const controlEntry = await home.entryFor(control.run_log_path, 'consumer')
+    expect(controlEntry).not.toBeNull()
+    expect(controlEntry!.status).toBe('denied')
+    // The denied arm writes no run record, so the consumer still has no
+    // `last_output` and the fingerprint that just matched still matches.
+    expect(await home.persistedRun('consumer')).toBeUndefined()
+
+    await home.setMarker()
+    const r2 = await home.advance()
+
+    expect((await home.persistedRun('prod'))?.status).toBe('failed')
+
+    const entry = await home.entryFor(r2.run_log_path, 'consumer')
+    expect(entry).not.toBeNull()
+    // `skipped` and not `denied`: the denial arm is the only one in the chain
+    // that files a different run-log status, so the status alone separates the
+    // two orderings before the summary is even read.
+    expect(entry!.status).toBe('skipped')
+    expect(entry!.result_summary).toBe(DEPENDENCY_FAILED_DETAIL)
+  })
+
+  test('a dependency-failed plugin needing a grant is recorded as dependency-failed, and still does not run', async () => {
+    const tripwire = join(home.root, 'CONSUMER_WAS_INVOKED')
+    // A handler that records the one thing no run-log row can prove on its own:
+    // that control reached the plugin. A gate that reports correctly and
+    // invokes anyway would be green on every other assertion here.
+    const TRIPWIRE_CONSUMER = `
+import { writeFileSync } from 'node:fs'
+export async function handler(manifest, args, signal, capabilities) {
+  writeFileSync(${JSON.stringify(tripwire)}, 'reached')
+  return {
+    status: 'success',
+    phases_completed: ['consumer'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'consumer ran',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`
+    await home.writePlugin('prod', {
+      outputs: { brief: {} },
+      handlerBody: home.producer('failed'),
+    })
+    await home.writePlugin('consumer', {
+      dependencies: ['prod'],
+      sideEffects: ['sends_email'],
+      handlerBody: TRIPWIRE_CONSUMER,
+    })
+
+    // CONTROL. Producer healthy, so the approval gate is the only guard armed.
+    // No `.session-approval` file exists anywhere under the fixture root and
+    // none may be added — a grant here would make the case below prove nothing.
+    const control = await home.advance()
+    const controlEntry = await home.entryFor(control.run_log_path, 'consumer')
+    expect(controlEntry).not.toBeNull()
+    expect(controlEntry!.status).toBe('skipped')
+    expect(controlEntry!.result_summary).toBe(UNAPPROVED_SUMMARY)
+
+    await home.setMarker()
+    const r2 = await home.advance()
+
+    expect((await home.persistedRun('prod'))?.status).toBe('failed')
+
+    const entry = await home.entryFor(r2.run_log_path, 'consumer')
+    expect(entry).not.toBeNull()
+    expect(entry!.status).toBe('skipped')
+    expect(entry!.result_summary).toBe(DEPENDENCY_FAILED_DETAIL)
+    expect(entry!.result_summary).not.toBe(UNAPPROVED_SUMMARY)
+
+    // THE OUTCOME, which the reordering must not have changed. A reason moved
+    // ahead of the approval check may only ever move a plugin from due to
+    // not-due; if it could admit a side-effecting plugin holding no grant, this
+    // is where that would show.
+    expect(await home.persistedRun('consumer')).toBeUndefined()
+    expect(existsSync(tripwire)).toBe(false)
   })
 })

@@ -462,9 +462,10 @@ describe('main([plan]) end to end', () => {
  *    not a defect in either — `plan` models a real run, not a dry run. Adding an
  *    approved side-effecting plugin here would encode that contradiction into
  *    the assertion and force someone to "fix" it by weakening the proof. The
- *    fixture below has exactly one side-effecting plugin and deliberately grants
- *    it nothing, so it is not-due in `plan` and dry-run-blocked in the run —
- *    absent from both sets, for two different reasons that agree.
+ *    fixture below has two side-effecting plugins and grants neither anything,
+ *    so both are not-due in `plan` and blocked in the run — absent from both
+ *    sets, for reasons that agree. No `.session-approval` file is written
+ *    anywhere in this fixture, and none may be added.
  *
  * 2. **`buildPlanModel` runs BEFORE `runAdvance`, always.** A real run writes
  *    `plugin_runs`, `last_run_at` and (in a degraded tier) auto-deferrals. Plan
@@ -526,8 +527,13 @@ describe('plan ≡ what a run would attempt', () => {
 
   /**
    * One fixture spanning every guard in the chain, so the set equality below is
-   * meaningful rather than vacuous: an eight-plugin home where seven are
-   * excluded for seven DIFFERENT reasons and one is due.
+   * meaningful rather than vacuous: a ten-plugin home where nine are excluded
+   * for eight DIFFERENT reasons and one is due.
+   *
+   * Nine exclusions and eight reasons, not nine of each: `failed-producer`
+   * exists to arm the dependency gate on the plugin below it and is itself
+   * excluded as `fresh`, which `fresh-one` already covers. It adds a plugin
+   * without adding a reason.
    *
    * `min_tier: 'suspended'` on everything except `tier-blocked` reads backwards
    * and is correct — 'suspended' means "runs at any degradation level" and
@@ -544,9 +550,19 @@ describe('plan ≡ what a run would attempt', () => {
     await writePlugin(home, 'manual-one', { ...tolerant, autonomy_level: 'manual' })
     await writePlugin(home, 'fresh-one', tolerant)
     await writePlugin(home, 'locked-one', tolerant)
-    // The ONLY side-effecting plugin, and no .session-approval file exists —
-    // see fixture constraint 1 above. Do not grant this.
+    await writePlugin(home, 'failed-producer', tolerant)
+    // TWO side-effecting plugins, and no .session-approval file exists anywhere
+    // in this fixture — see constraint 1 above. NEITHER is granted, and neither
+    // may be. They are here for different reasons: `gated-one` is the approval
+    // gate's own case, and `dep-failed-one` is the proof that the dependency
+    // gate is reached FIRST — it declares an effect precisely so that the wrong
+    // ordering has something to report instead.
     await writePlugin(home, 'gated-one', { ...tolerant, side_effects: ['sends_email'] })
+    await writePlugin(home, 'dep-failed-one', {
+      ...tolerant,
+      dependencies: ['failed-producer'],
+      side_effects: ['sends_email'],
+    })
 
     for (const name of [
       'due-one',
@@ -556,15 +572,34 @@ describe('plan ≡ what a run would attempt', () => {
       'manual-one',
       'fresh-one',
       'locked-one',
+      'failed-producer',
       'gated-one',
+      'dep-failed-one',
     ]) {
       await writeHandler(home, name)
     }
 
     await writeState(
       home,
-      // 1 hour into a 24h TTL — hours from the boundary in both directions.
-      { 'fresh-one': { last_run_at: new Date(Date.now() - 3_600_000).toISOString(), status: 'success' } },
+      {
+        // 1 hour into a 24h TTL — hours from the boundary in both directions.
+        'fresh-one': { last_run_at: new Date(Date.now() - 3_600_000).toISOString(), status: 'success' },
+        // Seeded failed AND fresh, and the freshness is load-bearing rather
+        // than decorative. The harness runs the plan model first and a real
+        // advance second (constraint 2). A seeded-failed producer that were DUE
+        // would be attempted by that advance, its autonomous arm would overwrite
+        // the seeded status with a success, and by `dep-failed-one`'s level the
+        // gate would read a success — while the plan side, having run first,
+        // read the failure. Test 1 would then go red for a disagreement caused
+        // by the fixture clearing its own latch one level early. Freshness keys
+        // on the timestamp and ignores the status (`staleness.ts`), and the
+        // freshness arm writes a run-log row and no run record, so this row
+        // survives the advance byte for byte.
+        'failed-producer': {
+          last_run_at: new Date(Date.now() - 3_600_000).toISOString(),
+          status: 'failed',
+        },
+      },
       {
         last_interaction_at: new Date(Date.now() - 3 * DAY_MS).toISOString(),
         task_aging: [
@@ -607,25 +642,36 @@ describe('plan ≡ what a run would attempt', () => {
 
     const reason = (n: string) => model.notDue.find((e) => e.plugin === n)?.reason
 
-    // Seven plugins, seven distinct not-due reason codes — every arm of
-    // evaluatePlugin's chain, in chain order.
+    // Nine plugins, eight distinct not-due reason codes — every arm of
+    // evaluatePlugin's chain, in chain order. `failed-producer` shares
+    // `fresh-one`'s reason, which is why nine exclusions span eight codes.
     expect(reason('weekly-one')).toBe('profile_schedule')
     expect(reason('tier-blocked')).toBe('min_tier')
     expect(reason('supervised-one')).toBe('headless_supervised')
     expect(reason('manual-one')).toBe('manual')
     expect(reason('fresh-one')).toBe('fresh')
+    expect(reason('failed-producer')).toBe('fresh')
     expect(reason('locked-one')).toBe('task_locked')
+    // The ordering assertion, and it belongs HERE rather than in Test 1. Set
+    // equality is satisfied either way: a consumer gated as `unapproved` is
+    // dry-run blocked and absent from both sets, so Test 1 stays green over the
+    // wrong ordering and proves nothing about order. This per-plugin reason is
+    // what separates them — the plugin declares a side effect and holds no
+    // grant, so `unapproved` is armed and waiting to be reported instead.
+    expect(reason('dep-failed-one')).toBe('dependency_failed')
     expect(reason('gated-one')).toBe('unapproved')
-    expect(new Set(model.notDue.map((e) => e.reason)).size).toBe(7)
+    expect(new Set(model.notDue.map((e) => e.reason)).size).toBe(8)
 
-    // …and exactly one plugin survived all seven, in both surfaces.
+    // …and exactly one plugin survived all eight, in both surfaces.
     expect(model.due).toHaveLength(1)
     expect([...attempted]).toEqual(['due-one'])
 
-    // The side-effecting plugin is absent from both sets for two reasons that
-    // agree: the gate blocks it in `plan`, the dry-run block skips it in the
-    // run. This is fixture constraint 1 holding, asserted.
+    // Both side-effecting plugins are absent from both sets for reasons that
+    // agree: the chain blocks them in `plan`, and in the run `gated-one` meets
+    // the dry-run block while `dep-failed-one` never reaches it, having already
+    // been gated on its dependency. Fixture constraint 1 holding, asserted.
     expect(attempted.has('gated-one')).toBe(false)
+    expect(attempted.has('dep-failed-one')).toBe(false)
   })
 
   test('Test 3: with no engine-state.json at all, every plugin is never-run, due, and attempted', async () => {
