@@ -600,6 +600,19 @@ export async function evaluatePlugin(
   return { due: true }
 }
 
+/**
+ * What a dispatch on `NotDueReason` does with a member it has no arm for.
+ *
+ * The compile error is the point: reached with a value the compiler still
+ * thinks is possible, the argument does not type as `never` and the build
+ * fails before any test runs. The throw is for the other case — a value
+ * arriving from a boundary the compiler never saw — where silence would file
+ * the run under whichever arm happened to have no guard.
+ */
+function assertNever(value: never): never {
+  throw new Error(`unhandled not-due reason: ${String(value)}`)
+}
+
 // -----------------------------------------------------------------------
 // topoSort — Kahn's algorithm
 // -----------------------------------------------------------------------
@@ -958,139 +971,113 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         }
 
         // -- Not-due: record the skip the evaluator decided on --
-        // One arm per reason code. The arms differ only in their run-log prose,
+        // One arm per reason code, dispatched so the compiler owns the
+        // completeness of the set. The arms differ only in their run-log prose,
         // which is a run-log concern and stays here rather than travelling in
         // the evaluator's structured reason.
+        //
+        // A `switch` and not a chain of `if`/`return`, because the chain's last
+        // block had no guard: every reason without an arm of its own fell into
+        // it and was recorded as an approval-gate skip, naming session approval
+        // and side effects on a plugin that may declare neither. The `default`
+        // arm below is what a chain cannot have — a place the compiler checks.
         if (!ev.due) {
           plugin_states.set(pluginName, 'skipped')
 
-          // -- Profile tier filter ---------------
-          if (ev.reason === 'profile_schedule') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+          // Narrowed through a local: a `switch` over a `const` of a literal
+          // union narrows the `default` arm to `never` reliably, which is the
+          // whole mechanism here.
+          const reason = ev.reason
 
-          // -- Tier filter: coarser gate than staleness ---------------
-          if (ev.reason === 'min_tier') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+          switch (reason) {
+            // -- Profile tier filter, tier filter, headless supervised bypass
+            //    (A2), manual, task lock --
+            // Five reasons, one arm: they differ only in the detail string the
+            // evaluator already produced, and five copies of the same six lines
+            // hid that the differences below are the real ones.
+            case 'profile_schedule':
+            case 'min_tier':
+            case 'headless_supervised':
+            case 'manual':
+            case 'task_locked': {
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'skipped',
+                started_at: entryStartedAt,
+                elapsed_ms: Date.now() - entryStart,
+                result_summary: ev.detail,
+                retried: false,
+              })
+              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+              return
+            }
 
-          // -- Headless supervised bypass (A2) --
-          if (ev.reason === 'headless_supervised') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+            // -- Fresh within TTL: the run log prefixes the freshness prose --
+            case 'fresh': {
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'skipped',
+                started_at: entryStartedAt,
+                elapsed_ms: Date.now() - entryStart,
+                result_summary: `skipped: ${ev.detail}`,
+                retried: false,
+              })
+              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+              return
+            }
 
-          // -- Manual: always skip --
-          if (ev.reason === 'manual') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+            // -- Denied: a human answered, and the answer still applies --
+            // The only arm here that does not write `status: 'skipped'`. A
+            // denial is an outcome of supervision, like `gated`, and filing it
+            // as a skip would put it in the same bucket as "no Grant" and
+            // "still fresh" — the log could then no longer tell an unanswered
+            // question from an answered one. The BOARD event carries the same
+            // distinction, via `emitPluginDenied`: making that argument about the
+            // run log and then emitting `plugin: skipped — denied …` next door
+            // left the two logs disagreeing about the same advance.
+            //
+            // No `plugin_runs` write: the plugin did not run. `runAdvance` has
+            // exactly two write sites for that record — the gated arm and the
+            // autonomous arm below — and this is not a third. (`applyPendingGate`
+            // holds the only other one, plus the delete in its discard closure;
+            // both are outside this function and answer a parked gate rather than
+            // an advance.)
+            case 'denied': {
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'denied',
+                started_at: entryStartedAt,
+                elapsed_ms: Date.now() - entryStart,
+                result_summary: ev.detail,
+                retried: false,
+              })
+              await emitPluginDenied(pluginName, ev.detail, run_id, eventsPath)
+              return
+            }
 
-          // -- Fresh within TTL: the run log prefixes the freshness prose --
-          if (ev.reason === 'fresh') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: `skipped: ${ev.detail}`,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+            // -- Side-effect approval gate ---------------------------------
+            // The run log names the specific effects; the board event does not.
+            // Guarded now, where it used to be the block everything unmatched
+            // fell into; it is also the only not-due arm that ends the progress
+            // hook, which is why it must never inherit another reason's run.
+            case 'unapproved': {
+              const unapprovedElapsed = Date.now() - entryStart
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'skipped',
+                started_at: entryStartedAt,
+                elapsed_ms: unapprovedElapsed,
+                result_summary: `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
+                retried: false,
+              })
+              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+              onPluginEnd?.(pluginName, 'skipped', unapprovedElapsed, 'unapproved side effects')
+              return
+            }
 
-          // -- Task locked: active task for this plugin on the board --
-          if (ev.reason === 'task_locked') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
+            default:
+              assertNever(reason)
           }
-
-          // -- Denied: a human answered, and the answer still applies --
-          // The only arm here that does not write `status: 'skipped'`. A
-          // denial is an outcome of supervision, like `gated`, and filing it
-          // as a skip would put it in the same bucket as "no Grant" and
-          // "still fresh" — the log could then no longer tell an unanswered
-          // question from an answered one. The BOARD event carries the same
-          // distinction, via `emitPluginDenied`: making that argument about the
-          // run log and then emitting `plugin: skipped — denied …` next door
-          // left the two logs disagreeing about the same advance.
-          //
-          // No `plugin_runs` write: the plugin did not run. `runAdvance` has
-          // exactly two write sites for that record — the gated arm and the
-          // autonomous arm below — and this is not a third. (`applyPendingGate`
-          // holds the only other one, plus the delete in its discard closure;
-          // both are outside this function and answer a parked gate rather than
-          // an advance.)
-          if (ev.reason === 'denied') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'denied',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginDenied(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
-
-          // -- Side-effect approval gate ---------------------------------
-          // The run log names the specific effects; the board event does not.
-          const unapprovedElapsed = Date.now() - entryStart
-          plugin_entries.push({
-            plugin: pluginName,
-            status: 'skipped',
-            started_at: entryStartedAt,
-            elapsed_ms: unapprovedElapsed,
-            result_summary: `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
-            retried: false,
-          })
-          await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-          onPluginEnd?.(pluginName, 'skipped', unapprovedElapsed, 'unapproved side effects')
-          return
         }
 
         // -- Set FSM to running --
