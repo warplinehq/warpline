@@ -14,15 +14,38 @@
  *
  *   OUT OF SCOPE — a path to an operator-configured or host-dropped INPUT file,
  *   where there is no producer plugin, no declared edge and nothing for a
- *   member to deliver. `feed-triage`, `derived-summary` and `metrics-rollup`
- *   read such files, and they resemble the first case only in mechanism. Asking
- *   the member for them would throw, because they declare no dependencies at
- *   all; making them not throw would mean inventing declarations that change
- *   level ordering for three more examples.
+ *   member to deliver. `derived-summary` and `metrics-rollup` read such files,
+ *   and they resemble the first case only in mechanism. Asking the member for
+ *   them would throw, because they declare no dependencies at all; making them
+ *   not throw would mean inventing declarations that change level ordering for
+ *   two more examples.
+ *
+ * `feed-triage` was a third name on that list. It is off the list now, and it
+ * left with an argument rather than by deletion, because the OUT OF SCOPE
+ * reasoning was never a property of the plugin — it was a fact about the tree.
+ * The reasoning holds while nothing produces the file the plugin reads: no
+ * producer, so no edge to declare, so nothing a member could be asked for
+ * without inventing the declaration first. That fact is what this phase
+ * changes, and it changes for exactly one of the three. `feed-monitor` gains a
+ * real Output, published the way `anomaly-watch` publishes one, and
+ * `feed-triage` declares the edge to it. The edge stops being invented and
+ * becomes declared, which withdraws the OUT OF SCOPE reasoning in full — for
+ * one plugin, on a fact that moved, not on a preference.
+ *
+ * The guard is NOT widened to let it through, and that is the point of writing
+ * this down. Once the handler reads through
+ * `capabilities.dependencies.lastOutput` the path literal is gone from the
+ * handler, so there is nothing left for `offenders` to find and the guard goes
+ * green by the offence disappearing. That is the move `anomaly-issue` and
+ * `daily-digest` already made — the two examples the IN SCOPE paragraph above
+ * names as having used to compute the path, and the precedent this admission
+ * follows. `derived-summary` and `metrics-rollup` stay policed on the unchanged
+ * ground: either is flagged the moment it declares a dependency while keeping a
+ * foreign path read.
  *
  * "The manifest declares a non-empty `dependencies` array" is what mechanizes
  * that distinction, and it is stated here so a later reader does not widen the
- * predicate and take those three examples with it. A general "no home-relative
+ * predicate and take those two examples with it. A general "no home-relative
  * JSON path in any handler" rule is a different, larger claim and this file
  * does not make it.
  *
