@@ -1,4 +1,8 @@
-import { describe, test, expect } from 'bun:test'
+import { describe, test, expect, afterEach } from 'bun:test'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { SkillResultSchema } from 'warpline/schemas/skill-result'
 import type { CapabilityContext } from 'warpline/unstable-capabilities'
 import { parseFeed, newerThan, handler } from './handler.js'
@@ -48,6 +52,37 @@ function invoke(args: Record<string, unknown>, signal = new AbortController().si
   return handler(manifest, args, signal, CONTEXT)
 }
 
+// CLAUDE.md rule 2: every fixture lives under tmpdir() and is removed after.
+// One tracking hook rather than a per-call `finally`, so the creation-site
+// census in src/__tests__/example-test-hygiene.test.ts stays balanced.
+const roots: string[] = []
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map(r => rm(r, { recursive: true, force: true })))
+})
+
+/**
+ * `warpline/lib/paths` exports only `warplineHome`, which resolves
+ * `WARPLINE_HOME` per call — the same seam a plugin author has. Every success
+ * arm now writes its entries under the home, so every case that reaches one
+ * gets its own; the preload's shared home would let one case read what another
+ * wrote.
+ */
+async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
+  const home = await mkdtemp(join(tmpdir(), 'warpline-feed-monitor-home-'))
+  roots.push(home)
+  const realHome = process.env.WARPLINE_HOME
+  process.env.WARPLINE_HOME = home
+  try {
+    return await fn(home)
+  } finally {
+    if (realHome === undefined) delete process.env.WARPLINE_HOME
+    else process.env.WARPLINE_HOME = realHome
+  }
+}
+
+/** Where a run leaves what it found. Derived exactly as the handler derives it. */
+const entriesPath = (home: string) => join(home, 'state', `${manifest.name}.entries.json`)
+
 /**
  * Swap `globalThis.fetch` for `stub`, run `body`, restore the real one whatever
  * happens. A leaked global breaks unrelated tests non-deterministically and
@@ -68,7 +103,7 @@ const okWith = (xml: string) => async () => ({ ok: true, status: 200, text: asyn
 
 describe('feed-monitor builds its result', () => {
   test('a successful fetch is a success built by the result builder, with no schema_version written by the handler', async () => {
-    await withFetch(okWith(RSS), async () => {
+    await withHome(() => withFetch(okWith(RSS), async () => {
       const result = await invoke({ feed_url: FEED_URL })
 
       expect(result.status).toBe('success')
@@ -77,7 +112,7 @@ describe('feed-monitor builds its result', () => {
       // that restates it is the drift the builder exists to stop.
       expect(result.schema_version).toBeUndefined()
       expect(SkillResultSchema.parse(result).schema_version).toBe(2)
-    })
+    }))
   })
 
   test('the signal the runtime passes reaches fetch, and aborting it rejects the call', async () => {
@@ -101,7 +136,7 @@ describe('feed-monitor builds its result', () => {
   test('no new entries is a success, never a bare skipped', async () => {
     // ATOM, not RSS: an undated entry always surfaces, so only a fully dated
     // feed can be entirely older than `since`.
-    await withFetch(okWith(ATOM), async () => {
+    await withHome(() => withFetch(okWith(ATOM), async () => {
       const result = await invoke({ feed_url: FEED_URL, since: '2027-01-01T00:00:00Z' })
 
       // deriveRunStatus maps a prefix-less `skipped` to `failed`, and the
@@ -109,7 +144,33 @@ describe('feed-monitor builds its result', () => {
       // a red run on every quiet day.
       expect(result.status).toBe('success')
       expect(result.summary).toContain('no new entries')
-    })
+    }))
+  })
+})
+
+/**
+ * The producer half of the dependency edge. A run writes what it found under
+ * the home and returns a `path` Output naming that file, which is what the
+ * runtime carries forward as `last_output` for a consumer to read.
+ */
+describe('feed-monitor publishes what it found', () => {
+  test('a successful poll writes its entries under the home and returns a path Output naming the file', async () => {
+    await withHome(home => withFetch(okWith(RSS), async () => {
+      const result = await invoke({ feed_url: FEED_URL })
+
+      const record = (result.artifacts_produced ?? []).at(-1)
+      expect(typeof record).toBe('object')
+      const output = record as { path?: string; body?: string; format?: string }
+      expect(output.format).toBe('json')
+      expect(output.body).toBeUndefined()
+      expect(output.path).toBe(entriesPath(home))
+
+      expect(existsSync(output.path!)).toBe(true)
+      const written = JSON.parse(await readFile(output.path!, 'utf-8')) as { new_entries: unknown }
+      // The shape feed-triage's degrader already tolerates: the entries this
+      // run reported as new, in the element type its docstring documents.
+      expect(written.new_entries).toEqual(parseFeed(RSS))
+    }))
   })
 })
 
@@ -160,12 +221,16 @@ describe('feed-monitor config value disclosure', () => {
   })
 
   test('a successful poll reports the entries without the feed it read them from', async () => {
-    await withFetch(okWith(RSS), async () => {
+    await withHome(home => withFetch(okWith(RSS), async () => {
       const result = await invoke({ feed_url: sentinelUrl })
 
       expect(result.status).toBe('success')
       expect(JSON.stringify(result)).not.toContain(SENTINEL)
       expect(result.summary).toContain('First')
-    })
+      // The written path is derived from the home and the manifest name, so
+      // the configured URL cannot reach it either.
+      expect(JSON.stringify(result.artifacts_produced ?? [])).not.toContain(SENTINEL)
+      expect(existsSync(entriesPath(home))).toBe(true)
+    }))
   })
 })
