@@ -191,7 +191,19 @@ export interface AdvanceOptions {
   approvalPath?: string
   /** Called before each plugin begins execution (for streaming CLI output) */
   onPluginStart?: (plugin: string) => void
-  /** Called after each plugin resolves with final FSM state and elapsed_ms (for streaming CLI output) */
+  /**
+   * Called after each plugin resolves with final FSM state and elapsed_ms (for
+   * streaming CLI output).
+   *
+   * NOT paired with `onPluginStart`. Two not-due arms — `unapproved` and
+   * `dependency_failed` — call this without a preceding start, because both are
+   * actionable skips worth a line while neither is an attempt. A host keying
+   * state off `onPluginStart` must tolerate an unmatched end.
+   *
+   * The asymmetry is the correct one and is not a candidate for repair from the
+   * other side: `plan.test.ts` defines "what a run attempted" as start-hook
+   * membership, and a gated plugin belongs outside that set.
+   */
   onPluginEnd?: (plugin: string, status: string, elapsed: number, reason?: string) => void
   /**
    * Called exactly once with a human-readable reason whenever the overall run
