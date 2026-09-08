@@ -141,17 +141,34 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
   const due: PlanEntry[] = []
   const notDue: NotDueEntry[] = []
 
+  /**
+   * Every plugin an earlier level of THIS preview found due.
+   *
+   * The one thing `plan` knows that the state document does not. A run mutates
+   * `plugin_runs` as its level loop goes, so a producer whose last run failed
+   * and whose TTL has expired is re-run and its latch overwritten before its
+   * dependents are ever evaluated. Reading the static document alone, `plan`
+   * published a skip for the dependent every time — in exactly the
+   * self-clearing case the spec calls the ordinary one.
+   *
+   * Filled at the level BOUNDARY, not inside the inner loop: `topoSort` puts no
+   * dependency in the same level as its dependent, so the distinction cannot
+   * change a verdict, and a set that is what its name says is worth two lines.
+   */
+  const dueAtEarlierLevel = new Set<string>()
+
   const restorePaths = _getPaths()
   _setPaths(pathsForStateFile(statePath, { eventsPath: eventsJsonlPath() }))
   try {
     await withoutStateBackups(async () => {
       for (const [level, names] of levels.entries()) {
+        const dueThisLevel: string[] = []
         // Sorted here so ordering is decided once, in the builder; the renderer
         // sorts defensively but does not own the policy.
         for (const name of [...names].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
           const manifest = manifests.get(name)
           if (!manifest) continue
-          const evaluation = await evaluatePlugin(name, manifest, ctx, now)
+          const evaluation = await evaluatePlugin(name, manifest, { ...ctx, dueAtEarlierLevel }, now)
           const entry = {
             plugin: name,
             level,
@@ -159,9 +176,12 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
             sideEffects: [...manifest.side_effects],
             approved: await checkApproval(name, approvalPath, { now }),
           }
-          if (evaluation.due) due.push(entry)
-          else notDue.push({ ...entry, reason: evaluation.reason, detail: evaluation.detail })
+          if (evaluation.due) {
+            due.push(entry)
+            dueThisLevel.push(name)
+          } else notDue.push({ ...entry, reason: evaluation.reason, detail: evaluation.detail })
         }
+        for (const name of dueThisLevel) dueAtEarlierLevel.add(name)
       }
     })
   } finally {

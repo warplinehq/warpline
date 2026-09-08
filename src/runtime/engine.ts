@@ -395,6 +395,22 @@ export interface EvalContext {
   state: EngineState
   /** Already-resolved session approval path — the evaluator does no path defaulting. */
   approvalPath: string
+  /**
+   * Plugins an EARLIER LEVEL of this same preview already found due.
+   *
+   * Set only by `plan`, which evaluates against a static state document and so
+   * cannot see the clearing that a run performs as it goes. `runAdvance` leaves
+   * it undefined: its `state.plugin_runs` is mutated by its own level loop and
+   * is already the truth, so a projection here would be a second answer to a
+   * question the state already answers.
+   *
+   * Named for what it knows: `dueAtEarlierLevel` does not know the producer
+   * will succeed — only that this preview decided the producer runs. A producer
+   * that runs and fails again leaves the run skipping a dependent this preview
+   * called due, which is the residual disclosed as the fifth entry under
+   * docs/runtime-spec.md § "What the dependency gate does not cover".
+   */
+  dueAtEarlierLevel?: ReadonlySet<string>
 }
 
 /**
@@ -455,9 +471,19 @@ export interface Gate {
  * dependency that never ran cannot gate anything. That is also what makes the
  * plain index read safe on an inherited key: `plugin_runs['toString']` answers
  * with a function whose `.status` is `undefined`, and `undefined !== 'failed'`.
+ *
+ * The second clause is the caller's own projection, and only `plan` supplies
+ * one: a dependency this same preview already decided is due is a dependency
+ * whose latch this advance is about to overwrite, so reporting its dependent as
+ * gated would publish a skip that is not going to happen. The whole `ctx` is
+ * taken rather than `ctx.state` because of it — one chokepoint for both the
+ * predicate and the detail, so a filtered dependency cannot be dropped from one
+ * and named in the other.
  */
-function failedDependencies(manifest: PluginManifest, state: EngineState): string[] {
-  return manifest.dependencies.filter((d) => state.plugin_runs[d]?.status === 'failed')
+function failedDependencies(manifest: PluginManifest, ctx: EvalContext): string[] {
+  return manifest.dependencies.filter(
+    (d) => ctx.state.plugin_runs[d]?.status === 'failed' && !ctx.dueAtEarlierLevel?.has(d),
+  )
 }
 
 /**
@@ -579,14 +605,14 @@ export const GATES: readonly Gate[] = [
   // anything.
   {
     reason: 'dependency_failed',
-    applies: ({ manifest, ctx }) => failedDependencies(manifest, ctx.state).length > 0,
+    applies: ({ manifest, ctx }) => failedDependencies(manifest, ctx).length > 0,
     // Declared plugin names and one closed enum value. Nothing else may be
     // interpolated here: this string is the run log's `result_summary`, which is
     // read and shared, and this repository has twice paid for an operator-
     // configured value reaching a result summary. The test asserts it as an
     // exact string rather than a substring, so an appended leak fails.
     detail: ({ manifest, ctx }) =>
-      `skipped: dependency failed — ${failedDependencies(manifest, ctx.state)
+      `skipped: dependency failed — ${failedDependencies(manifest, ctx)
         .map((d) => `'${d}'`)
         .join(', ')} last recorded status 'failed'`,
   },
