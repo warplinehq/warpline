@@ -68,6 +68,7 @@ export function witnessAfterGrantRead(
 import { computeTier, isEligibleForTier } from './tier.js'
 import type { TierName } from './tier.js'
 import { isPluginFresh } from './staleness.js'
+import type { FreshnessResult } from './staleness.js'
 import {
   readEngineState,
   writeEngineState,
@@ -396,6 +397,137 @@ export interface EvalContext {
 }
 
 /**
+ * Everything a gate predicate is allowed to read.
+ *
+ * The three derived values are computed ONCE, before the scan, because more
+ * than one entry reads them and because an entry recomputing them would be
+ * free to disagree with the entry next door. All three are pure reads over the
+ * state snapshot already in hand — no I/O, nothing that can throw on a plugin
+ * an earlier gate would have filtered out — so computing them ahead of the
+ * gates that used to short-circuit them changes nothing an operator can see.
+ */
+interface GateInput {
+  plugin: string
+  manifest: PluginManifest
+  ctx: EvalContext
+  now: number
+  freshness: FreshnessResult
+  standing: DenialStanding
+  /**
+   * Prefix for whatever the operator sees next when a denial has been
+   * superseded; empty when there is nothing to say. Produced from the denial
+   * standing, consumed by the approval entry's detail — the one value in this
+   * chain that travels between two entries.
+   */
+  supersededNote: string
+}
+
+/**
+ * One entry in the declared guard chain: a reason code, the predicate that
+ * fires it, and the prose the run log and the preview both render.
+ */
+export interface Gate {
+  reason: NotDueReason
+  /** True = the plugin is not due, for this entry's reason. */
+  applies: (g: GateInput) => boolean | Promise<boolean>
+  detail: (g: GateInput) => string
+}
+
+/**
+ * The guard chain, in the order it is evaluated.
+ *
+ * This array IS the order. It exists so an operator can read the sequence off
+ * one declaration instead of reconstructing it from the longest function in
+ * the runtime, and so a proposal for a new gate has a line in a list to argue
+ * about rather than a paragraph of control flow. The scan returns on the first
+ * entry that fires and evaluates nothing below it, which matters because two
+ * of these predicates perform real reads.
+ *
+ * Not here, deliberately: the dry-run side-effect block. It needs the dry-run
+ * flag and the finished verdict, so it lives in the orchestrator and is the
+ * last gate before invocation on a dry run. On a real run the last gate is the
+ * final entry below, and nothing may be added after it.
+ */
+export const GATES: readonly Gate[] = [
+  // -- Profile tier filter ---------------
+  {
+    reason: 'profile_schedule',
+    applies: ({ manifest, ctx }) =>
+      ctx.allowedSchedules !== undefined && !ctx.allowedSchedules.has(manifest.schedule),
+    detail: ({ manifest, ctx }) =>
+      `profile '${ctx.profile}' filter: schedule '${manifest.schedule}' not in tier`,
+  },
+
+  // -- Tier filter: coarser gate than staleness ---------------
+  {
+    reason: 'min_tier',
+    applies: ({ manifest, ctx }) =>
+      !isEligibleForTier(manifest.min_tier ?? 'normal', ctx.currentTier),
+    detail: ({ manifest, ctx }) =>
+      `tier filter: current '${ctx.currentTier}' exceeds plugin min_tier '${manifest.min_tier ?? 'normal'}'`,
+  },
+
+  // -- Headless supervised bypass (A2) --
+  {
+    reason: 'headless_supervised',
+    applies: ({ manifest, ctx }) => ctx.headless && manifest.autonomy_level === 'supervised',
+    detail: () => 'headless mode: supervised plugin bypassed (no interactive gate)',
+  },
+
+  // -- Manual: always skip --
+  {
+    reason: 'manual',
+    applies: ({ manifest }) => manifest.autonomy_level === 'manual',
+    detail: () => 'manual — requires explicit invocation',
+  },
+
+  // -- Staleness check: skip if fresh --
+  {
+    reason: 'fresh',
+    applies: ({ freshness }) => freshness.fresh,
+    detail: ({ freshness }) => freshness.reason ?? 'fresh',
+  },
+
+  // -- Task lock check: active task for this plugin on the board --
+  {
+    reason: 'task_locked',
+    applies: ({ plugin }) => smCheckTaskLock(plugin),
+    detail: () => 'task locked — active on board',
+  },
+
+  // -- Denial: a human already said no to this exact proposal --------
+  // Ordered after the task lock and BEFORE the approval gate. A denied plugin
+  // is not asked about at all, so it must not first be reported as needing a
+  // Grant it does not need.
+  //
+  // The denial holds only while the fingerprint still matches. When it moves,
+  // the answer is stale and the plugin is asked again — but the question is a
+  // returning one, and `supersededNote` makes the difference visible rather
+  // than letting it reappear looking new.
+  {
+    reason: 'denied',
+    applies: ({ standing }) => standing.standing === 'live',
+    // The `none` arm is unreachable behind the predicate above; it is written
+    // out so the record narrows to one that has a denial to quote.
+    detail: ({ standing }) =>
+      standing.standing === 'none'
+        ? ''
+        : `denied ${standing.denial.denied_at}: ${standing.denial.reason}`,
+  },
+
+  // -- Side-effect approval gate ---------------------------------
+  // The last gate before invocation on a real run. Nothing goes after it.
+  {
+    reason: 'unapproved',
+    applies: async ({ plugin, manifest, ctx, now }) =>
+      manifest.side_effects.length > 0 &&
+      !(await checkApproval(plugin, ctx.approvalPath, { now })),
+    detail: ({ supersededNote }) =>
+      `${supersededNote}skipped (unapproved): side effects require session approval`,
+  },
+]
+
+/**
  * Decide whether a plugin is due, with no writes of any kind.
  *
  * This is the guard chain lifted out of `runAdvance`'s per-plugin body. Every
@@ -426,92 +558,42 @@ export async function evaluatePlugin(
   ctx: EvalContext,
   now: number,
 ): Promise<EvalResult> {
-  // -- Profile tier filter ---------------
-  if (ctx.allowedSchedules && !ctx.allowedSchedules.has(manifest.schedule)) {
-    return {
-      due: false,
-      reason: 'profile_schedule',
-      detail: `profile '${ctx.profile}' filter: schedule '${manifest.schedule}' not in tier`,
-    }
-  }
-
-  // -- Tier filter: coarser gate than staleness ---------------
-  if (!isEligibleForTier(manifest.min_tier ?? 'normal', ctx.currentTier)) {
-    return {
-      due: false,
-      reason: 'min_tier',
-      detail: `tier filter: current '${ctx.currentTier}' exceeds plugin min_tier '${manifest.min_tier ?? 'normal'}'`,
-    }
-  }
-
-  // -- Headless supervised bypass (A2) --
-  if (ctx.headless && manifest.autonomy_level === 'supervised') {
-    return {
-      due: false,
-      reason: 'headless_supervised',
-      detail: 'headless mode: supervised plugin bypassed (no interactive gate)',
-    }
-  }
-
-  // -- Manual: always skip --
-  if (manifest.autonomy_level === 'manual') {
-    return { due: false, reason: 'manual', detail: 'manual — requires explicit invocation' }
-  }
-
-  // -- Staleness check: skip if fresh --
-  const freshness = isPluginFresh(pluginName, manifest, ctx.state, { force: ctx.force, now })
-  if (freshness.fresh) {
-    return { due: false, reason: 'fresh', detail: freshness.reason ?? 'fresh' }
-  }
-
-  // -- Task lock check: active task for this plugin on the board --
-  if (await smCheckTaskLock(pluginName)) {
-    return { due: false, reason: 'task_locked', detail: 'task locked — active on board' }
-  }
-
-  // -- Denial: a human already said no to this exact proposal --------
-  // Ordered after the task lock and BEFORE the approval gate. A denied plugin
-  // is not asked about at all, so it must not first be reported as needing a
-  // Grant it does not need.
-  //
-  // The denial holds only while the fingerprint still matches. When it moves,
-  // the answer is stale and the plugin is asked again — but the question is a
-  // returning one, and `supersededNote` below makes the difference visible
-  // rather than letting it reappear looking new.
-  //
   const standing = denialStanding(ctx.state, pluginName, manifest)
-  if (standing.standing === 'live') {
-    return {
-      due: false,
-      reason: 'denied',
-      detail: `denied ${standing.denial.denied_at}: ${standing.denial.reason}`,
-    }
-  }
 
   /**
-   * Prefix for whatever the operator sees next when a denial has been
-   * superseded. A returning Ask that says nothing looks like a first-time one,
-   * and the operator has no way to tell they already answered it.
+   * The cross-entry values, resolved before the scan starts.
+   *
+   * `supersededNote` is why this block exists rather than living inside the
+   * entries that read it: it is produced by the denial check and consumed by
+   * the approval check, and a scan has nowhere to put a value that travels
+   * between two entries. A returning Ask that says nothing looks like a
+   * first-time one, and the operator has no way to tell they already answered
+   * it.
    *
    * It keeps saying so until the denial is taken back. That is deliberate: the
    * record is still there, still answering a proposal that no longer exists,
    * and the operator is the only one who can retire it.
    */
-  const supersededNote =
-    standing.standing === 'superseded'
-      ? `previously denied ${standing.denial.denied_at} ('${standing.denial.reason}') — the ` +
-        'proposal has changed since, so this is a returning question, not a new one. '
-      : ''
+  const input: GateInput = {
+    plugin: pluginName,
+    manifest,
+    ctx,
+    now,
+    freshness: isPluginFresh(pluginName, manifest, ctx.state, { force: ctx.force, now }),
+    standing,
+    supersededNote:
+      standing.standing === 'superseded'
+        ? `previously denied ${standing.denial.denied_at} ('${standing.denial.reason}') — the ` +
+          'proposal has changed since, so this is a returning question, not a new one. '
+        : '',
+  }
 
-  // -- Side-effect approval gate ---------------------------------
-  if (
-    manifest.side_effects.length > 0 &&
-    !(await checkApproval(pluginName, ctx.approvalPath, { now }))
-  ) {
-    return {
-      due: false,
-      reason: 'unapproved',
-      detail: `${supersededNote}skipped (unapproved): side effects require session approval`,
+  // Declared order, first match wins. Awaited one at a time on purpose: the
+  // later predicates perform real reads, and a gate that already fired must
+  // not cause them.
+  for (const gate of GATES) {
+    if (await gate.applies(input)) {
+      return { due: false, reason: gate.reason, detail: gate.detail(input) }
     }
   }
 
