@@ -175,11 +175,18 @@ const REGISTRY: readonly ShapeEntry[] = [
   {
     shape: 1,
     example: 'feed-monitor',
-    partial: 'polls a feed and reports what is new, but persists no snapshot — github-poll carries the full act',
-    act: async () => {
+    partial: 'polls a feed, persists what it found and publishes a path Output naming it, but never reads that file back — the diff against the last run is what shape 1 turns on, and github-poll carries it',
+    act: async (home) => {
       const result = await withFetch(okText(RSS), () =>
         feedMonitor(feedMonitorManifest, { feed_url: 'https://feeds.example.test/feed.xml' }, signal(), CONTEXT))
-      return result.status === 'success' && result.summary.includes('First')
+      // Parsed at the boundary the engine parses at: `artifacts_produced` also
+      // admits a bare string, which normalises to a path Output there and
+      // never reaches `last_output` in the handler's own shape.
+      const [output] = SkillResultSchema.parse(result).artifacts_produced
+      if (result.status !== 'success' || output?.path === undefined || output.body !== undefined) return false
+      const written = readJson<{ new_entries: { title: string }[] }>(join(home, 'state', 'feed-monitor.entries.json'))
+      return output.path === join(home, 'state', 'feed-monitor.entries.json')
+        && written.new_entries.map((e) => e.title).includes('First')
     },
   },
   {
