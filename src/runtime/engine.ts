@@ -607,12 +607,20 @@ export const GATES: readonly Gate[] = [
     reason: 'dependency_failed',
     applies: ({ manifest, ctx }) => failedDependencies(manifest, ctx).length > 0,
     // Declared plugin names and one closed enum value. Nothing else may be
-    // interpolated here: this string is the run log's `result_summary`, which is
-    // read and shared, and this repository has twice paid for an operator-
-    // configured value reaching a result summary. The test asserts it as an
-    // exact string rather than a substring, so an appended leak fails.
+    // interpolated here: this string reaches the run log's `result_summary`, the
+    // board event and `warpline plan`, all of which are read and shared, and
+    // this repository has twice paid for an operator-configured value reaching a
+    // result summary. The test asserts it as an exact string rather than a
+    // substring, so an appended leak fails.
+    //
+    // No `skipped: ` prefix, matching the `fresh` arm: the orchestrator adds one
+    // for the run log and nothing else does. It used to be written here on the
+    // grounds that a prefix added downstream would be a second author for one
+    // string — but the second author already exists and is `emitPluginSkipped`,
+    // which formats `${plugin}: skipped — ${reason}`, so the prefix here made
+    // the board say `skipped` twice about one plugin.
     detail: ({ manifest, ctx }) =>
-      `skipped: dependency failed — ${failedDependencies(manifest, ctx)
+      `dependency failed — ${failedDependencies(manifest, ctx)
         .map((d) => `'${d}'`)
         .join(', ')} last recorded status 'failed'`,
   },
@@ -1150,10 +1158,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
             // -- Dependency failed: it ran, it failed, and this plugin would
             //    otherwise read what it left behind on an earlier cycle --
-            // The detail is written through verbatim, unlike the freshness arm
-            // above: the evaluator already produced the whole sentence, naming
-            // every failed dependency, and a prefix added here would be a
-            // second author for one string.
+            // The run log's prefix is added HERE, exactly as the freshness arm
+            // above adds it, and the evaluator's detail stays bare. The board
+            // event takes that bare detail and formats its own
+            // `${plugin}: skipped — ${reason}`, so one `skipped` reaches an
+            // operator instead of two.
             //
             // The second not-due arm to call the progress end hook, and the
             // reason is the approval gate's reason: a dependency failure is
@@ -1182,7 +1191,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 status: 'skipped',
                 started_at: entryStartedAt,
                 elapsed_ms: dependencyFailedElapsed,
-                result_summary: ev.detail,
+                result_summary: `skipped: ${ev.detail}`,
                 retried: false,
               })
               await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)

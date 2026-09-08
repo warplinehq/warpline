@@ -68,7 +68,17 @@ import { denialFingerprint } from '../engine.js'
 /** The evaluator's whole detail for the task-lock arm, copied from `engine.ts`. */
 const LOCK_DETAIL = 'task locked — active on board'
 
-/** The evaluator's whole detail for a single failed dependency named `prod`. */
+/**
+ * The whole `result_summary` the run log carries for a single failed dependency
+ * named `prod`.
+ *
+ * The `skipped: ` prefix is the ORCHESTRATOR's, not the evaluator's — the arm
+ * adds it exactly as the freshness arm does, and the evaluator's detail is the
+ * bare sentence after it. The board event reads that bare detail and adds its
+ * own `skipped`, which is why only one of the two may write the word. This
+ * value is unchanged by that split, and its being unchanged is the point:
+ * moving the prefix must not move what a run log says.
+ */
 const DEPENDENCY_FAILED_DETAIL =
   "skipped: dependency failed — 'prod' last recorded status 'failed'"
 
