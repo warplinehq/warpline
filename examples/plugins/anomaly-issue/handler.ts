@@ -167,15 +167,12 @@ export const handler: CapabilityHandlerFn = async (_manifest, args, signal, capa
     // as `failed`, and "the producer has not run yet" must not paint a red run.
     // NOT `skillFailure('dependency_unavailable', …)` either — that reddens the
     // ordinary first-advance case and pre-empts a runtime-level gate that is
-    // the runtime's to add, not this plugin's. That gate exists now:
+    // the runtime's to add, not this plugin's. That gate exists now —
     // `dependency_failed` stops a plugin whose declared dependency's last run
-    // failed, before the handler is invoked at all. This arm does not change
-    // and must not — a host that runs a single plugin directly supplies no
-    // dependency state, so every declared name still reads `null` there and
-    // this is still the arm that answers for it.
-    // And NO Output: an empty one
-    // would become this plugin's `last_output`, and a downstream reader would
-    // take it for real work.
+    // failed, before this handler is invoked — and the arm stays anyway,
+    // because a host running one plugin directly supplies no dependency state.
+    // And NO Output: an empty one would become this plugin's `last_output`,
+    // and a downstream reader would take it for real work.
     //
     // What changed is the sentence, not the arm. It used to claim the producer
     // "has produced nothing yet" whatever state it was in, which is a different
