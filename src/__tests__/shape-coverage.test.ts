@@ -285,9 +285,40 @@ const REGISTRY: readonly ShapeEntry[] = [
     example: 'feed-triage',
     // The structured arm proves the builder wrote the handoff; the prefix is
     // what the shipped scanner reads.
-    act: async (home) => {
-      seed(home, 'state/feed-entries.json', { new_entries: [{ title: 'A post', link: 'https://feeds.example.test/a', published: null }] })
-      const result = await feedTriage(feedTriageManifest, {}, signal(), CONTEXT)
+    //
+    // The producer runs FIRST, and for real. Seeding a file for the consumer
+    // to read was the shortcut this act used to take, and it proved the
+    // handoff while assuming the delivery — over a path the consumer computed
+    // itself, from an input nothing produced. `feed-monitor` fetches, over the
+    // global fetch with no injection seam, so the response is stubbed with the
+    // helpers already here; that is the github-poll act's call shape, borrowed
+    // the same way the daily-digest act borrows it.
+    act: async () => {
+      // Parsed at the boundary the engine parses at: `artifacts_produced` also
+      // admits a bare string, which normalises to a path Output there and never
+      // reaches `last_output` in the handler's own shape.
+      const produced = SkillResultSchema.parse(await withFetch(okText(RSS), () =>
+        feedMonitor(feedMonitorManifest, { feed_url: 'https://feeds.example.test/feed.xml' }, signal(), CONTEXT)))
+      const record = produced.artifacts_produced.at(-1)
+      // Asserted, not assumed — and it is the narrowing too: `undefined` is not
+      // assignable to the option's value type, so an act that skips this check
+      // does not compile.
+      if (record === undefined) return false
+      // The record the runtime would deliver, delivered by the runtime's own
+      // mint. This file may reach `src/`; an example test may not — which is
+      // why the plugin's own test hand-builds a context and this one does not,
+      // and why both are kept: they prove different halves.
+      const context = mintContext(
+        {
+          manifest: feedTriageManifest,
+          dependencyRuns: { 'feed-monitor': { status: 'success', last_output: record } },
+        },
+        { granted: false, reason: 'manual-run' },
+      ).context
+      const result = await feedTriage(feedTriageManifest, {}, signal(), context)
+      // The handoff arm, not the nothing-to-triage arm: a broken edge would
+      // take the second one and still be a `success`, which is exactly the
+      // quiet failure this act exists to refuse.
       return result.needs_llm !== undefined && result.summary.startsWith('[needs-llm]')
     },
   },
