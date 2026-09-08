@@ -1101,7 +1101,7 @@ extended casually.
 
 #### What the dependency gate does not cover
 
-Four limitations, written down here rather than left for a reader to discover.
+Five limitations, written down here rather than left for a reader to discover.
 
 **The latch, and how it clears.** The gate reads the LAST run's status, so a
 dependency whose last run failed gates its dependents until it runs again
@@ -1136,6 +1136,25 @@ is not a failed one. The engine warns about the unresolved name at load time and
 `topoSort` ignores it for ordering; the gate deliberately adds no second roster
 check of its own, because that would be a second dependency signal answering the
 same question.
+
+**`warpline plan` and an advance can disagree, in one direction only.** The gate
+reads a run outcome, and a preview does not run anything. `plan` walks levels
+against the state document as it sits on disk; an advance evaluates against a
+`plugin_runs` its own level loop is overwriting as it goes. To keep the preview
+from publishing a skip for every dependent on the self-clearing path above, the
+evaluator takes an optional `dueAtEarlierLevel` set — the plugins an earlier
+level of the same preview already found due — and does not gate on a dependency
+in it. Only `plan` supplies one; an advance leaves it undefined, because its
+state is already the answer.
+
+That assumes a due producer clears its latch, which `plan` cannot know. A
+producer that is due and fails again leaves `plan` reporting a dependent **due**
+where the advance skips it. The reverse can no longer happen: the set only ever
+removes a `dependency_failed` verdict, never adds one. The direction is the
+point. This runtime asks a human to approve side effects on the strength of what
+the preview showed, so a preview that under-states an advance is the input to a
+wrong answer, and one that over-states it is only a plugin that did not run.
+Pinned by `plan.test.ts` Test 2b.
 
 ### `pending_gates`
 

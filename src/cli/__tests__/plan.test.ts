@@ -130,8 +130,30 @@ export async function handler(_manifest, _args) {
 }
 `
 
-async function writeHandler(home: TestHome, name: string): Promise<void> {
-  await writeFile(join(home.pluginsDir, name, 'handler.ts'), SUCCESS_HANDLER)
+/**
+ * A handler that returns a valid `SkillResult` whose `status` is `failed`.
+ *
+ * The `errors` entry is spelled out rather than left empty because
+ * `SkillResultSchema` requires the shape, and a fixture the runtime rejects
+ * would record `failed` for the wrong reason.
+ */
+const FAILING_HANDLER = `
+export async function handler(_manifest, _args) {
+  return {
+    status: 'failed',
+    phases_completed: [],
+    phases_failed: ['fixture'],
+    errors: [{ code: 'dependency_unavailable', message: 'declined', impact: 'HIGH', retryable: false }],
+    data_freshness: {},
+    summary: 'fixture failed',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`
+
+async function writeHandler(home: TestHome, name: string, body = SUCCESS_HANDLER): Promise<void> {
+  await writeFile(join(home.pluginsDir, name, 'handler.ts'), body)
 }
 
 /** Every file under `dir`, recursively, as paths relative to it. */
@@ -527,13 +549,25 @@ describe('plan ≡ what a run would attempt', () => {
 
   /**
    * One fixture spanning every guard in the chain, so the set equality below is
-   * meaningful rather than vacuous: a ten-plugin home where nine are excluded
-   * for eight DIFFERENT reasons and one is due.
+   * meaningful rather than vacuous: a twelve-plugin home where nine are excluded
+   * for eight DIFFERENT reasons and three are due.
    *
    * Nine exclusions and eight reasons, not nine of each: `failed-producer`
    * exists to arm the dependency gate on the plugin below it and is itself
    * excluded as `fresh`, which `fresh-one` already covers. It adds a plugin
    * without adding a reason.
+   *
+   * `recover-producer` / `dep-recovers` are the OTHER half of the dependency
+   * gate, and they are here because the fixture used to be blind to it. They
+   * are due rather than excluded: the producer is seeded failed and STALE, so
+   * plan finds it due and the advance re-runs it into a success, and the
+   * dependent — declaring no side effects, so nothing else can hold it back —
+   * is due on both surfaces. That is the self-clearing path `runtime-spec.md`
+   * calls the ordinary one, and it is the case the equality below has to be
+   * able to see. The residual, where such a producer fails AGAIN, is a
+   * divergence and lives in its own test outside this fixture; putting it here
+   * would turn Test 1 red for a disagreement that is disclosed rather than a
+   * defect.
    *
    * `min_tier: 'suspended'` on everything except `tier-blocked` reads backwards
    * and is correct — 'suspended' means "runs at any degradation level" and
@@ -563,6 +597,12 @@ describe('plan ≡ what a run would attempt', () => {
       dependencies: ['failed-producer'],
       side_effects: ['sends_email'],
     })
+    // The ninth gate, armed against a producer that actually re-runs. No side
+    // effects on the dependent: the dry-run block would otherwise hold it out
+    // of the attempted set for a reason that has nothing to do with the gate,
+    // which is what `dep-failed-one` above is for.
+    await writePlugin(home, 'recover-producer', tolerant)
+    await writePlugin(home, 'dep-recovers', { ...tolerant, dependencies: ['recover-producer'] })
 
     for (const name of [
       'due-one',
@@ -575,6 +615,8 @@ describe('plan ≡ what a run would attempt', () => {
       'failed-producer',
       'gated-one',
       'dep-failed-one',
+      'recover-producer',
+      'dep-recovers',
     ]) {
       await writeHandler(home, name)
     }
@@ -590,13 +632,25 @@ describe('plan ≡ what a run would attempt', () => {
         // would be attempted by that advance, its autonomous arm would overwrite
         // the seeded status with a success, and by `dep-failed-one`'s level the
         // gate would read a success — while the plan side, having run first,
-        // read the failure. Test 1 would then go red for a disagreement caused
-        // by the fixture clearing its own latch one level early. Freshness keys
-        // on the timestamp and ignores the status (`staleness.ts`), and the
-        // freshness arm writes a run-log row and no run record, so this row
-        // survives the advance byte for byte.
+        // read the failure. Freshness keys on the timestamp and ignores the
+        // status (`staleness.ts`), and the freshness arm writes a run-log row
+        // and no run record, so this row survives the advance byte for byte.
+        //
+        // What the freshness does NOT buy any more is the fixture's blindness to
+        // the gate. `recover-producer` below is stale on purpose and does
+        // re-run; this pair is here for Test 2's reason coverage, which needs a
+        // `dependency_failed` verdict to read and needs the producer to hold
+        // still while it reads it.
         'failed-producer': {
           last_run_at: new Date(Date.now() - 3_600_000).toISOString(),
+          status: 'failed',
+        },
+        // Failed and STALE — 25 hours into a 24h TTL. Plan finds it due, the
+        // advance re-runs it, `SUCCESS_HANDLER` overwrites the seeded status,
+        // and `dep-recovers` is ungated on both surfaces. The clearing this
+        // fixture used to be built to avoid is the thing it now proves.
+        'recover-producer': {
+          last_run_at: new Date(Date.now() - 25 * 3_600_000).toISOString(),
           status: 'failed',
         },
       },
@@ -630,7 +684,7 @@ describe('plan ≡ what a run would attempt', () => {
     // Asserted as sorted arrays so a mismatch names the offending plugin
     // instead of printing "Set(1) !== Set(2)".
     expect([...planned].sort()).toEqual([...attempted].sort())
-    expect([...planned].sort()).toEqual(['due-one'])
+    expect([...planned].sort()).toEqual(['dep-recovers', 'due-one', 'recover-producer'])
   })
 
   test('Test 2: the fixture spans every guard, so the equality is not vacuous', async () => {
@@ -642,7 +696,7 @@ describe('plan ≡ what a run would attempt', () => {
 
     const reason = (n: string) => model.notDue.find((e) => e.plugin === n)?.reason
 
-    // Nine plugins, eight distinct not-due reason codes — every arm of
+    // Nine excluded plugins, eight distinct not-due reason codes — every arm of
     // evaluatePlugin's chain, in chain order. `failed-producer` shares
     // `fresh-one`'s reason, which is why nine exclusions span eight codes.
     expect(reason('weekly-one')).toBe('profile_schedule')
@@ -662,9 +716,19 @@ describe('plan ≡ what a run would attempt', () => {
     expect(reason('gated-one')).toBe('unapproved')
     expect(new Set(model.notDue.map((e) => e.reason)).size).toBe(8)
 
-    // …and exactly one plugin survived all eight, in both surfaces.
-    expect(model.due).toHaveLength(1)
-    expect([...attempted]).toEqual(['due-one'])
+    // …and the three that survived all eight did so in both surfaces. Sorted:
+    // a level runs its plugins concurrently, so insertion order into the
+    // attempted set is not a property this fixture may assert.
+    expect(model.due).toHaveLength(3)
+    expect([...attempted].sort()).toEqual(['dep-recovers', 'due-one', 'recover-producer'])
+
+    // The ninth gate, on the surface it was blind to. `recover-producer` is
+    // seeded failed; `dep-recovers` declares it and is due anyway, in plan
+    // because Task 1's projection saw the producer go due at level 0, and in the
+    // run because the producer had already overwritten the seeded status by the
+    // time the gate read it.
+    expect(reason('dep-recovers')).toBeUndefined()
+    expect(attempted.has('dep-recovers')).toBe(true)
 
     // Both side-effecting plugins are absent from both sets for reasons that
     // agree: the chain blocks them in `plan`, and in the run `gated-one` meets
@@ -672,6 +736,62 @@ describe('plan ≡ what a run would attempt', () => {
     // been gated on its dependency. Fixture constraint 1 holding, asserted.
     expect(attempted.has('gated-one')).toBe(false)
     expect(attempted.has('dep-failed-one')).toBe(false)
+  })
+
+  /**
+   * The one disagreement the two surfaces are allowed to have, characterized.
+   *
+   * `docs/runtime-spec.md` § "What the dependency gate does not cover", FIFTH
+   * entry. `plan` cannot know whether a producer it finds due will succeed, only
+   * that this advance will attempt it. It assumes the latch clears, because the
+   * alternative assumption — that it does not — is what made plan publish a skip
+   * for every self-clearing dependent, and a preview that under-states an
+   * advance is the input to a wrong approval in a runtime that gates side
+   * effects on an informed answer.
+   *
+   * So a producer that is due and fails AGAIN leaves plan saying due where the
+   * run skips. That is the accepted residual of the fix, not a defect awaiting
+   * repair: the divergence is irreducible for a gate keyed on a run outcome the
+   * preview does not compute, and this direction is the safe one. It is asserted
+   * here so it cannot drift silently — a limitation with no test is a limitation
+   * that rots.
+   *
+   * Deliberately NOT in the spanning fixture. A fail-again producer there turns
+   * Test 1's set equality red, and the repair that suggests itself is re-seeding
+   * the fixture until the case cannot arise — which is exactly the blindness
+   * this file has just had removed.
+   */
+  test('Test 2b: the residual — a producer that fails again leaves plan due where the run skips', async () => {
+    await writePlugin(home, 'fails-again')
+    await writePlugin(home, 'dep-fails-again', { dependencies: ['fails-again'] })
+    await writeHandler(home, 'fails-again', FAILING_HANDLER)
+    await writeHandler(home, 'dep-fails-again')
+
+    await writeState(home, {
+      // Stale, so it is due and re-run rather than held by freshness.
+      'fails-again': {
+        last_run_at: new Date(Date.now() - 25 * 3_600_000).toISOString(),
+        status: 'failed',
+      },
+    })
+
+    const { statePath, eventsPath } = routeStateManager()
+    const model = await buildPlanModel(Date.now())
+    const attempted = await attemptedByRun(statePath, eventsPath)
+
+    // PLAN: both due. The producer because its TTL expired, the dependent
+    // because the producer went due at an earlier level of this same preview.
+    expect(model.due.map((e) => e.plugin).sort()).toEqual(['dep-fails-again', 'fails-again'])
+
+    // RUN: the producer alone. Its handler returned `failed`, the autonomous arm
+    // wrote that status, and the gate read the write.
+    expect([...attempted]).toEqual(['fails-again'])
+
+    // The direction, stated as an assertion rather than left to the reader:
+    // plan over-reports, never under-reports. Nothing the run attempted is
+    // missing from the plan.
+    const planned = new Set(model.due.map((e) => e.plugin))
+    expect([...attempted].filter((p) => !planned.has(p))).toEqual([])
   })
 
   test('Test 3: with no engine-state.json at all, every plugin is never-run, due, and attempted', async () => {
