@@ -523,19 +523,50 @@ export const GATES: readonly Gate[] = [
   },
 
   // -- Dependency failed: it ran, and its last run ended failed ------
-  // Ordered after the staleness check and after the task lock, and BEFORE the
-  // denial entry.
+  // Ordered after the staleness check and after the task lock, and BEFORE both
+  // the denial entry and the approval entry. That placement is argued rather
+  // than assumed, because it is the one thing about this gate that was chosen
+  // against standing advice.
   //
-  // After staleness, because a plugin that is still fresh is not going to read
-  // anything this cycle and "still fresh" is the smaller, older answer; putting
-  // this above it would relabel every fresh dependent of a failed producer.
+  // AFTER STALENESS. A plugin that is still fresh is not going to read anything
+  // this cycle, and "still fresh" is the smaller, older answer; putting this
+  // above it would relabel every fresh dependent of a failed producer.
   //
-  // Before the denial entry for the same shape of reason the denial sits above
-  // the approval gate: this plugin will not run either way, and the fact the
-  // operator can act on is the failed dependency, not an answer to a proposal
-  // that is not being made this cycle. It only ever moves a plugin from due to
-  // not-due, so it is well above the approval gate and cannot admit a side
-  // effect nobody approved.
+  // AFTER THE TASK LOCK. A task lock is a human holding this plugin open on the
+  // board. That answer outranks a statement about the plugin's inputs, and a
+  // locked plugin should be reported as locked — the operator already knows why
+  // it is not running, and it is not this.
+  //
+  // BEFORE THE DENIAL. The denial entry below gives the reason in its own
+  // comment: a denied plugin is not asked about at all, so it must not first be
+  // reported as needing a Grant it does not need. The same sentence applies one
+  // step earlier. A plugin that cannot usefully run must not first be reported
+  // as STILL DENIED, because the denial answers a proposal this plugin will not
+  // be making in this advance. Sitting ahead of the denial also keeps this
+  // detail clear of `supersededNote`, which is computed between the denial and
+  // the approval entries and would otherwise decorate a dependency-failure
+  // message with a paragraph about a returning question nobody asked.
+  //
+  // BEFORE THE APPROVAL CHECK, AND WHY THE STANDING ADVICE IS WRONG HERE. The
+  // standing advice in this project's own notes is to add new gates at the END
+  // of the chain, on the grounds that appending cannot reorder what is already
+  // there. That advice is wrong for this gate, for the reason the denial arm
+  // already gives: a plugin that cannot usefully run must not first be reported
+  // as needing a session grant it does not need, and appending would produce
+  // exactly that report. The contradiction is deliberate.
+  //
+  // What makes it safe is that this gate only ever moves a plugin from due to
+  // not-due. It admits nothing. It cannot let a side-effecting plugin holding no
+  // grant reach a handler, because every path out of it is a skip. The operator
+  // sees a different reason; nobody sees a different outcome.
+  //
+  // Both halves are falsifiable rather than merely argued. The declared order is
+  // pinned as a list by `gate-order.test.ts`, which also asserts that the
+  // approval entry is still the last gate before invocation on a real run. The
+  // pairwise cases in `dependency-failed.test.ts` arm two guards on one plugin
+  // at once and read which one the run log names, and the approval pair asserts
+  // the outcome as well as the reason: the side-effecting consumer gets no run
+  // record and its handler is never entered.
   //
   // What arms it is one status on one existing record, and only that one.
   // `skipped` does not: a plain skip and a `[needs-llm]` handoff lead a consumer
