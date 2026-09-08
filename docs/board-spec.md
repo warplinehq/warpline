@@ -333,11 +333,12 @@ ignored.
 
 On a default install over the twelve bundled examples, with no grant, this is
 what the first advance does (the README carries the `warpline plan` render it
-is read from). Seven plugins are due at level 0 — `announce-fanout`,
-`anomaly-watch`, `derived-summary`, `draft-writer`, `feed-triage`,
-`metrics-rollup` and `note-intake` — every one `autonomous` with no declared
-side effects, and every one is still recorded `gated`, so the run stops after
-level 0 and `daily-digest` at level 1 does not run until they are reviewed.
+is read from). Six plugins are due at level 0 — `announce-fanout`,
+`anomaly-watch`, `derived-summary`, `draft-writer`, `metrics-rollup` and
+`note-intake` — every one `autonomous` with no declared side effects, and every
+one is still recorded `gated`, so the run stops after level 0 and neither
+`daily-digest` nor `feed-triage`, both at level 1 because each declares a
+dependency, runs until they are reviewed.
 The other four — `feed-monitor`, `github-poll`, `link-enrich` and
 `anomaly-issue` — declare side effects and are skipped as unapproved before
 the review gate is reached, until a session grant covers them.

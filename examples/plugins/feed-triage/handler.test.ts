@@ -1,9 +1,9 @@
 import { describe, test, expect, afterEach } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
-import type { CapabilityContext } from 'warpline/unstable-capabilities'
-import { SkillResultSchema } from 'warpline/schemas/skill-result'
+import type { CapabilityContext, DependenciesHandle } from 'warpline/unstable-capabilities'
+import { SkillResultSchema, type OutputRecord } from 'warpline/schemas/skill-result'
 import { newEntries, handler } from './handler.js'
 import { manifest } from './manifest.js'
 
@@ -19,12 +19,68 @@ async function tempRoot(prefix = 'warpline-feed-triage-'): Promise<string> {
   return root
 }
 
-/** The handler is four-parameter; a test hands it a context it never reads. */
-const CONTEXT = {} as CapabilityContext
+/**
+ * The closed status vocabulary, named through the published handle type rather
+ * than restated here — a second copy of an enum is a second thing that can go
+ * out of date.
+ */
+type RunStatus = ReturnType<DependenciesHandle['lastRun']>
 
-function invoke(args: Record<string, unknown>) {
-  return handler(manifest, args, new AbortController().signal, CONTEXT)
+/**
+ * The fourth parameter, carrying the two members this handler reads.
+ *
+ * A hand-written literal and not the runtime's mint: an example may import
+ * only the three `warpline/unstable-*` specifiers, so `src/` is out of reach
+ * from here on purpose. What that costs is stated rather than hidden — this
+ * file proves the HANDLER does the right thing with each of the four states,
+ * and the runtime's DELIVERY of them is proven under `src/`, by the
+ * `feed-triage` act in `shape-coverage.test.ts` which runs the real producer
+ * and mints this context through the runtime itself.
+ *
+ * Both members throw for any name but `feed-monitor`, mirroring the runtime's
+ * shared refusal, so a case can never pass against a coupling the manifest
+ * does not declare.
+ *
+ * The default pairs the two facts coherently: a fixture handing over a record
+ * without saying how the last run ended models a producer that succeeded, and
+ * one handing over nothing models a producer that has never run. Every case
+ * that means something else says so.
+ */
+function contextWith(record: OutputRecord | null, run: RunStatus = record === null ? null : 'success'): CapabilityContext {
+  const declared = (name: string): void => {
+    if (name !== 'feed-monitor') {
+      throw new Error(`feed-triage does not declare '${name}' in manifest.dependencies`)
+    }
+  }
+  return {
+    caller: { plugin: 'feed-triage' },
+    secrets: { resolvedNames: () => [] },
+    dependencies: {
+      lastOutput: (_caller, name: string) => {
+        declared(name)
+        return record
+      },
+      lastRun: (_caller, name: string) => {
+        declared(name)
+        return run
+      },
+    },
+  } as CapabilityContext
 }
+
+/**
+ * A `path`-form Output over a file written at `rel` inside the test's own home
+ * — the form `feed-monitor` publishes, because an entry list grows with the
+ * feed and the body cap is 16 KiB.
+ */
+async function recordAt(home: string, rel: string, payload: unknown): Promise<OutputRecord> {
+  const path = join(home, rel)
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, typeof payload === 'string' ? payload : JSON.stringify(payload))
+  return { type: 'feed-entries', format: 'json', path }
+}
+
+const ENTRIES_REL = join('state', 'feed-monitor.entries.json')
 
 /**
  * `warpline/lib/paths` exports only `warplineHome`, which resolves
@@ -41,6 +97,10 @@ async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
     if (realHome === undefined) delete process.env.WARPLINE_HOME
     else process.env.WARPLINE_HOME = realHome
   }
+}
+
+function invoke(context: CapabilityContext) {
+  return handler(manifest, {}, new AbortController().signal, context)
 }
 
 const entryA = { title: 'A post', link: 'https://example.com/a', published: '2026-08-20T09:00:00Z' }
@@ -60,12 +120,10 @@ describe('feed-triage newEntries', () => {
 
 describe('feed-triage handler', () => {
   test('at least one entry hands off through the builder: the prefix, one Context marker, and the structured arm', async () => {
-    await withHome(async () => {
-      const root = await tempRoot()
-      const path = join(root, 'feed-entries.json')
-      await writeFile(path, JSON.stringify({ new_entries: [entryA, entryB] }))
+    await withHome(async home => {
+      const record = await recordAt(home, ENTRIES_REL, { fetched_at: entryA.published, new_entries: [entryA, entryB] })
 
-      const result = await invoke({ entries_path: path })
+      const result = await invoke(contextWith(record))
 
       expect(result.status).toBe('skipped')
       expect(result.summary.startsWith('[needs-llm]')).toBe(true)
@@ -83,11 +141,9 @@ describe('feed-triage handler', () => {
 
   test('the payload is written under the home and the handoff names it relative to the home', async () => {
     await withHome(async home => {
-      const root = await tempRoot()
-      const path = join(root, 'feed-entries.json')
-      await writeFile(path, JSON.stringify({ new_entries: [entryA, entryB] }))
+      const record = await recordAt(home, ENTRIES_REL, { new_entries: [entryA, entryB] })
 
-      const result = await invoke({ entries_path: path })
+      const result = await invoke(contextWith(record))
 
       const contextPath = result.needs_llm?.context_path ?? ''
       expect(contextPath.length).toBeGreaterThan(0)
@@ -104,51 +160,76 @@ describe('feed-triage handler', () => {
     })
   })
 
-  test('zero entries do not hand off', async () => {
-    await withHome(async () => {
-      const root = await tempRoot()
-      const path = join(root, 'feed-entries.json')
-      await writeFile(path, JSON.stringify({ new_entries: [] }))
+  test('an empty entry list does not hand off', async () => {
+    await withHome(async home => {
+      // The producer writes on its quiet day too, so an empty list is an
+      // observation and not the absence of one. This is not the same state as
+      // no record at all, and it does not take the same arm.
+      const record = await recordAt(home, ENTRIES_REL, { new_entries: [] })
 
-      const result = await invoke({ entries_path: path })
+      const result = await invoke(contextWith(record))
 
       // `deriveRunStatus` returns 'success' for any success result before it
       // ever tests the prefix, so this is sufficient to prove the run is not
       // delegated.
       expect(result.status).toBe('success')
       expect(result.summary.startsWith('[needs-llm]')).toBe(false)
+      expect(result.summary).toContain('no new entries from feed-monitor')
       expect(result.schema_version).toBeUndefined()
     })
   })
 
-  test('a missing input file is quiet, not red, and keeps its prefix', async () => {
+  test('no Output and no recorded producer run is quiet, not red, and keeps its prefix', async () => {
     await withHome(async () => {
-      const root = await tempRoot()
-      const path = join(root, 'never-created', 'feed-entries.json')
-
-      const result = await invoke({ entries_path: path })
+      const result = await invoke(contextWith(null, null))
 
       // NOT a bare 'skipped': a prefix-less skipped maps to `failed`, and
       // `warpline run` persists the artifact — "no data yet" must not paint a
-      // red run. The summary keeps the plugin-name prefix its other quiet arm
-      // carries.
+      // red run. Nor a dependency failure: the runtime carries that gate, and
+      // a host supplying no dependency state at all reaches here too.
       expect(result.status).toBe('success')
       expect(result.summary.startsWith('[needs-llm]')).toBe(false)
       expect(result.summary.startsWith('feed-triage:')).toBe(true)
+      expect(result.summary).toContain('no data from feed-monitor yet')
     })
   })
 
-  test('an entries file that exists but is not JSON is a failure, not a quiet first run', async () => {
+  test('no Output from a producer that HAS run says so, rather than repeating the first-run sentence', async () => {
     await withHome(async () => {
-      const root = await tempRoot()
-      const path = join(root, 'feed-entries.json')
-      await writeFile(path, '{"new_entries": [')
+      const result = await invoke(contextWith(null, 'success'))
 
-      const result = await invoke({ entries_path: path })
-
-      expect(result.status).toBe('failed')
-      expect(result.errors?.[0]?.code).toBe('parse_error')
+      expect(result.status).toBe('success')
+      expect(result.summary).toContain('feed-monitor has run (last run: success)')
+      expect(result.summary).toContain('has never produced an Output')
+      // The two never-produced states are distinguishable, which is the whole
+      // reason both members are read: one waits for a schedule, the other
+      // wants somebody to look at a producer that runs and returns nothing.
+      const firstRun = await invoke(contextWith(null, null))
+      expect(result.summary).not.toBe(firstRun.summary)
     })
+  })
+
+  test('a record whose file is unreadable or not JSON degrades to nothing to triage, never a throw', async () => {
+    await withHome(async home => {
+      // The payload is a string another plugin authored over content it
+      // fetched from a remote feed. A throw out of a handler is a failed run
+      // with no structure, which the runtime tells you not to return.
+      const record = await recordAt(home, ENTRIES_REL, '{"new_entries": [')
+
+      const result = await invoke(contextWith(record))
+
+      expect(result.status).toBe('success')
+      expect(result.summary.startsWith('[needs-llm]')).toBe(false)
+    })
+  })
+
+  test('a name the manifest does not declare throws from both members, exactly as the real member does', () => {
+    const context = contextWith(null)
+    // Tied to the manifest, not to a literal repeated here: a test that passed
+    // against a coupling the manifest never declared would prove nothing.
+    expect(manifest.dependencies).toEqual(['feed-monitor'])
+    expect(() => context.dependencies.lastOutput(context.caller, 'anomaly-watch')).toThrow()
+    expect(() => context.dependencies.lastRun(context.caller, 'anomaly-watch')).toThrow()
   })
 
   test('declares no side effects', () => {
@@ -156,43 +237,43 @@ describe('feed-triage handler', () => {
   })
 })
 
-// The config channel reaches this handler through `entries_path`, a declared
-// manifest input an operator sets in `<home>/config/feed-triage.json`. Every
-// arm below drives a sentinel-bearing path through a different exit and asks
-// where it ended up. The sentinel lives in the DIRECTORY name, so it rides the
-// resolved path into whatever an arm interpolates.
+// The config channel that used to reach this handler — a declared
+// `entries_path` input naming a file the handler computed a default for — is
+// gone with the code that read it. What arrives instead is a path on a record
+// the RUNTIME delivered, written by another plugin; it is not operator
+// configuration, and it still must not reach the run log.
 //
-// No arm may echo it — the handoff included. The handoff summary names a path
-// after `Context: `, but that path is the payload file this plugin writes
-// under the home, never the path it was configured to read from.
-describe('feed-triage handler input guard', () => {
+// The sentinel lives in the DIRECTORY name of that path, so it rides into
+// whatever an arm interpolates. No arm may echo it — the handoff included. The
+// handoff summary names a path after `Context: `, but that path is the payload
+// file this plugin writes under the home, never the one it read from.
+describe('feed-triage handler does not echo the path it read', () => {
   const sentinel = 'do-not-echo-6f8b40'
+  const sentinelRel = join('state', sentinel, 'feed-monitor.entries.json')
 
-  async function sentinelRoot(): Promise<string> {
-    return tempRoot(`${sentinel}-`)
-  }
+  test('the handoff carries the payload it wrote under the home, never the record it read from', async () => {
+    await withHome(async home => {
+      const record = await recordAt(home, sentinelRel, { new_entries: [entryA, entryB] })
 
-  test('a missing feed state names the input, not the path it was configured with', async () => {
-    await withHome(async () => {
-      const path = join(tmpdir(), sentinel, 'feed-entries.json')
+      const result = await invoke(contextWith(record))
 
-      const result = await invoke({ entries_path: path })
-
-      expect(result.status).toBe('success')
+      expect(result.status).toBe('skipped')
+      expect(result.errors ?? []).toEqual([])
       // The whole result, not just the summary: errors[] is a field too, and
       // so is anything a later edit adds beside them.
       expect(JSON.stringify(result)).not.toContain(sentinel)
-      expect(result.summary).toContain('no feed state')
+      // The tail is still a payload the scanner can open, inside the home.
+      const tail = result.summary.split('Context: ')[1] ?? ''
+      expect(tail.startsWith(home)).toBe(true)
+      expect(JSON.parse(await readFile(tail, 'utf-8'))).toEqual({ new_entries: [entryA, entryB] })
     })
   })
 
-  test('zero new entries names the input, not the path it read', async () => {
-    await withHome(async () => {
-      const root = await sentinelRoot()
-      const path = join(root, 'feed-entries.json')
-      await writeFile(path, JSON.stringify({ new_entries: [] }))
+  test('an empty entry list names the producer, not the record it read', async () => {
+    await withHome(async home => {
+      const record = await recordAt(home, sentinelRel, { new_entries: [] })
 
-      const result = await invoke({ entries_path: path })
+      const result = await invoke(contextWith(record))
 
       expect(result.status).toBe('success')
       expect(JSON.stringify(result)).not.toContain(sentinel)
@@ -200,35 +281,14 @@ describe('feed-triage handler input guard', () => {
     })
   })
 
-  test('an unreadable feed state names the input key, not the path or the OS error', async () => {
-    await withHome(async () => {
-      const root = await sentinelRoot()
-      const path = join(root, 'feed-entries.json')
-      await writeFile(path, '{"new_entries": [')
-
-      const result = await invoke({ entries_path: path })
-
-      expect(result.status).toBe('failed')
-      expect(JSON.stringify(result)).not.toContain(sentinel)
-      expect(result.errors?.[0]?.message).toContain('entries_path')
-    })
-  })
-
-  test('the handoff carries the payload it wrote under the home, never the path it read from', async () => {
+  test('an unreadable record names neither the path nor the parser words', async () => {
     await withHome(async home => {
-      const root = await sentinelRoot()
-      const path = join(root, 'feed-entries.json')
-      await writeFile(path, JSON.stringify({ new_entries: [entryA, entryB] }))
+      const record = await recordAt(home, sentinelRel, '{"new_entries": [')
 
-      const result = await invoke({ entries_path: path })
+      const result = await invoke(contextWith(record))
 
-      expect(result.status).toBe('skipped')
-      expect(result.errors ?? []).toEqual([])
+      expect(result.status).toBe('success')
       expect(JSON.stringify(result)).not.toContain(sentinel)
-      // The tail is still a payload the scanner can open, inside the home.
-      const tail = result.summary.split('Context: ')[1] ?? ''
-      expect(tail.startsWith(home)).toBe(true)
-      expect(JSON.parse(await readFile(tail, 'utf-8'))).toEqual({ new_entries: [entryA, entryB] })
     })
   })
 })

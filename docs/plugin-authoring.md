@@ -208,12 +208,13 @@ run log through that one field by design. The bound comes from the same
 contract: the scanner only reads paths that resolve inside the warpline home,
 and `skillHandoff` takes the path relative to the home and the parse boundary
 refuses any other shape. The bundled `feed-triage` is the worked case. It reads
-its entries from a declared input, writes the payload it hands off under
-`state/` itself, and names that file — so the configured input never reaches
-the log, and its test asserts the whole result is value-free on every arm, the
-handoff included. A plugin that instead names a configured path directly must
-make that an input which can never carry a secret, which is what keeps the
-exception this one field wide instead of a precedent.
+its entries through `capabilities.dependencies.lastOutput`, writes the payload
+it hands off under `state/` itself, and names that file — so the path on the
+producer's record never reaches the log, and its test asserts the whole result
+is value-free on every arm, the handoff included. A plugin that instead names a
+configured path directly must make that an input which can never carry a
+secret, which is what keeps the exception this one field wide instead of a
+precedent.
 
 The second: an `undo_instruction` on a side effect that already happened names
 what to undo, and naming it can require the value. The bundled `anomaly-issue`

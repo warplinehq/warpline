@@ -11,6 +11,19 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * hands the per-entry judgment off via a `[needs-llm]` summary. It never calls
  * a model; the one thing it writes is the handoff payload, under the warpline
  * home. See docs/needs-llm-contract.md.
+ *
+ * What `dependencies: ['feed-monitor']` buys: level ordering (this plugin runs
+ * at level 1, after feed-monitor), a re-run whenever feed-monitor ran more
+ * recently than this plugin did — even inside the TTL window — AND the read
+ * itself. The declaration is what the `dependencies` capability member keys
+ * off: `capabilities.dependencies.lastOutput(caller, 'feed-monitor')` returns
+ * the Output that plugin last produced, and a name this list does not carry
+ * throws rather than reading as a dependency that has not run.
+ *
+ * The feed state used to arrive through a declared input naming a path this
+ * handler computed a default for. Nothing produced that file when the input
+ * was written; `feed-monitor` does now, so the coupling stopped being invented
+ * and became declared, and the input went with the code that read it.
  */
 export const manifest = PluginManifestSchema.parse({
   name: 'feed-triage',
@@ -20,13 +33,7 @@ export const manifest = PluginManifestSchema.parse({
   side_effects: [],
   ttl_hours: 6,
   schedule: 'on_run',
-  inputs: {
-    entries_path: {
-      type: 'string',
-      required: false,
-      description: 'Path to a feed-entries JSON file; when absent, the handler computes it from the warpline home, as state/feed-entries.json. The handler copies the entries it hands off to state/feed-triage.handoff.json under the warpline home and names that file after Context:, so this value never reaches the run log',
-    },
-  },
+  dependencies: ['feed-monitor'],
   outputs: {
     triage: { type: 'array', description: 'Entries handed off for judgment' },
   },

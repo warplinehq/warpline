@@ -43,13 +43,13 @@ Due (8):
     (no declared side effects)
   draft-writer (level 0)
     (no declared side effects)
-  feed-triage (level 0)
-    (no declared side effects)
   metrics-rollup (level 0)
     (no declared side effects)
   note-intake (level 0)
     (no declared side effects)
   daily-digest (level 1)
+    (no declared side effects)
+  feed-triage (level 1)
     (no declared side effects)
 
 Not due (4):
