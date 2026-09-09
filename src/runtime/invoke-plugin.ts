@@ -362,8 +362,42 @@ export async function invokePlugin(
   try {
     const fileConfig = await loadPluginConfig(configPath)
     // `?? {}` because a manifest that bypassed zod parse has no `inputs` at
-    // all — the same tolerance the retry-loop defaults below rely on.
-    const resolution = resolvePluginArgs(manifest.inputs ?? {}, fileConfig, args)
+    // all — the same tolerance the retry-loop defaults below rely on, and
+    // `?? []` on `secrets` for exactly the same reason.
+    const declared = manifest.inputs ?? {}
+    const secretNames = new Set(manifest.secrets ?? [])
+
+    // A declared credential's single home is the environment. So a name
+    // appearing in both records is the credential on the `secrets` side and
+    // documentation on the `inputs` side: the required check and the default
+    // both belong to the declaration that resolves it, which is the credential
+    // pre-flight below, not this merge.
+    //
+    // The record itself is filtered, not the merge it produces, and that is
+    // the whole mechanism. `declaredDefaults` iterates exactly this record, so
+    // removing the name here is what structurally stops a manifest placeholder
+    // standing in for a credential — a run that succeeds on a placeholder is
+    // silent at every sink downstream. Filtering the merged result instead
+    // would leave that placeholder in place for whatever read it first.
+    //
+    // Here, and not inside the shared resolver: that function ships as
+    // `warpline/schemas/*`, so its signature is a compatibility surface, and
+    // the other caller that needs this exclusion already performs it for
+    // itself. This call site was the one that did not.
+    //
+    // Null prototype when a filtered copy is built, and assigned into rather
+    // than spread — a spread re-attaches Object.prototype to the result. A
+    // manifest declaring no secrets passes its own record through untouched.
+    let resolverInputs = declared
+    if (secretNames.size > 0) {
+      const filtered: typeof declared = Object.create(null) as typeof declared
+      for (const [key, input] of Object.entries(declared)) {
+        if (!secretNames.has(key)) filtered[key] = input
+      }
+      resolverInputs = filtered
+    }
+
+    const resolution = resolvePluginArgs(resolverInputs, fileConfig, args)
     if (!resolution.ok) {
       return oneAttemptFailure(
         pluginName,

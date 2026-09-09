@@ -284,6 +284,14 @@ Declaring nothing, and declaring `secrets: []`, are the same thing: the check
 runs and passes. Read the value with `process.env.GITHUB_TOKEN` inside your
 handler, at the point of use.
 
+**Declaring one name in both `inputs` and `secrets` is legal**, and the
+credential still comes from the environment alone. The `inputs` entry documents
+the name for whoever reads your manifest, and that is all it does: the runtime
+excludes the name from input resolution, so its `default` is never applied and
+its required check never runs. A placeholder like `your-token` sitting in that
+entry therefore cannot reach your handler in place of a credential, and a
+missing environment variable still fails the run by name before you are called.
+
 **Never put a resolved credential value into a `SkillResult`**, for the reason
 the config channel above states at length: a run log is a file people paste into
 issues. Name the key you expected.

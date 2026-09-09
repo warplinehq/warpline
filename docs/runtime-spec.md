@@ -113,6 +113,13 @@ supplies one. It is the LOWEST of three precedence tiers, resolved inside
 | 2 | `<home>/config/<plugin>.json` | the declared default |
 | 3 (highest) | per-invocation arguments | both |
 
+A name that also appears in `secrets` takes no tier in this table at all. It is
+resolved from the process environment before the handler is called, so the
+declared default is not applied to it and the required check does not run
+against it. The entry stays legal and stays useful — it names the parameter for
+whoever reads the manifest — but it describes a value this resolution order
+never supplies.
+
 A missing config file is an empty config, not an error. A config file that
 exists but is unparseable or the wrong shape is a `parse_error` that fails once
 and never enters the retry loop; its message names the file and the offending
@@ -151,7 +158,13 @@ get in front of.
 it. Adding the field invalidates no manifest that already validated.
 
 This is not `capabilities`, which is a free-text array of informational tags.
-Neither field reads the other.
+Those two fields do not read each other.
+
+`inputs` is the field that does. Declaring one name in both records is legal,
+and the runtime consults `secrets` while it resolves `inputs`: such a name is
+excluded from the input resolution entirely and comes from the environment
+alone. The `inputs` entry for it is documentation, and its `default` is not
+applied — a placeholder written there cannot stand in for a credential.
 
 ### `schedule`
 
