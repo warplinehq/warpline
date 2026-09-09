@@ -38,7 +38,6 @@ import {
   loadPluginManifests,
   topoSort,
   evaluatePlugin,
-  PROFILE_ALLOWED_SCHEDULES,
   RUN_PROFILES,
 } from '../runtime/engine.js'
 import type { EvalContext, RunProfile } from '../runtime/engine.js'
@@ -120,7 +119,9 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
 
   const state = await readEngineStateReadOnly(statePath)
   const ctx: EvalContext = {
-    allowedSchedules: profile ? PROFILE_ALLOWED_SCHEDULES[profile] : undefined,
+    // The profile and nothing derived from it. The schedule tier and headless
+    // mode (A2) are both worked out inside the gates, so a preview and the run
+    // it previews cannot arrive there with different answers.
     profile,
     // `now`, not `computeTier`'s `Date.now()` default: it is the last input
     // that would otherwise read the wall clock, and this function's whole
@@ -130,9 +131,6 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
     // a real home carrying one lets two consecutive previews straddle a
     // 2/7/14-day boundary and disagree with nothing in the diff to blame.
     currentTier: computeTier(state.last_interaction_at, now),
-    // Headless is defined as "a profile was requested" (A2) — the same
-    // definition `runAdvance` uses, so supervised bypass matches.
-    headless: profile !== undefined,
     force: false,
     state,
     approvalPath,

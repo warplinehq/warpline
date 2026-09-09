@@ -73,7 +73,7 @@ describe('supersededNote reaches the unapproved detail', () => {
     const result = await evaluatePlugin(
       'x',
       manifest,
-      { currentTier: 'normal', headless: false, force: false, state, approvalPath: noGrantPath },
+      { currentTier: 'normal', force: false, state, approvalPath: noGrantPath },
       Date.parse('2026-09-08T00:00:00.000Z'),
     )
 
@@ -103,7 +103,7 @@ describe('supersededNote reaches the unapproved detail', () => {
     const result = await evaluatePlugin(
       'x',
       manifest,
-      { currentTier: 'normal', headless: false, force: false, state, approvalPath: noGrantPath },
+      { currentTier: 'normal', force: false, state, approvalPath: noGrantPath },
       Date.parse('2026-09-08T00:00:00.000Z'),
     )
 

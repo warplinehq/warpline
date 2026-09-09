@@ -126,12 +126,13 @@ export type RunProfile = 'daily' | 'weekly' | 'manual'
 /**
  * Profile tier → set of schedules that run under that profile.
  *
- * Exported so `warpline plan` can build the same `EvalContext.allowedSchedules`
- * a run builds instead of restating the tier map — a second copy is exactly the
- * one-comparison disagreement between preview and run that this exists to
- * prevent.
+ * Read in exactly one place — the profile tier gate, which derives the tier
+ * from `EvalContext.profile` as it evaluates. Preview and run therefore share
+ * the map by construction rather than by two callers agreeing to build the same
+ * set, which is the one-comparison disagreement this exists to prevent.
+ * `RUN_PROFILES` below is derived from it for the same reason.
  */
-export const PROFILE_ALLOWED_SCHEDULES: Record<RunProfile, ReadonlySet<string>> = {
+const PROFILE_ALLOWED_SCHEDULES: Record<RunProfile, ReadonlySet<string>> = {
   daily: new Set(['on_run', 'daily']),
   weekly: new Set(['on_run', 'daily', 'weekly']),
   manual: new Set(['manual']),
@@ -399,17 +400,22 @@ export type EvalResult =
 /** Everything `evaluatePlugin` needs that is not the plugin itself. */
 export interface EvalContext {
   /**
-   * Schedules allowed by the headless profile tier.
+   * The requested run profile, and the only field that answers "was a profile
+   * asked for?".
    *
-   * Undefined means no profile was requested, and that is not the same as
-   * every schedule passing: a `manual` schedule is excluded in that case too,
-   * because it runs only when something asked for it by name.
+   * The schedule tier and headless mode are both derived from it where they are
+   * read, never carried alongside it. Three separately settable fields could
+   * disagree, and a context saying `weekly` beside a tier nobody built would
+   * produce a skip naming a profile the run never asked for — the same
+   * predicate/prose disagreement the gates below exist to make impossible,
+   * displaced one level up.
+   *
+   * Undefined means no profile was requested, and that is not the same as every
+   * schedule passing: a `manual` schedule is excluded in that case too, because
+   * it runs only when something asked for it by name.
    */
-  allowedSchedules?: ReadonlySet<string>
-  /** The requested profile, for the profile-filter detail string. */
   profile?: RunProfile
   currentTier: TierName
-  headless: boolean
   force: boolean
   state: EngineState
   /** Already-resolved session approval path — the evaluator does no path defaulting. */
@@ -528,14 +534,19 @@ export const GATES: readonly Gate[] = [
   // manual profile is not that opt-in. So the undefined branch excludes that
   // one schedule and admits the other three, and it says so in a detail that
   // names the profile the operator would have to ask for.
+  //
+  // Both arms switch on `ctx.profile`, the one field that carries the answer,
+  // and the tier is looked up here rather than handed in. So the branch that
+  // hardcodes 'manual' is reached only when no profile was requested, by
+  // construction — it cannot name a profile somebody did ask for.
   {
     reason: 'profile_schedule',
     applies: ({ manifest, ctx }) =>
-      ctx.allowedSchedules !== undefined
-        ? !ctx.allowedSchedules.has(manifest.schedule)
+      ctx.profile !== undefined
+        ? !PROFILE_ALLOWED_SCHEDULES[ctx.profile].has(manifest.schedule)
         : manifest.schedule === 'manual',
     detail: ({ manifest, ctx }) =>
-      ctx.allowedSchedules !== undefined
+      ctx.profile !== undefined
         ? `profile '${ctx.profile}' filter: schedule '${manifest.schedule}' not in tier`
         : `schedule 'manual': requires profile 'manual'`,
   },
@@ -550,9 +561,13 @@ export const GATES: readonly Gate[] = [
   },
 
   // -- Headless supervised bypass (A2) --
+  // Headless is defined as "a profile was requested" (A2), so it is read off
+  // `ctx.profile` here rather than carried as a second field that could say
+  // otherwise.
   {
     reason: 'headless_supervised',
-    applies: ({ manifest, ctx }) => ctx.headless && manifest.autonomy_level === 'supervised',
+    applies: ({ manifest, ctx }) =>
+      ctx.profile !== undefined && manifest.autonomy_level === 'supervised',
     detail: () => 'headless mode: supervised plugin bypassed (no interactive gate)',
   },
 
@@ -889,12 +904,6 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     onRunFailure,
   } = options
 
-  // Headless mode is defined as "a profile was explicitly requested" (A2).
-  // In headless mode, supervised plugins are skipped rather than gated, and
-  // plugin schedules are filtered by the profile tier.
-  const headless = profile !== undefined
-  const allowedSchedules = profile ? PROFILE_ALLOWED_SCHEDULES[profile] : undefined
-
   // The destructure above defaults only `undefined`, so an empty string
   // arrives here unchanged — and `resolve('')` is the current working
   // directory, which reads fine. Left alone, "no plugin root" would silently
@@ -1095,11 +1104,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
   // 6b. Evaluation context shared by every plugin in this run. The
   // approval path is resolved once here so the evaluator does no defaulting.
+  // `profile` alone: headless mode (A2) and the schedule tier are both derived
+  // from it inside the gates, so this run and a `warpline plan` preview cannot
+  // reach the gates carrying different answers to the same question.
   const evalCtx: EvalContext = {
-    allowedSchedules,
     profile,
     currentTier,
-    headless,
     force,
     state,
     approvalPath: approvalPath ?? sessionApprovalPath(),
