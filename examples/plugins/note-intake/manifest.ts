@@ -23,10 +23,10 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * `schedule: 'manual'`: the engine's manual run profile is the only one that
  * admits this schedule, so an advance running under a profile (the headless,
  * scheduled form) never picks the plugin up, and `warpline run` by hand is
- * the way it runs. An advance with NO profile applies no schedule filter at
- * all today, so an interactive advance would try this plugin and fail on the
- * missing note; that is the engine's gap, recorded rather than papered over
- * here. `schedule` is a different question from `autonomy_level`, which
+ * the way it runs. An advance requested with no profile applies no schedule
+ * tier at all, and it leaves this plugin alone as well — so nothing reaches
+ * the handler without a note for it to route.
+ * `schedule` is a different question from `autonomy_level`, which
  * stays `autonomous` because the run itself needs no supervision once a
  * human has started it.
  */

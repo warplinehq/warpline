@@ -50,6 +50,15 @@ that import happens during `warpline plan` — before any approval gate is
 consulted. The imports and the `manifest` export are the whole file. See
 [Runtime constraints](#runtime-constraints) §3.
 
+**`schedule: 'manual'` means nothing picks the plugin up unless it is asked
+for.** The other three values are reached by an advance: `on_run`, `daily` and
+`weekly` all run when an advance's profile admits them, and all three run when
+an advance is requested with no profile at all. `manual` is reached by exactly
+two things — the `manual` run profile, and `warpline run` typed by an operator.
+No advance reaches it, profiled or not. Choose it when the plugin needs
+something only a person supplies at the moment of running, and choose one of
+the other three when you want it to happen on its own.
+
 **Declare every side effect.** The gate is only as honest as the declaration.
 If your handler calls out to any external system — even read-only HTTP —
 declare `external_api`. Undeclared side effects are the one unforgivable
