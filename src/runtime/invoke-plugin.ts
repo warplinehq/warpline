@@ -436,10 +436,15 @@ export async function invokePlugin(
       }
     }
 
-    const resolution =
-      refusals.length > 0
-        ? { ok: false as const, problems: refusals }
-        : resolvePluginArgs(resolverInputs, fileConfig, args)
+    // Concatenated, not short-circuited: the resolver still runs, so a
+    // misplaced credential and a missing required input in the same file are
+    // reported together rather than one round-trip at a time. Safe because the
+    // secret name was excluded from `resolverInputs` above, so the resolver has
+    // nothing to say about it and cannot double-report it; the merged `args` it
+    // builds are discarded on this arm anyway.
+    const resolved = resolvePluginArgs(resolverInputs, fileConfig, args)
+    const problems = [...refusals, ...(resolved.ok ? [] : resolved.problems)]
+    const resolution = problems.length > 0 ? { ok: false as const, problems } : resolved
     if (!resolution.ok) {
       return oneAttemptFailure(
         pluginName,
