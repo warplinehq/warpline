@@ -54,13 +54,13 @@ Due (8):
 
 Not due (4):
 
-  feed-monitor — skipped (unapproved): side effects require session approval
+  feed-monitor — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
-  github-poll — skipped (unapproved): side effects require session approval
+  github-poll — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
-  link-enrich — skipped (unapproved): side effects require session approval
+  link-enrich — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
-  anomaly-issue — skipped (unapproved): side effects require session approval
+  anomaly-issue — unapproved: side effects require session approval
     creates_issue: ⚠ unapproved — would be SKIPPED this run
     external_api: ⚠ unapproved — would be SKIPPED this run
 ```

@@ -58,6 +58,7 @@
  */
 import { describe, test, expect, beforeAll, beforeEach, afterEach } from 'bun:test'
 import { existsSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 import { createTwoAdvanceHome, type TwoAdvanceHome } from './helpers/two-advance-home.js'
 import { _setPaths } from '../../board/state-manager.js'
@@ -85,6 +86,21 @@ const DEPENDENCY_FAILED_DETAIL =
 /** What the approval arm writes for a consumer declaring one effect. */
 const UNAPPROVED_SUMMARY =
   'skipped (unapproved): side effects [sends_email] require session approval'
+
+/**
+ * What the BOARD reads for that same consumer, on that same event.
+ *
+ * Two strings, one skip, and they are deliberately not equal: the run log names
+ * the specific effects and the board does not, which `engine.ts` states at the
+ * arm. What they may not do is disagree about the shape. `emitPluginSkipped`
+ * formats `${plugin}: skipped — ${reason}`, so the evaluator's detail must not
+ * write `skipped` itself or the operator reads it twice about one plugin.
+ *
+ * Asserted as an exact string for the reason the run-log summaries are: what it
+ * does not carry is as much the point as what it does.
+ */
+const UNAPPROVED_BOARD_SUMMARY =
+  'consumer: skipped — unapproved: side effects require session approval'
 
 /**
  * A consumer that does nothing but succeed.
@@ -536,6 +552,24 @@ export async function handler(manifest, args, signal, capabilities) {
     expect(controlEntry).not.toBeNull()
     expect(controlEntry!.status).toBe('skipped')
     expect(controlEntry!.result_summary).toBe(UNAPPROVED_SUMMARY)
+
+    // The pair, pinned together on the one event that wrote both. The run log
+    // keeps `skipped (unapproved): ` — `docs/why-the-gate-holds.md` calls it the
+    // one-command check — and the board says `skipped` exactly ONCE. Editing
+    // either string alone reddens here, which is the whole reason both are read
+    // in the same assertion block instead of two files apart.
+    const boardSummary = (await readFile(home.eventsPath, 'utf-8'))
+      .split('\n')
+      .filter((l: string) => l.length > 0)
+      .map((l: string) => JSON.parse(l) as { type: string; source: string; summary: string })
+      // `.filter().pop()` rather than `findLast`, which needs lib es2023 —
+      // raising the tsconfig target is a deliberate change and not this one's.
+      .filter((e) => e.type === 'plugin_result' && e.source === 'consumer')
+      .pop()?.summary
+    expect(boardSummary).toBe(UNAPPROVED_BOARD_SUMMARY)
+    expect(boardSummary!.match(/skipped/g)).toHaveLength(1)
+    expect(controlEntry!.result_summary).toContain('require session approval')
+    expect(boardSummary).toContain('require session approval')
 
     await home.setMarker()
     const r2 = await home.advance()

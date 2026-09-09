@@ -123,7 +123,7 @@ Nothing is due — no plugin passed the filter chain.
 
 Not due (1):
 
-  hello-warpline — skipped (unapproved): side effects require session approval
+  hello-warpline — unapproved: side effects require session approval
     creates_issue: ⚠ unapproved — would be SKIPPED this run
 ```
 

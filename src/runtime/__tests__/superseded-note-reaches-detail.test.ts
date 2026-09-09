@@ -83,7 +83,7 @@ describe('supersededNote reaches the unapproved detail', () => {
     expect(result.detail).toBe(
       "previously denied 2026-08-29T10:00:00.000Z ('operator said no') — the proposal has " +
         'changed since, so this is a returning question, not a new one. ' +
-        'skipped (unapproved): side effects require session approval',
+        'unapproved: side effects require session approval',
     )
   })
 
@@ -109,6 +109,6 @@ describe('supersededNote reaches the unapproved detail', () => {
 
     expect(result.due).toBe(false)
     if (result.due) return
-    expect(result.detail).toBe('skipped (unapproved): side effects require session approval')
+    expect(result.detail).toBe('unapproved: side effects require session approval')
   })
 })

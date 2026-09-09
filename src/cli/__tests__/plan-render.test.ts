@@ -63,7 +63,7 @@ describe('renderPlan', () => {
           notDue({
             plugin: 'digest-mailer-blocked',
             reason: 'unapproved',
-            detail: 'skipped (unapproved): side effects require session approval',
+            detail: 'unapproved: side effects require session approval',
             sideEffects: ['sends_email'],
             approved: false,
           }),
@@ -93,7 +93,7 @@ describe('renderPlan', () => {
     // marker — that is the only place the marker is reachable from a real
     // fixture home, since checkApproval is the last guard in the chain.
     expect(out).toContain(
-      '  digest-mailer-blocked — skipped (unapproved): side effects require session approval',
+      '  digest-mailer-blocked — unapproved: side effects require session approval',
     )
     expect(out).toContain('    sends_email: ⚠ unapproved — would be SKIPPED this run')
 

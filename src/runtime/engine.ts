@@ -664,8 +664,22 @@ export const GATES: readonly Gate[] = [
     applies: async ({ plugin, manifest, ctx, now }) =>
       manifest.side_effects.length > 0 &&
       !(await checkApproval(plugin, ctx.approvalPath, { now })),
+    // No `skipped` in this string, for the reason the `dependency_failed` arm
+    // above spells out at length: the detail has a second author downstream.
+    // `emitPluginSkipped` formats `${plugin}: skipped — ${reason}`, so the old
+    // `skipped (unapproved): ` prefix made the board say `skipped` twice about
+    // one plugin — the exact shape 60e9228 fixed for the dependency gate and
+    // deferred here. The word survives as `unapproved: ` so the reason stays
+    // greppable in `warpline plan` output, which renders `${plugin} — ${detail}`
+    // and has no prefix of its own.
+    //
+    // The run log keeps `skipped (unapproved): ` and names the specific
+    // effects; that string is authored at the arm below and is deliberately not
+    // this one. `docs/why-the-gate-holds.md` calls it the one-command check.
+    // `board-detail-and-run-log-summary.test.ts` pins the pair so the two
+    // cannot drift apart unnoticed.
     detail: ({ supersededNote }) =>
-      `${supersededNote}skipped (unapproved): side effects require session approval`,
+      `${supersededNote}unapproved: side effects require session approval`,
   },
 ]
 
