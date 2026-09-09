@@ -16,7 +16,7 @@ import { createTestHome } from '../../runtime/__tests__/helpers/create-test-home
 import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
-import { runAdvance } from '../../runtime/engine.js'
+import { denialFingerprint, runAdvance } from '../../runtime/engine.js'
 import { buildPlanModel, run } from '../plan.js'
 import { main } from '../warpline.js'
 
@@ -603,6 +603,14 @@ describe('plan ≡ what a run would attempt', () => {
     // which is what `dep-failed-one` above is for.
     await writePlugin(home, 'recover-producer', tolerant)
     await writePlugin(home, 'dep-recovers', { ...tolerant, dependencies: ['recover-producer'] })
+    // The NINTH not-due reason, and the one this fixture was blind to. A THIRD
+    // side-effecting plugin, deliberately: `denied` is ordered before
+    // `unapproved`, so a plugin that could be caught by either is the only one
+    // that proves which fires. Declare no effect and the plugin reports
+    // `denied` whatever the ordering, which is the vacuous version of this
+    // assertion. The denial itself is seeded in state below — no
+    // `.session-approval` file appears anywhere, so fixture constraint 1 holds.
+    await writePlugin(home, 'denied-one', { ...tolerant, side_effects: ['sends_email'] })
 
     for (const name of [
       'due-one',
@@ -617,6 +625,7 @@ describe('plan ≡ what a run would attempt', () => {
       'dep-failed-one',
       'recover-producer',
       'dep-recovers',
+      'denied-one',
     ]) {
       await writeHandler(home, name)
     }
@@ -655,6 +664,24 @@ describe('plan ≡ what a run would attempt', () => {
         },
       },
       {
+        // A LIVE denial: the fingerprint is computed from the same three inputs
+        // `proposalFingerprint` reads — the plugin name, its declared effects,
+        // and its last output — so it still matches and the standing is `live`
+        // rather than `superseded`. `denied-one` has no `plugin_runs` row, so
+        // the output half is the empty list on both sides. Recomputed here from
+        // the real `denialFingerprint` rather than pasted as a literal: a hash
+        // frozen into a fixture stops tracking the function that produces it,
+        // and the failure mode is a silent `superseded` that reports
+        // `unapproved` and looks like the ordering broke.
+        denials: {
+          'denied-one': {
+            plugin: 'denied-one',
+            reason: 'operator declined the fixture proposal',
+            denied_at: new Date(Date.now() - 2 * DAY_MS).toISOString(),
+            note: null,
+            fingerprint: denialFingerprint('denied-one', ['sends_email'], []),
+          },
+        },
         last_interaction_at: new Date(Date.now() - 3 * DAY_MS).toISOString(),
         task_aging: [
           {
@@ -696,9 +723,14 @@ describe('plan ≡ what a run would attempt', () => {
 
     const reason = (n: string) => model.notDue.find((e) => e.plugin === n)?.reason
 
-    // Nine excluded plugins, eight distinct not-due reason codes — every arm of
+    // Ten excluded plugins, NINE distinct not-due reason codes — every arm of
     // evaluatePlugin's chain, in chain order. `failed-producer` shares
-    // `fresh-one`'s reason, which is why nine exclusions span eight codes.
+    // `fresh-one`'s reason, which is why ten exclusions span nine codes.
+    //
+    // The title says every guard and now means it. It used to span eight of the
+    // nine with `denied` absent, so a chain that dropped the denial arm
+    // altogether stayed green here — the plugin would simply have reported
+    // `unapproved` instead and no assertion asked.
     expect(reason('weekly-one')).toBe('profile_schedule')
     expect(reason('tier-blocked')).toBe('min_tier')
     expect(reason('supervised-one')).toBe('headless_supervised')
@@ -713,8 +745,13 @@ describe('plan ≡ what a run would attempt', () => {
     // what separates them — the plugin declares a side effect and holds no
     // grant, so `unapproved` is armed and waiting to be reported instead.
     expect(reason('dep-failed-one')).toBe('dependency_failed')
+    // The second ordering assertion, and it reads the same way as the one
+    // above. `denied-one` declares a side effect and holds no grant, so
+    // `unapproved` is armed behind the denial arm and waiting to be reported in
+    // its place. `denied` is what makes the ordering visible.
+    expect(reason('denied-one')).toBe('denied')
     expect(reason('gated-one')).toBe('unapproved')
-    expect(new Set(model.notDue.map((e) => e.reason)).size).toBe(8)
+    expect(new Set(model.notDue.map((e) => e.reason)).size).toBe(9)
 
     // …and the three that survived all eight did so in both surfaces. Sorted:
     // a level runs its plugins concurrently, so insertion order into the
@@ -736,6 +773,9 @@ describe('plan ≡ what a run would attempt', () => {
     // been gated on its dependency. Fixture constraint 1 holding, asserted.
     expect(attempted.has('gated-one')).toBe(false)
     expect(attempted.has('dep-failed-one')).toBe(false)
+    // Third side-effecting plugin, same agreement: the denial arm returns
+    // before `invokePlugin` in the run, and the chain blocks it in `plan`.
+    expect(attempted.has('denied-one')).toBe(false)
   })
 
   /**
