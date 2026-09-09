@@ -3,6 +3,7 @@ import { mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { invokePlugin, deriveRunStatus } from '../invoke-plugin.js'
+import { _setHome, pluginConfigPath } from '../../lib/paths.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 // Fixture plugin directories live in a tmp dir to avoid polluting .warpline/plugins/
@@ -360,6 +361,101 @@ describe('invokePlugin: a name declared in both inputs and secrets', () => {
       expect(result.result.status).toBe('success')
       expect(result.result.summary).toContain('hasOwn=false')
       expect(result.result.summary).not.toContain('your-token')
+    })
+  })
+
+  /**
+   * Excluding the name from the input record removes the required check and
+   * the default. It does NOT stop a value for that name arriving anyway: the
+   * resolver deliberately does not narrow its result to the declared inputs,
+   * because `warpline run` passes a mandatory positional no manifest declares.
+   * So a value written into the config file, or passed as an invocation
+   * argument, still lands beside the environment-resolved credential. The
+   * refusal below is what stops it, and the negative control is what proves
+   * the refusal did not take the neighbouring branch and break every run.
+   */
+  describe('and a value for that name supplied through another channel', () => {
+    beforeEach(() => {
+      // CLAUDE.md: a test writes nothing outside a temp dir, and an unrooted
+      // config path resolves under the developer's real warpline home. Scoped
+      // to this block, because the rest of this file resolves against the
+      // ambient home and must keep doing so.
+      _setHome(tmpDir)
+    })
+
+    afterEach(() => {
+      _setHome(null)
+    })
+
+    test('is refused when it is written into the config file', async () => {
+      await withOverlapCanary(async () => {
+        await writePlugin(tmpDir, 'overlap-file', OVERLAP_HANDLER, {
+          inputs: { [OVERLAP_KEY]: { type: 'string', required: true } },
+          secrets: [OVERLAP_KEY],
+        })
+        const configPath = pluginConfigPath('overlap-file')
+        await mkdir(join(configPath, '..'), { recursive: true })
+        await writeFile(configPath, JSON.stringify({ [OVERLAP_KEY]: 'from-the-config-file' }))
+
+        const result = await invokePlugin(
+          'overlap-file',
+          {},
+          { pluginsDir: tmpDir, eventsPath: EVENTS_PATH },
+          { granted: false, reason: 'manual-run' },
+        )
+
+        expect(result.result.status).toBe('failed')
+        expect(result.result.errors[0]?.code).toBe('parse_error')
+        expect(result.result.errors[0]?.message).toContain(OVERLAP_KEY)
+        expect(result.result.errors[0]?.message).not.toContain('from-the-config-file')
+        // Above the retry loop: one attempt, never max_retries + 1.
+        expect(result.attempt_count).toBe(1)
+        expect(result.retried).toBe(false)
+      })
+    })
+
+    test('is refused when it is passed as an invocation argument', async () => {
+      await withOverlapCanary(async () => {
+        await writePlugin(tmpDir, 'overlap-args', OVERLAP_HANDLER, {
+          inputs: { [OVERLAP_KEY]: { type: 'string', required: true } },
+          secrets: [OVERLAP_KEY],
+        })
+
+        const result = await invokePlugin(
+          'overlap-args',
+          { [OVERLAP_KEY]: 'from-the-command-line' },
+          { pluginsDir: tmpDir, eventsPath: EVENTS_PATH },
+          { granted: false, reason: 'manual-run' },
+        )
+
+        expect(result.result.status).toBe('failed')
+        expect(result.result.errors[0]?.code).toBe('parse_error')
+        expect(result.result.errors[0]?.message).toContain(OVERLAP_KEY)
+        expect(result.result.errors[0]?.message).not.toContain('from-the-command-line')
+        expect(result.attempt_count).toBe(1)
+        expect(result.retried).toBe(false)
+      })
+    })
+
+    test('leaves an undeclared non-secret argument alone, so a hand-run plugin still runs', async () => {
+      await withOverlapCanary(async () => {
+        await writePlugin(tmpDir, 'overlap-control', OVERLAP_HANDLER, {
+          inputs: { [OVERLAP_KEY]: { type: 'string', required: true } },
+          secrets: [OVERLAP_KEY],
+        })
+
+        // What `warpline run <plugin> default` passes. No manifest declares
+        // `action`, and refusing an undeclared key would break every one.
+        const result = await invokePlugin(
+          'overlap-control',
+          { action: 'default' },
+          { pluginsDir: tmpDir, eventsPath: EVENTS_PATH },
+          { granted: false, reason: 'manual-run' },
+        )
+
+        expect(result.result.status).toBe('success')
+        expect(result.result.summary).toContain('hasOwn=false')
+      })
     })
   })
 })
