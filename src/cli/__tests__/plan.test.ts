@@ -239,10 +239,12 @@ describe('buildPlanModel', () => {
 
     const unprofiled = await buildPlanModel(Date.now())
     expect(unprofiled.due.map((e) => e.plugin).sort()).toEqual([
-      'manual-schedule',
       'supervised-one',
       'weekly-one',
     ])
+    expect(unprofiled.notDue.find((e) => e.plugin === 'manual-schedule')?.reason).toBe(
+      'profile_schedule',
+    )
 
     const weekly = await buildPlanModel(Date.now(), 'weekly')
     expect(weekly.due.map((e) => e.plugin)).toEqual(['weekly-one'])
@@ -444,7 +446,7 @@ describe('main([plan]) end to end', () => {
     expect(weekly.code).toBe(0)
     expect(weekly.stdout).not.toBe(unprofiled.stdout)
 
-    expect(unprofiled.stdout).toContain('Due (3):')
+    expect(unprofiled.stdout).toContain('Due (2):')
     expect(weekly.stdout).toContain('Due (1):')
     expect(weekly.stdout).toContain('  weekly-one (level 0)')
     expect(weekly.stdout).toContain(

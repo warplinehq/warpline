@@ -215,20 +215,41 @@ describe('Engine profile filter', () => {
     expect(result.status).toBe('complete')
   })
 
-  test('no-profile (undefined): runs ALL plugins including manual (existing interactive behavior)', async () => {
+  test('no-profile (undefined): skips a manual schedule and runs on_run, daily and weekly', async () => {
     const result = await runAdvance({
       pluginsDir: fixture.pluginsDir,
       stateDir: fixture.statePath,
       runsDir: fixture.runsDir,
       eventsPath: fixture.eventsPath,
-      // No profile — undefined — should preserve existing behavior
+      // No profile — undefined — no schedule tier is applied
     })
 
-    // When no profile is set, all non-supervised autonomous plugins run
+    // No profile applies no tier, so the other three schedules all run. A
+    // manual schedule is the exception: it is opt-in, and an advance nobody
+    // asked for the manual profile is not that opt-in.
     expect(result.plugin_states.get('fx-onrun')).toBe('completed')
     expect(result.plugin_states.get('fx-daily')).toBe('completed')
     expect(result.plugin_states.get('fx-weekly')).toBe('completed')
+    expect(result.plugin_states.get('fx-manual')).toBe('skipped')
+  })
+
+  test('manual profile runs the manual schedule and skips the other four', async () => {
+    const result = await runAdvance({
+      pluginsDir: fixture.pluginsDir,
+      stateDir: fixture.statePath,
+      runsDir: fixture.runsDir,
+      eventsPath: fixture.eventsPath,
+      profile: 'manual',
+    })
+
+    // The shared five-plugin fixture, not a weekly-only root: the point is
+    // that the manual tier admits `manual` and nothing else, which needs a
+    // fixture carrying a manual-scheduled plugin to show.
     expect(result.plugin_states.get('fx-manual')).toBe('completed')
+    expect(result.plugin_states.get('fx-onrun')).toBe('skipped')
+    expect(result.plugin_states.get('fx-daily')).toBe('skipped')
+    expect(result.plugin_states.get('fx-weekly')).toBe('skipped')
+    expect(result.plugin_states.get('fx-supervised')).toBe('skipped')
   })
 })
 
