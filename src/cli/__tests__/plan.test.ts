@@ -245,6 +245,14 @@ describe('buildPlanModel', () => {
     expect(unprofiled.notDue.find((e) => e.plugin === 'manual-schedule')?.reason).toBe(
       'profile_schedule',
     )
+    // Whole string, `toBe` and never `toContain`. This detail is what an
+    // operator reads off the Not-due row, and a substring match is exactly
+    // what let a detail opening with the word the skip emitter already prints
+    // ship once. It also holds the wording to a profile name rather than a
+    // command-line flag, which no verb offers.
+    expect(unprofiled.notDue.find((e) => e.plugin === 'manual-schedule')?.detail).toBe(
+      "schedule 'manual': requires profile 'manual'",
+    )
 
     const weekly = await buildPlanModel(Date.now(), 'weekly')
     expect(weekly.due.map((e) => e.plugin)).toEqual(['weekly-one'])

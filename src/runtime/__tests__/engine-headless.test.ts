@@ -8,7 +8,7 @@
  *   A2:   supervised plugins are skipped (not gated) in headless/profile mode
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { runAdvance } from '../engine.js'
@@ -231,6 +231,19 @@ describe('Engine profile filter', () => {
     expect(result.plugin_states.get('fx-daily')).toBe('completed')
     expect(result.plugin_states.get('fx-weekly')).toBe('completed')
     expect(result.plugin_states.get('fx-manual')).toBe('skipped')
+
+    // The board line, whole. The gate detail is written once and read twice —
+    // here and on the plan preview's Not-due row — and both readers are
+    // people. `toBe` rather than `toContain` on purpose: a substring match is
+    // what let a detail opening with the very word this emitter already prints
+    // ship once, and it would equally let a detail name a command-line flag
+    // that no verb offers instead of the profile that admits the schedule.
+    const events = (await readFile(fixture.eventsPath, 'utf8'))
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { type: string; source: string; summary: string })
+    const skip = events.find((e) => e.type === 'plugin_result' && e.source === 'fx-manual')
+    expect(skip?.summary).toBe("fx-manual: skipped — schedule 'manual': requires profile 'manual'")
   })
 
   test('manual profile runs the manual schedule and skips the other four', async () => {
