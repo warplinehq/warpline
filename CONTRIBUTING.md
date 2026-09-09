@@ -62,6 +62,20 @@ cutting a release. A guard nobody has watched fail is not a guard.
   `src/__tests__/no-private-planning-refs.test.ts` cannot see them. Commit
   messages are the third such surface, and that test now scans them directly.
 
+**The marketplace `version` is a release artifact, not a build artifact.** Three
+files carry a version — `package.json`, `.claude-plugin/marketplace.json` and
+`plugin/.claude-plugin/plugin.json` — and only the first is what npm reads. Bump
+all three in the same commit as the tag; `scripts/assert-release-tag.sh` refuses
+the release if they disagree, and reports a missing or unreadable one as a
+failure rather than as agreement.
+
+The marketplace one earns the rule. It is what decides whether an installed user
+receives an update at all: with it set they are updated when it changes, and
+without it they track the commit SHA and take every push to `main` with no way
+back. That makes a stale version worse than an absent one, because it pins
+people to a number that stopped describing what they get. `renames` in that file
+is append-only history and is never edited in place.
+
 **A `npm deprecate` message goes through the scanner before it is sent.** It is
 published prose with no review step, so it is the one remaining surface with no
 gate of its own:

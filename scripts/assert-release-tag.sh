@@ -12,6 +12,15 @@
 #      name is absent. It exists only until the first real upload and must be
 #      deleted in the same change (see CLAUDE.md); shipping while it is still
 #      present means the repository is in a half-migrated state.
+#   3. EVERY VERSION-BEARING MANIFEST AGREES with package.json. There are two
+#      besides it, and they ship to a different place by a different route:
+#      the marketplace entry and the plugin manifest are read by Claude Code,
+#      not by npm, so a release can be correct on the registry and wrong in
+#      the marketplace with nothing to say so. The marketplace `version` is
+#      what decides whether an installed user receives an update at all —
+#      without it they track the commit SHA and take every push with no
+#      rollback — so a stale one is worse than a missing one: it pins users to
+#      a number that no longer describes what they get.
 #
 # Why this runs before every upload-adjacent step and not after: the upload is
 # irreversible. The correction path is `npm deprecate` plus a new version
@@ -62,8 +71,35 @@ if [ -d "$STUB" ]; then
   rc=1
 fi
 
+# Read with node rather than a grep, because both are JSON and the marketplace
+# one nests its version inside `plugins[]` — a line-oriented match would find
+# the wrong field the moment either file gains another. A file that is absent
+# or unparseable reports as such and fails: "could not look" is not "agrees".
+check_manifest_version() {
+  local path="$1" expr="$2" found
+  if [ ! -f "$path" ]; then
+    echo "FAIL: '${path}' is missing; it must carry a version matching package.json '${VERSION}'" >&2
+    rc=1
+    return
+  fi
+  if ! found="$(node -p "try{const v=$expr;typeof v==='string'?v:''}catch(e){''}" 2>/dev/null)" || [ -z "$found" ]; then
+    echo "FAIL: could not read a version string from '${path}'" >&2
+    rc=1
+    return
+  fi
+  if [ "$found" != "$VERSION" ]; then
+    echo "FAIL: '${path}' version '${found}' does not equal package.json version '${VERSION}'" >&2
+    rc=1
+  fi
+}
+
+check_manifest_version ".claude-plugin/marketplace.json" \
+  "require('./.claude-plugin/marketplace.json').plugins.find(p=>p.name==='warpline').version"
+check_manifest_version "plugin/.claude-plugin/plugin.json" \
+  "require('./plugin/.claude-plugin/plugin.json').version"
+
 if [ "$rc" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: tag '${TAG}' matches package.json version '${VERSION}', and '${STUB}/' is absent"
+echo "OK: tag '${TAG}' matches package.json version '${VERSION}', the marketplace and plugin manifests agree, and '${STUB}/' is absent"
