@@ -418,6 +418,13 @@ export async function invokePlugin(
     // better-fitting sentence, and the remedy the operator needs is in the
     // problem string rather than the preamble.
     //
+    // The args-side problem says "invocation argument" and not "--input". This
+    // function is exported from the root barrel and from `unstable-runtime`,
+    // and `runAdvance` reaches it with a programmatic args object, so a flag is
+    // one channel among several and naming it would assert something false
+    // about a caller that never typed one. The preamble's file name is the
+    // accepted mismatch above; a remedy the caller cannot act on is not.
+    //
     // Each problem names the key and the environment variable and never the
     // value received, which is the house rule for every problem string here.
     const refusals: string[] = []
@@ -431,7 +438,7 @@ export async function invokePlugin(
     for (const key of Object.keys(args)) {
       if (secretNames.has(key)) {
         refusals.push(
-          `'${key}' is a declared secret; drop the --input and set the ${key} environment variable instead`,
+          `'${key}' is a declared secret and cannot be passed as an invocation argument; set the ${key} environment variable instead`,
         )
       }
     }
