@@ -195,6 +195,13 @@ widest one available and is still not a route to a manual plugin. The skip is
 reported like any other, naming the schedule and the profile that would admit
 it.
 
+This exclusion is a change, not a rule that always held. Earlier releases ran a
+`manual` schedule on an unprofiled advance. They no longer do, and the change is
+quiet where it lands: the advance still reports `complete`, the plugin is
+recorded `skipped` with a `profile_schedule` reason, and nothing about the run
+reads as wrong. A host whose only invocation path is an unprofiled `runAdvance`
+should read that list once and ask for the `manual` profile where it meant to.
+
 This is a different question from `autonomy_level`, which is a separate gate.
 `schedule` decides whether the plugin is considered; `autonomy_level` decides
 whether it may proceed once it has been. A plugin may declare
