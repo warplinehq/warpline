@@ -36,7 +36,7 @@ import { emitAttemptFailed } from '../board/engine-events.js'
 import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
 import { resolveSecrets, scrubSecrets } from './secrets.js'
 import { mintContext } from './capabilities.js'
-import type { CapabilityContext, CapabilityGrantWitness } from './capabilities.js'
+import type { CapabilityContext, CapabilityGrantWitness, DependencyRun } from './capabilities.js'
 
 /**
  * Resolve the default plugins directory via canonical paths.ts.
@@ -167,6 +167,18 @@ export interface InvokePluginOptions {
   runsDir?: string
   /** Override events.jsonl path for retry notices — same leak class as runsDir. */
   eventsPath?: string
+  /** What this plugin's declared dependencies last produced and how their last
+   *  runs ended, already resolved by the caller. Optional, like every field
+   *  here: the manual CLI path reads no runtime state and omits it, and a
+   *  caller that omits it hands its handler a member that reads `null` for
+   *  every declared name rather than no member.
+   *
+   *  Renamed from `dependencyOutputs` when the second fact landed, rather than
+   *  gaining a sibling: two projections of a map the engine mutates during its
+   *  level loop can disagree about which run they describe. This field rides
+   *  `warpline/unstable-runtime`, whose specifier promises nothing about any
+   *  name behind it, which is what makes renaming it the available choice. */
+  dependencyRuns?: Readonly<Record<string, DependencyRun | null>>
 }
 
 /**
@@ -198,7 +210,7 @@ function isHandoff(result: SkillResult | null): boolean {
  * `delegated` (2026-08-19): a `skipped` result whose summary carries the
  * `[needs-llm]` prefix is a successful HANDOFF to an LLM skill, not a failure.
  * It previously mapped to `failed`, which painted a red badge on /plugins and
- * made anomaly-watch treat every content-atomiser dispatch as critical.
+ * made a watcher treat every handoff a delegating plugin made as critical.
  * A plain non-needs-llm `skipped` still maps to `failed` — no persisted-run
  * path produces one today; widen deliberately if one appears.
  */
@@ -350,8 +362,96 @@ export async function invokePlugin(
   try {
     const fileConfig = await loadPluginConfig(configPath)
     // `?? {}` because a manifest that bypassed zod parse has no `inputs` at
-    // all — the same tolerance the retry-loop defaults below rely on.
-    const resolution = resolvePluginArgs(manifest.inputs ?? {}, fileConfig, args)
+    // all — the same tolerance the retry-loop defaults below rely on, and
+    // `?? []` on `secrets` for exactly the same reason.
+    const declared = manifest.inputs ?? {}
+    const secretNames = new Set(manifest.secrets ?? [])
+
+    // A declared credential's single home is the environment. So a name
+    // appearing in both records is the credential on the `secrets` side and
+    // documentation on the `inputs` side: the required check and the default
+    // both belong to the declaration that resolves it, which is the credential
+    // pre-flight below, not this merge.
+    //
+    // The record itself is filtered, not the merge it produces, and that is
+    // the whole mechanism. `declaredDefaults` iterates exactly this record, so
+    // removing the name here is what structurally stops a manifest placeholder
+    // standing in for a credential — a run that succeeds on a placeholder is
+    // silent at every sink downstream. Filtering the merged result instead
+    // would leave that placeholder in place for whatever read it first.
+    //
+    // Here, and not inside the shared resolver: that function ships as
+    // `warpline/schemas/*`, so its signature is a compatibility surface, and
+    // the other caller that needs this exclusion already performs it for
+    // itself. This call site was the one that did not.
+    //
+    // Null prototype when a filtered copy is built, and assigned into rather
+    // than spread — a spread re-attaches Object.prototype to the result. A
+    // manifest declaring no secrets passes its own record through untouched.
+    let resolverInputs = declared
+    if (secretNames.size > 0) {
+      const filtered: typeof declared = Object.create(null) as typeof declared
+      for (const [key, input] of Object.entries(declared)) {
+        if (!secretNames.has(key)) filtered[key] = input
+      }
+      resolverInputs = filtered
+    }
+
+    // Filtering the record above removes the required check and the default.
+    // It does not stop a value for that name arriving anyway: the resolver
+    // deliberately does not narrow its result to the declared inputs — a run
+    // started by hand passes a mandatory positional no manifest declares — so
+    // a key sitting in the config file or in the caller's args still lands in
+    // the merge, next to the credential resolved from the environment. This
+    // refusal is what stops it, and it sits above the retry loop with
+    // everything else that can refuse, so an invalid config fails once.
+    //
+    // Only the declared-secret branch is taken from the configure-side loop.
+    // Its undeclared-key branch does not transfer: the positional above is
+    // undeclared by every manifest and legal here by design, and copying that
+    // branch would refuse every hand-started run in the product.
+    //
+    // The problems join the resolver's own arm rather than returning through a
+    // second one. For a key found in the caller's args the shared preamble
+    // names a file the operator did not edit — accepted deliberately, because
+    // one refusal above the retry loop is worth more than a second arm with a
+    // better-fitting sentence, and the remedy the operator needs is in the
+    // problem string rather than the preamble.
+    //
+    // The args-side problem says "invocation argument" and not "--input". This
+    // function is exported from the root barrel and from `unstable-runtime`,
+    // and `runAdvance` reaches it with a programmatic args object, so a flag is
+    // one channel among several and naming it would assert something false
+    // about a caller that never typed one. The preamble's file name is the
+    // accepted mismatch above; a remedy the caller cannot act on is not.
+    //
+    // Each problem names the key and the environment variable and never the
+    // value received, which is the house rule for every problem string here.
+    const refusals: string[] = []
+    for (const key of Object.keys(fileConfig)) {
+      if (secretNames.has(key)) {
+        refusals.push(
+          `'${key}' is a declared secret; remove it from this file and set the ${key} environment variable instead`,
+        )
+      }
+    }
+    for (const key of Object.keys(args)) {
+      if (secretNames.has(key)) {
+        refusals.push(
+          `'${key}' is a declared secret and cannot be passed as an invocation argument; set the ${key} environment variable instead`,
+        )
+      }
+    }
+
+    // Concatenated, not short-circuited: the resolver still runs, so a
+    // misplaced credential and a missing required input in the same file are
+    // reported together rather than one round-trip at a time. Safe because the
+    // secret name was excluded from `resolverInputs` above, so the resolver has
+    // nothing to say about it and cannot double-report it; the merged `args` it
+    // builds are discarded on this arm anyway.
+    const resolved = resolvePluginArgs(resolverInputs, fileConfig, args)
+    const problems = [...refusals, ...(resolved.ok ? [] : resolved.problems)]
+    const resolution = problems.length > 0 ? { ok: false as const, problems } : resolved
     if (!resolution.ok) {
       return oneAttemptFailure(
         pluginName,
@@ -429,6 +529,7 @@ export async function invokePlugin(
       manifest,
       caller: { plugin: pluginName, runId },
       resolvedSecretNames: Object.keys(secrets.values),
+      dependencyRuns: options.dependencyRuns,
     },
     witness,
   )

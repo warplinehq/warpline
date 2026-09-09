@@ -171,6 +171,17 @@ export const PluginRunSchema = z.object({
    * at 30 days by mtime. That is a dangling pointer by design: it resolves to
    * not-retained, and deleting the pointer to avoid the case would throw away
    * the only record that the Output existed.
+   *
+   * The same argument covers a case it was not written for: a later run of the
+   * same plugin that produced NO Output. That run has said nothing about what
+   * the plugin produced — this field is a fact about the plugin, not about its
+   * last run — so dropping the key would again throw away the only record that
+   * the Output existed, and this time on the ordinary path rather than after 30
+   * days. The engine therefore carries the prior Output forward at every write,
+   * keyed on the run producing nothing and never on how the run ended: a throw,
+   * a returned `failed`, and a success with an empty `artifacts_produced` are
+   * one case. Preserving on only some of them would make this field mean a
+   * fourth thing the sentence above does not say.
    */
   last_output: OutputRecordSchema.optional(),
 })

@@ -27,27 +27,48 @@
  * run time. Each name is used in a position where a wrong or absent type is a
  * compile error, and that IS the check.
  */
+import type { HandlerFn } from 'warpline'
+import type { OutputRecord } from 'warpline/schemas/skill-result'
 import type {
   CapabilityCaller,
   CapabilityContext,
   CapabilityGrantWitness,
   CapabilityHandlerFn,
+  DependenciesHandle,
   SecretsHandle,
 } from 'warpline/unstable-capabilities'
 
 /**
- * The object a handler is handed. The two named keys are what an author can
+ * The object a handler is handed. The three named keys are what an author can
  * reach without a cast, and writing them out is what pins them: an empty
  * literal no longer satisfies this type, which is the point — a context
- * missing `secrets` or `caller` is one production cannot produce.
+ * missing `secrets`, `dependencies` or `caller` is one production cannot
+ * produce.
  */
 const _caller: CapabilityCaller = { plugin: 'some-plugin', runId: 'some-run' }
 const _handle: SecretsHandle = { resolvedNames: (_c: CapabilityCaller) => ['SOME_TOKEN'] }
-const context: CapabilityContext = { caller: _caller, secrets: _handle }
+const _depsHandle: DependenciesHandle = {
+  lastOutput: (_c: CapabilityCaller, _d: string) => null,
+  lastRun: (_c: CapabilityCaller, _d: string) => null,
+}
+const context: CapabilityContext = {
+  caller: _caller,
+  secrets: _handle,
+  dependencies: _depsHandle,
+}
 const _members: readonly string[] = Object.keys(context)
 
 /** The caller argument, supplied the way a plugin author would supply it. */
 const _names: readonly string[] = context.secrets.resolvedNames(context.caller)
+
+/**
+ * The dependency read, written the way a plugin author would write it: through
+ * the bare published specifier, with the caller passed and the return narrowed.
+ * A handler cannot name what it gets back without `OutputRecord`, which the
+ * already-published `warpline/schemas/*` subpath carries.
+ */
+const _record: OutputRecord | null = context.dependencies.lastOutput(context.caller, 'upstream')
+const _body: string | undefined = _record === null ? undefined : _record.body
 
 /**
  * Both arms of the witness, written out. A union narrowed to one arm would
@@ -77,6 +98,40 @@ export type {
   CapabilityContext,
   CapabilityGrantWitness,
   CapabilityHandlerFn,
+  DependenciesHandle,
   SecretsHandle,
 }
-export { context, _caller, _handle, _members, _names, _granted, _manual, _ungated, _handler }
+/**
+ * The root barrel's `HandlerFn`, reached through the bare `warpline` specifier.
+ * A type leaves no trace in `dist/index.js`, so the tarball probe cannot see
+ * this export; this is the one check that takes the path a consumer takes.
+ * The second line is the widening the authoring guide promises: a
+ * three-parameter handler is assignable to the four-parameter type, so a plugin
+ * written before the fourth parameter existed keeps type-checking.
+ */
+const _three: HandlerFn = async (manifest, _args, _signal) => ({
+  status: 'success',
+  phases_completed: [manifest.name],
+  phases_failed: [],
+  data_freshness: {},
+  summary: 'three parameters',
+})
+const _widened: CapabilityHandlerFn = _three
+
+export type { HandlerFn }
+export {
+  context,
+  _caller,
+  _handle,
+  _depsHandle,
+  _record,
+  _body,
+  _members,
+  _names,
+  _granted,
+  _manual,
+  _ungated,
+  _handler,
+  _three,
+  _widened,
+}

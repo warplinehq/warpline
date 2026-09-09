@@ -6,14 +6,13 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * The side-effect half of the anomaly chain: one GitHub issue per anomaly
  * `anomaly-watch` reports, never the same anomaly twice.
  *
- * Where the input comes from: `anomaly-watch` returns `anomalies` in its
- * result and writes nothing. A host that chains the two drops that array at
- * `<home>/state/anomalies.json` — the same convention the feed chain uses
- * for `feed-entries.json`. This plugin reads that file.
- *
  * What `dependencies: ['anomaly-watch']` buys: level ordering (this plugin
- * runs at level 1, after anomaly-watch) AND a re-run whenever anomaly-watch
- * ran more recently than this plugin did — even inside the TTL window.
+ * runs at level 1, after anomaly-watch), a re-run whenever anomaly-watch ran
+ * more recently than this plugin did — even inside the TTL window — AND the
+ * read itself. The declaration is what the `dependencies` capability member
+ * keys off: `capabilities.dependencies.lastOutput(caller, 'anomaly-watch')`
+ * returns the Output that plugin last produced, and a name this list does not
+ * carry throws rather than reading as a dependency that has not run.
  *
  * The order of the gates, plainly: the declared side effects gate execution
  * BEFORE the handler runs — unapproved, the plugin is skipped and the run
@@ -41,11 +40,6 @@ export const manifest = PluginManifestSchema.parse({
   dependencies: ['anomaly-watch'],
   inputs: {
     repo: { type: 'string', required: true, description: 'owner/name, e.g. oven-sh/bun' },
-    anomalies_path: {
-      type: 'string',
-      required: false,
-      description: 'Path to an anomalies JSON file; when absent, the handler computes it from the warpline home, as state/anomalies.json',
-    },
   },
   outputs: {
     issues_created: { type: 'number', description: 'Issues filed this run' },

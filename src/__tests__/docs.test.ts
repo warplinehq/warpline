@@ -135,6 +135,27 @@ describe('CLI surface', () => {
     // The sentence is the claim; the count inside it is what goes stale.
     expect(readme).toContain(`Those ${WORD_FOR[n] ?? n} subcommands are the whole CLI surface`)
   })
+
+  /**
+   * `scaffold --from` and `init` copy the whole example directory, test file
+   * included — a recorded choice, pinned by scaffold.test.ts. The consequence
+   * is not enforced anywhere: nothing in warpline loads the copied test, the
+   * default `.warpline/` is a dot-directory `bun test` does not descend into,
+   * but a home placed as a plain directory inside a project is on that
+   * project's discovery path. So the README and the scaffold docstring both
+   * have to say it, and this pins that they do.
+   */
+  test('the README and the scaffold docstring say the copied example carries its test file and where bun test finds it', () => {
+    const readme = read('README.md')
+    const from = readme.slice(readme.indexOf('--from <example>` copies'))
+    expect(from).toContain('`handler.test.ts`')
+    expect(from).toContain('`bun test`')
+    expect(from).toContain('WARPLINE_HOME=./warpline-home')
+    const scaffold = read('src/cli/scaffold.ts')
+    const section = scaffold.slice(scaffold.indexOf('## `--from` is a copy'), scaffold.indexOf('## Why the generated imports'))
+    expect(section).toContain('`handler.test.ts`')
+    expect(section).toContain('`bun test`')
+  })
 })
 
 // ── Documented commands must exist ───────────────────────────────────────
@@ -1179,21 +1200,44 @@ describe('hand-written manifest prose', () => {
 
   // Two dispositions from the 09 verification live only in this section's
   // prose. The first is the single carve-out from the never-echo rule above it
-  // — delete the paragraph and the rule reads as absolute again while
-  // `feed-triage` keeps violating it. The second is an operator instruction the
-  // runtime cannot enforce, because warpline never writes that file: nothing in
-  // this codebase can be asserted against it, so the sentence itself is the
-  // only artifact there is to pin.
-  test('plugin-authoring carries the handoff carve-out and the atomic-write instruction', () => {
+  // — delete the paragraph and the rule reads as absolute again, while a
+  // handoff still has to name a path; `feed-triage` is the worked case, and
+  // the path it names is a copy it wrote under the home, never the configured
+  // value. The second is the hand-edit instruction. `warpline configure` is
+  // the supported writer of that file and the guide has to say so — for one
+  // phase it said the opposite, that nothing writes it, and this test held
+  // that sentence in place — but an operator who edits by hand is outside
+  // anything the runtime can enforce, so the rename instruction is the only
+  // artifact there is to pin for that path.
+  test('plugin-authoring carries the handoff carve-out, names configure as the writer, and keeps the atomic-write instruction', () => {
     const doc = read('docs/plugin-authoring.md')
     expect(doc).toContain('Two exceptions, each one field wide')
     expect(doc).toContain('undo_instruction')
     expect(doc).toContain('anomaly-issue')
     expect(doc).toContain('needs-llm-contract.md')
     expect(doc).toContain('feed-triage')
+    expect(doc).toContain('warpline configure <plugin>')
     expect(doc).toContain('rename it over the target')
-    expect(doc).toContain('never writes it')
+    expect(doc).not.toContain('never writes it')
+    expect(doc).not.toMatch(/There is no `warpline config\s+set` command/)
     expect(doc).not.toContain('plugin-config.json')
+  })
+
+  // The prior-state paragraph once told authors to name that file "through
+  // your config file", the opposite of what every shipped example does and
+  // of what derive-dont-store.md argues: the path is derived from the
+  // manifest name and never from an input, so nothing an operator configures
+  // can point it somewhere else. Two documents in one tarball must not give
+  // opposite advice on the same question.
+  test('plugin-authoring tells authors to derive the prior-state path from the manifest name, and points at derive-dont-store', () => {
+    const doc = read('docs/plugin-authoring.md')
+    const paragraph = doc.slice(doc.indexOf('**There is no snapshot store'))
+    expect(paragraph).toContain('<home>/state/')
+    expect(paragraph).toMatch(/derived\s+from your manifest's name/)
+    expect(paragraph).toMatch(/never\s+from an input/)
+    expect(paragraph).toContain('anomaly-watch')
+    expect(paragraph).toContain('derive-dont-store.md')
+    expect(doc).not.toMatch(/named through your\s+config/)
   })
 })
 

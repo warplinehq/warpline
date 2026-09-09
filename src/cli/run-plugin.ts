@@ -42,8 +42,13 @@ import * as util from 'node:util'
 import { invokePlugin } from '../runtime/invoke-plugin.js'
 
 const USAGE =
-  'Usage: warpline run <plugin-name> <action-key> [--retries=N] [--json]'
+  'Usage: warpline run <plugin-name> <action-key> [--retries=N] [--json] [--input key=value]...\n' +
+  '  --input is repeatable. Values are passed through as strings and validated\n' +
+  '  against the declared input type; a non-string input takes its value from\n' +
+  '  the config file or the manifest default.'
 const RETRIES_ERROR = 'Invalid --retries value; expected integer in [0, 10]'
+const INPUT_ERROR = 'Invalid --input value; expected key=value'
+const INPUT_KEY_ERROR = 'Invalid --input key; a key may not be an Object.prototype member'
 
 /**
  * The stdout contract. Key ORDER is part of it, so build this only
@@ -121,12 +126,16 @@ export async function runPlugin(
   argv: string[],
   signal?: AbortSignal,
 ): Promise<RunPluginOutcome> {
-  let values: { retries?: string; json?: boolean }
+  let values: { retries?: string; json?: boolean; input?: string[] }
   let positionals: string[]
   try {
     const parsed = util.parseArgs({
       args: argv,
-      options: { retries: { type: 'string' }, json: { type: 'boolean' } },
+      options: {
+        retries: { type: 'string' },
+        json: { type: 'boolean' },
+        input: { type: 'string', multiple: true },
+      },
       allowPositionals: true,
       strict: true,
     })
@@ -145,6 +154,40 @@ export async function runPlugin(
     retriesOverride = retries
   }
 
+  // `--input key=value`, split on the FIRST `=` so a value may carry one.
+  //
+  // Values are STRINGS and stay strings. This file holds no manifest at parse
+  // time (invokePlugin loads it), and the resolver validates a value against
+  // the declared type without converting it, so `--input n=90` against a
+  // number input fails there with the resolver's own problem string. That
+  // loud failure is the ceiling, stated in USAGE and the authoring guide. The
+  // escape hatch, if it is ever wanted, is loading the manifest here and
+  // converting against `input.type` at this boundary — never inside the
+  // shared schema module, which would change the config-file tier too.
+  //
+  // A key is refused on the predicate the config file's key schema applies,
+  // `key in Object.prototype`: derived from the prototype, so it cannot go
+  // stale against a list. The predicate and not the schema, because the
+  // resolver never checks caller keys (its schema guards the file tier only)
+  // and the schema's record parser skips a `__proto__` key before the key
+  // rule sees it — a safe drop for a file, a silent one for a typed flag.
+  // A null prototype on the record, so a key that does get through lands as
+  // an own property and never as a prototype assignment. Both messages name
+  // the flag and the shape expected of it, never the key or the value
+  // received, because a usage error can land in a run log.
+  //
+  // Accepted cost: text on a command line reaches shell history and process
+  // listings. A path-based channel resolved under the home is the deferred
+  // alternative and is not built here.
+  const inputs: Record<string, unknown> = Object.create(null)
+  for (const pair of values.input ?? []) {
+    const eq = pair.indexOf('=')
+    if (eq < 1) return usage(INPUT_ERROR)
+    const key = pair.slice(0, eq)
+    if (key in Object.prototype) return usage(INPUT_KEY_ERROR)
+    inputs[key] = pair.slice(eq + 1)
+  }
+
   const [plugin, action] = positionals
   if (!plugin || !action) return usage(USAGE)
 
@@ -157,9 +200,14 @@ export async function runPlugin(
     //
     // Behaviour is unchanged. A manual run of a plugin declaring no side
     // effects gets exactly what it got before.
+    //
+    // The pairs merge under `action`, so the positional wins: the guide says
+    // the name is taken by what the operator typed, and `--input action=...`
+    // does not get to contradict it. `Object.assign` onto a null prototype,
+    // as the resolver does, rather than a spread that would re-attach one.
     const invocation = await invokePlugin(
       plugin,
-      { action },
+      Object.assign(Object.create(null) as Record<string, unknown>, inputs, { action }),
       {
         signal,
         maxRetriesOverride: retriesOverride,

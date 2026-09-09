@@ -3,10 +3,13 @@
 # Verify the packaged artifact end to end, from a checkout, before publish.
 #
 # Packs the tarball, installs it into a throwaway --prefix (never the real
-# global root), and asserts the six things a checkout cannot prove:
+# global root), and asserts the seven things a checkout cannot prove:
 #
 #   1. the `files` whitelist shipped no source, tests or planning artifacts
-#   2. `warpline --help` runs under Node with the tarball's bytes
+#   2. `warpline --help` runs under Node with the tarball's bytes, and
+#      `warpline init` runs BOTH its branches from the installed bin — piped
+#      (the declared defaults, idempotent) and the in-process walk with an
+#      injected terminal — each in its own scratch home
 #   3. the `exports` map resolves every published specifier — under Node AND
 #      Bun — exposes exactly one path accessor, ships no filesystem helper and
 #      no removed field behind `schemas/run-log`, exposes exactly the decided
@@ -21,6 +24,9 @@
 #      `<warplineHome>/node_modules/warpline` symlink into the install
 #   6. Node can import BOTH generated files for real — the assertion that
 #      fails with ERR_MODULE_NOT_FOUND without that symlink
+#   7. EVERY shipped example, copied out of the install by `scaffold --from`,
+#      imports under Node — iterated over the shipped tree, never a roster,
+#      with a vacuity guard against a `files` entry that stopped shipping them
 #
 # Checks 5 and 6 are the whole reason this script exists rather than a test:
 # the scaffold defects do not reproduce from a checkout, where warpline's own
@@ -45,10 +51,12 @@ cd "$REPO_ROOT"
 PREFIX="$(mktemp -d)"
 CONSUMER="$(mktemp -d)"
 WL_HOME="$(mktemp -d)"
+INIT_HOME="$(mktemp -d)"
+INIT_HOME_TTY="$(mktemp -d)"
 TARBALL=""
 
 cleanup() {
-  rm -rf "$PREFIX" "$CONSUMER" "$WL_HOME"
+  rm -rf "$PREFIX" "$CONSUMER" "$WL_HOME" "$INIT_HOME" "$INIT_HOME_TTY"
   [ -n "$TARBALL" ] && rm -f "$REPO_ROOT/$TARBALL"
   return 0
 }
@@ -85,7 +93,7 @@ BIN="$PREFIX/bin/warpline"
 [ -x "$BIN" ] || fail "$BIN is not executable"
 
 HELP_OUT="$("$BIN" --help)" || fail "warpline --help exited non-zero"
-for cmd in plan scaffold run approve revoke; do
+for cmd in plan scaffold run approve deny revoke init configure; do
   echo "$HELP_OUT" | grep -qE "^  $cmd " || fail "--help does not list '$cmd'"
 done
 
@@ -94,6 +102,63 @@ BOGUS_OUT="$("$BIN" bogus 2>"$CONSUMER/bogus.err")" && fail "warpline bogus exit
 [ -z "$BOGUS_OUT" ] || fail "warpline bogus wrote to stdout: $BOGUS_OUT"
 grep -q 'Unknown command' "$CONSUMER/bogus.err" \
   || fail "warpline bogus wrote no error to stderr"
+
+# ── 2b. The first-run verb, both branches, from the installed bin ────────
+#
+# `init` asks for the seed's declared inputs on a terminal and writes the
+# declared defaults when stdin is not one. Both branches run here from the
+# packed bytes under Node, each in its OWN scratch home and never in WL_HOME:
+# section 5 asserts that `scaffold demo` is what created the
+# node_modules/warpline link there, and an init that ran first through the
+# same home preparation would make that assertion vacuous.
+
+echo "== init from the install, stdin not a terminal"
+INIT_CFG="$INIT_HOME/config/metrics-rollup.json"
+INIT_OUT="$(WARPLINE_HOME="$INIT_HOME" "$BIN" init </dev/null)" \
+  || fail "warpline init </dev/null exited non-zero"
+[ -f "$INIT_CFG" ] || fail "$INIT_CFG was not written by a piped init"
+grep -qF '"retention_days": 90' "$INIT_CFG" \
+  || fail "piped init did not write the declared default:"$'\n'"$(cat "$INIT_CFG")"
+if echo "$INIT_OUT" | grep -qF 'metrics_path>'; then
+  fail "piped init wrote a prompt to a stdin that is not a terminal: $INIT_OUT"
+fi
+echo "$INIT_OUT" | grep -qF 'Next: warpline plan' \
+  || fail "piped init did not print the next step: $INIT_OUT"
+
+# A second run from the same bytes leaves the file byte-identical.
+cp "$INIT_CFG" "$CONSUMER/init-first.json"
+WARPLINE_HOME="$INIT_HOME" "$BIN" init </dev/null >/dev/null \
+  || fail "a second piped init exited non-zero"
+cmp -s "$INIT_CFG" "$CONSUMER/init-first.json" \
+  || fail "a second piped init changed $INIT_CFG"
+
+# The walk, in-process under Node with injected streams: an input flagged as a
+# terminal carrying an empty line (metrics_path, optional and undefaulted, so
+# left out) and then `30` (retention_days, parsed as a number by the walk).
+# Nothing here launches a child process and pipes answers into it — that is
+# the path the reader module records as unreliable. The subpath is not on the
+# exports map, so the installed file is imported by absolute path; the
+# delimiter is unquoted so the prefix interpolates, and the JS carries no `$`.
+INIT_JS="$PREFIX/lib/node_modules/warpline/dist/cli/init.js"
+[ -f "$INIT_JS" ] || fail "$INIT_JS is not in the install"
+cat > "$CONSUMER/init-walk.mjs" <<INITWALK
+import { Readable, Writable } from 'node:stream'
+const { run } = await import('${INIT_JS}')
+const input = Object.assign(Readable.from(['\n', '30\n']), { isTTY: true })
+const output = new Writable({ write(_chunk, _enc, cb) { cb() } })
+process.exit(await run([], { input, output }))
+INITWALK
+
+echo "== init from the install, the walk under node"
+INIT_TTY_CFG="$INIT_HOME_TTY/config/metrics-rollup.json"
+WARPLINE_HOME="$INIT_HOME_TTY" node "$CONSUMER/init-walk.mjs" >/dev/null \
+  || fail "the in-process init walk under node exited non-zero"
+[ -f "$INIT_TTY_CFG" ] || fail "$INIT_TTY_CFG was not written by the walk"
+grep -qF '"retention_days": 30' "$INIT_TTY_CFG" \
+  || fail "the walk did not write the typed answer as a number:"$'\n'"$(cat "$INIT_TTY_CFG")"
+if grep -qF 'metrics_path' "$INIT_TTY_CFG"; then
+  fail "an empty answer for an optional, undefaulted input was written:"$'\n'"$(cat "$INIT_TTY_CFG")"
+fi
 
 # ── 3. The exports map, from a consumer that only sees the install ───────
 #
@@ -357,16 +422,20 @@ for (const name of ['atomicWriteJson', 'atomicWriteText', 'readJsonOrNull']) {
 
 // `warpline/unstable-result` is the third deliberately-unstable subpath, and it
 // inherits the same paragraph in docs/runtime-spec.md rather than inventing its
-// own promise. Exact set, same reason: the barrel re-exports from two runtime
-// modules, either of which may grow a helper that has no business being public.
+// own promise. Exact set, same reason: the barrel re-exports from one runtime
+// module, which may grow a helper that has no business being public.
 //
-// One entry rather than two, because the reader returns an `OutputRecord` — the
-// same schema family the builders construct — so producing a result and reading
-// one are two halves of one subject. The literal below and
+// The result builders, and nothing beside them. A reader for a declared
+// dependency's Output was published here and removed: the runtime never handed
+// a handler the `EngineState` it took, so calling it meant a plugin loading the
+// state document itself — a second source of truth that can disagree with the
+// first, since run-log pruning applies by mtime to the runs directory and not
+// to the state document. The `dependencies` capability member replaced it on
+// the handler's fourth parameter. The literal below and
 // `src/unstable-result.ts` are edited together, or this reddens.
 const unstableResult = await import('warpline/unstable-result')
 
-const UNSTABLE_RESULT_EXPECTED = 'readDependencyOutput,skillFailure,skillHandoff,skillOk'
+const UNSTABLE_RESULT_EXPECTED = 'skillFailure,skillHandoff,skillOk'
 
 const unstableResultExports = Object.keys(unstableResult).filter((k) => k !== 'default').sort().join(',')
 console.log('   warpline/unstable-result exports: ' + unstableResultExports)
@@ -384,7 +453,7 @@ if (resultNeverReachable.length) {
   process.exit(1)
 }
 
-for (const name of ['readDependencyOutput', 'skillFailure', 'skillHandoff', 'skillOk']) {
+for (const name of ['skillFailure', 'skillHandoff', 'skillOk']) {
   if (typeof unstableResult[name] !== 'function') {
     console.error('warpline/unstable-result: ' + name + ' is not callable')
     process.exit(1)
@@ -632,4 +701,61 @@ for f in manifest handler; do
   " || fail "node could not import the generated $f.ts"
 done
 
-echo "OK: $TARBALL installs, runs and scaffolds a working plugin under Node alone"
+# ── 7. Every shipped example loads under Node from OUTSIDE the install ───
+#
+# The examples ship as `.ts` under node_modules/warpline/examples/plugins/,
+# and Node refuses type stripping under a node_modules directory (the
+# section-3 comment), so they cannot be loaded where they ship. An adopter
+# loads one from a copy, which is what `scaffold --from` makes: the copy lands
+# under the home whose symlink and ESM marker check 5 just proved, so this
+# check reuses that home and drives the copy through the installed bin. That
+# exercises the flag on the shipped artifact as well, and the rewritten
+# manifest name is what Node reads back.
+#
+# Why this cannot be the in-tree examples shard: from a checkout every
+# `warpline/*` specifier resolves, so a `files` regression or an unexported
+# subpath is invisible there. Only the packed bytes can show it.
+#
+# Iterated over the shipped tree, never a hardcoded roster, so an example
+# added later is covered on the day it lands. The vacuity guard compares the
+# count against the checkout's own examples/plugins, so a truncated `files`
+# entry reddens here instead of passing by finding nothing. Under node, never
+# Bun: Bun remaps `.ts` specifiers and assumes ESM, which hides exactly the
+# divergences checks 5 and 6 exist to catch.
+
+echo "== every shipped example loads under node from outside the install"
+SHIPPED_EXAMPLES="$PREFIX/lib/node_modules/warpline/examples/plugins"
+[ -d "$SHIPPED_EXAMPLES" ] || fail "the install ships no examples/plugins directory"
+SHIPPED_COUNT="$(find "$SHIPPED_EXAMPLES" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+REPO_COUNT="$(find "$REPO_ROOT/examples/plugins" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+[ "$SHIPPED_COUNT" -gt 0 ] || fail "the install ships zero example directories"
+[ "$SHIPPED_COUNT" -ge "$REPO_COUNT" ] \
+  || fail "the install ships $SHIPPED_COUNT example directories; the checkout holds $REPO_COUNT"
+
+for dir in "$SHIPPED_EXAMPLES"/*/; do
+  name="$(basename "$dir")"
+  copy="$name-copy"
+  WARPLINE_HOME="$WL_HOME" "$BIN" scaffold "$copy" --from "$name" >/dev/null \
+    || fail "warpline scaffold $copy --from $name exited non-zero"
+  COPY_DIR="$WL_HOME/plugins/$copy"
+  [ -f "$COPY_DIR/handler.ts" ] || fail "scaffold --from $name wrote no handler.ts"
+  [ -f "$COPY_DIR/manifest.ts" ] || fail "scaffold --from $name wrote no manifest.ts"
+  # Failure output names the example and, through Node's own message, the
+  # specifier that did not resolve; the only path it can carry is under the
+  # temp home.
+  node -e "
+    import('$COPY_DIR/handler.ts')
+      .then((m) => {
+        if (typeof m.handler !== 'function') { console.error('   $name: handler.ts exports no handler function'); process.exit(1) }
+        return import('$COPY_DIR/manifest.ts')
+      })
+      .then((m) => {
+        if (m.manifest.name !== '$copy') { console.error('   $name: copied manifest is named ' + m.manifest.name + ', expected $copy'); process.exit(1) }
+        console.log('   $name: handler.ts and manifest.ts import under node from outside the install')
+      })
+      .catch((err) => { console.error('   $name: ' + (err.code || '') + ' ' + err.message); process.exit(1) })
+  " || fail "shipped example $name did not load under node from outside the install"
+done
+echo "   $SHIPPED_COUNT shipped examples copied out and loaded"
+
+echo "OK: $TARBALL installs, runs and scaffolds a working plugin under Node alone, and every shipped example loads from outside the install"

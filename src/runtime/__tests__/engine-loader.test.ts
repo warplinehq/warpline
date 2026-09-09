@@ -207,7 +207,6 @@ describe('loadPluginManifests — per-plugin load failures', () => {
 function makeCtx(overrides: Partial<EvalContext> = {}): EvalContext {
   return {
     currentTier: 'normal',
-    headless: false,
     force: false,
     state: defaultEngineState(),
     approvalPath: join(root, 'no-such-approval'),
@@ -227,10 +226,7 @@ async function listTree(dir: string): Promise<string[]> {
 describe('evaluatePlugin — pure, clock-injected due-ness', () => {
   test('Test 1: a schedule outside the profile tier is not due', async () => {
     const manifest = makeManifest('fx-weekly', { schedule: 'weekly' })
-    const ctx = makeCtx({
-      profile: 'daily',
-      allowedSchedules: new Set(['on_run', 'daily']),
-    })
+    const ctx = makeCtx({ profile: 'daily' })
 
     const result = await evaluatePlugin('fx-weekly', manifest, ctx, Date.now())
 
@@ -249,10 +245,13 @@ describe('evaluatePlugin — pure, clock-injected due-ness', () => {
   })
 
   test('Test 3: headless bypasses supervised; manual is never due', async () => {
+    // Headless is "a profile was requested", so the profile is what makes it
+    // headless here. `daily` admits the fixture's `on_run` schedule, so the
+    // tier gate above lets the plugin through to the one under test.
     const supervised = await evaluatePlugin(
       'fx-supervised',
       makeManifest('fx-supervised', { autonomy_level: 'supervised' }),
-      makeCtx({ headless: true }),
+      makeCtx({ profile: 'daily' }),
       Date.now(),
     )
     expect(supervised.due === false && supervised.reason).toBe('headless_supervised')
@@ -386,10 +385,8 @@ describe('evaluatePlugin agrees with the run it was extracted from', () => {
     // the just-run plugins as fresh and the two sets would diverge by design.
     const preState = await readEngineState(statePath)
     const ctx: EvalContext = {
-      allowedSchedules: new Set(['on_run', 'daily']),
       profile: 'daily',
       currentTier: computeTier(preState.last_interaction_at),
-      headless: true,
       force: false,
       state: preState,
       approvalPath: join(root, 'no-such-approval'),

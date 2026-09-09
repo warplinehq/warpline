@@ -247,10 +247,23 @@ describe('runAdvance', () => {
     await ctx.cleanup()
   })
 
+  /**
+   * The three positional parameters and their defaults are unchanged, so every
+   * existing caller is untouched. Anything a newer case needs rides on the
+   * fourth, an options object that also defaults.
+   */
   async function createTestPlugin(
     name: string,
     autonomyLevel: 'autonomous' | 'supervised' | 'manual' = 'autonomous',
     resultStatus: 'success' | 'partial' | 'failed' | 'skipped' = 'success',
+    options: {
+      dependencies?: string[]
+      outputs?: Record<string, unknown>
+      /** Returned as `artifacts_produced`, so this plugin records an Output. */
+      artifacts?: unknown[]
+      /** Replaces the generated summary expression. JS source, not a value. */
+      summaryExpr?: string
+    } = {},
   ) {
     const pluginDir = join(pluginsDir, name)
     await mkdir(pluginDir, { recursive: true })
@@ -260,13 +273,13 @@ describe('runAdvance', () => {
       version: '1.0.0',
       description: `${name} test plugin`,
       inputs: {},
-      outputs: {},
+      outputs: options.outputs ?? {},
       capabilities: [],
       schedule: 'on_run',
       autonomy_level: autonomyLevel,
       side_effects: autonomyLevel === 'supervised' ? ['writes_db'] : [],
       ttl_hours: 0.001, // near-zero TTL so plugins are always stale
-      dependencies: [],
+      dependencies: options.dependencies ?? [],
       timeout_ms: 5000,
       max_parallelism: 1,
     }
@@ -279,15 +292,15 @@ describe('runAdvance', () => {
     await writeFile(
       join(pluginDir, 'handler.ts'),
       `
-export async function handler(manifest, args) {
+export async function handler(manifest, args, signal, capabilities) {
   return {
     status: '${resultStatus}',
     phases_completed: ['${name}'],
     phases_failed: [],
     errors: [],
     data_freshness: {},
-    summary: '${name} completed',
-    artifacts_produced: [],
+    summary: ${options.summaryExpr ?? `'${name} completed'`},
+    artifacts_produced: ${JSON.stringify(options.artifacts ?? [])},
     schema_version: 1,
   }
 }
@@ -688,6 +701,86 @@ export async function handler(manifest, args) {
     // loose form is also satisfied by interrupted — a different defect that
     // would pass here silently.
     expect(result.status).toBe('partial')
+  })
+
+  /**
+   * The engine fills the dependency option, and it fills it at invocation time.
+   *
+   * Two producers at level 0 declare the SAME `outputs` key and each return a
+   * distinct body; one level-1 consumer declares both and reads each through
+   * the capability member. Nothing merges: the lookup is keyed by plugin name,
+   * which makes the collision unrepresentable, so no precedence rule exists to
+   * get wrong.
+   *
+   * The assertion reads the PERSISTED run log, for the reason Test 12 states in
+   * its own words — what a host can act on is what was persisted. It is also
+   * the only test in this suite that would catch the projection being hoisted
+   * out of the per-plugin closure: hoisted, it is a snapshot taken before any
+   * producer ran, and every direct-mint case that hands a literal stays green.
+   */
+  test('a level-1 consumer receives each level-0 producer\'s own Output in one advance', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const outputs = { anomalies: { type: 'brief', description: 'the shared key' } }
+
+    await createTestPlugin('prod-a', 'autonomous', 'success', {
+      outputs,
+      artifacts: [{ type: 'brief', format: 'json', body: '{"from":"prod-a"}' }],
+    })
+    await createTestPlugin('prod-b', 'autonomous', 'success', {
+      outputs,
+      artifacts: [{ type: 'brief', format: 'json', body: '{"from":"prod-b"}' }],
+    })
+    await createTestPlugin('consumer', 'autonomous', 'success', {
+      dependencies: ['prod-a', 'prod-b'],
+      summaryExpr:
+        "JSON.stringify({ a: capabilities.dependencies.lastOutput(capabilities.caller, 'prod-a'), b: capabilities.dependencies.lastOutput(capabilities.caller, 'prod-b') })",
+    })
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: join(stateDir, 'engine-state.json'),
+      runsDir,
+      eventsPath,
+    })
+
+    const log = JSON.parse(await readFile(result.run_log_path, 'utf-8'))
+    const entry = log.plugin_entries.find((e: { plugin: string }) => e.plugin === 'consumer')
+    expect(entry).toBeDefined()
+
+    const seen = JSON.parse(entry.result_summary) as {
+      a: { body: string } | null
+      b: { body: string } | null
+    }
+    expect(seen.a).not.toBeNull()
+    expect(seen.b).not.toBeNull()
+    expect(JSON.parse(seen.a!.body)).toEqual({ from: 'prod-a' })
+    expect(JSON.parse(seen.b!.body)).toEqual({ from: 'prod-b' })
+    expect(seen.a!.body).not.toBe(seen.b!.body)
+  })
+
+  test('a declared dependency that produced no Output reads null, and the advance completes', async () => {
+    const { runAdvance } = await import('../engine.js')
+
+    await createTestPlugin('quiet-prod')
+    await createTestPlugin('quiet-consumer', 'autonomous', 'success', {
+      dependencies: ['quiet-prod'],
+      summaryExpr:
+        "JSON.stringify({ upstream: capabilities.dependencies.lastOutput(capabilities.caller, 'quiet-prod') })",
+    })
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: join(stateDir, 'engine-state.json'),
+      runsDir,
+      eventsPath,
+    })
+
+    expect(result.status).toBe('complete')
+    const log = JSON.parse(await readFile(result.run_log_path, 'utf-8'))
+    const entry = log.plugin_entries.find(
+      (e: { plugin: string }) => e.plugin === 'quiet-consumer',
+    )
+    expect(JSON.parse(entry.result_summary)).toEqual({ upstream: null })
   })
 })
 
@@ -1659,6 +1752,86 @@ export async function handler(manifest, args) {
     expect(second.outcome).toBe('already_applied')
   })
 
+  /**
+   * The supervised half of the preservation invariant that
+   * `dependency-output-preservation.test.ts` proves on the autonomous path.
+   * Those arms all land on the autonomous `plugin_runs` write, so on their own
+   * they leave the park and the approve claimed and unchecked — two further
+   * writes of the same field, each able to drop it.
+   *
+   * It reuses this describe's gate fixture rather than standing up a second
+   * one, but it cannot BE Test 43: that case's plugin produces an Output, and
+   * the precondition here is a gated run that produced none.
+   *
+   * The prior Output is seeded rather than earned by a first advance, because
+   * a supervised plugin's first advance parks a gate instead of completing —
+   * earning it would mean approving one gate to set up a second, and the
+   * assertion would then rest on the very write it is trying to check.
+   */
+  test('Test 47: a supervised plugin\'s prior Output survives a gated run that produced none, through the park and through the approve', async () => {
+    const { runAdvance, applyPendingGate, findPendingGate, loadPluginManifests } = await import(
+      '../engine.js'
+    )
+    const { readEngineState, writeEngineState } = await import('../engine-state-store.js')
+    await createOutputPlugin('gated-keeper', '[]', 'supervised')
+
+    const approvalPath = join(ctx.root, '.session-approval-test47')
+    await grantApproval('gated-keeper', 4 * 60 * 60 * 1000, approvalPath)
+
+    // Stamped the way the runtime stamps one, so the seed is a record the
+    // schema would have accepted from a real run rather than a shape invented
+    // for the fixture.
+    const priorOutput = {
+      type: 'brief',
+      format: 'markdown' as const,
+      run_id: 'run-that-produced-it',
+      produced_at: new Date(Date.now() - 60_000).toISOString(),
+      body: '# what this plugin produced before the gated run',
+    }
+    const seeded = await readEngineState(statePath)
+    seeded.plugin_runs['gated-keeper'] = {
+      // Well outside the fixture's 0.001h TTL, so the plugin is due and the
+      // advance below actually runs it.
+      last_run_at: new Date(Date.now() - 60_000).toISOString(),
+      status: 'success',
+      duration_ms: 5,
+      last_output: priorOutput,
+    }
+    await writeEngineState(seeded, statePath)
+
+    await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+      approvalPath,
+    })
+
+    // Write site 1 — the supervised park.
+    const parked = await readEngineState(statePath)
+    expect(parked.plugin_runs['gated-keeper']?.status).toBe('gated')
+    expect(parked.plugin_runs['gated-keeper']?.last_output).toEqual(priorOutput)
+
+    // Write site 2 — the approve verb applying the gate.
+    const { manifests } = await loadPluginManifests(ctx.pluginsDir)
+    const gate = findPendingGate(parked, 'gated-keeper')
+    expect(gate).toBeDefined()
+    const applied = await applyPendingGate(
+      parked,
+      gate as NonNullable<typeof gate>,
+      manifests.get('gated-keeper') as PluginManifest,
+      { statePath },
+    )
+    expect(applied.outcome).toBe('applied')
+
+    const after = await readEngineState(statePath)
+    // Both, in one assertion set: the run's real terminal status AND the
+    // preserved record. A fix that kept the Output by declining to write the
+    // status would satisfy the second and falsify the first.
+    expect(after.plugin_runs['gated-keeper']?.status).toBe('success')
+    expect(after.plugin_runs['gated-keeper']?.last_output).toEqual(priorOutput)
+  })
+
   test('Test 44: an applied marker past the gate ceiling is dropped by the advance, one inside it is kept', async () => {
     const { runAdvance, GATE_MAX_AGE_MS } = await import('../engine.js')
     await createOutputPlugin('quiet-writer', '[]')
@@ -1800,6 +1973,7 @@ export async function handler(manifest, args) {
     const state = JSON.parse(await readFile(statePath, 'utf-8'))
     expect(state.pending_gates.map((g: { plugin: string }) => g.plugin)).toEqual(['live-gate'])
   })
+
 })
 
 /**

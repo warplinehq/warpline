@@ -33,22 +33,33 @@ warpline plan — preview only; nothing was executed.
 Grant: none — plugins with side effects would be SKIPPED this run
 Plugins: /tmp/warpline-demo/plugins
 
-Due (3):
+Due (7):
 
+  announce-fanout (level 0)
+    (no declared side effects)
   anomaly-watch (level 0)
     (no declared side effects)
-  feed-triage (level 0)
+  derived-summary (level 0)
+    (no declared side effects)
+  draft-writer (level 0)
     (no declared side effects)
   metrics-rollup (level 0)
     (no declared side effects)
+  daily-digest (level 1)
+    (no declared side effects)
+  feed-triage (level 1)
+    (no declared side effects)
 
-Not due (3):
+Not due (5):
 
-  feed-monitor — skipped (unapproved): side effects require session approval
+  feed-monitor — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
-  github-poll — skipped (unapproved): side effects require session approval
+  github-poll — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
-  anomaly-issue — skipped (unapproved): side effects require session approval
+  link-enrich — unapproved: side effects require session approval
+    external_api: ⚠ unapproved — would be SKIPPED this run
+  note-intake — schedule 'manual': requires profile 'manual'
+  anomaly-issue — unapproved: side effects require session approval
     creates_issue: ⚠ unapproved — would be SKIPPED this run
     external_api: ⚠ unapproved — would be SKIPPED this run
 ```
@@ -107,18 +118,43 @@ Worked examples in [examples/plugins/](examples/plugins/):
 
 | Example | Demonstrates |
 | --- | --- |
-| `anomaly-watch` | A pure deterministic check — the baseline shape |
-| `github-poll` | `external_api` side effect gating an autonomous plugin |
-| `feed-monitor` | Deterministic fetch/parse that emits the handoff — the producer half of the feed chain |
-| `feed-triage` | The `on_run` consumer half — per-entry judgment handed off via `[needs-llm]`, no declared side effects |
+| `anomaly-watch` | Compare against a prior observation — reads the record it wrote last run, reports what newly breached and what cleared, and returns the breached set as an Output |
+| `github-poll` | `external_api` side effect gating an autonomous plugin; writes one snapshot of what it polled and reports the delta on the next run |
+| `feed-monitor` | Deterministic fetch/parse that reports new entries — the producer half of the feed chain; the judgment handoff is `feed-triage`'s, not this one's |
+| `feed-triage` | The `on_run` consumer half — per-entry judgment handed off via `[needs-llm]` through `skillHandoff`, the payload written under the home; no declared side effects |
 | `metrics-rollup` | `daily` schedule with retained state — append-only rows, a retention window, weekly rollups; writes only under the home |
 | `anomaly-issue` | `dependencies` ordering after `anomaly-watch`, `supervised` autonomy, and a `creates_issue` side effect through the gate — irreversible, so the result says how to undo it |
+| `daily-digest` | Aggregate — declares two producers, lets the engine order them, and folds what they last reported into one digest Output |
+| `derived-summary` | Derive, don't store — reads a source under the home, returns the summary, writes nothing; `ttl_hours` decides whether recomputing is worth it |
+| `note-intake` | Operator text for one run — `schedule: 'manual'` plus a required input supplied with `warpline run note-intake default --input note=<text>`, routed whole to a file under the home |
+| `link-enrich` | Fan in from three sources with per-source isolation — one refused source is a `partial` run that names it, every source refused is a failure; credentials are names on `secrets` |
+| `draft-writer` | Config-heavy writer — every adopter choice is a declared input with a placeholder default, three reference files named by path and refused outside the home, the drafting handed off |
+| `announce-fanout` | Config-heavy fan-out — channels, calls to action and a cadence as declared inputs, per-channel isolation, the per-channel rewrite handed off |
+
+Copy any of them into your own home as a starting point:
+`npx warpline scaffold my-plugin --from <example>` copies the directory with
+only the manifest's name rewritten. That includes the example's
+`handler.test.ts`, so the copy arrives with its tests. Nothing in warpline
+runs that file, and the default `.warpline/` home is a dot-directory that
+`bun test` does not descend into; a home placed as a plain directory inside a
+project (`WARPLINE_HOME=./warpline-home`) is on that project's discovery path,
+and its own `bun test` will run the copied file.
 
 Authoring guide: [docs/plugin-authoring.md](docs/plugin-authoring.md).
 
 ```bash
+# First run: create the home, copy one example plugin in, write its config.
+# Asks for each input the plugin declares on a terminal; writes the declared
+# defaults when stdin is not one. Safe to run again.
+npx warpline init
+
 # Scaffold a plugin — also prepares the home directory
 npx warpline scaffold my-plugin
+
+# Write a plugin's config from the inputs its manifest declares. Prompts on a
+# terminal; takes --from '<json>' when stdin is not one. Never writes a secret.
+# Safe to run again: a value already in the file is kept unless you replace it.
+npx warpline configure my-plugin
 
 # Preview what the next engine advance would do. Executes nothing.
 npx warpline plan
@@ -138,7 +174,7 @@ npx warpline deny my-plugin
 npx warpline revoke
 ```
 
-Those six subcommands are the whole CLI surface. Running everything
+Those eight subcommands are the whole CLI surface. Running everything
 that's due on a schedule is a library call, not a command. It's `runAdvance()`
 from the package root:
 
@@ -204,6 +240,7 @@ handoff up, the deterministic work carries on running without it.
 - [docs/first-plugin.md](docs/first-plugin.md) — **start here**: build, run and gate a plugin in ten minutes
 - [docs/doctrine.md](docs/doctrine.md) — the deterministic/LLM boundary
 - [docs/runtime-spec.md](docs/runtime-spec.md) — manifest fields, retry/timeout/abort semantics, run artifacts
+- [docs/derive-dont-store.md](docs/derive-dont-store.md) — why there is no snapshot store, diff engine or resource cache, and what `ttl_hours` plus one overwritten file does instead
 - [docs/board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)
   — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface
   at 0.1, so this spec is not shipped in the package and the link is absolute.

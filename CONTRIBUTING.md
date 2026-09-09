@@ -75,8 +75,9 @@ printf '%s\n' "$MESSAGE" | bash scripts/scan-public-surfaces.sh \
 ## Voice
 
 Applies to the prose documents written in the first person — today that's
-`docs/why-the-gate-holds.md`. Reference specs and the README are still in a
-flatter register and are exempt until converted.
+`docs/why-the-gate-holds.md` and `docs/derive-dont-store.md`, the two files in
+`VOICED_DOCS` in `src/__tests__/voice.test.ts`. Reference specs and the README
+are still in a flatter register and are exempt until converted.
 
 The measurable half is enforced by `src/__tests__/voice.test.ts`, so it fails in
 CI rather than in review: no em dashes, no semicolons, median sentence at most

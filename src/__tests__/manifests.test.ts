@@ -208,6 +208,20 @@ describe('the shipped manifests', () => {
   test('every manifest parses', () => {
     expect(manifestParseOffenders(REPO_ROOT)).toEqual([])
   })
+
+  // The runtime dependency set is one package, and it stays one. A new
+  // runtime dependency is a supply-chain surface every adopter installs, so
+  // adding one is a decision to record, not a side effect of a feature: the
+  // first-run prompt walk, for instance, uses `node:readline` and nothing
+  // else. Deep-equal on the parsed object, not a substring of the file text,
+  // because a substring check stays green when a second entry lands beside
+  // the first. `devDependencies` is deliberately NOT asserted: it moves on
+  // routine maintenance (a `bun-types` or `typescript` bump) and pinning it
+  // would produce a false red on every one of those.
+  test('package.json declares exactly one runtime dependency', () => {
+    const pkg = JSON.parse(read('package.json')) as { dependencies: Record<string, string> }
+    expect(pkg.dependencies).toEqual({ zod: '^4.3.6' })
+  })
 })
 
 // ── Violation fixtures: each check, proven to go red ──────────────────────

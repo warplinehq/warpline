@@ -20,6 +20,29 @@
  * Same refusal, same reason: `failed` with a `parse_error` is what a bad
  * config is.
  *
+ * What that ground admits, and why the admission is not a loophole:
+ * `dependency_failed`. The whole of the `bad_config` refusal is that something
+ * already answers for it, so a gate would be a second answer. Nothing answers
+ * for a dependent whose declared dependency failed this cycle. The dependent is
+ * due, it runs, it asks the dependencies capability member for its producer's
+ * last Output, it is handed whatever that producer left behind on some earlier
+ * cycle, and it returns `success` over stale data. There is no first answer for
+ * a gate to duplicate and no place for two answers to disagree, because there
+ * is no answer at all — the run log records a success that is not one. A reason
+ * that models something nothing else models is admitted on exactly the ground
+ * that refused a reason duplicating something already modelled. Where in the
+ * chain it sits is a separate question with an argument of its own.
+ *
+ * Note how narrow that is. It admits the dependency that RAN and FAILED. It
+ * does not admit the dependency that never produced anything: a `null` last
+ * Output is "never produced", the handler's own arm owns that case and returns
+ * its own honest result, and no gate covers it.
+ *
+ * So this file is still a refusal and not a tally. The next proposal of the
+ * `bad_config` shape — a gate for a failure `invokePlugin` already reports in
+ * full — is refused on the unchanged ground above. Apply the ground; counting
+ * the members proves nothing about whether the next member belongs.
+ *
  * `NotDueReason` is a TypeScript union, not a Zod enum, so it has no runtime
  * shape to read and the assertion is a line-wise read of the source — the same
  * genre as the other source guards in this repo, which are all regex and none
@@ -36,7 +59,7 @@ const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
 const ENGINE = join(REPO_ROOT, 'src', 'runtime', 'engine.ts')
 
 /**
- * The eight reasons a plugin can be not due, as of this release. Written out
+ * The nine reasons a plugin can be not due, as of this release. Written out
  * here rather than derived, because a derived expectation would agree with
  * whatever the source says and pin nothing.
  */
@@ -48,6 +71,7 @@ const NOT_DUE_REASONS = [
   'fresh',
   'denied',
   'task_locked',
+  'dependency_failed',
   'unapproved',
 ]
 
@@ -79,7 +103,7 @@ function readNotDueReasons(): string[] {
 }
 
 describe('invalid config grows no new gate', () => {
-  test('NotDueReason declares exactly its eight members', () => {
+  test('NotDueReason declares exactly its nine members', () => {
     const found = readNotDueReasons()
     // Non-empty first: a scan that matched nothing would otherwise only fail
     // the comparison below by being empty, which reads like a deleted union

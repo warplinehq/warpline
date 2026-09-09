@@ -50,6 +50,15 @@ that import happens during `warpline plan` — before any approval gate is
 consulted. The imports and the `manifest` export are the whole file. See
 [Runtime constraints](#runtime-constraints) §3.
 
+**`schedule: 'manual'` means nothing picks the plugin up unless it is asked
+for.** The other three values are reached by an advance: `on_run`, `daily` and
+`weekly` all run when an advance's profile admits them, and all three run when
+an advance is requested with no profile at all. `manual` is reached by exactly
+two things — the `manual` run profile, and `warpline run` typed by an operator.
+No advance reaches it, profiled or not. Choose it when the plugin needs
+something only a person supplies at the moment of running, and choose one of
+the other three when you want it to happen on its own.
+
 **Declare every side effect.** The gate is only as honest as the declaration.
 If your handler calls out to any external system — even read-only HTTP —
 declare `external_api`. Undeclared side effects are the one unforgivable
@@ -58,37 +67,40 @@ plugin bug: they bypass the entire human-approval model.
 ### handler.ts
 
 ```typescript
-import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
-import type { SkillResult } from 'warpline/schemas/skill-result'
-import { manifest } from './manifest.ts'   // .ts, not .js — see Runtime constraints
+import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
+import { skillFailure, skillOk } from 'warpline/unstable-result'
 
-export async function handler(
-  _manifest: PluginManifest,
-  _args: Record<string, unknown> = {},
-  signal?: AbortSignal,
-): Promise<SkillResult> {
-  // 1. Validate args — return a failed SkillResult with parse_error, don't throw
+export const handler: CapabilityHandlerFn = async (manifest, args, signal, capabilities) => {
+  // 1. Validate args — return skillFailure('parse_error', ...), don't throw
   // 2. Do the work. Forward `signal` to fetch()/spawn() so timeouts can cancel I/O
-  // 3. Return a SkillResult
-  return {
-    status: 'success',           // success | partial | failed | skipped
+  // 3. Return a result a builder constructed
+  return skillOk('one line a human reads on the board', {
     phases_completed: [manifest.name],
-    phases_failed: [],
-    errors: [],                  // makeSkillError(code, message, { impact, retryable })
     data_freshness: { source: new Date().toISOString() },
-    summary: 'one line a human reads on the board',
-    artifacts_produced: [],
-    schema_version: 1,
-  }
+  })
 }
 ```
 
-Typing that function is optional, and `import type { HandlerFn } from 'warpline'`
-is how you do it if you want the compiler to check the signature for you. Its
-return type is `SkillResultInput` rather than the `SkillResult` above — the
-schema's input side, where defaulted fields are optional and a bare path string
-is allowed in `artifacts_produced`. Annotating with `SkillResult`, as this
-example does, still satisfies it.
+This is the form `warpline scaffold` emits. The annotation is the whole type
+check: `CapabilityHandlerFn` names all four parameters and the return type,
+`SkillResultInput` — the schema's input side, where defaulted fields are
+optional and a bare path string is allowed in `artifacts_produced`. The fourth
+parameter is the capability context; [Capabilities](#capabilities) below is
+what it carries. A sibling import such as `./manifest.ts` is fine — spell the
+`.ts`, see [Runtime constraints](#runtime-constraints).
+
+`HandlerFn` on the root barrel still describes the three-parameter shape and
+still type-checks: a plugin written against it keeps compiling and keeps
+running unchanged, because the widening is on the parameter list — a
+three-parameter function is assignable to the four-parameter type. It stays
+for the plugins that already have it. A new plugin takes the form above.
+
+The builders construct the three results a plugin writes — `skillOk`,
+`skillFailure`, and `skillHandoff` for the `[needs-llm]` exit — and leave
+`schema_version` to the schema's own default. No builder emits `partial`. A
+side-effecting batch that stopped part-way sets it over a built result,
+`{ ...skillOk(summary, overrides), status: 'partial' }`; the bundled
+`anomaly-issue` is the worked case.
 
 Rules the runtime holds you to:
 
@@ -124,10 +136,14 @@ A flat JSON object of input names to values:
 One file per plugin rather than one document for all of them, so a single bad
 edit fails a single plugin instead of every plugin in the same advance.
 
-**Warpline reads that file and never writes it.** There is no `warpline config
-set` command today, so nothing in the runtime can make your edit atomic on your
-behalf — that part is the operator's own responsibility. Write a temporary file
-in the same directory and rename it over the target. A rename within one
+**`warpline configure <plugin>` is the supported way to write that file.** It
+walks the inputs your manifest declares on a terminal, takes `--from '<json>'`
+when stdin is not one, never writes a name declared in `secrets`, and writes
+once, atomically, after every value has validated — so a refused value leaves
+the previous file untouched, and a re-run keeps every value already on disk
+unless you replace it. `warpline init` writes the seed plugin's config the same
+way. You can still edit the file by hand; if you do, write a temporary file in
+the same directory and rename it over the target. A rename within one
 filesystem is atomic, so an advance that reads the file mid-edit sees the old
 contents rather than half the new ones; editing the target in place hands a
 concurrent run a torn document instead.
@@ -143,7 +159,22 @@ Three tiers resolve every declared input, lowest precedence first:
 The merge happens inside the runtime before your handler is called, so by the
 time you hold `args` it is already done. § 1 of
 [runtime-spec.md](runtime-spec.md) is the contract; this section is how to
-write against it.
+write against it. In the runtime's own names the order is
+`manifest_default -> config_file -> invocation_args`, and `invocation_args`
+wins.
+
+**Tier 3 from the command line.**
+`warpline run <plugin> <action> --input key=value` supplies a per-invocation
+argument. The flag is repeatable, and each pair is split on its first `=`, so a
+value may itself contain one. What it carries is a **string**, and nothing
+converts it. An input declared as `number`, `boolean`, `array` or `object`
+given a value this way fails the type check with a problem naming the key and
+the expected type — `input 'retention_days' must be a number` — the same
+problem a wrong-typed config value produces, and the run fails once without
+retrying. An input of one of
+those four types takes its value from `<home>/config/<plugin>.json` or from
+its manifest default; the command line is for text. That is the flag's
+ceiling as it stands, and this guide promises nothing past it.
 
 The bundled `github-poll` example is the worked case. Its manifest declares
 `repo` as required *and* gives it a default, which is not the contradiction it
@@ -181,15 +212,18 @@ look like secrets, and it leaks the first one it fails to recognise.
 names a payload PATH after `Context:`, because
 [needs-llm-contract.md](needs-llm-contract.md) defines that field as a path the
 scanner resolves and reads — a key name there would leave the scanner nothing to
-open, and the handoff would stop being consumable at all. A plugin that resolves
-its payload path from a declared input therefore writes that input's value into
-the run log by design. The bound comes from the same contract: the scanner only
-reads paths that resolve inside the warpline home, so an input used this way
-must name a payload file under the home, and must never be an input that carries
-a secret. The bundled `feed-triage` is the worked case. Its other two summaries
-name the key like every other example, and its test splits the handoff summary
-on `Context: ` to assert the half a human reads is value-free — which is what
-keeps the exception this one field wide instead of a precedent.
+open, and the handoff would stop being consumable at all. So a path reaches the
+run log through that one field by design. The bound comes from the same
+contract: the scanner only reads paths that resolve inside the warpline home,
+and `skillHandoff` takes the path relative to the home and the parse boundary
+refuses any other shape. The bundled `feed-triage` is the worked case. It reads
+its entries through `capabilities.dependencies.lastOutput`, writes the payload
+it hands off under `state/` itself, and names that file — so the path on the
+producer's record never reaches the log, and its test asserts the whole result
+is value-free on every arm, the handoff included. A plugin that instead names a
+configured path directly must make that an input which can never carry a
+secret, which is what keeps the exception this one field wide instead of a
+precedent.
 
 The second: an `undo_instruction` on a side effect that already happened names
 what to undo, and naming it can require the value. The bundled `anomaly-issue`
@@ -207,11 +241,13 @@ that files anything.
 positional as a per-invocation argument, which is tier 3 and beats both tiers
 below it. An input you declare under that name therefore resolves to whatever
 the operator typed on the command line, never to your default and never to the
-config file. Pick another name.
+config file, and `--input action=...` does not override the positional. Pick
+another name.
 
-**There is no environment-variable tier**, today. The file is the only channel
-an *input* has, so an input carrying a secret is a secret sitting on disk under
-the operator's home. That is a known limitation rather than an oversight, and it
+**There is no environment-variable tier**, today. The file and the command line
+are the only channels an *input* has, so an input carrying a secret is a secret
+sitting on disk under the operator's home, or in a shell history. That is a
+known limitation rather than an oversight, and it
 is stated here so you meet it before you design around it. A credential does not
 belong in that file: declare its name on `manifest.secrets` and read the value
 from the environment inside your handler. The next section is how.
@@ -247,6 +283,21 @@ get in front of.
 Declaring nothing, and declaring `secrets: []`, are the same thing: the check
 runs and passes. Read the value with `process.env.GITHUB_TOKEN` inside your
 handler, at the point of use.
+
+**Declaring one name in both `inputs` and `secrets` is legal**, and the
+credential still comes from the environment alone. The `inputs` entry documents
+the name for whoever reads your manifest, and that is all it does: the runtime
+excludes the name from input resolution, so its `default` is never applied and
+its required check never runs. A placeholder like `your-token` sitting in that
+entry therefore cannot reach your handler in place of a credential, and a
+missing environment variable still fails the run by name before you are called.
+
+**A value for a declared secret name is refused, not ignored.** Writing that key
+into `<home>/config/<plugin>.json`, or passing it as `--input <name>=...`, fails
+the run with a `parse_error` naming the key and the environment variable to set
+instead — never the value it found. Both channels are places a credential should
+not be, and quietly dropping the value would leave an operator believing they
+had set one.
 
 **Never put a resolved credential value into a `SkillResult`**, for the reason
 the config channel above states at length: a run log is a file people paste into
@@ -286,6 +337,13 @@ a free-text array of informational tags describing what a plugin does. It grants
 nothing, the mint never reads it, and no member is keyed off it. The table below
 is keyed off `side_effects`.
 
+**`manifest.dependencies` and `capabilities.dependencies` share a name
+deliberately** — which is the opposite of the case above, and worth saying so
+that a reader does not have to guess which pattern applies. The member delivers
+exactly what the manifest field declares: the plugins you listed there, and no
+others. Asking it for a name you did not list throws, and the message tells you
+which manifest line to add.
+
 Members reach a handler as a fourth parameter, after `signal`. The runtime calls
 handlers with four arguments, and a handler declared with three keeps working
 unchanged — the widening is on the parameter type, so a three-parameter function
@@ -311,6 +369,7 @@ error, not a convention.
 | Member | Requires `side_effects` entry | What it does |
 |---|---|---|
 | `secrets` | **ungated** | Lists the credential names this plugin declared and the runtime resolved. Names only — never a value. |
+| `dependencies` | **ungated** | Reads the Output a plugin this manifest declared as a dependency last produced, and how its last run ended. Declared names only — an undeclared one throws. |
 
 <!-- /generated -->
 
@@ -321,9 +380,81 @@ import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
 
 export const handler: CapabilityHandlerFn = async (manifest, args, signal, capabilities) => {
   const declared = capabilities.secrets.resolvedNames(capabilities.caller)
-  // ...
+
+  // A plugin listed in this manifest's `dependencies`, read for both facts.
+  // `lastOutput` is `null` when that plugin has never produced an Output — a
+  // fact about the plugin, not about its last run, because a run that produces
+  // none leaves the previous record in place. `lastRun` is `null` when the
+  // plugin has never run at all, and otherwise is its last run's status. A name
+  // this manifest does not declare throws from either one.
+  const upstream = capabilities.dependencies.lastOutput(capabilities.caller, 'anomaly-watch')
+  const upstreamRun = capabilities.dependencies.lastRun(capabilities.caller, 'anomaly-watch')
+
+  if (upstream === null) {
+    // Nothing produced yet. `upstreamRun` says whether that is because
+    // anomaly-watch has not run (`null`) or ran and produced none.
+  } else if (upstream.body !== undefined) {
+    const payload: unknown = JSON.parse(upstream.body)
+    // ...guard the shape before trusting it: another plugin wrote this.
+    //
+    // `upstreamRun === 'failed'` (or `'skipped'`) means this record predates
+    // that run. Annotate what you publish with it — do NOT branch away from
+    // the read. The record is real work the producer really produced, and the
+    // carry-forward exists to keep it reachable; a guard here would throw away
+    // the one thing it bought you. Both shipped examples do it this way.
+  }
 }
 ```
+
+The two members answer two different questions about the same declared name,
+and reading only the first is how a plugin ends up publishing "nothing yet"
+about a dependency that produced last week. Together they name four states:
+
+| `lastOutput` | `lastRun` | What it means |
+|---|---|---|
+| `null` | `null` | Never run. |
+| `null` | `'success'` | Ran, and has never produced an Output. |
+| a record | `'failed'` | Produced before; its latest run failed. The record stands, and it is older than that run. **Not reachable under a full advance** — see below. |
+| a record | `'success'` | Produced, and its latest run is healthy. |
+
+**A record beside `'success'` does not mean the record came from that run.** A
+run that produced nothing carries the previous record forward, so this row also
+covers "succeeded today, produced nothing, and what you are holding is
+yesterday's". When currency matters, read `produced_at` or `run_id` on the
+record itself — the runtime stamps both, and they are the only currency signal
+the pair does not give you.
+
+**`'failed'` does not reach your handler under a full advance.** The engine gates
+a plugin whose declared dependency's last run failed: it is not due, it is
+recorded `skipped`, and it is never invoked. So under a full engine advance,
+every dependency your handler is told about has passed that gate by construction,
+and
+the `'failed'` row above is unreachable. It stays in the table because it is
+still reachable elsewhere — the carve-out below is the same one — and because a
+handler that drops the branch is wrong on any host that supplies dependency state
+without running the gate.
+
+**These four states describe an engine advance.** A host may supply no
+dependency state at all, and both members then answer `null` for every declared
+name whatever `engine-state.json` holds — so `null` means "never run" only on a
+host that supplies it. `warpline run` is a host that does not: it invokes one
+plugin standalone and reads no runtime state, by design. Say "no data from
+`<name>`" rather than "`<name>` has not run yet" in anything a handler
+publishes, unless you know your host supplies the state.
+
+`lastRun` can also read `'gated'`, `'partial'` or `'skipped'`. `'gated'` is the
+ordinary answer for a supervised dependency parked waiting for an approval —
+a real state to report, not an error to handle. `'skipped'` is your dependency
+handing its work to an LLM: it returned `status: 'skipped'` with a `[needs-llm]`
+summary, so it ran and produced nothing this time. Treat it the way you treat
+`'failed'` — the record you are holding is real and is older than that run. None
+of these three is gated: only `'failed'` is, and only under a full advance, so
+`'skipped'`, `'gated'` and `'partial'` all arrive at your handler normally.
+
+An Output carries **either** a `body` or a `path`, never both. When it carries a
+`path`, resolving it is your handler's business — `readJsonOrNull` from
+`warpline/unstable-fs` is the sanctioned way. The member hands you the record
+and reads no filesystem itself.
 
 Three rules, and they are the whole model:
 
@@ -368,10 +499,15 @@ permission you do not already have.
 **There is no snapshot store, and so no history, retention or diff.** Keep that
 under the plugin's own channel meanwhile: write what you want to remember as a
 declared output, and read your own prior state back the way your handler
-already reads anything — from a path you control, named through your config
-file. The runtime hands a handler no reader for its own past runs, so a plugin
-that needs history owns that file today. What a store would add is retention
-and comparison you would otherwise write per plugin, not permission you lack.
+already reads anything — from a file under `<home>/state/`, at a path derived
+from your manifest's name and never from an input, so nothing an operator
+configures can point it somewhere else. Guard its shape on the way back in,
+because a file that parses but is not what you wrote is the same failure one
+step later. `anomaly-watch` is the worked case for both, and
+[derive-dont-store.md](derive-dont-store.md) is the argument. The runtime hands
+a handler no reader for its own past runs, so a plugin that needs history owns
+that file today. What a store would add is retention and comparison you would
+otherwise write per plugin, not permission you lack.
 
 ## Runtime constraints
 

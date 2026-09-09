@@ -16,12 +16,26 @@
  * fails honestly.
  */
 import { describe, test, expect, afterEach } from 'bun:test'
-import { mkdtempSync, existsSync, lstatSync, readlinkSync, mkdirSync, symlinkSync } from 'node:fs'
-import { readFile, writeFile, mkdir, rm } from 'node:fs/promises'
+import { mkdtempSync, existsSync, lstatSync, readlinkSync, mkdirSync, readdirSync, symlinkSync } from 'node:fs'
+import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { scaffoldPlugin } from '../scaffold.js'
+import { main } from '../warpline.js'
 import { _setHome, pluginsDir } from '../../lib/paths.js'
+import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
+import { SkillResultSchema } from '../../schemas/skill-result.js'
+import type { CapabilityContext } from '../../runtime/capabilities.js'
+import type { CapabilityHandlerFn } from '../../runtime/invoke-plugin.js'
+
+const REPO_ROOT = join(import.meta.dir, '..', '..', '..')
+
+/**
+ * The one handler declaration form: a const annotated with the published
+ * four-parameter type, parameters inferred from it. Unused parameters may
+ * carry an underscore prefix; the form is the same either way.
+ */
+const DECLARATION = /^export const handler: CapabilityHandlerFn = async \(_?manifest, _?args, _?signal, _?capabilities\) =>/m
 
 const homes: string[] = []
 
@@ -53,6 +67,13 @@ async function generated(name: string): Promise<{ manifest: string; handler: str
   }
 }
 
+/** Every file directly under `dir`, name to bytes. */
+async function snapshot(dir: string): Promise<Record<string, string>> {
+  const names = (await readdir(dir)).sort()
+  const entries = await Promise.all(names.map(async (f) => [f, await readFile(join(dir, f), 'utf8')] as const))
+  return Object.fromEntries(entries)
+}
+
 describe('scaffoldPlugin — generated specifiers', () => {
   test('writes both files and bakes no absolute path into any import', async () => {
     freshHome()
@@ -76,13 +97,15 @@ describe('scaffoldPlugin — generated specifiers', () => {
     expect(specifiers(manifest)).toContain('warpline/schemas/plugin-manifest')
   })
 
-  test('handler.ts imports both schema types by package specifier and its sibling with .ts', async () => {
+  test('handler.ts imports the schema types, the handler type and the builders by package specifier, and its sibling with .ts', async () => {
     freshHome()
     await scaffoldPlugin('demo')
     const { handler } = await generated('demo')
     const specs = specifiers(handler)
     expect(specs).toContain('warpline/schemas/plugin-manifest')
     expect(specs).toContain('warpline/schemas/skill-result')
+    expect(specs).toContain('warpline/unstable-capabilities')
+    expect(specs).toContain('warpline/unstable-result')
     // `.ts`, never `.js`: Node's type stripping resolves the literal
     // specifier with no extension remapping.
     expect(specs).toContain('./manifest.ts')
@@ -95,12 +118,16 @@ describe('scaffoldPlugin — generated specifiers', () => {
     const dir = join(pluginsDir(), 'demo')
     await mkdir(dir, { recursive: true })
     await writeFile(join(dir, 'manifest.ts'), 'PRIOR ART')
+    const before = await snapshot(dir)
 
     const result = await scaffoldPlugin('demo')
     expect(result.created).toBe(false)
     expect(result.message).toContain('already exists')
     expect(await readFile(join(dir, 'manifest.ts'), 'utf8')).toBe('PRIOR ART')
     expect(existsSync(join(dir, 'handler.ts'))).toBe(false)
+    // The whole directory, not the one file: a partial overwrite that left
+    // manifest.ts alone and wrote something else would pass the line above.
+    expect(await snapshot(dir)).toEqual(before)
   })
 
   test.each([
@@ -117,6 +144,93 @@ describe('scaffoldPlugin — generated specifiers', () => {
     expect(result.path).toBe('')
     expect(result.message).toContain('Invalid plugin name')
     expect(existsSync(join(home, 'plugins'))).toBe(false)
+  })
+})
+
+// ── The emitted plugin matches the published handler contract ────────────
+//
+// The scaffold is what a second author copies, so what it emits IS the
+// authoring guidance. Three places answer "how do I declare a handler" — the
+// guide, this template and the pinned `anomaly-issue` example — and the last
+// two cases below hold them to one answer.
+describe('scaffoldPlugin — the emitted plugin matches the published handler contract', () => {
+  test('handler.ts declares four parameters typed by a type-only CapabilityHandlerFn import', async () => {
+    freshHome()
+    await scaffoldPlugin('demo')
+    const { handler } = await generated('demo')
+    // Type-only: `warpline/unstable-capabilities` carries no runtime value,
+    // and the tarball gate asserts that set is empty.
+    expect(handler).toContain("import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'")
+    expect(handler).toMatch(DECLARATION)
+    expect(handler).not.toContain('export async function handler')
+  })
+
+  test('handler.ts writes no schema_version of its own and builds its result', async () => {
+    freshHome()
+    await scaffoldPlugin('demo')
+    const { handler } = await generated('demo')
+    expect(handler).not.toContain('schema_version')
+    expect(specifiers(handler)).toContain('warpline/unstable-result')
+  })
+
+  test('manifest.ts declares at least one input, each with a type, a description and a default', async () => {
+    freshHome()
+    await scaffoldPlugin('demo')
+    // Imported for real from the temp home: the `<home>/node_modules/warpline`
+    // symlink is what resolves its `warpline/schemas/*` specifier, exactly as
+    // it would for an author. Parsed again here so the shape assertion runs
+    // against this checkout's schema, not only the one behind the symlink.
+    const mod = (await import(join(pluginsDir(), 'demo', 'manifest.ts'))) as { manifest: unknown }
+    const manifest = PluginManifestSchema.parse(mod.manifest)
+    const inputs = Object.entries(manifest.inputs)
+    expect(inputs.length).toBeGreaterThan(0)
+    for (const [, input] of inputs) {
+      expect(['string', 'number', 'boolean', 'array', 'object']).toContain(input.type)
+      expect(typeof input.description).toBe('string')
+      expect(input.default).toBeDefined()
+    }
+  })
+
+  test('the emitted pair loads and runs as a unit: the manifest parses, the handler is typed CapabilityHandlerFn, and its result passes the boundary', async () => {
+    freshHome()
+    await scaffoldPlugin('demo')
+    const dir = join(pluginsDir(), 'demo')
+    const { handler: handlerSource } = await generated('demo')
+    // The declared type NAME, from the text: a type leaves no trace in the
+    // loaded module, so the annotation is only checkable as bytes here. The
+    // annotation's reachability from a global install is the tarball gate's
+    // job (checks 5 and 6), not this file's.
+    expect(handlerSource).toMatch(/^export const handler: CapabilityHandlerFn = /m)
+
+    const { manifest } = (await import(join(dir, 'manifest.ts'))) as { manifest: unknown }
+    const parsed = PluginManifestSchema.parse(manifest)
+    const { handler } = (await import(join(dir, 'handler.ts'))) as { handler: CapabilityHandlerFn }
+    // Tier 1 of the resolution order: every declared input at its default,
+    // which is what the runtime hands a plugin nobody has configured yet.
+    const args = Object.fromEntries(Object.entries(parsed.inputs).map(([k, v]) => [k, v.default]))
+    const result = SkillResultSchema.parse(await handler(parsed, args, new AbortController().signal, {} as CapabilityContext))
+    expect(result.status).toBe('success')
+    expect(result.phases_completed).toEqual(['demo'])
+    // The schema's own default, because the handler wrote no version field.
+    expect(result.schema_version).toBe(2)
+  })
+
+  test('the authoring guide shows one declaration form, and it is the one the scaffold emits', async () => {
+    freshHome()
+    await scaffoldPlugin('demo')
+    const { handler } = await generated('demo')
+    const doc = await readFile(join(REPO_ROOT, 'docs', 'plugin-authoring.md'), 'utf8')
+    expect(doc).not.toContain('export async function handler')
+    const declarations = doc.match(/^export const handler:.*$/gm) ?? []
+    expect(declarations.length).toBeGreaterThan(0)
+    for (const line of declarations) expect(line).toMatch(DECLARATION)
+    expect(handler).toMatch(DECLARATION)
+  })
+
+  test('the pinned example uses the same form and no longer carries the bare satisfies clause', async () => {
+    const example = await readFile(join(REPO_ROOT, 'examples', 'plugins', 'anomaly-issue', 'handler.ts'), 'utf8')
+    expect(example).not.toContain('satisfies HandlerFn')
+    expect(example).toMatch(DECLARATION)
   })
 })
 
@@ -221,5 +335,178 @@ describe('scaffoldPlugin — the home-level ESM marker', () => {
 
     expect(result.created).toBe(true)
     expect(result.message).toContain('not valid JSON')
+  })
+})
+
+// ── scaffold --from <example>: a copy of a shipped example ────────────────
+//
+// One code path with two sources. The same home preparation, the same name
+// guard and the same directory creation run; only the file contents differ.
+// The source is the package's own shipped `examples/plugins/` tree, so the
+// registry is `package.json`'s `files` entry and nothing else: no remote
+// registry, no verb that installs rather than copies, and no record anywhere
+// of which copies exist. The copy diverges from day one, and that is the point.
+//
+// Two entry points reach scaffold, the dispatcher arm and this module's own
+// `import.meta.main` tail, and both must honour the flag or one of them
+// silently scaffolds the template for an author who asked for an example.
+
+/** Run a CLI entry point with stdout/stderr captured, originals always restored. */
+async function captured(fn: () => Promise<number>): Promise<{ code: number; stdout: string; stderr: string }> {
+  const realOut = process.stdout.write
+  const realErr = process.stderr.write
+  let stdout = ''
+  let stderr = ''
+  process.stdout.write = ((chunk: string) => {
+    stdout += chunk
+    return true
+  }) as typeof process.stdout.write
+  process.stderr.write = ((chunk: string) => {
+    stderr += chunk
+    return true
+  }) as typeof process.stderr.write
+  try {
+    return { code: await fn(), stdout, stderr }
+  } finally {
+    process.stdout.write = realOut
+    process.stderr.write = realErr
+  }
+}
+
+const viaDispatcher = (argv: string[]) => captured(() => main(argv))
+
+/**
+ * The subcommand's own `run`, reached dynamically so a missing export is a
+ * failed assertion in the case that needs it rather than a load failure that
+ * takes the whole file down with it.
+ */
+async function scaffoldRun(): Promise<(argv: string[]) => Promise<number>> {
+  const mod = (await import('../scaffold.js')) as { run?: unknown }
+  expect(typeof mod.run).toBe('function')
+  return mod.run as (argv: string[]) => Promise<number>
+}
+
+const EXAMPLE = join(REPO_ROOT, 'examples', 'plugins', 'anomaly-watch')
+
+/** The specifier set the built-in template emits; the default path must not drift from it. */
+const TEMPLATE_HANDLER_SPECIFIERS = [
+  'warpline/schemas/plugin-manifest',
+  'warpline/schemas/skill-result',
+  'warpline/unstable-capabilities',
+  'warpline/unstable-result',
+  './manifest.ts',
+]
+
+describe('scaffold --from <example>', () => {
+  test('copies the shipped example into the home with only the manifest name rewritten, and reaches nothing else', async () => {
+    const home = freshHome()
+    // A copy from the shipped tree has no reason to touch the network; a
+    // fetch during it is a registry sneaking in.
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (() => {
+      throw new Error('scaffold --from must not reach the network')
+    }) as unknown as typeof fetch
+    let code: number
+    try {
+      ;({ code } = await viaDispatcher(['scaffold', 'my-copy', '--from', 'anomaly-watch']))
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    expect(code).toBe(0)
+
+    const dir = join(pluginsDir(), 'my-copy')
+    const copy = await snapshot(dir)
+    const source = await snapshot(EXAMPLE)
+    expect(Object.keys(copy)).toEqual(Object.keys(source))
+    expect(copy['handler.ts']).toBe(source['handler.ts'])
+    expect(copy['handler.test.ts']).toBe(source['handler.test.ts'])
+    // The one rewrite: the manifest's name, so the loader keys the copy on it
+    // and the config path derives from it. Nothing else moves.
+    expect(copy['manifest.ts']).toBe(source['manifest.ts'].replace("name: 'anomaly-watch'", "name: 'my-copy'"))
+    const mod = (await import(join(dir, 'manifest.ts'))) as { manifest: unknown }
+    expect(PluginManifestSchema.parse(mod.manifest).name).toBe('my-copy')
+
+    // No manifest of copies and no registry file: the home holds exactly what
+    // the home preparation and the copy wrote, and the plugins dir holds one entry.
+    expect(readdirSync(home).sort()).toEqual(['node_modules', 'package.json', 'plugins'])
+    expect(readdirSync(join(home, 'plugins'))).toEqual(['my-copy'])
+  })
+
+  test('refuses a --from that is not a shipped example, names the available ones, and creates nothing, not even the home', async () => {
+    const home = freshHome()
+    const { code, stdout, stderr } = await viaDispatcher(['scaffold', 'my-copy', '--from', 'does-not-exist'])
+    expect(code).toBe(1)
+    expect(stdout + stderr).toContain('--from')
+    expect(stdout + stderr).toContain('anomaly-watch')
+    expect(existsSync(join(home, 'plugins', 'my-copy'))).toBe(false)
+    // Nothing at all: a refused source is decided before the home is prepared,
+    // so the symlink and the ESM marker are not written either.
+    expect(readdirSync(home)).toEqual([])
+  })
+
+  test.each([
+    ['../../etc', 'traversal'],
+    ['anomaly-watch/handler.ts', 'separator'],
+    ['anomaly.watch', 'dot'],
+    ['Anomaly-Watch', 'uppercase'],
+    ['', 'empty'],
+  ])('refuses the --from value %p (%s) on the same name guard as the plugin name, before any filesystem access', async (from) => {
+    const home = freshHome()
+    const run = await scaffoldRun()
+    const { code, stdout, stderr } = await captured(() => run(['my-copy', '--from', from]))
+    expect(code).toBe(1)
+    expect(stdout + stderr).toContain('--from')
+    expect(readdirSync(home)).toEqual([])
+  })
+
+  test('with no --from, the dispatcher path emits the built-in template byte for byte, with the pinned specifier set', async () => {
+    const a = freshHome()
+    expect((await viaDispatcher(['scaffold', 'demo'])).code).toBe(0)
+    const viaMain = await snapshot(join(a, 'plugins', 'demo'))
+
+    const b = freshHome()
+    expect((await scaffoldPlugin('demo')).created).toBe(true)
+    expect(await snapshot(join(b, 'plugins', 'demo'))).toEqual(viaMain)
+
+    expect(Object.keys(viaMain)).toEqual(['handler.ts', 'manifest.ts'])
+    expect(specifiers(viaMain['handler.ts'])).toEqual(TEMPLATE_HANDLER_SPECIFIERS)
+    expect(specifiers(viaMain['manifest.ts'])).toEqual(['warpline/schemas/plugin-manifest'])
+  })
+
+  test('both entry points honour the flag: the dispatcher arm and run() write the same directory', async () => {
+    const a = freshHome()
+    expect((await viaDispatcher(['scaffold', 'my-copy', '--from', 'anomaly-watch'])).code).toBe(0)
+    const viaMain = await snapshot(join(a, 'plugins', 'my-copy'))
+
+    const b = freshHome()
+    const run = await scaffoldRun()
+    expect((await captured(() => run(['my-copy', '--from', 'anomaly-watch']))).code).toBe(0)
+    expect(await snapshot(join(b, 'plugins', 'my-copy'))).toEqual(viaMain)
+    expect(Object.keys(viaMain)).toContain('handler.test.ts')
+  })
+
+  test('the import.meta.main tail and the dispatcher arm both go through run(), so neither can drop a flag', async () => {
+    // Structural, because the tail only executes as a process entry and the
+    // repository budgets itself to one spawning test file.
+    const source = await readFile(join(REPO_ROOT, 'src', 'cli', 'scaffold.ts'), 'utf8')
+    const tail = source.slice(source.indexOf('import.meta.main'))
+    expect(tail).toMatch(/\brun\(/)
+    expect(tail).not.toContain('process.argv[2]')
+
+    const dispatcher = await readFile(join(REPO_ROOT, 'src', 'cli', 'warpline.ts'), 'utf8')
+    const arm = dispatcher.slice(dispatcher.indexOf("case 'scaffold':"), dispatcher.indexOf("case 'run':"))
+    expect(arm).toContain('return await run(rest)')
+    expect(arm).not.toContain('scaffoldPlugin(')
+  })
+
+  test('an unknown flag and a missing name are usage errors that write nothing', async () => {
+    const home = freshHome()
+    const run = await scaffoldRun()
+    const bogus = await captured(() => run(['my-copy', '--bogus']))
+    expect(bogus.code).toBe(1)
+    expect(bogus.stderr).toContain('Usage: warpline scaffold')
+    expect((await captured(() => run([]))).code).toBe(1)
+    expect((await captured(() => run(['one', 'two']))).code).toBe(1)
+    expect(readdirSync(home)).toEqual([])
   })
 })

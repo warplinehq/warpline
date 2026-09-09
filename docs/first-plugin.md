@@ -29,7 +29,7 @@ Check it landed:
 npx warpline --help
 ```
 
-You should see five commands: `plan`, `scaffold`, `run`, `approve`, `revoke`.
+You should see the command list; every verb this tutorial uses is on it.
 
 ## 2. Scaffold
 
@@ -43,7 +43,9 @@ Plugin 'hello-warpline' scaffolded at .../warpline-tutorial/.warpline/plugins/he
 
 That created a home directory, `.warpline/`, and put your plugin inside it.
 Everything warpline reads or writes lives under that one directory — there is
-no global state, and deleting it undoes this entire tutorial.
+no global state, and deleting it undoes this entire tutorial. (Adding
+`--from <example>` copies one of the bundled examples in place of the
+template; `npx warpline --help` names the flag.)
 
 Your plugin is two files. The **manifest** declares what the plugin is and what
 it is allowed to do:
@@ -121,7 +123,7 @@ Nothing is due — no plugin passed the filter chain.
 
 Not due (1):
 
-  hello-warpline — skipped (unapproved): side effects require session approval
+  hello-warpline — unapproved: side effects require session approval
     creates_issue: ⚠ unapproved — would be SKIPPED this run
 ```
 

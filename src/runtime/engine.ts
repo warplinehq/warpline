@@ -31,7 +31,7 @@ import {
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { invokePlugin } from './invoke-plugin.js'
-import type { CapabilityGrantWitness } from './capabilities.js'
+import type { CapabilityGrantWitness, DependencyRun } from './capabilities.js'
 
 /**
  * The grant witness for a plugin the engine has already cleared to run.
@@ -68,11 +68,12 @@ export function witnessAfterGrantRead(
 import { computeTier, isEligibleForTier } from './tier.js'
 import type { TierName } from './tier.js'
 import { isPluginFresh } from './staleness.js'
+import type { FreshnessResult } from './staleness.js'
 import {
   readEngineState,
   writeEngineState,
 } from './engine-state-store.js'
-import type { Denial, EngineState, PendingGate } from '../schemas/engine-state.js'
+import type { Denial, EngineState, PendingGate, PluginRun } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs, RETENTION_DAYS } from './run-log-store.js'
 import type { RunLog } from '../schemas/run-log.js'
 import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
@@ -125,12 +126,13 @@ export type RunProfile = 'daily' | 'weekly' | 'manual'
 /**
  * Profile tier → set of schedules that run under that profile.
  *
- * Exported so `warpline plan` can build the same `EvalContext.allowedSchedules`
- * a run builds instead of restating the tier map — a second copy is exactly the
- * one-comparison disagreement between preview and run that this exists to
- * prevent.
+ * Read in exactly one place — the profile tier gate, which derives the tier
+ * from `EvalContext.profile` as it evaluates. Preview and run therefore share
+ * the map by construction rather than by two callers agreeing to build the same
+ * set, which is the one-comparison disagreement this exists to prevent.
+ * `RUN_PROFILES` below is derived from it for the same reason.
  */
-export const PROFILE_ALLOWED_SCHEDULES: Record<RunProfile, ReadonlySet<string>> = {
+const PROFILE_ALLOWED_SCHEDULES: Record<RunProfile, ReadonlySet<string>> = {
   daily: new Set(['on_run', 'daily']),
   weekly: new Set(['on_run', 'daily', 'weekly']),
   manual: new Set(['manual']),
@@ -150,8 +152,9 @@ export interface AdvanceOptions {
   /**
    * Headless run profile. When set, the engine filters plugins by
    * schedule tier and treats the run as non-interactive (see RunProfile).
-   * When undefined, all plugins are eligible and supervised plugins gate
-   * normally — this preserves pre-profile interactive behavior.
+   * When undefined, the engine applies no schedule tier but still excludes
+   * `schedule: 'manual'`, and supervised plugins gate normally — this
+   * preserves pre-profile interactive behavior.
    */
   profile?: RunProfile
   /**
@@ -190,7 +193,19 @@ export interface AdvanceOptions {
   approvalPath?: string
   /** Called before each plugin begins execution (for streaming CLI output) */
   onPluginStart?: (plugin: string) => void
-  /** Called after each plugin resolves with final FSM state and elapsed_ms (for streaming CLI output) */
+  /**
+   * Called after each plugin resolves with final FSM state and elapsed_ms (for
+   * streaming CLI output).
+   *
+   * NOT paired with `onPluginStart`. Two not-due arms — `unapproved` and
+   * `dependency_failed` — call this without a preceding start, because both are
+   * actionable skips worth a line while neither is an attempt. A host keying
+   * state off `onPluginStart` must tolerate an unmatched end.
+   *
+   * The asymmetry is the correct one and is not a candidate for repair from the
+   * other side: `plan.test.ts` defines "what a run attempted" as start-hook
+   * membership, and a gated plugin belongs outside that set.
+   */
   onPluginEnd?: (plugin: string, status: string, elapsed: number, reason?: string) => void
   /**
    * Called exactly once with a human-readable reason whenever the overall run
@@ -375,6 +390,7 @@ export type NotDueReason =
   | 'fresh'
   | 'denied'
   | 'task_locked'
+  | 'dependency_failed'
   | 'unapproved'
 
 export type EvalResult =
@@ -383,17 +399,321 @@ export type EvalResult =
 
 /** Everything `evaluatePlugin` needs that is not the plugin itself. */
 export interface EvalContext {
-  /** Schedules allowed by the headless profile tier; undefined = unfiltered. */
-  allowedSchedules?: ReadonlySet<string>
-  /** The requested profile, for the profile-filter detail string. */
+  /**
+   * The requested run profile, and the only field that answers "was a profile
+   * asked for?".
+   *
+   * The schedule tier and headless mode are both derived from it where they are
+   * read, never carried alongside it. Three separately settable fields could
+   * disagree, and a context saying `weekly` beside a tier nobody built would
+   * produce a skip naming a profile the run never asked for — the same
+   * predicate/prose disagreement the gates below exist to make impossible,
+   * displaced one level up.
+   *
+   * Undefined means no profile was requested, and that is not the same as every
+   * schedule passing: a `manual` schedule is excluded in that case too, because
+   * it runs only when something asked for it by name.
+   */
   profile?: RunProfile
   currentTier: TierName
-  headless: boolean
   force: boolean
   state: EngineState
   /** Already-resolved session approval path — the evaluator does no path defaulting. */
   approvalPath: string
+  /**
+   * Plugins an EARLIER LEVEL of this same preview already found due.
+   *
+   * Set only by `plan`, which evaluates against a static state document and so
+   * cannot see the clearing that a run performs as it goes. `runAdvance` leaves
+   * it undefined: its `state.plugin_runs` is mutated by its own level loop and
+   * is already the truth, so a projection here would be a second answer to a
+   * question the state already answers.
+   *
+   * Named for what it knows: `dueAtEarlierLevel` does not know the producer
+   * will succeed — only that this preview decided the producer runs. A producer
+   * that runs and fails again leaves the run skipping a dependent this preview
+   * called due, which is the residual disclosed as the fifth entry under
+   * docs/runtime-spec.md § "What the dependency gate does not cover".
+   */
+  dueAtEarlierLevel?: ReadonlySet<string>
 }
+
+/**
+ * Everything a gate predicate is allowed to read.
+ *
+ * The three derived values are computed ONCE, before the scan, because more
+ * than one entry reads them and because an entry recomputing them would be
+ * free to disagree with the entry next door. All three are pure reads over the
+ * state snapshot already in hand — no I/O, nothing that can throw on a plugin
+ * an earlier gate would have filtered out — so computing them ahead of the
+ * gates that used to short-circuit them changes nothing an operator can see.
+ */
+interface GateInput {
+  plugin: string
+  manifest: PluginManifest
+  ctx: EvalContext
+  now: number
+  freshness: FreshnessResult
+  standing: DenialStanding
+  /**
+   * Prefix for whatever the operator sees next when a denial has been
+   * superseded; empty when there is nothing to say. Produced from the denial
+   * standing, consumed by the approval entry's detail — the one value in this
+   * chain that travels between two entries.
+   */
+  supersededNote: string
+}
+
+/**
+ * One entry in the declared guard chain: a reason code, the predicate that
+ * fires it, and the prose the run log and the preview both render.
+ */
+export interface Gate {
+  reason: NotDueReason
+  /** True = the plugin is not due, for this entry's reason. */
+  applies: (g: GateInput) => boolean | Promise<boolean>
+  detail: (g: GateInput) => string
+}
+
+/**
+ * The declared dependencies whose LAST RECORDED RUN failed, in the order the
+ * manifest declares them.
+ *
+ * `manifest.dependencies` order and not sorted order, because that is the order
+ * the dependency-run projection below already preserves and the order the author
+ * wrote; two orderings of the same list is one more place for two answers to
+ * disagree.
+ *
+ * The read is `plugin_runs[d]?.status` and nothing else. There is no second
+ * check for "did this dependency legitimately not run": the run record is
+ * written only where a run actually happened, so no not-due reason can ever
+ * appear in it, and a defensive check would imply a second source of truth for
+ * a fact this record already holds alone. Nor is there a roster check for a
+ * declared name that is not installed — that would be a second dependency
+ * signal, and the case is named in `docs/runtime-spec.md` instead.
+ *
+ * A name with no entry answers `undefined`, which is not `'failed'`, so a
+ * dependency that never ran cannot gate anything. That is also what makes the
+ * plain index read safe on an inherited key: `plugin_runs['toString']` answers
+ * with a function whose `.status` is `undefined`, and `undefined !== 'failed'`.
+ *
+ * The second clause is the caller's own projection, and only `plan` supplies
+ * one: a dependency this same preview already decided is due is a dependency
+ * whose latch this advance is about to overwrite, so reporting its dependent as
+ * gated would publish a skip that is not going to happen. The whole `ctx` is
+ * taken rather than `ctx.state` because of it — one chokepoint for both the
+ * predicate and the detail, so a filtered dependency cannot be dropped from one
+ * and named in the other.
+ */
+function failedDependencies(manifest: PluginManifest, ctx: EvalContext): string[] {
+  return manifest.dependencies.filter(
+    (d) => ctx.state.plugin_runs[d]?.status === 'failed' && !ctx.dueAtEarlierLevel?.has(d),
+  )
+}
+
+/**
+ * The guard chain, in the order it is evaluated.
+ *
+ * This array IS the order. It exists so an operator can read the sequence off
+ * one declaration instead of reconstructing it from the longest function in
+ * the runtime, and so a proposal for a new gate has a line in a list to argue
+ * about rather than a paragraph of control flow. The scan returns on the first
+ * entry that fires and evaluates nothing below it, which matters because two
+ * of these predicates perform real reads.
+ *
+ * Not here, deliberately: the dry-run side-effect block. It needs the dry-run
+ * flag and the finished verdict, so it lives in the orchestrator and is the
+ * last gate before invocation on a dry run. On a real run the last gate is the
+ * final entry below, and nothing may be added after it.
+ */
+export const GATES: readonly Gate[] = [
+  // -- Profile tier filter ---------------
+  // A requested profile carries a tier of schedules and the plugin is in it or
+  // it is not. No profile is the second question, and the answer is not "no
+  // filter": `manual` reads as opt-in, and an advance nobody asked for the
+  // manual profile is not that opt-in. So the undefined branch excludes that
+  // one schedule and admits the other three, and it says so in a detail that
+  // names the profile the operator would have to ask for.
+  //
+  // Both arms switch on `ctx.profile`, the one field that carries the answer,
+  // and the tier is looked up here rather than handed in. So the branch that
+  // hardcodes 'manual' is reached only when no profile was requested, by
+  // construction — it cannot name a profile somebody did ask for.
+  {
+    reason: 'profile_schedule',
+    applies: ({ manifest, ctx }) =>
+      ctx.profile !== undefined
+        ? !PROFILE_ALLOWED_SCHEDULES[ctx.profile].has(manifest.schedule)
+        : manifest.schedule === 'manual',
+    detail: ({ manifest, ctx }) =>
+      ctx.profile !== undefined
+        ? `profile '${ctx.profile}' filter: schedule '${manifest.schedule}' not in tier`
+        : `schedule 'manual': requires profile 'manual'`,
+  },
+
+  // -- Tier filter: coarser gate than staleness ---------------
+  {
+    reason: 'min_tier',
+    applies: ({ manifest, ctx }) =>
+      !isEligibleForTier(manifest.min_tier ?? 'normal', ctx.currentTier),
+    detail: ({ manifest, ctx }) =>
+      `tier filter: current '${ctx.currentTier}' exceeds plugin min_tier '${manifest.min_tier ?? 'normal'}'`,
+  },
+
+  // -- Headless supervised bypass (A2) --
+  // Headless is defined as "a profile was requested" (A2), so it is read off
+  // `ctx.profile` here rather than carried as a second field that could say
+  // otherwise.
+  {
+    reason: 'headless_supervised',
+    applies: ({ manifest, ctx }) =>
+      ctx.profile !== undefined && manifest.autonomy_level === 'supervised',
+    detail: () => 'headless mode: supervised plugin bypassed (no interactive gate)',
+  },
+
+  // -- Manual: always skip --
+  {
+    reason: 'manual',
+    applies: ({ manifest }) => manifest.autonomy_level === 'manual',
+    detail: () => 'manual — requires explicit invocation',
+  },
+
+  // -- Staleness check: skip if fresh --
+  {
+    reason: 'fresh',
+    applies: ({ freshness }) => freshness.fresh,
+    detail: ({ freshness }) => freshness.reason ?? 'fresh',
+  },
+
+  // -- Task lock check: active task for this plugin on the board --
+  {
+    reason: 'task_locked',
+    applies: ({ plugin }) => smCheckTaskLock(plugin),
+    detail: () => 'task locked — active on board',
+  },
+
+  // -- Dependency failed: it ran, and its last run ended failed ------
+  // Ordered after the staleness check and after the task lock, and BEFORE both
+  // the denial entry and the approval entry. That placement is argued rather
+  // than assumed, because it is the one thing about this gate that was chosen
+  // against standing advice.
+  //
+  // AFTER STALENESS. A plugin that is still fresh is not going to read anything
+  // this cycle, and "still fresh" is the smaller, older answer; putting this
+  // above it would relabel every fresh dependent of a failed producer.
+  //
+  // AFTER THE TASK LOCK. A task lock is a human holding this plugin open on the
+  // board. That answer outranks a statement about the plugin's inputs, and a
+  // locked plugin should be reported as locked — the operator already knows why
+  // it is not running, and it is not this.
+  //
+  // BEFORE THE DENIAL. The denial entry below gives the reason in its own
+  // comment: a denied plugin is not asked about at all, so it must not first be
+  // reported as needing a Grant it does not need. The same sentence applies one
+  // step earlier. A plugin that cannot usefully run must not first be reported
+  // as STILL DENIED, because the denial answers a proposal this plugin will not
+  // be making in this advance. Sitting ahead of the denial also keeps this
+  // detail clear of `supersededNote`, which is computed between the denial and
+  // the approval entries and would otherwise decorate a dependency-failure
+  // message with a paragraph about a returning question nobody asked.
+  //
+  // BEFORE THE APPROVAL CHECK, AND WHY THE STANDING ADVICE IS WRONG HERE. The
+  // standing advice in this project's own notes is to add new gates at the END
+  // of the chain, on the grounds that appending cannot reorder what is already
+  // there. That advice is wrong for this gate, for the reason the denial arm
+  // already gives: a plugin that cannot usefully run must not first be reported
+  // as needing a session grant it does not need, and appending would produce
+  // exactly that report. The contradiction is deliberate.
+  //
+  // What makes it safe is that this gate only ever moves a plugin from due to
+  // not-due. It admits nothing. It cannot let a side-effecting plugin holding no
+  // grant reach a handler, because every path out of it is a skip. The operator
+  // sees a different reason; nobody sees a different outcome.
+  //
+  // Both halves are falsifiable rather than merely argued. The declared order is
+  // pinned as a list by `gate-order.test.ts`, which also asserts that the
+  // approval entry is still the last gate before invocation on a real run. The
+  // pairwise cases in `dependency-failed.test.ts` arm two guards on one plugin
+  // at once and read which one the run log names, and the approval pair asserts
+  // the outcome as well as the reason: the side-effecting consumer gets no run
+  // record and its handler is never entered.
+  //
+  // What arms it is one status on one existing record, and only that one.
+  // `skipped` does not: a plain skip and a `[needs-llm]` handoff lead a consumer
+  // to the same action, which is to read the carried-forward Output, and gating
+  // on it would break every judgment chain in the repository. `gated` does not:
+  // the gated arm writes a real Output, and a level holding a gate stops the
+  // advance, so no dependent is evaluated behind it. `partial` does not: the
+  // dependency published data and the authoring guide tells consumers to read
+  // it. An absent entry does not: a dependency that never ran cannot invalidate
+  // anything.
+  {
+    reason: 'dependency_failed',
+    applies: ({ manifest, ctx }) => failedDependencies(manifest, ctx).length > 0,
+    // Declared plugin names and one closed enum value. Nothing else may be
+    // interpolated here: this string reaches the run log's `result_summary`, the
+    // board event and `warpline plan`, all of which are read and shared, and
+    // this repository has twice paid for an operator-configured value reaching a
+    // result summary. The test asserts it as an exact string rather than a
+    // substring, so an appended leak fails.
+    //
+    // No `skipped: ` prefix, matching the `fresh` arm: the orchestrator adds one
+    // for the run log and nothing else does. It used to be written here on the
+    // grounds that a prefix added downstream would be a second author for one
+    // string — but the second author already exists and is `emitPluginSkipped`,
+    // which formats `${plugin}: skipped — ${reason}`, so the prefix here made
+    // the board say `skipped` twice about one plugin.
+    detail: ({ manifest, ctx }) =>
+      `dependency failed — ${failedDependencies(manifest, ctx)
+        .map((d) => `'${d}'`)
+        .join(', ')} last recorded status 'failed'`,
+  },
+
+  // -- Denial: a human already said no to this exact proposal --------
+  // Ordered after the task lock and BEFORE the approval gate. A denied plugin
+  // is not asked about at all, so it must not first be reported as needing a
+  // Grant it does not need.
+  //
+  // The denial holds only while the fingerprint still matches. When it moves,
+  // the answer is stale and the plugin is asked again — but the question is a
+  // returning one, and `supersededNote` makes the difference visible rather
+  // than letting it reappear looking new.
+  {
+    reason: 'denied',
+    applies: ({ standing }) => standing.standing === 'live',
+    // The `none` arm is unreachable behind the predicate above; it is written
+    // out so the record narrows to one that has a denial to quote.
+    detail: ({ standing }) =>
+      standing.standing === 'none'
+        ? ''
+        : `denied ${standing.denial.denied_at}: ${standing.denial.reason}`,
+  },
+
+  // -- Side-effect approval gate ---------------------------------
+  // The last gate before invocation on a real run. Nothing goes after it.
+  {
+    reason: 'unapproved',
+    applies: async ({ plugin, manifest, ctx, now }) =>
+      manifest.side_effects.length > 0 &&
+      !(await checkApproval(plugin, ctx.approvalPath, { now })),
+    // No `skipped` in this string, for the reason the `dependency_failed` arm
+    // above spells out at length: the detail has a second author downstream.
+    // `emitPluginSkipped` formats `${plugin}: skipped — ${reason}`, so the old
+    // `skipped (unapproved): ` prefix made the board say `skipped` twice about
+    // one plugin — the exact shape 60e9228 fixed for the dependency gate and
+    // deferred here. The word survives as `unapproved: ` so the reason stays
+    // greppable in `warpline plan` output, which renders `${plugin} — ${detail}`
+    // and has no prefix of its own.
+    //
+    // The run log keeps `skipped (unapproved): ` and names the specific
+    // effects; that string is authored at the arm below and is deliberately not
+    // this one. `docs/why-the-gate-holds.md` calls it the one-command check.
+    // `board-detail-and-run-log-summary.test.ts` pins the pair so the two
+    // cannot drift apart unnoticed.
+    detail: ({ supersededNote }) =>
+      `${supersededNote}unapproved: side effects require session approval`,
+  },
+]
 
 /**
  * Decide whether a plugin is due, with no writes of any kind.
@@ -426,96 +746,59 @@ export async function evaluatePlugin(
   ctx: EvalContext,
   now: number,
 ): Promise<EvalResult> {
-  // -- Profile tier filter ---------------
-  if (ctx.allowedSchedules && !ctx.allowedSchedules.has(manifest.schedule)) {
-    return {
-      due: false,
-      reason: 'profile_schedule',
-      detail: `profile '${ctx.profile}' filter: schedule '${manifest.schedule}' not in tier`,
-    }
-  }
-
-  // -- Tier filter: coarser gate than staleness ---------------
-  if (!isEligibleForTier(manifest.min_tier ?? 'normal', ctx.currentTier)) {
-    return {
-      due: false,
-      reason: 'min_tier',
-      detail: `tier filter: current '${ctx.currentTier}' exceeds plugin min_tier '${manifest.min_tier ?? 'normal'}'`,
-    }
-  }
-
-  // -- Headless supervised bypass (A2) --
-  if (ctx.headless && manifest.autonomy_level === 'supervised') {
-    return {
-      due: false,
-      reason: 'headless_supervised',
-      detail: 'headless mode: supervised plugin bypassed (no interactive gate)',
-    }
-  }
-
-  // -- Manual: always skip --
-  if (manifest.autonomy_level === 'manual') {
-    return { due: false, reason: 'manual', detail: 'manual — requires explicit invocation' }
-  }
-
-  // -- Staleness check: skip if fresh --
-  const freshness = isPluginFresh(pluginName, manifest, ctx.state, { force: ctx.force, now })
-  if (freshness.fresh) {
-    return { due: false, reason: 'fresh', detail: freshness.reason ?? 'fresh' }
-  }
-
-  // -- Task lock check: active task for this plugin on the board --
-  if (await smCheckTaskLock(pluginName)) {
-    return { due: false, reason: 'task_locked', detail: 'task locked — active on board' }
-  }
-
-  // -- Denial: a human already said no to this exact proposal --------
-  // Ordered after the task lock and BEFORE the approval gate. A denied plugin
-  // is not asked about at all, so it must not first be reported as needing a
-  // Grant it does not need.
-  //
-  // The denial holds only while the fingerprint still matches. When it moves,
-  // the answer is stale and the plugin is asked again — but the question is a
-  // returning one, and `supersededNote` below makes the difference visible
-  // rather than letting it reappear looking new.
-  //
   const standing = denialStanding(ctx.state, pluginName, manifest)
-  if (standing.standing === 'live') {
-    return {
-      due: false,
-      reason: 'denied',
-      detail: `denied ${standing.denial.denied_at}: ${standing.denial.reason}`,
-    }
-  }
 
   /**
-   * Prefix for whatever the operator sees next when a denial has been
-   * superseded. A returning Ask that says nothing looks like a first-time one,
-   * and the operator has no way to tell they already answered it.
+   * The cross-entry values, resolved before the scan starts.
+   *
+   * `supersededNote` is why this block exists rather than living inside the
+   * entries that read it: it is produced by the denial check and consumed by
+   * the approval check, and a scan has nowhere to put a value that travels
+   * between two entries. A returning Ask that says nothing looks like a
+   * first-time one, and the operator has no way to tell they already answered
+   * it.
    *
    * It keeps saying so until the denial is taken back. That is deliberate: the
    * record is still there, still answering a proposal that no longer exists,
    * and the operator is the only one who can retire it.
    */
-  const supersededNote =
-    standing.standing === 'superseded'
-      ? `previously denied ${standing.denial.denied_at} ('${standing.denial.reason}') — the ` +
-        'proposal has changed since, so this is a returning question, not a new one. '
-      : ''
+  const input: GateInput = {
+    plugin: pluginName,
+    manifest,
+    ctx,
+    now,
+    freshness: isPluginFresh(pluginName, manifest, ctx.state, { force: ctx.force, now }),
+    standing,
+    supersededNote:
+      standing.standing === 'superseded'
+        ? `previously denied ${standing.denial.denied_at} ('${standing.denial.reason}') — the ` +
+          'proposal has changed since, so this is a returning question, not a new one. '
+        : '',
+  }
 
-  // -- Side-effect approval gate ---------------------------------
-  if (
-    manifest.side_effects.length > 0 &&
-    !(await checkApproval(pluginName, ctx.approvalPath, { now }))
-  ) {
-    return {
-      due: false,
-      reason: 'unapproved',
-      detail: `${supersededNote}skipped (unapproved): side effects require session approval`,
+  // Declared order, first match wins. Awaited one at a time on purpose: the
+  // later predicates perform real reads, and a gate that already fired must
+  // not cause them.
+  for (const gate of GATES) {
+    if (await gate.applies(input)) {
+      return { due: false, reason: gate.reason, detail: gate.detail(input) }
     }
   }
 
   return { due: true }
+}
+
+/**
+ * What a dispatch on `NotDueReason` does with a member it has no arm for.
+ *
+ * The compile error is the point: reached with a value the compiler still
+ * thinks is possible, the argument does not type as `never` and the build
+ * fails before any test runs. The throw is for the other case — a value
+ * arriving from a boundary the compiler never saw — where silence would file
+ * the run under whichever arm happened to have no guard.
+ */
+function assertNever(value: never): never {
+  throw new Error(`unhandled not-due reason: ${String(value)}`)
 }
 
 // -----------------------------------------------------------------------
@@ -620,12 +903,6 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     onPluginEnd,
     onRunFailure,
   } = options
-
-  // Headless mode is defined as "a profile was explicitly requested" (A2).
-  // In headless mode, supervised plugins are skipped rather than gated, and
-  // plugin schedules are filtered by the profile tier.
-  const headless = profile !== undefined
-  const allowedSchedules = profile ? PROFILE_ALLOWED_SCHEDULES[profile] : undefined
 
   // The destructure above defaults only `undefined`, so an empty string
   // arrives here unchanged — and `resolve('')` is the current working
@@ -827,11 +1104,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
   // 6b. Evaluation context shared by every plugin in this run. The
   // approval path is resolved once here so the evaluator does no defaulting.
+  // `profile` alone: headless mode (A2) and the schedule tier are both derived
+  // from it inside the gates, so this run and a `warpline plan` preview cannot
+  // reach the gates carrying different answers to the same question.
   const evalCtx: EvalContext = {
-    allowedSchedules,
     profile,
     currentTier,
-    headless,
     force,
     state,
     approvalPath: approvalPath ?? sessionApprovalPath(),
@@ -876,139 +1154,161 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         }
 
         // -- Not-due: record the skip the evaluator decided on --
-        // One arm per reason code. The arms differ only in their run-log prose,
+        // One arm per reason code, dispatched so the compiler owns the
+        // completeness of the set. The arms differ only in their run-log prose,
         // which is a run-log concern and stays here rather than travelling in
         // the evaluator's structured reason.
+        //
+        // A `switch` and not a chain of `if`/`return`, because the chain's last
+        // block had no guard: every reason without an arm of its own fell into
+        // it and was recorded as an approval-gate skip, naming session approval
+        // and side effects on a plugin that may declare neither. The `default`
+        // arm below is what a chain cannot have — a place the compiler checks.
         if (!ev.due) {
           plugin_states.set(pluginName, 'skipped')
 
-          // -- Profile tier filter ---------------
-          if (ev.reason === 'profile_schedule') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+          // Narrowed through a local: a `switch` over a `const` of a literal
+          // union narrows the `default` arm to `never` reliably, which is the
+          // whole mechanism here.
+          const reason = ev.reason
 
-          // -- Tier filter: coarser gate than staleness ---------------
-          if (ev.reason === 'min_tier') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+          switch (reason) {
+            // -- Profile tier filter, tier filter, headless supervised bypass
+            //    (A2), manual, task lock --
+            // Five reasons, one arm: they differ only in the detail string the
+            // evaluator already produced, and five copies of the same six lines
+            // hid that the differences below are the real ones.
+            case 'profile_schedule':
+            case 'min_tier':
+            case 'headless_supervised':
+            case 'manual':
+            case 'task_locked': {
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'skipped',
+                started_at: entryStartedAt,
+                elapsed_ms: Date.now() - entryStart,
+                result_summary: ev.detail,
+                retried: false,
+              })
+              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+              return
+            }
 
-          // -- Headless supervised bypass (A2) --
-          if (ev.reason === 'headless_supervised') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+            // -- Fresh within TTL: the run log prefixes the freshness prose --
+            case 'fresh': {
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'skipped',
+                started_at: entryStartedAt,
+                elapsed_ms: Date.now() - entryStart,
+                result_summary: `skipped: ${ev.detail}`,
+                retried: false,
+              })
+              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+              return
+            }
 
-          // -- Manual: always skip --
-          if (ev.reason === 'manual') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+            // -- Dependency failed: it ran, it failed, and this plugin would
+            //    otherwise read what it left behind on an earlier cycle --
+            // The run log's prefix is added HERE, exactly as the freshness arm
+            // above adds it, and the evaluator's detail stays bare. The board
+            // event takes that bare detail and formats its own
+            // `${plugin}: skipped — ${reason}`, so one `skipped` reaches an
+            // operator instead of two.
+            //
+            // The second not-due arm to call the progress end hook, and the
+            // reason is the approval gate's reason: a dependency failure is
+            // actionable in the way a missing Grant is actionable and unlike
+            // "still fresh", so the operator watching a long advance gets a line
+            // for the plugin they were waiting on instead of silence.
+            //
+            // Not the older rationale, which does not survive a read of source:
+            // that the plan-versus-run harness keys its attempted-set off the
+            // end hook. It keys off `onPluginStart` only (`plan.test.ts`,
+            // `attemptedByRun`), and a gated plugin is correctly outside the
+            // attempted set either way, because this arm returns before the
+            // start hook fires.
+            //
+            // No `plugin_runs` write, for the reason spelled out on the denial
+            // arm below: `runAdvance` has exactly three write sites for that
+            // record and this is not a fourth. A write here would move
+            // `last_run_at` for a plugin that never ran, re-arm the freshness
+            // latch against a run that did not happen, and make a plugin that
+            // never ran indistinguishable from one that ran and produced
+            // nothing — which is the exact confusion this gate exists to end.
+            case 'dependency_failed': {
+              const dependencyFailedElapsed = Date.now() - entryStart
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'skipped',
+                started_at: entryStartedAt,
+                elapsed_ms: dependencyFailedElapsed,
+                result_summary: `skipped: ${ev.detail}`,
+                retried: false,
+              })
+              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+              onPluginEnd?.(pluginName, 'skipped', dependencyFailedElapsed, 'dependency failed')
+              return
+            }
 
-          // -- Fresh within TTL: the run log prefixes the freshness prose --
-          if (ev.reason === 'fresh') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: `skipped: ${ev.detail}`,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+            // -- Denied: a human answered, and the answer still applies --
+            // The only arm here that does not write `status: 'skipped'`. A
+            // denial is an outcome of supervision, like `gated`, and filing it
+            // as a skip would put it in the same bucket as "no Grant" and
+            // "still fresh" — the log could then no longer tell an unanswered
+            // question from an answered one. The BOARD event carries the same
+            // distinction, via `emitPluginDenied`: making that argument about the
+            // run log and then emitting `plugin: skipped — denied …` next door
+            // left the two logs disagreeing about the same advance.
+            //
+            // No `plugin_runs` write: the plugin did not run. `runAdvance` has
+            // exactly three write sites for that record — the catch around
+            // `invokePlugin`, the gated arm and the autonomous arm, all below —
+            // and neither this arm nor the dependency-failed one above is a
+            // fourth. (`applyPendingGate`
+            // holds the only other one, plus the delete in its discard closure;
+            // both are outside this function and answer a parked gate rather than
+            // an advance.)
+            case 'denied': {
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'denied',
+                started_at: entryStartedAt,
+                elapsed_ms: Date.now() - entryStart,
+                result_summary: ev.detail,
+                retried: false,
+              })
+              await emitPluginDenied(pluginName, ev.detail, run_id, eventsPath)
+              return
+            }
 
-          // -- Task locked: active task for this plugin on the board --
-          if (ev.reason === 'task_locked') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'skipped',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-            return
-          }
+            // -- Side-effect approval gate ---------------------------------
+            // The run log names the specific effects; the board event does not.
+            // Guarded now, where it used to be the block everything unmatched
+            // fell into, which is why it must never inherit another reason's
+            // run: it ends the progress hook, and it is one of the two not-due
+            // arms that do — the dependency-failed arm above is the other, on
+            // the same argument that an actionable skip earns the operator a
+            // line where "still fresh" does not.
+            case 'unapproved': {
+              const unapprovedElapsed = Date.now() - entryStart
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'skipped',
+                started_at: entryStartedAt,
+                elapsed_ms: unapprovedElapsed,
+                result_summary: `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
+                retried: false,
+              })
+              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+              onPluginEnd?.(pluginName, 'skipped', unapprovedElapsed, 'unapproved side effects')
+              return
+            }
 
-          // -- Denied: a human answered, and the answer still applies --
-          // The only arm here that does not write `status: 'skipped'`. A
-          // denial is an outcome of supervision, like `gated`, and filing it
-          // as a skip would put it in the same bucket as "no Grant" and
-          // "still fresh" — the log could then no longer tell an unanswered
-          // question from an answered one. The BOARD event carries the same
-          // distinction, via `emitPluginDenied`: making that argument about the
-          // run log and then emitting `plugin: skipped — denied …` next door
-          // left the two logs disagreeing about the same advance.
-          //
-          // No `plugin_runs` write: the plugin did not run. `runAdvance` has
-          // exactly two write sites for that record — the gated arm and the
-          // autonomous arm below — and this is not a third. (`applyPendingGate`
-          // holds the only other one, plus the delete in its discard closure;
-          // both are outside this function and answer a parked gate rather than
-          // an advance.)
-          if (ev.reason === 'denied') {
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'denied',
-              started_at: entryStartedAt,
-              elapsed_ms: Date.now() - entryStart,
-              result_summary: ev.detail,
-              retried: false,
-            })
-            await emitPluginDenied(pluginName, ev.detail, run_id, eventsPath)
-            return
+            default:
+              assertNever(reason)
           }
-
-          // -- Side-effect approval gate ---------------------------------
-          // The run log names the specific effects; the board event does not.
-          const unapprovedElapsed = Date.now() - entryStart
-          plugin_entries.push({
-            plugin: pluginName,
-            status: 'skipped',
-            started_at: entryStartedAt,
-            elapsed_ms: unapprovedElapsed,
-            result_summary: `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
-            retried: false,
-          })
-          await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-          onPluginEnd?.(pluginName, 'skipped', unapprovedElapsed, 'unapproved side effects')
-          return
         }
 
         // -- Set FSM to running --
@@ -1031,10 +1331,63 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // `witnessAfterGrantRead` — one copy, because two copies of an
           // argument drift and the copy that drifts is the one nobody reads.
           const witness = witnessAfterGrantRead(pluginName, manifest.side_effects)
+
+          // What each DECLARED dependency last produced and how its last run
+          // ended, projected HERE and not from the state read at the top of the
+          // advance. `plugin_runs` is mutated by each level's own writes below,
+          // and level ordering is what puts a level-0 producer's write before a
+          // level-1 consumer's invocation. A projection hoisted out of this
+          // closure is a snapshot taken before any producer ran: the consumer
+          // would read nothing on every advance while every test handing a
+          // literal stayed green.
+          //
+          // Declared names only, so the record never carries a key the
+          // consumer's manifest does not list. `null` for a name with no entry
+          // at all; within an entry, `last_output` is ABSENT rather than null
+          // for a run that produced none, which the member's `?? null` covers.
+          //
+          // ONE projection for both facts. Two would be two reads of a map this
+          // loop mutates, and the one that drifted would be the one nobody
+          // read — the same failure the paragraph above describes for a hoisted
+          // snapshot. `DependencyRun` is a `Pick` of exactly the two fields the
+          // two members expose: this is the boundary where a field is chosen
+          // for exposure to a different plugin, and widening it is what the
+          // leak test watches for.
+          const dependencyRuns = Object.fromEntries(
+            manifest.dependencies.map((d): [string, DependencyRun | null] => {
+              const run = state.plugin_runs[d]
+              return [
+                d,
+                run
+                  ? {
+                      status: run.status,
+                      // A COPY, and the copy is the point. The record lives in
+                      // `state.plugin_runs`, `writeEngineState` persists that
+                      // map unvalidated at the end of the advance, and
+                      // `capabilities.ts` hands whatever is here straight to
+                      // the handler. Passing the live object made a consumer's
+                      // in-place edit — `rec.body = JSON.stringify(patched)` is
+                      // the obvious shape — the engine's persisted state: a
+                      // body over the 16 KiB `OutputRecordSchema` cap bricks
+                      // every later fail-closed read, and because
+                      // `proposalFingerprint` hashes this field, the edit moves
+                      // the PRODUCER's fingerprint and re-arms side effects an
+                      // operator already denied. `status` needs no copy; it is
+                      // a string.
+                      last_output:
+                        run.last_output === undefined
+                          ? undefined
+                          : structuredClone(run.last_output),
+                    }
+                  : null,
+              ]
+            }),
+          )
+
           invocationResult = await invokePlugin(
             pluginName,
             {},
-            { pluginsDir, runId: run_id },
+            { pluginsDir, runId: run_id, dependencyRuns },
             witness,
           )
         } catch (err) {
@@ -1049,6 +1402,28 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             result_summary: `invocation threw: ${errMsg}`,
             retried: false,
           })
+          // The run happened and it ended failed, so it is recorded like any
+          // other. Returning here without this write left the PREVIOUS run's
+          // entry in place, and `lastRun` answered with it — "how its last run
+          // ended" naming a run two advances back. `failed` is right for every
+          // path in, not just the invocation: the try also covers
+          // `witnessAfterGrantRead` and the dependency projection, and a throw
+          // out of either is as much a failed run as one out of `invokePlugin`.
+          // Note what does NOT arrive here — a handler that throws is caught
+          // inside `invokePlugin` and comes back as a `failed` result, which
+          // the autonomous write below handles; the reachable `invokePlugin`
+          // case is `loadPluginConfig` rethrowing a non-`PluginConfigError`.
+          //
+          // `lastOutputOf` takes the same carry-forward as the other three
+          // write sites: this run produced nothing, and an Output is a fact
+          // about the plugin rather than about its latest run.
+          const priorThrownEntry = state.plugin_runs[pluginName]
+          state.plugin_runs[pluginName] = {
+            last_run_at: new Date().toISOString(),
+            status: 'failed',
+            duration_ms: failedElapsed,
+            ...lastOutputOf(null, priorThrownEntry),
+          }
           await emitPluginFailed(pluginName, errMsg, run_id, eventsPath)
           onPluginEnd?.(pluginName, 'failed', failedElapsed, errMsg)
           return
@@ -1117,13 +1492,18 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // here would let the two disagree by a millisecond and make that
             // anchoring a lie.
             const completedAt = new Date().toISOString()
+            // Read before the overwrite, or the carry-forward has nothing to
+            // carry. There may be no entry yet — a plugin's first run.
+            const priorGatedEntry = state.plugin_runs[pluginName]
             state.plugin_runs[pluginName] = {
               last_run_at: completedAt,
               status: 'gated',
               duration_ms: Date.now() - entryStart,
               // last_output: written here as well as on the autonomous path. A
-              // gated run produced its Outputs before the gate saw them.
-              ...lastOutputOf(result),
+              // gated run produced its Outputs before the gate saw them — and
+              // a gated run that produced none leaves the plugin's prior Output
+              // where it was.
+              ...lastOutputOf(result, priorGatedEntry),
             }
 
             // -- Park the REAL result ------------------------------------
@@ -1168,12 +1548,41 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         onPluginEnd?.(pluginName, finalStatus, autonomousElapsed)
 
         // -- Update plugin_runs in state --
+        // Read before the overwrite, or the carry-forward has nothing to carry.
+        const priorAutonomousEntry = state.plugin_runs[pluginName]
         state.plugin_runs[pluginName] = {
           last_run_at: new Date().toISOString(),
-          status: result.status === 'failed' ? 'failed' : result.status === 'partial' ? 'partial' : 'success',
+          // The plugin's own terminal status, carried through rather than
+          // narrowed. `skipped` is the one that used to be lost: it is every
+          // dispatched `[needs-llm]` handoff, and the `else` arm folded it to
+          // `success`. That was internal until `lastRun` published the field —
+          // after which a consumer following the four-state table read
+          // "produced, and its latest run is healthy" for a producer that had
+          // handed its work to an LLM and produced nothing, beside a
+          // carried-forward record that made the claim look corroborated.
+          // `PluginRunSchema` has always admitted `skipped`; only this mapping
+          // refused to emit it.
+          //
+          // Deliberately NOT `delegated`: that value belongs to
+          // `deriveRunStatus`, which feeds the RunArtifact and the board events
+          // and answers a different question. A plain `skipped` and a handoff
+          // lead a consumer to the same action — read the carried-forward
+          // Output, do not treat it as a failure — so a second value here would
+          // be a distinction nothing acts on. Widen if a caller ever needs to
+          // tell them apart.
+          status:
+            result.status === 'failed'
+              ? 'failed'
+              : result.status === 'partial'
+                ? 'partial'
+                : result.status === 'skipped'
+                  ? 'skipped'
+                  : 'success',
           duration_ms: Date.now() - entryStart,
-          // last_output: absent, not null, when this run produced no Output.
-          ...lastOutputOf(result),
+          // last_output: this run's Output when it produced one, the plugin's
+          // prior Output when it did not, and absent — not null — when there
+          // has never been one.
+          ...lastOutputOf(result, priorAutonomousEntry),
         }
       }),
     )
@@ -1702,6 +2111,31 @@ export async function applyPendingGate(
     //
     // A superseded denial does not protect the entry: it is already stale, and
     // the plugin being due again is the correct outcome.
+    //
+    // **The delete takes `last_output` with it, and that loss is permanent.**
+    // The Output pointer lives inside the entry, so deleting the entry deletes
+    // it. The three write sites carry a plugin's prior Output forward across a
+    // run that produced none, and they do it by reading the entry that is about
+    // to be overwritten — after this delete there is no entry to read, so the
+    // key comes back only from a FRESH Output on a later advance. The destroyed
+    // record itself never returns. An advance that again produces nothing
+    // leaves the plugin reading as having run and never produced, which is
+    // exactly the misreport the carry-forward exists to stop, reached through a
+    // second door.
+    //
+    // The bound is on the TRIGGER, not on the loss. This path fires only on
+    // `dependency_moved` or `expired`, and the delete is already skipped while
+    // a denial is live. The plugin being due again is a re-run OPPORTUNITY and
+    // not a repair: writing that the loss is bounded to one advance would be a
+    // false claim in this docstring.
+    //
+    // The delete stands anyway, because the entry is what makes the plugin due
+    // and dueness is the whole point of the refusal. The change that would
+    // remove the residual is structural rather than local: lifting
+    // `last_output` out of `plugin_runs` into a sibling top-level key, so an
+    // Output's lifetime stops being bound to a run record's. That is a change
+    // to a published schema shape with a migration for every state file on
+    // disk, and it is not made here.
     const standing = denialStanding(state, gate.plugin, manifest)
 
     state.pending_gates = state.pending_gates.filter((g) => g !== gate)
@@ -1740,11 +2174,17 @@ export async function applyPendingGate(
   // and the Output pointer the run already carried. `last_run_at` is the gate's
   // completion, not `now` — a later approval must not move when the work
   // happened.
+  //
+  // The prior entry read here is the `gated` one this same run wrote, so a
+  // gated run that produced no Output has already had the plugin's prior Output
+  // carried through the park — this site reads what is there and carries it one
+  // step further, rather than reconstructing it.
+  const priorApprovedEntry = state.plugin_runs[gate.plugin]
   state.plugin_runs[gate.plugin] = {
     last_run_at: completedAt,
     status: gate.plugin_result.status,
     duration_ms: Math.max(0, new Date(completedAt).getTime() - startedMs),
-    ...lastOutputOf(gate.plugin_result),
+    ...lastOutputOf(gate.plugin_result, priorApprovedEntry),
   }
   // Marked, not deleted. A deleted gate is an invisible one, and the next
   // `approve` would fall through to the Grant path instead of refusing.
@@ -1763,16 +2203,54 @@ export async function applyPendingGate(
 /**
  * The `last_output` slice of a `plugin_runs` entry, spread into the write.
  *
- * Returns an EMPTY object when the result produced no Output, so the key is
- * absent from the JSON rather than present as `null` or `{}` — a reader should
- * not have to tell an unproductive run from a malformed pointer.
+ * The run's own most recent Output when it produced one, otherwise whatever the
+ * entry being overwritten already held, otherwise nothing.
+ *
+ * **Why the carry-forward.** `last_output` is a fact about the PLUGIN — "the
+ * most recent Output this plugin produced", as `PluginRunSchema` defines it in
+ * `schemas/engine-state.ts` — and not a fact about its last run. It only lives
+ * inside the run entry because that is where the pointer was put. So a run that
+ * produced no Output has said nothing about what the plugin produced, and a
+ * write that dropped the key was answering a question it had not been asked.
+ * The same schema comment already argues this for the pruned-log case: deleting
+ * the pointer to avoid a dangling `run_id` would throw away the only record
+ * that the Output existed. An Output-less run is that argument's other half.
+ *
+ * **Status-blind, deliberately.** What survives is keyed on the run producing
+ * nothing, never on how the run ended. A throw, a returned `failed`, and a
+ * SUCCESS carrying an empty `artifacts_produced` are one case here. Gating the
+ * carry-forward on `failed` would make the field mean a fourth thing — "the
+ * last Output, unless the plugin last succeeded without producing one" — which
+ * no reader could state and none of the three writers agree on.
+ *
+ * **This is the lifetime of the seam.** `dependencyRuns` above projects this
+ * key straight into a declared consumer's `capabilities.dependencies`, so how
+ * long it survives here is exactly how long a consumer can read its producer.
+ * A consumer that reads `null` from `lastOutput` concludes the producer has
+ * never produced. That conclusion is now sound because of the carry-forward
+ * below, and a consumer that needs to know how the producer's LAST run went
+ * asks `lastRun` for it instead of inferring health from this field.
+ *
+ * Returns an EMPTY object when there is nothing to write, so the key is absent
+ * from the JSON rather than present as `null` or `{}` — a reader should not
+ * have to tell an unproductive run from a malformed pointer. That contract is
+ * unchanged: a plugin that has never produced still carries no key at all.
  *
  * "Most recent" is the last element: `artifacts_produced` is written in the
  * order the handler produced them.
  */
-function lastOutputOf(result: SkillResult): { last_output?: OutputRecord } {
-  const last = result.artifacts_produced.at(-1)
-  return last === undefined ? {} : { last_output: last }
+function lastOutputOf(
+  result: SkillResult | null,
+  prior: PluginRun | undefined,
+): { last_output?: OutputRecord } {
+  // `null` is the third caller: an invocation that threw has no result at all,
+  // which is the strongest form of "this run produced nothing" and takes the
+  // carry-forward for the same reason the other two do. Widened here rather
+  // than inlined at that site, so all three writers keep sharing one rule.
+  const last = result?.artifacts_produced.at(-1)
+  if (last !== undefined) return { last_output: last }
+  const carried = prior?.last_output
+  return carried === undefined ? {} : { last_output: carried }
 }
 
 function getDefaultPluginsDir(): string {

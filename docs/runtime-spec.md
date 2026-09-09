@@ -113,6 +113,18 @@ supplies one. It is the LOWEST of three precedence tiers, resolved inside
 | 2 | `<home>/config/<plugin>.json` | the declared default |
 | 3 (highest) | per-invocation arguments | both |
 
+A name that also appears in `secrets` takes no tier in this table at all. It is
+resolved from the process environment before the handler is called, so the
+declared default is not applied to it and the required check does not run
+against it. The entry stays legal and stays useful — it names the parameter for
+whoever reads the manifest — but it describes a value this resolution order
+never supplies.
+
+A value for such a name supplied through tier 2 or tier 3 is refused rather than
+used: the run fails once with a `parse_error` naming the key and the environment
+variable to set instead, and never the value it received. That refusal sits
+above the retry loop with the rest of the config resolution, so it happens once.
+
 A missing config file is an empty config, not an error. A config file that
 exists but is unparseable or the wrong shape is a `parse_error` that fails once
 and never enters the retry loop; its message names the file and the offending
@@ -151,7 +163,50 @@ get in front of.
 it. Adding the field invalidates no manifest that already validated.
 
 This is not `capabilities`, which is a free-text array of informational tags.
-Neither field reads the other.
+Those two fields do not read each other.
+
+`inputs` is the field that does. Declaring one name in both records is legal,
+and the runtime consults `secrets` while it resolves `inputs`: such a name is
+excluded from the input resolution entirely and comes from the environment
+alone. The `inputs` entry for it is documentation, and its `default` is not
+applied — a placeholder written there cannot stand in for a credential.
+
+### `schedule`
+
+`schedule` says when an advance should consider the plugin at all. It is a
+closed set of four values — `on_run`, `daily`, `weekly` and `manual` — declared
+by the plugin itself rather than written by the operator somewhere else.
+
+An advance may be requested with a run profile, and a profile admits a **tier**
+of schedules rather than one. `daily` admits `on_run` and `daily`; `weekly`
+admits `on_run`, `daily` and `weekly`; `manual` admits `manual` and nothing
+else. A plugin whose schedule falls outside the requested tier is skipped, and
+the skip names the profile and the schedule.
+
+`manual` is the one schedule no scheduled tier reaches. The `manual` profile is
+the only profile that admits it, so a plugin declaring it runs when that
+profile is asked for, or when an operator invokes it by hand.
+
+An advance requested with **no** profile applies no tier — and still excludes
+`manual`. That is the plain reading of the word: a manual schedule runs when
+something asks for it, and an advance that asked for nothing has not asked. The
+other three schedules all run in that case, so an unprofiled advance is the
+widest one available and is still not a route to a manual plugin. The skip is
+reported like any other, naming the schedule and the profile that would admit
+it.
+
+This exclusion is a change, not a rule that always held. Earlier releases ran a
+`manual` schedule on an unprofiled advance. They no longer do, and the change is
+quiet where it lands: the advance still reports `complete`, the plugin is
+recorded `skipped` with a `profile_schedule` reason, and nothing about the run
+reads as wrong. A host whose only invocation path is an unprofiled `runAdvance`
+should read that list once and ask for the `manual` profile where it meant to.
+
+This is a different question from `autonomy_level`, which is a separate gate.
+`schedule` decides whether the plugin is considered; `autonomy_level` decides
+whether it may proceed once it has been. A plugin may declare
+`schedule: 'manual'` alongside `autonomy_level: 'autonomous'` and mean exactly
+that — nothing starts it unasked, and nothing supervises it once a human has.
 
 ### `outputs.temporality`
 
@@ -246,7 +301,9 @@ versions; nothing else here claims to be.
 
 Seven specifiers are published: `warpline`, `warpline/schemas/*`,
 `warpline/lib/paths`, `warpline/unstable-runtime`, `warpline/unstable-fs`,
-`warpline/unstable-result` and `warpline/unstable-capabilities`.
+`warpline/unstable-result` — the three result builders `skillOk`,
+`skillFailure` and `skillHandoff`, and nothing beside them — and
+`warpline/unstable-capabilities`.
 Nothing else in the package is reachable — the `exports` map is an allowlist,
 and an import of any other subpath fails at resolution rather than resolving to
 something internal.
@@ -269,11 +326,44 @@ than inventing its own.
 `warpline/unstable-capabilities` is **type-only**. Every name behind it is
 erased at build time, so the module it resolves to exports no runtime value at
 all, and importing it for a value gets you nothing. It carries the shape of the
-capability context a handler is handed, the shape of the grant witness a caller
-of the runtime must supply, and the four-parameter handler type that ties the
-two together. The mint and the capability registry are deliberately not behind
+capability context a handler is handed, the shape of each member on it —
+`SecretsHandle` and `DependenciesHandle` — the shape of the grant witness a
+caller of the runtime must supply, and the four-parameter handler type that ties
+them together. The mint and the capability registry are deliberately not behind
 it: the registry is a table designed to grow, and publishing it would owe a
 stability promise on every row anybody adds.
+
+`DependenciesHandle` carries two member functions, both taking the caller and a
+name the reading manifest declares:
+
+- `lastOutput(caller, name)` returns that plugin's most recent Output record, or
+  `null` when it has never produced one. See § `last_output` for why that is a
+  fact about the plugin and not about its last run.
+- `lastRun(caller, name)` returns that plugin's last run status — one of
+  `success`, `partial`, `failed`, `skipped`, `gated` — or `null` when it has
+  never run. It is the same enum § `plugin_runs` records, and it is the whole of
+  what this member returns: the failure TEXT a run may carry is not part of it,
+  and no field of the run record other than these two is delivered through this
+  handle.
+
+Both members answer from the dependency state the HOST supplied, and a host may
+supply none: `invokePlugin`'s `dependencyRuns` is optional, and a caller that
+omits it hands the handler a member reading `null` for every declared name
+whatever `engine-state.json` holds. `warpline run` is such a caller — it invokes
+one plugin standalone and reads no runtime state. So `null` distinguishes "never
+run" from "produced nothing" only on an engine advance, and a handler that must
+run correctly under both should not publish "has not run yet" on the strength of
+a `null`.
+
+An undeclared name throws from either member, through one shared refusal, and
+the message names the reading plugin, the requested name and the manifest field
+to add it to.
+
+`InvokePluginOptions.dependencyRuns` is what a host fills to supply both facts.
+It was briefly named `dependencyOutputs` and carried only the record; no
+published release ever shipped that name. Renaming it would have been allowed
+regardless, because the field rides `warpline/unstable-runtime`, whose promise
+about any name behind it is stated above and is exactly nothing.
 
 ## 2. Retry Policy
 
@@ -555,7 +645,7 @@ set is closed — an unlisted value fails validation rather than being dropped.
 |--------|---------|
 | `completed` | The handler ran and returned a result the engine accepted |
 | `failed` | The handler threw, returned a failed result, or the plugin's manifest never loaded |
-| `skipped` | The plugin was not due — fresh, filtered, locked, or without a session Grant |
+| `skipped` | The plugin was not due — fresh, filtered, locked, without a session Grant, or holding a declared dependency whose last run failed |
 | `gated` | Supervised: the handler ran and its result was parked pending a human answer |
 | `denied` | A human answered no, and the answer still applies to what is being proposed |
 
@@ -1008,6 +1098,21 @@ A record keyed by plugin name, holding the last run of each. It is what the
 TTL staleness check reads, and the only field that check consults is
 `last_run_at`.
 
+The dueness evaluator is a second reader of the record, and the first reader for
+which `status` decides whether a plugin runs at all. A plugin holding a declared
+dependency whose entry here records `failed` is not due, for the reason
+`dependency_failed`, and is recorded `skipped` with a summary naming every such
+dependency in manifest-declared order. Until that gate existed, the dependent ran
+and read whatever the failed producer had left behind on an earlier cycle — a
+diff-against-history consumer then reported "no change" for a cycle in which
+nothing was observed, and no field distinguished the two.
+
+There is no data migration. The field is read, never written or reshaped, and no
+schema changed. What does change on upgrade: an existing home already carrying a
+`failed` status for a scheduled dependency begins gating that dependency's
+dependents on the first advance afterwards. That is the correct behaviour and it
+arrives without a migration step, so it arrives unannounced.
+
 | Field | Type | Meaning |
 |-------|------|---------|
 | `last_run_at` | ISO 8601 string | When the run ended |
@@ -1027,9 +1132,84 @@ happened. A parked run that recorded nothing left the plugin due on the next
 advance, so its side effects fired again — every advance, for the whole grant
 window, on one approval.
 
+`skipped` records a run whose handler returned `skipped` — in practice every
+dispatched `[needs-llm]` handoff, since that is the only path producing one
+today. The plugin's own terminal status is written through unnarrowed, so a
+handoff is not folded into `success`: a consumer reading `lastRun` beside a
+carried-forward `last_output` would otherwise be told "produced, and its latest
+run is healthy" about a plugin that handed its work to an LLM and produced
+nothing. This is not the `delegated` of `deriveRunStatus`, which answers a
+different question for the run artifact and the board events; a plain `skipped`
+and a handoff lead a consumer to the same action, so this field does not
+distinguish them.
+
+A run whose invocation threw is recorded here too, as `failed`. Only
+`invokePlugin` throwing out of itself reaches that path — a handler that throws
+is caught inside and returns a `failed` result through the ordinary write — and
+the reachable cause is a config file that exists but cannot be read. Recording
+it is what keeps `status` a fact about the last run: without the write, the
+previous run's entry stayed and `lastRun` named a run two advances back.
+
 The status set is closed. Adding a member fans out into this document, and
 into every operator state file written afterwards, which is why it is not
 extended casually.
+
+#### What the dependency gate does not cover
+
+Five limitations, written down here rather than left for a reader to discover.
+
+**The latch, and how it clears.** The gate reads the LAST run's status, so a
+dependency whose last run failed gates its dependents until it runs again
+without failing. In the ordinary case it self-clears on the very next advance:
+the dependency is due, it runs, its entry is overwritten, and its dependents are
+due again. It cannot be cleared by hand — `warpline run` invokes one plugin
+standalone and writes no run record, so a manual run of the failed dependency
+leaves the latch exactly where it was. It is genuinely sticky only for a
+dependency that has stopped being scheduled at all: a `manual` dependency nobody
+invokes under an advance, one filtered out by the active profile or tier, and —
+the worst case — one deleted from the plugin directory outright, whose stale
+`failed` record outlives its manifest and can never be overwritten. A dependent
+declaring a dropped dependency is then gated permanently. Editing
+`engine-state.json` is the only way out.
+
+**One hop only.** In a chain A → B → C, a B gated by this reason writes no run
+record, so B's own recorded status stays whatever it last was — very likely
+`success`. C is therefore not gated, and once C's own freshness window expires it
+runs against B's stale data, which is exactly the failure the gate closes one
+level up. Every one-hop edge is covered; the second hop is not.
+
+**A manifest that never loaded is a blind spot.** A plugin whose `manifest.ts`
+fails to import is recorded as a `failed` run-log entry and a failed engine
+state, but it writes no `plugin_runs` record at all — nothing ran. Its dependents
+are therefore not gated. Fixing it here would mean writing a run record for a
+plugin that never ran, moving a `last_run_at` for a run that did not happen, so
+the gap is named rather than closed.
+
+**A declared dependency that is not installed does not gate.** A name in
+`dependencies` with no plugin behind it has no run record, and an absent record
+is not a failed one. The engine warns about the unresolved name at load time and
+`topoSort` ignores it for ordering; the gate deliberately adds no second roster
+check of its own, because that would be a second dependency signal answering the
+same question.
+
+**`warpline plan` and an advance can disagree, in one direction only.** The gate
+reads a run outcome, and a preview does not run anything. `plan` walks levels
+against the state document as it sits on disk; an advance evaluates against a
+`plugin_runs` its own level loop is overwriting as it goes. To keep the preview
+from publishing a skip for every dependent on the self-clearing path above, the
+evaluator takes an optional `dueAtEarlierLevel` set — the plugins an earlier
+level of the same preview already found due — and does not gate on a dependency
+in it. Only `plan` supplies one; an advance leaves it undefined, because its
+state is already the answer.
+
+That assumes a due producer clears its latch, which `plan` cannot know. A
+producer that is due and fails again leaves `plan` reporting a dependent **due**
+where the advance skips it. The reverse can no longer happen: the set only ever
+removes a `dependency_failed` verdict, never adds one. The direction is the
+point. This runtime asks a human to approve side effects on the strength of what
+the preview showed, so a preview that under-states an advance is the input to a
+wrong answer, and one that over-states it is only a plugin that did not run.
+Pinned by `plan.test.ts` Test 2b.
 
 ### `pending_gates`
 
@@ -1128,16 +1308,15 @@ due on the next advance. The parked result was never accepted, so there is no
 accepted run to hold the work back; the `gated` entry existed to stop the
 effects re-firing during the hold, and the hold is over.
 
-**A denial that was live at the moment of the refusal is re-fingerprinted, not
-stranded.** The fingerprint is read out of `plugin_runs[plugin].last_output`, so
-deleting the entry moves it, and a denial recorded against the parked result
-would stop matching — the plugin would be due again and re-fire the side effects
-the operator said no to, silently, since the superseded-denial note only rides
-the unapproved arm. So the fingerprint is measured before the delete and, if it
-still matched, recomputed after it. The denial then answers the plugin's
-Output-less proposal: it is denied by name until the operator takes it back.
-A denial that was already stale is left alone — re-stamping it would revive an
-answer to a proposal that no longer exists.
+The delete takes `last_output` with it, and that loss is permanent. The pointer
+lives inside the entry, and the carry-forward described in § `last_output` works
+by reading the entry it is about to overwrite — with no entry there is nothing
+to carry, so the key returns only from a fresh Output on a later advance, never
+as the record that was deleted. The plugin being due again is a re-run
+opportunity and not a repair: a re-run that also produces no Output leaves the
+plugin reading as having run and never produced. What IS bounded is the trigger.
+This path fires only on the two refusals above — a dependency moved, or the gate
+expired — and the delete is skipped entirely while a denial is live.
 
 **The `plugin_runs` entry is kept while a denial is live, and the denial is left
 exactly as it was.** Deleting the entry is what makes a plugin due again after
@@ -1296,6 +1475,11 @@ A plugin with no declared side effects and no recorded Output hashes the empty
 sets. That is a stable value scoped by its name — it is denied by name — not an
 error.
 
+A run that produces no Output no longer moves the fingerprint. It leaves
+`last_output` as it was (§ `last_output`), so a denial recorded against a real
+proposal stays bound to it across a producer's failed run, rather than being
+superseded by the empty-set hash the same plugin would otherwise fall back to.
+
 ### `last_output`
 
 A pointer to the most recent Output a plugin produced, so a reader can name it
@@ -1303,14 +1487,32 @@ without scanning the runs directory. It is the Output record shape from § 5,
 reused rather than restated — a second shape would be a second thing that could
 disagree with the first.
 
-It is written wherever `plugin_runs` is written, which is both the autonomous
-completion and the supervised park. A gated run produced its Outputs before the
-gate ever saw them, so it carries a pointer like any other run.
+Every write of a `plugin_runs` entry decides this key — the autonomous
+completion, the supervised park, the approve verb applying a gate, and the
+invocation that threw. A gated run produced its Outputs before the gate ever
+saw them, so it carries a pointer like any other run. A run that threw has no
+result to read one from, which is the strongest form of "produced nothing" and
+takes the same carry-forward as the rest.
 
-**Absent, not null.** A run that produced no Output writes no `last_output` key
-at all — not `null`, not `{}`. Reading a missing key is unambiguous; reading an
-empty object means guessing whether the run produced nothing or the writer
-failed.
+What each write records is the run's own most recent Output when the run
+produced one, and otherwise the pointer the entry already held. The field is a
+fact about the PLUGIN — the most recent Output it produced — not about its last
+run, so a run that produced nothing has said nothing about it and does not
+clear it.
+
+**Status-blind.** What survives is keyed on the run producing no Output, never
+on how the run ended. A run that threw, a run that returned `failed`, and a run
+that succeeded carrying an empty `artifacts_produced` are one case here. The
+consequence for a reader: this field cannot be read as a health signal for the
+plugin that produced it, and a consumer that needs to know how its dependency's
+latest run went asks `capabilities.dependencies.lastRun` for it instead. The two
+answers come from one projection of this same entry, so they cannot disagree
+about which run they describe.
+
+**Absent, not null.** A plugin that has never produced an Output has no
+`last_output` key at all — not `null`, not `{}`. Reading a missing key is
+unambiguous; reading an empty object means guessing whether the plugin produced
+nothing or the writer failed.
 
 The pointer may dangle. Its `run_id` names a run log, and run logs are pruned at
 30 days by mtime (§ 6), so a pointer can outlive the run it names. That resolves

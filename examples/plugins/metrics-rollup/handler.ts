@@ -1,8 +1,8 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
-import { makeSkillError, type SkillResult } from 'warpline/schemas/skill-result'
+import { join } from 'node:path'
 import { warplineHome } from 'warpline/lib/paths'
+import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
+import { atomicWriteJson, readJsonOrNull } from 'warpline/unstable-fs'
+import { skillFailure, skillOk } from 'warpline/unstable-result'
 
 /**
  * Input: the same metrics file anomaly-watch reads. Only `name` and `latest`
@@ -48,13 +48,19 @@ interface State {
 }
 
 /**
- * Shape guards for the two things that arrive as JSON.
+ * Shape guards for the three things that arrive as JSON.
  *
  * Not optional politeness: `rollupWeekly` does `sum += row.value`, so one
  * `latest: "3"` or one missing field turns a rollup into a string
  * concatenation or `NaN` — and `retire` has already deleted the rows it was
  * computed from, so the (week, name) entry is wrong permanently. `weekStart`
  * throws `RangeError` on a malformed date, which fails the whole run.
+ *
+ * The same arithmetic runs over an EXISTING rollup: `cur.sum += row.value`
+ * with a `sum` of `"15"` writes `"151"`, atomically. So the retained rollups
+ * are guarded too, and a malformed one is refused rather than dropped — a
+ * dropped row costs one sample, but a rollup is the only trace left of the
+ * rows it was folded from, and nothing can rebuild it.
  */
 export function isRow(r: unknown): r is Row {
   const v = r as Row
@@ -65,6 +71,13 @@ export function isRow(r: unknown): r is Row {
 export function isSeries(s: unknown): s is Series {
   const v = s as Series
   return !!v && typeof v.name === 'string' && Number.isFinite(v.latest)
+}
+
+export function isRollup(r: unknown): r is Rollup {
+  const v = r as Rollup
+  return !!v && typeof v.name === 'string'
+    && typeof v.week === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.week)
+    && [v.count, v.sum, v.mean, v.min, v.max].every(n => Number.isFinite(n))
 }
 
 /** One row per series for `today`, unless (today, name) is already present. */
@@ -119,11 +132,8 @@ export function rollupWeekly(retired: Row[], existing: Rollup[]): Rollup[] {
   return [...byKey.values()]
 }
 
-export async function handler(
-  _manifest: PluginManifest,
-  args: Record<string, unknown>,
-  _signal: AbortSignal, // accepted, unused — local file I/O has nothing to cancel
-): Promise<SkillResult> {
+// `_signal` is accepted, unused — local file I/O has nothing to cancel.
+export const handler: CapabilityHandlerFn = async (manifest, args, _signal, _capabilities) => {
   const metricsPath = typeof args.metrics_path === 'string'
     ? args.metrics_path
     : join(warplineHome(), 'state', 'metrics.json')
@@ -132,79 +142,72 @@ export async function handler(
   // this message lands in a run log, and the value can arrive from the
   // operator's config file.
   if (typeof retentionDays !== 'number' || !(retentionDays > 0)) {
-    return {
-      status: 'failed',
-      phases_completed: [],
-      phases_failed: ['metrics-rollup'],
-      errors: [makeSkillError('parse_error', "input 'retention_days' must be a positive number", { impact: 'HIGH', retryable: false })],
-      data_freshness: {},
-      summary: 'metrics-rollup: invalid retention_days input',
-      artifacts_produced: [],
-      schema_version: 1,
-    }
+    return skillFailure('parse_error', "input 'retention_days' must be a positive number", {
+      phases_failed: [manifest.name],
+      impact: 'HIGH',
+      retryable: false,
+    })
   }
 
-  let series: Series[]
-  let droppedSeries = 0
+  // `metrics_path` is operator-configured and this result lands in the run
+  // log, so neither arm names it. A file that exists but is corrupt is not
+  // "no data yet": left green, it is an appended-nothing day that looks fine,
+  // every day.
+  let rawMetrics: { series?: unknown } | null
   try {
-    const raw = JSON.parse(await readFile(metricsPath, 'utf-8'))
-    const rawSeries: unknown[] = Array.isArray(raw.series) ? raw.series : []
-    series = rawSeries.filter(isSeries)
-    droppedSeries = rawSeries.length - series.length
-  } catch (err) {
-    // A file that exists but is corrupt is not "no data yet". Left green, it
-    // is an appended-nothing day that looks fine, every day.
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      return {
-        status: 'failed',
-        phases_completed: [],
-        phases_failed: ['metrics-rollup'],
-        errors: [makeSkillError('parse_error', "the file named by input 'metrics_path' is unreadable", { impact: 'HIGH', retryable: false })],
-        data_freshness: {},
-        summary: 'metrics-rollup: the configured metrics file is unreadable',
-        artifacts_produced: [],
-        schema_version: 1,
-      }
-    }
+    rawMetrics = await readJsonOrNull<{ series?: unknown }>(metricsPath)
+  } catch {
+    return skillFailure('parse_error', "the file named by input 'metrics_path' is unreadable", {
+      phases_failed: [manifest.name],
+      impact: 'HIGH',
+      retryable: false,
+    })
+  }
+  if (rawMetrics === null) {
     // NOT a bare `skipped`: deriveRunStatus persists a prefix-less `skipped`
     // as `failed`, and "no data yet" must not paint a red run.
-    return {
-      status: 'success',
-      phases_completed: ['metrics-rollup'],
-      phases_failed: [],
-      errors: [],
-      data_freshness: {},
-      summary: 'metrics-rollup: no metrics file at the configured path — nothing to roll up',
-      artifacts_produced: [],
-      schema_version: 1,
-    }
+    return skillOk(`${manifest.name}: no metrics file at the configured path — nothing to roll up`, {
+      phases_completed: [manifest.name],
+    })
   }
+  const rawSeries: unknown[] = Array.isArray(rawMetrics.series) ? rawMetrics.series : []
+  const series = rawSeries.filter(isSeries)
+  const droppedSeries = rawSeries.length - series.length
 
-  const statePath = join(warplineHome(), 'state', 'metrics-rollup.json')
+  // `readJsonOrNull` is null for ENOENT — a first run — and rethrows every
+  // other error, which is the rule this site needs and must not soften: a
+  // transient EMFILE, a file truncated by an unrelated crash, a hand-edit typo
+  // must not start empty, because the write below would then rename that
+  // emptiness over up to retention_days of rows and every rollup ever folded.
+  // So the catch refuses rather than proceeds, and says so without the path
+  // or the parser's words, both of which would land in the run log.
+  const statePath = join(warplineHome(), 'state', `${manifest.name}.json`)
+  let raw: { rows?: unknown; rollups?: unknown } | null
+  try {
+    raw = await readJsonOrNull<{ rows?: unknown; rollups?: unknown }>(statePath)
+  } catch {
+    return skillFailure('parse_error', `${manifest.name}: retained state unreadable — refusing to overwrite it`, {
+      phases_failed: [manifest.name],
+      impact: 'HIGH',
+      retryable: false,
+    })
+  }
   let state: State = { rows: [], rollups: [] }
   let droppedRows = 0
-  try {
-    const raw = JSON.parse(await readFile(statePath, 'utf-8'))
+  if (raw !== null) {
     const rawRows: unknown[] = Array.isArray(raw.rows) ? raw.rows : []
-    state = { rows: rawRows.filter(isRow), rollups: Array.isArray(raw.rollups) ? raw.rollups : [] }
-    droppedRows = rawRows.length - state.rows.length
-  } catch (err) {
-    // ENOENT is a first run. Anything else — a transient EMFILE, a file
-    // truncated by an unrelated crash, a hand-edit typo — must not start
-    // empty: the write below would then rename that over up to
-    // retention_days of rows and every rollup ever folded.
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      return {
-        status: 'failed',
-        phases_completed: [],
-        phases_failed: ['metrics-rollup'],
-        errors: [makeSkillError('parse_error', `cannot read ${statePath}: ${err instanceof Error ? err.message : String(err)}`, { impact: 'HIGH', retryable: false })],
-        data_freshness: {},
-        summary: 'metrics-rollup: retained state unreadable — refusing to overwrite it',
-        artifacts_produced: [],
-        schema_version: 1,
-      }
+    const rawRollups: unknown[] = Array.isArray(raw.rollups) ? raw.rollups : []
+    // See the guards above: a malformed rollup refuses the run, before the
+    // write below would make the fold permanent.
+    if (!rawRollups.every(isRollup)) {
+      return skillFailure('parse_error', `${manifest.name}: a retained rollup is not in the shape this plugin writes — refusing to overwrite the store`, {
+        phases_failed: [manifest.name],
+        impact: 'HIGH',
+        retryable: false,
+      })
     }
+    state = { rows: rawRows.filter(isRow), rollups: rawRollups.filter(isRollup) }
+    droppedRows = rawRows.length - state.rows.length
   }
 
   const today = new Date().toISOString().slice(0, 10)
@@ -213,20 +216,13 @@ export async function handler(
   const { kept, retired } = retire(rows, cutoffDate(today, retentionDays))
   const rollups = rollupWeekly(retired, state.rollups)
 
-  // A half-written retained store is data loss; write-then-rename is one line.
-  await mkdir(dirname(statePath), { recursive: true })
-  await writeFile(`${statePath}.tmp`, JSON.stringify({ rows: kept, rollups }, null, 2))
-  await rename(`${statePath}.tmp`, statePath)
+  // A half-written retained store is data loss; the atomic writer creates the
+  // parent and renames a temp file over the target.
+  await atomicWriteJson<State>(statePath, { rows: kept, rollups })
 
-  return {
-    status: 'success',
-    phases_completed: ['metrics-rollup'],
-    phases_failed: [],
-    errors: [],
-    data_freshness: { metrics: new Date().toISOString() },
-    summary: `appended ${appended} rows, retired ${retired.length} into ${rollups.length} weekly rollups (${kept.length} rows retained)`
+  return skillOk(
+    `appended ${appended} rows, retired ${retired.length} into ${rollups.length} weekly rollups (${kept.length} rows retained)`
       + (droppedSeries || droppedRows ? `; dropped ${droppedSeries} malformed series and ${droppedRows} malformed retained rows` : ''),
-    artifacts_produced: [],
-    schema_version: 1,
-  }
+    { phases_completed: [manifest.name], data_freshness: { metrics: new Date().toISOString() } },
+  )
 }

@@ -8,7 +8,7 @@
  *   A2:   supervised plugins are skipped (not gated) in headless/profile mode
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { runAdvance } from '../engine.js'
@@ -215,20 +215,54 @@ describe('Engine profile filter', () => {
     expect(result.status).toBe('complete')
   })
 
-  test('no-profile (undefined): runs ALL plugins including manual (existing interactive behavior)', async () => {
+  test('no-profile (undefined): skips a manual schedule and runs on_run, daily and weekly', async () => {
     const result = await runAdvance({
       pluginsDir: fixture.pluginsDir,
       stateDir: fixture.statePath,
       runsDir: fixture.runsDir,
       eventsPath: fixture.eventsPath,
-      // No profile — undefined — should preserve existing behavior
+      // No profile — undefined — no schedule tier is applied
     })
 
-    // When no profile is set, all non-supervised autonomous plugins run
+    // No profile applies no tier, so the other three schedules all run. A
+    // manual schedule is the exception: it is opt-in, and an advance nobody
+    // asked for the manual profile is not that opt-in.
     expect(result.plugin_states.get('fx-onrun')).toBe('completed')
     expect(result.plugin_states.get('fx-daily')).toBe('completed')
     expect(result.plugin_states.get('fx-weekly')).toBe('completed')
+    expect(result.plugin_states.get('fx-manual')).toBe('skipped')
+
+    // The board line, whole. The gate detail is written once and read twice —
+    // here and on the plan preview's Not-due row — and both readers are
+    // people. `toBe` rather than `toContain` on purpose: a substring match is
+    // what let a detail opening with the very word this emitter already prints
+    // ship once, and it would equally let a detail name a command-line flag
+    // that no verb offers instead of the profile that admits the schedule.
+    const events = (await readFile(fixture.eventsPath, 'utf8'))
+      .split('\n')
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as { type: string; source: string; summary: string })
+    const skip = events.find((e) => e.type === 'plugin_result' && e.source === 'fx-manual')
+    expect(skip?.summary).toBe("fx-manual: skipped — schedule 'manual': requires profile 'manual'")
+  })
+
+  test('manual profile runs the manual schedule and skips the other four', async () => {
+    const result = await runAdvance({
+      pluginsDir: fixture.pluginsDir,
+      stateDir: fixture.statePath,
+      runsDir: fixture.runsDir,
+      eventsPath: fixture.eventsPath,
+      profile: 'manual',
+    })
+
+    // The shared five-plugin fixture, not a weekly-only root: the point is
+    // that the manual tier admits `manual` and nothing else, which needs a
+    // fixture carrying a manual-scheduled plugin to show.
     expect(result.plugin_states.get('fx-manual')).toBe('completed')
+    expect(result.plugin_states.get('fx-onrun')).toBe('skipped')
+    expect(result.plugin_states.get('fx-daily')).toBe('skipped')
+    expect(result.plugin_states.get('fx-weekly')).toBe('skipped')
+    expect(result.plugin_states.get('fx-supervised')).toBe('skipped')
   })
 })
 

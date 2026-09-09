@@ -1,6 +1,11 @@
-import { describe, test, expect } from 'bun:test'
-import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
+import { describe, test, expect, afterEach } from 'bun:test'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { SkillResultSchema } from 'warpline/schemas/skill-result'
+import type { CapabilityContext } from 'warpline/unstable-capabilities'
 import { parseFeed, newerThan, handler } from './handler.js'
+import { manifest } from './manifest.js'
 
 const RSS = `<rss><channel>
 <item><title>First</title><link>https://x.test/1</link><pubDate>Tue, 18 Aug 2026 10:00:00 GMT</pubDate></item>
@@ -39,26 +44,55 @@ describe('feed-monitor newerThan', () => {
   })
 })
 
-/**
- * `feed_url` is a declared, required input read from
- * `<home>/config/feed-monitor.json`, and a feed URL can carry a token in a
- * query string. Every `SkillResult` field here lands in a run log, so an arm
- * that quotes the URL it was handed is a disclosure path. The arm names the
- * key and the shape it wanted instead.
- *
- * The three cases below cover the three arms a configured value reaches: the
- * input guard, the non-ok response, and the success path. Only a sentinel that
- * is a valid http(s) URL gets past the first one.
- */
+/** The handler is four-parameter; a test hands it a context it never reads. */
+const CONTEXT = {} as CapabilityContext
+
+function invoke(args: Record<string, unknown>, signal = new AbortController().signal) {
+  return handler(manifest, args, signal, CONTEXT)
+}
+
+// CLAUDE.md rule 2: every fixture lives under tmpdir() and is removed after.
+// One tracking hook rather than a per-call `finally`, so the creation-site
+// census in src/__tests__/example-test-hygiene.test.ts stays balanced.
+const roots: string[] = []
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map(r => rm(r, { recursive: true, force: true })))
+})
 
 /**
- * Swap `globalThis.fetch` for one returning `response`, run `body`, restore the
- * real one whatever happens. A leaked global breaks unrelated tests
- * non-deterministically and nobody attributes that back to the file that did it.
+ * `warpline/lib/paths` exports only `warplineHome`, which resolves
+ * `WARPLINE_HOME` per call — the same seam a plugin author has. Every success
+ * arm now writes its entries under the home, so every case that reaches one
+ * gets its own; the preload's shared home would let one case read what another
+ * wrote.
  */
-async function withStubbedFetch(response: unknown, body: () => Promise<void>): Promise<void> {
+async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
+  const home = await mkdtemp(join(tmpdir(), 'warpline-feed-monitor-home-'))
+  roots.push(home)
+  const realHome = process.env.WARPLINE_HOME
+  process.env.WARPLINE_HOME = home
+  try {
+    return await fn(home)
+  } finally {
+    if (realHome === undefined) delete process.env.WARPLINE_HOME
+    else process.env.WARPLINE_HOME = realHome
+  }
+}
+
+/** Where a run leaves what it found. Derived exactly as the handler derives it. */
+const entriesPath = (home: string) => join(home, 'state', `${manifest.name}.entries.json`)
+
+/** `node:fs/promises` is the only fs specifier an example test may reach for. */
+const exists = (path: string) => stat(path).then(() => true, () => false)
+
+/**
+ * Swap `globalThis.fetch` for `stub`, run `body`, restore the real one whatever
+ * happens. A leaked global breaks unrelated tests non-deterministically and
+ * nobody attributes that back to the file that did it.
+ */
+async function withFetch(stub: (input: unknown, init?: RequestInit) => Promise<unknown>, body: () => Promise<void>): Promise<void> {
   const realFetch = globalThis.fetch
-  globalThis.fetch = (async () => response) as unknown as typeof fetch
+  globalThis.fetch = stub as unknown as typeof fetch
   try {
     await body()
   } finally {
@@ -66,50 +100,197 @@ async function withStubbedFetch(response: unknown, body: () => Promise<void>): P
   }
 }
 
+const FEED_URL = 'https://feeds.example.test/feed.xml'
+const okWith = (xml: string) => async () => ({ ok: true, status: 200, text: async () => xml })
+
+describe('feed-monitor builds its result', () => {
+  test('a successful fetch is a success built by the result builder, with no schema_version written by the handler', async () => {
+    await withHome(() => withFetch(okWith(RSS), async () => {
+      const result = await invoke({ feed_url: FEED_URL })
+
+      expect(result.status).toBe('success')
+      expect(result.summary).toContain('First')
+      // The builder leaves the field to the schema's own default; a handler
+      // that restates it is the drift the builder exists to stop.
+      expect(result.schema_version).toBeUndefined()
+      expect(SkillResultSchema.parse(result).schema_version).toBe(2)
+    }))
+  })
+
+  test('the signal the runtime passes reaches fetch, and aborting it rejects the call', async () => {
+    const controller = new AbortController()
+    let received: AbortSignal | null | undefined
+    await withFetch(async (_input, init) => {
+      received = init?.signal
+      return new Promise((_, reject) => {
+        const abort = () => reject(new DOMException('The operation was aborted.', 'AbortError'))
+        if (init?.signal?.aborted) abort()
+        else init?.signal?.addEventListener('abort', abort, { once: true })
+      })
+    }, async () => {
+      const pending = invoke({ feed_url: FEED_URL }, controller.signal)
+      controller.abort()
+      await expect(pending).rejects.toThrow()
+      expect(received).toBe(controller.signal)
+    })
+  })
+
+  test('no new entries is a success, never a bare skipped', async () => {
+    // ATOM, not RSS: an undated entry always surfaces, so only a fully dated
+    // feed can be entirely older than `since`.
+    await withHome(() => withFetch(okWith(ATOM), async () => {
+      const result = await invoke({ feed_url: FEED_URL, since: '2027-01-01T00:00:00Z' })
+
+      // deriveRunStatus maps a prefix-less `skipped` to `failed`, and the
+      // engine persists the artifact: "nothing new yet" as a skip would paint
+      // a red run on every quiet day.
+      expect(result.status).toBe('success')
+      expect(result.summary).toContain('no new entries')
+    }))
+  })
+})
+
+/**
+ * The producer half of the dependency edge. A run writes what it found under
+ * the home and returns a `path` Output naming that file, which is what the
+ * runtime carries forward as `last_output` for a consumer to read.
+ */
+describe('feed-monitor publishes what it found', () => {
+  test('a successful poll writes its entries under the home and returns a path Output naming the file', async () => {
+    await withHome(home => withFetch(okWith(RSS), async () => {
+      const result = await invoke({ feed_url: FEED_URL })
+
+      const record = (result.artifacts_produced ?? []).at(-1)
+      expect(typeof record).toBe('object')
+      const output = record as { path?: string; body?: string; format?: string }
+      expect(output.format).toBe('json')
+      expect(output.body).toBeUndefined()
+      expect(output.path).toBe(entriesPath(home))
+
+      expect(await exists(output.path!)).toBe(true)
+      const written = JSON.parse(await readFile(output.path!, 'utf-8')) as { new_entries: unknown }
+      // The shape feed-triage's degrader already tolerates: the entries this
+      // run reported as new, in the element type its docstring documents.
+      expect(written.new_entries).toEqual(parseFeed(RSS))
+    }))
+  })
+
+  test('the Output survives the boundary the engine parses at, in the path arm', async () => {
+    await withHome(home => withFetch(okWith(RSS), async () => {
+      const result = await invoke({ feed_url: FEED_URL })
+
+      // `artifacts_produced` also admits a bare string, which normalises to a
+      // path Output HERE and nowhere else. Parsing at the boundary the engine
+      // parses at is what proves the record reaches `last_output` intact.
+      const parsed = SkillResultSchema.parse(result)
+      expect(parsed.artifacts_produced).toHaveLength(1)
+      const output = parsed.artifacts_produced[0]!
+      expect(output.body).toBeUndefined()
+      expect(output.path).toBe(entriesPath(home))
+      expect(output.format).toBe('json')
+
+      const written = JSON.parse(await readFile(output.path!, 'utf-8')) as { fetched_at: string; new_entries: unknown }
+      expect(written.new_entries).toEqual(parseFeed(RSS))
+      // A reader of the file alone can tell when it was produced.
+      expect(written.fetched_at).toBe(parsed.data_freshness.feed!)
+    }))
+  })
+
+  test('a quiet day writes the file with an empty entry list and is still a success', async () => {
+    // ATOM, not RSS: an undated entry always surfaces, so only a fully dated
+    // feed can be entirely older than `since`.
+    await withHome(home => withFetch(okWith(ATOM), async () => {
+      const result = await invoke({ feed_url: FEED_URL, since: '2027-01-01T00:00:00Z' })
+
+      expect(result.status).toBe('success')
+      // An empty result is an observation, not the absence of one: a consumer
+      // that reads `[]` learns the poll happened and found nothing, which is
+      // not what it learns from a file that was never written.
+      const written = JSON.parse(await readFile(entriesPath(home), 'utf-8')) as { new_entries: unknown[] }
+      expect(written.new_entries).toEqual([])
+      expect(SkillResultSchema.parse(result).artifacts_produced[0]!.path).toBe(entriesPath(home))
+    }))
+  })
+
+  test('a failed poll writes nothing, so the previous file is left alone', async () => {
+    await withHome(home => withFetch(async () => ({ ok: false, status: 503 }), async () => {
+      const result = await invoke({ feed_url: FEED_URL })
+
+      expect(result.status).toBe('failed')
+      // The premise of the gate this phase builds: a dependency that failed
+      // must not overwrite what the last good run published.
+      expect(await exists(entriesPath(home))).toBe(false)
+      expect(result.artifacts_produced ?? []).toHaveLength(0)
+    }))
+  })
+
+  test('an unusable feed_url is refused before any write', async () => {
+    await withHome(async home => {
+      const result = await invoke({ feed_url: 'not-a-url' })
+
+      expect(result.status).toBe('failed')
+      expect(await exists(entriesPath(home))).toBe(false)
+    })
+  })
+})
+
+/**
+ * `feed_url` is a declared, required input read from
+ * `<home>/config/feed-monitor.json`, and a feed URL can carry a token in a
+ * query string. Every `SkillResult` field here lands in a run log, so an arm
+ * that quotes the URL it was handed is a disclosure path. The arm names the
+ * key and the shape it wanted instead.
+ *
+ * The four cases below cover the four arms a configured value reaches: the
+ * input guard, the non-ok response, a fetch that throws, and the success path.
+ * Only a sentinel that is a valid http(s) URL gets past the first one.
+ */
 describe('feed-monitor config value disclosure', () => {
   const SENTINEL = 'do-not-echo-091a2b'
   const sentinelUrl = `https://${SENTINEL}.test/feed.xml`
 
   test('an invalid feed_url is rejected without the value appearing anywhere in the result', async () => {
-    const result = await handler(
-      {} as PluginManifest,
-      { feed_url: SENTINEL },
-      new AbortController().signal,
-    )
+    const result = await invoke({ feed_url: SENTINEL })
 
     expect(result.status).toBe('failed')
-    expect(result.errors[0]?.code).toBe('parse_error')
+    expect(result.errors?.[0]?.code).toBe('parse_error')
     expect(JSON.stringify(result)).not.toContain(SENTINEL)
-    expect(result.errors[0]?.message).toContain('feed_url')
-    expect(result.errors[0]?.message).toContain('http(s)')
+    expect(result.errors?.[0]?.message).toContain('feed_url')
+    expect(result.errors?.[0]?.message).toContain('http(s)')
   })
 
   test('a non-ok response names the status, not the feed it was configured with', async () => {
-    await withStubbedFetch({ ok: false, status: 500 }, async () => {
-      const result = await handler(
-        {} as PluginManifest,
-        { feed_url: sentinelUrl },
-        new AbortController().signal,
-      )
+    await withFetch(async () => ({ ok: false, status: 500 }), async () => {
+      const result = await invoke({ feed_url: sentinelUrl })
 
       expect(result.status).toBe('failed')
-      expect(result.errors[0]?.code).toBe('dependency_unavailable')
+      expect(result.errors?.[0]?.code).toBe('dependency_unavailable')
       expect(JSON.stringify(result)).not.toContain(SENTINEL)
-      expect(result.errors[0]?.message).toContain('500')
+      expect(result.errors?.[0]?.message).toContain('500')
+    })
+  })
+
+  test('a fetch that throws fails without forwarding the message that names the URL', async () => {
+    await withFetch(async (input) => { throw new TypeError(`Unable to connect to ${String(input)}`) }, async () => {
+      const result = await invoke({ feed_url: sentinelUrl })
+
+      expect(result.status).toBe('failed')
+      expect(result.errors?.[0]?.code).toBe('dependency_unavailable')
+      expect(JSON.stringify(result)).not.toContain(SENTINEL)
     })
   })
 
   test('a successful poll reports the entries without the feed it read them from', async () => {
-    await withStubbedFetch({ ok: true, status: 200, text: async () => RSS }, async () => {
-      const result = await handler(
-        {} as PluginManifest,
-        { feed_url: sentinelUrl },
-        new AbortController().signal,
-      )
+    await withHome(home => withFetch(okWith(RSS), async () => {
+      const result = await invoke({ feed_url: sentinelUrl })
 
       expect(result.status).toBe('success')
       expect(JSON.stringify(result)).not.toContain(SENTINEL)
       expect(result.summary).toContain('First')
-    })
+      // The written path is derived from the home and the manifest name, so
+      // the configured URL cannot reach it either.
+      expect(JSON.stringify(result.artifacts_produced ?? [])).not.toContain(SENTINEL)
+      expect(await exists(entriesPath(home))).toBe(true)
+    }))
   })
 })

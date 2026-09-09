@@ -1,8 +1,11 @@
 import { describe, test, expect } from 'bun:test'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { PluginManifest } from 'warpline/schemas/plugin-manifest'
+import type { CapabilityContext } from 'warpline/unstable-capabilities'
+import { OutputRecordSchema, OUTPUT_BODY_CAP_BYTES } from 'warpline/schemas/skill-result'
 import { findAnomalies, handler } from './handler.js'
+import { manifest } from './manifest.js'
 
 describe('anomaly-watch findAnomalies', () => {
   test('flags above-direction breaches only when latest exceeds threshold', () => {
@@ -29,25 +32,183 @@ describe('anomaly-watch findAnomalies', () => {
   })
 })
 
+const METRICS = {
+  series: [
+    { name: 'errors', latest: 42, threshold: 10, direction: 'above' },
+    { name: 'signups', latest: 3, threshold: 5, direction: 'below' },
+    { name: 'latency', latest: 90, threshold: 100, direction: 'above' },
+  ],
+}
+
+/** The handler is four-parameter; a test hands it a context it never reads. */
+const CONTEXT = {} as CapabilityContext
+
+function invoke(args: Record<string, unknown>) {
+  return handler(manifest, args, new AbortController().signal, CONTEXT)
+}
+
+/**
+ * `warpline/lib/paths` exports only `warplineHome`, which resolves
+ * `WARPLINE_HOME` per call — the same seam a plugin author has. Each test
+ * below gets its own home and restores the suite's afterwards.
+ */
+async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
+  const home = await mkdtemp(join(tmpdir(), 'anomaly-watch-'))
+  const realHome = process.env.WARPLINE_HOME
+  process.env.WARPLINE_HOME = home
+  try {
+    return await fn(home)
+  } finally {
+    if (realHome === undefined) delete process.env.WARPLINE_HOME
+    else process.env.WARPLINE_HOME = realHome
+    await rm(home, { recursive: true, force: true })
+  }
+}
+
+async function seedMetrics(home: string): Promise<void> {
+  await mkdir(join(home, 'state'), { recursive: true })
+  await writeFile(join(home, 'state', 'metrics.json'), JSON.stringify(METRICS))
+}
+
+describe('anomaly-watch reads what it wrote', () => {
+  test('the first run writes its observation and reports it as the first', async () => {
+    await withHome(async (home) => {
+      await seedMetrics(home)
+      const result = await invoke({})
+
+      expect(result.status).toBe('success')
+      expect(result.summary).toContain('first observation')
+      expect(result.summary).toContain('errors')
+      expect(result.summary).toContain('signups')
+
+      const written = JSON.parse(await readFile(join(home, 'state', 'anomaly-watch.last.json'), 'utf-8'))
+      expect(written.breached).toEqual(['errors', 'signups'])
+      expect(typeof written.observed_at).toBe('string')
+    })
+  })
+
+  test('a second run in the same home reads the first and says something different', async () => {
+    await withHome(async (home) => {
+      await seedMetrics(home)
+      const first = await invoke({})
+      const second = await invoke({})
+
+      expect(second.status).toBe('success')
+      expect(second.summary).not.toBe(first.summary)
+      expect(second.summary).not.toContain('first observation')
+    })
+  })
+
+  test('a series that clears and one that newly breaches are both named against the prior run', async () => {
+    await withHome(async (home) => {
+      await seedMetrics(home)
+      await invoke({})
+      await writeFile(join(home, 'state', 'metrics.json'), JSON.stringify({
+        series: [
+          { name: 'errors', latest: 1, threshold: 10, direction: 'above' },
+          { name: 'signups', latest: 3, threshold: 5, direction: 'below' },
+          { name: 'latency', latest: 150, threshold: 100, direction: 'above' },
+        ],
+      }))
+      const second = await invoke({})
+
+      expect(second.summary).toMatch(/new: latency/)
+      expect(second.summary).toMatch(/cleared: errors/)
+    })
+  })
+})
+
+/**
+ * The last-observation file is this plugin's own, so the trigger is a hand
+ * edit or a truncated write — but derive-dont-store.md points at this handler
+ * as the shape to copy, so an unguarded read here is what every author copies.
+ * A prior in the wrong shape is refused the way an unreadable one is, never
+ * compared against (`prior.breached.includes` on a non-array throws) and
+ * never overwritten.
+ */
+describe('anomaly-watch refuses a prior observation it did not write', () => {
+  test('a last-observation file in the wrong shape is a parse_error, not a throw, and is left as it is', async () => {
+    await withHome(async (home) => {
+      await seedMetrics(home)
+      const path = join(home, 'state', 'anomaly-watch.last.json')
+      for (const wrong of ['{}', '{"observed_at": 1, "breached": "errors"}', '[]', '{"observed_at": "x", "breached": [1]}']) {
+        await writeFile(path, wrong)
+        const result = await invoke({})
+
+        expect(result.status).toBe('failed')
+        expect(result.errors?.[0]?.code).toBe('parse_error')
+        expect(result.summary).not.toContain('undefined')
+        expect(JSON.stringify(result)).not.toContain(home)
+        expect(await readFile(path, 'utf-8')).toBe(wrong)
+      }
+    })
+  })
+})
+
+describe('anomaly-watch produces an Output', () => {
+  test('the success arm returns exactly one Output that parses at the boundary', async () => {
+    await withHome(async (home) => {
+      await seedMetrics(home)
+      const result = await invoke({})
+
+      expect(result.artifacts_produced).toHaveLength(1)
+      const raw = result.artifacts_produced![0]
+      expect(typeof raw).toBe('object')
+
+      const parsed = OutputRecordSchema.parse(raw)
+      expect(['markdown', 'json', 'html', 'text']).toContain(parsed.format)
+      expect((parsed.body === undefined) !== (parsed.path === undefined)).toBe(true)
+      expect(parsed.run_id).toBeUndefined()
+      expect(parsed.produced_at).toBeUndefined()
+    })
+  })
+
+  test('a body Output stays under the cap measured in UTF-8 bytes', async () => {
+    await withHome(async (home) => {
+      await seedMetrics(home)
+      const result = await invoke({})
+      const output = OutputRecordSchema.parse(result.artifacts_produced![0])
+
+      expect(output.body).toBeDefined()
+      expect(Buffer.byteLength(output.body!, 'utf8')).toBeLessThan(OUTPUT_BODY_CAP_BYTES)
+      expect(JSON.parse(output.body!).anomalies.map((s: { name: string }) => s.name)).toEqual(['errors', 'signups'])
+    })
+  })
+})
+
 /**
  * `metrics_path` arrives from `<home>/config/anomaly-watch.json` and the
  * summary below is written into the run log on every run. Naming the path back
  * puts an operator-configured value into a document meant to be shareable, so
- * the arm names the input key and says nothing about what it was handed.
+ * every arm names the input key and says nothing about what it was handed.
  *
- * The sentinel is a path that does not exist, which is what makes the
- * no-metrics-file arm reachable at all.
+ * The first sentinel is a path that does not exist, which is what makes the
+ * no-metrics-file arm reachable at all. The second is a file that exists and
+ * is not JSON, which is the arm a swallowed read error would misreport as
+ * "no data yet".
  */
 describe('anomaly-watch config value disclosure', () => {
   const SENTINEL = 'do-not-echo-d4e5f6'
 
   test('a missing metrics file reports nothing to check without naming the path', async () => {
-    const result = await handler(
-      {} as PluginManifest,
-      { metrics_path: join(tmpdir(), SENTINEL, 'metrics.json') },
-    )
+    await withHome(async () => {
+      const result = await invoke({ metrics_path: join(tmpdir(), SENTINEL, 'metrics.json') })
 
-    expect(result.status).toBe('skipped')
-    expect(JSON.stringify(result)).not.toContain(SENTINEL)
+      expect(result.status).toBe('success')
+      expect(result.artifacts_produced ?? []).toHaveLength(0)
+      expect(JSON.stringify(result)).not.toContain(SENTINEL)
+    })
+  })
+
+  test('an unreadable metrics file fails without naming the path', async () => {
+    await withHome(async (home) => {
+      const path = join(home, SENTINEL, 'metrics.json')
+      await mkdir(join(home, SENTINEL), { recursive: true })
+      await writeFile(path, 'not json')
+      const result = await invoke({ metrics_path: path })
+
+      expect(result.status).toBe('failed')
+      expect(JSON.stringify(result)).not.toContain(SENTINEL)
+    })
   })
 })

@@ -13,7 +13,7 @@
  * appear in only one of them.
  */
 import { createHash } from 'node:crypto'
-import { readdir, readFile, stat } from 'node:fs/promises'
+import { readdir, readFile, readlink, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 export async function snapshotHome(dir: string): Promise<string[]> {
@@ -23,6 +23,15 @@ export async function snapshotHome(dir: string): Promise<string[]> {
     for (const entry of await readdir(current, { withFileTypes: true })) {
       const child = join(current, entry.name)
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name
+      if (entry.isSymbolicLink()) {
+        // Recorded as its target, never followed: a prepared home carries
+        // `node_modules/warpline` pointing at the package root, and following
+        // that would walk the whole checkout. No mtime either — the link is
+        // re-created on every home preparation by design, so its mtime moves
+        // while the home's contents do not.
+        out.push(`${rel}|link|${await readlink(child)}`)
+        continue
+      }
       if (entry.isDirectory()) {
         await walk(child, rel)
         continue

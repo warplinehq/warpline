@@ -1,0 +1,9 @@
+{ "$comment": "Example frontmatter schema to be replaced by the adopter's own; generic field names, no real publication's shape",
+  "required": ["title", "summary"],
+  "fields": {
+    "title": "string",
+    "summary": "string",
+    "tags": "string[]",
+    "published": "date"
+  }
+}

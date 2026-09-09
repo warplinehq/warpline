@@ -41,7 +41,7 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
  * arguably earns a flatter register, and converting them is tracked separately.
  * Add a file here only together with the edit that makes it pass.
  */
-const VOICED_DOCS = ['docs/why-the-gate-holds.md']
+const VOICED_DOCS = ['docs/why-the-gate-holds.md', 'docs/derive-dont-store.md']
 
 /**
  * Thresholds sit deliberately loose of where the prose currently measures, so
