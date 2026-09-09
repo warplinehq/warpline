@@ -284,6 +284,18 @@ Declaring nothing, and declaring `secrets: []`, are the same thing: the check
 runs and passes. Read the value with `process.env.GITHUB_TOKEN` inside your
 handler, at the point of use.
 
+**Every name on `secrets` is required, and the check is all or nothing.** One
+unset name fails the whole run before your handler is called; there is no
+per-name `required: false` and no partial resolution. A plugin that reaches
+several sources and means to carry on when one credential is missing cannot say
+so through this field. Declare only the names the plugin cannot run without,
+and give an optional source its own switch — an input naming whether that source
+is on, or a separate plugin per source, so the runtime gates what is genuinely
+required and your handler decides the rest. `link-enrich` is the worked case:
+its handler isolates a source whose credential is absent, and because all three
+names sit on `secrets`, that arm is reachable through the runtime only when all
+three are set.
+
 **Declaring one name in both `inputs` and `secrets` is legal**, and the
 credential still comes from the environment alone. The `inputs` entry documents
 the name for whoever reads your manifest, and that is all it does: the runtime
@@ -485,9 +497,20 @@ buys is that the approval gate and the run record agree with each other about
 what a plugin said it would do — which is why an undeclared side effect is the
 one unforgivable plugin bug.
 
-### Two things that do not exist yet
+### Three things that do not exist yet
 
-Both are deferred rather than refused, and both have a way to work today.
+All three are deferred rather than refused, and all three have a way to work
+today.
+
+**There is no text reader on `warpline/unstable-fs`, and no existence probe.**
+The published surface is `atomicWriteJson`, `atomicWriteText` and
+`readJsonOrNull`, so a handler that must read a prose file — or merely check one
+is there — has nothing on that subpath to call. Reach for `node:fs/promises`
+directly for that one read, and keep the sanctioned helpers for everything they
+do cover. What you must not do is probe with `readJsonOrNull` and treat "it did
+not return `null`" as "the file exists": that is true today, because `ENOENT` is
+the only `null`, but it reads as a reader, it throws on any prose file it finds,
+and the next author copies it. `draft-writer` states the ceiling at the site.
 
 **There is no `warpline/unstable-http`, and no minted HTTP member.** Call
 `fetch` directly from your handler and declare `external_api` on

@@ -106,7 +106,7 @@ A plugin is a directory under `<home>/plugins/<name>/` with two files:
 ```
 my-plugin/
   manifest.ts   # export const manifest = PluginManifestSchema.parse({...})
-  handler.ts    # export const handler: HandlerFn = async (manifest, args, signal) => SkillResult
+  handler.ts    # export const handler: CapabilityHandlerFn = async (manifest, args, signal, capabilities) => SkillResult
 ```
 
 The manifest declares what the plugin is allowed to do (side effects,
