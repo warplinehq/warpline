@@ -268,3 +268,98 @@ describe('invokePlugin', () => {
     expect(artifact.status).toBe('delegated')
   })
 })
+
+/**
+ * A name declared in BOTH `manifest.inputs` and `manifest.secrets` runs, and
+ * the credential reaches the handler from the environment alone.
+ *
+ * Every case proves the plugin RAN before asserting anything about `args`. A
+ * run reported successful while a manifest `default` stood in for a credential
+ * is the outcome these cases exist to exclude, and it is silent: the handler is
+ * called, the result parses, and the placeholder is indistinguishable from a
+ * real value at every sink downstream. So the handler reports the BOOLEAN
+ * `Object.hasOwn(args, <name>)` in its summary and nothing else — never the
+ * value, which would move a credential into an assertion to prove a credential
+ * is not somewhere.
+ *
+ * The environment variable is set and removed around each case. Bun runs a
+ * file's tests in one process and CI shards by directory, so a leaked key is
+ * visible to every sibling file in the same shard.
+ */
+
+/** A value no other string in this suite contains. */
+const OVERLAP_CANARY = 'WL-CANARY-invoke-7c3f9ae1'
+
+/** The name the overlap fixtures declare in both records. */
+const OVERLAP_KEY = 'WARPLINE_TEST_CANARY_INVOKE'
+
+/** Run `fn` with `OVERLAP_KEY` set to the canary, and restore it afterwards. */
+async function withOverlapCanary(fn: () => Promise<void>): Promise<void> {
+  const had = Object.prototype.hasOwnProperty.call(process.env, OVERLAP_KEY)
+  const previous = process.env[OVERLAP_KEY]
+  process.env[OVERLAP_KEY] = OVERLAP_CANARY
+  try {
+    await fn()
+  } finally {
+    if (had) process.env[OVERLAP_KEY] = previous
+    else delete process.env[OVERLAP_KEY]
+  }
+}
+
+// Reports whether the key is an own property of `args` — a boolean, in a field
+// the parse boundary keeps. It returns, logs and interpolates no value.
+const OVERLAP_HANDLER = `
+  export async function handler(manifest, args) {
+    return {
+      status: 'success',
+      phases_completed: ['overlap'],
+      phases_failed: [],
+      errors: [],
+      data_freshness: {},
+      summary: 'overlap ran; hasOwn=' + Object.hasOwn(args, '${OVERLAP_KEY}'),
+      artifacts_produced: [],
+      schema_version: 1,
+    }
+  }
+`
+
+describe('invokePlugin: a name declared in both inputs and secrets', () => {
+  test('an undefaulted required overlapping input resolves from the environment', async () => {
+    await withOverlapCanary(async () => {
+      await writePlugin(tmpDir, 'overlap-plain', OVERLAP_HANDLER, {
+        inputs: { [OVERLAP_KEY]: { type: 'string', required: true } },
+        secrets: [OVERLAP_KEY],
+      })
+
+      const result = await invokePlugin(
+        'overlap-plain',
+        {},
+        { pluginsDir: tmpDir, eventsPath: EVENTS_PATH },
+        { granted: false, reason: 'manual-run' },
+      )
+
+      expect(result.result.status).toBe('success')
+      expect(result.result.summary).toContain('hasOwn=false')
+    })
+  })
+
+  test('an overlapping input carrying a default puts no placeholder in args', async () => {
+    await withOverlapCanary(async () => {
+      await writePlugin(tmpDir, 'overlap-defaulted', OVERLAP_HANDLER, {
+        inputs: { [OVERLAP_KEY]: { type: 'string', required: true, default: 'your-token' } },
+        secrets: [OVERLAP_KEY],
+      })
+
+      const result = await invokePlugin(
+        'overlap-defaulted',
+        {},
+        { pluginsDir: tmpDir, eventsPath: EVENTS_PATH },
+        { granted: false, reason: 'manual-run' },
+      )
+
+      expect(result.result.status).toBe('success')
+      expect(result.result.summary).toContain('hasOwn=false')
+      expect(result.result.summary).not.toContain('your-token')
+    })
+  })
+})
