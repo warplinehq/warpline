@@ -292,6 +292,13 @@ its required check never runs. A placeholder like `your-token` sitting in that
 entry therefore cannot reach your handler in place of a credential, and a
 missing environment variable still fails the run by name before you are called.
 
+**A value for a declared secret name is refused, not ignored.** Writing that key
+into `<home>/config/<plugin>.json`, or passing it as `--input <name>=...`, fails
+the run with a `parse_error` naming the key and the environment variable to set
+instead — never the value it found. Both channels are places a credential should
+not be, and quietly dropping the value would leave an operator believing they
+had set one.
+
 **Never put a resolved credential value into a `SkillResult`**, for the reason
 the config channel above states at length: a run log is a file people paste into
 issues. Name the key you expected.

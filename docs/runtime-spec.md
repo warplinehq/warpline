@@ -120,6 +120,11 @@ against it. The entry stays legal and stays useful — it names the parameter fo
 whoever reads the manifest — but it describes a value this resolution order
 never supplies.
 
+A value for such a name supplied through tier 2 or tier 3 is refused rather than
+used: the run fails once with a `parse_error` naming the key and the environment
+variable to set instead, and never the value it received. That refusal sits
+above the retry loop with the rest of the config resolution, so it happens once.
+
 A missing config file is an empty config, not an error. A config file that
 exists but is unparseable or the wrong shape is a `parse_error` that fails once
 and never enters the retry loop; its message names the file and the offending

@@ -397,7 +397,49 @@ export async function invokePlugin(
       resolverInputs = filtered
     }
 
-    const resolution = resolvePluginArgs(resolverInputs, fileConfig, args)
+    // Filtering the record above removes the required check and the default.
+    // It does not stop a value for that name arriving anyway: the resolver
+    // deliberately does not narrow its result to the declared inputs — a run
+    // started by hand passes a mandatory positional no manifest declares — so
+    // a key sitting in the config file or in the caller's args still lands in
+    // the merge, next to the credential resolved from the environment. This
+    // refusal is what stops it, and it sits above the retry loop with
+    // everything else that can refuse, so an invalid config fails once.
+    //
+    // Only the declared-secret branch is taken from the configure-side loop.
+    // Its undeclared-key branch does not transfer: the positional above is
+    // undeclared by every manifest and legal here by design, and copying that
+    // branch would refuse every hand-started run in the product.
+    //
+    // The problems join the resolver's own arm rather than returning through a
+    // second one. For a key found in the caller's args the shared preamble
+    // names a file the operator did not edit — accepted deliberately, because
+    // one refusal above the retry loop is worth more than a second arm with a
+    // better-fitting sentence, and the remedy the operator needs is in the
+    // problem string rather than the preamble.
+    //
+    // Each problem names the key and the environment variable and never the
+    // value received, which is the house rule for every problem string here.
+    const refusals: string[] = []
+    for (const key of Object.keys(fileConfig)) {
+      if (secretNames.has(key)) {
+        refusals.push(
+          `'${key}' is a declared secret; remove it from this file and set the ${key} environment variable instead`,
+        )
+      }
+    }
+    for (const key of Object.keys(args)) {
+      if (secretNames.has(key)) {
+        refusals.push(
+          `'${key}' is a declared secret; drop the --input and set the ${key} environment variable instead`,
+        )
+      }
+    }
+
+    const resolution =
+      refusals.length > 0
+        ? { ok: false as const, problems: refusals }
+        : resolvePluginArgs(resolverInputs, fileConfig, args)
     if (!resolution.ok) {
       return oneAttemptFailure(
         pluginName,
