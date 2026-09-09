@@ -101,7 +101,7 @@ describe('loadPluginConfig', () => {
     expect((err as PluginConfigError).message).not.toContain(secret)
   })
 
-  // Backstop for the phase's atomic-write truth: the loader never observes a
+  // Backstop for this module's atomic-write truth: the loader never observes a
   // partially-written config, because a writer publishes via `.tmp`-then-
   // `rename` and `rename` is atomic within a filesystem. Mid-write, the final
   // path does not exist at all — which the loader reads as "absent", never as

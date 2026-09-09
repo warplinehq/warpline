@@ -1,12 +1,11 @@
 /**
- * B-1: the returning-question note reaches the gate's detail string.
+ * The returning-question note reaches the gate's detail string.
  *
  * `supersededNote` is produced by the denial check and consumed by the approval
  * check, so it is computed ONCE before the `GATES` array is scanned rather than
  * inside the entry that reads it. That eager-computation ordering survived the
- * 14-04 refactor by argument, not by test: presence checks see the wiring and
- * cannot see the order. Phase 14 shipped it as the phase's one
- * behaviour-unverified truth.
+ * refactor that split the chain into the declared `GATES` array by argument, not
+ * by test: presence checks see the wiring and cannot see the order.
  *
  * This is the missing half — it runs the interleaving instead of reading it.
  * Deny a side-effecting plugin, move the proposal so the fingerprint no longer
