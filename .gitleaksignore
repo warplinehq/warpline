@@ -8,3 +8,11 @@
 # Nothing is suppressed. If you are about to add a line here, the question to
 # answer in the commit message is why the finding is not a secret — not why it
 # is inconvenient.
+
+# The scrubber's own test fixture, not a credential. secrets.test.ts asserts
+# that scrubSecrets() redacts a key when a shorter declared value is a prefix
+# of a longer one, so the file has to contain a literal shaped like a live
+# key for the assertion to mean anything. 'sk-live-abc123XYZ' was typed to
+# look like one; it authenticates against nothing, and its entropy (3.97) is
+# what earns it the generic-api-key rule.
+ff9cd11786e518a61fa6307720a86138589712fc:src/runtime/__tests__/secrets.test.ts:generic-api-key:456
