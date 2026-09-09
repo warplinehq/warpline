@@ -153,6 +153,36 @@ it. Adding the field invalidates no manifest that already validated.
 This is not `capabilities`, which is a free-text array of informational tags.
 Neither field reads the other.
 
+### `schedule`
+
+`schedule` says when an advance should consider the plugin at all. It is a
+closed set of four values — `on_run`, `daily`, `weekly` and `manual` — declared
+by the plugin itself rather than written by the operator somewhere else.
+
+An advance may be requested with a run profile, and a profile admits a **tier**
+of schedules rather than one. `daily` admits `on_run` and `daily`; `weekly`
+admits `on_run`, `daily` and `weekly`; `manual` admits `manual` and nothing
+else. A plugin whose schedule falls outside the requested tier is skipped, and
+the skip names the profile and the schedule.
+
+`manual` is the one schedule no scheduled tier reaches. The `manual` profile is
+the only profile that admits it, so a plugin declaring it runs when that
+profile is asked for, or when an operator invokes it by hand.
+
+An advance requested with **no** profile applies no tier — and still excludes
+`manual`. That is the plain reading of the word: a manual schedule runs when
+something asks for it, and an advance that asked for nothing has not asked. The
+other three schedules all run in that case, so an unprofiled advance is the
+widest one available and is still not a route to a manual plugin. The skip is
+reported like any other, naming the schedule and the profile that would admit
+it.
+
+This is a different question from `autonomy_level`, which is a separate gate.
+`schedule` decides whether the plugin is considered; `autonomy_level` decides
+whether it may proceed once it has been. A plugin may declare
+`schedule: 'manual'` alongside `autonomy_level: 'autonomous'` and mean exactly
+that — nothing starts it unasked, and nothing supervises it once a human has.
+
 ### `outputs.temporality`
 
 Each entry in `outputs` also declares `temporality`, which says what a re-run

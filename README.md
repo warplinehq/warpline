@@ -33,7 +33,7 @@ warpline plan — preview only; nothing was executed.
 Grant: none — plugins with side effects would be SKIPPED this run
 Plugins: /tmp/warpline-demo/plugins
 
-Due (8):
+Due (7):
 
   announce-fanout (level 0)
     (no declared side effects)
@@ -45,14 +45,12 @@ Due (8):
     (no declared side effects)
   metrics-rollup (level 0)
     (no declared side effects)
-  note-intake (level 0)
-    (no declared side effects)
   daily-digest (level 1)
     (no declared side effects)
   feed-triage (level 1)
     (no declared side effects)
 
-Not due (4):
+Not due (5):
 
   feed-monitor — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
@@ -60,6 +58,7 @@ Not due (4):
     external_api: ⚠ unapproved — would be SKIPPED this run
   link-enrich — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
+  note-intake — schedule 'manual': requires profile 'manual'
   anomaly-issue — unapproved: side effects require session approval
     creates_issue: ⚠ unapproved — would be SKIPPED this run
     external_api: ⚠ unapproved — would be SKIPPED this run

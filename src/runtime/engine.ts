@@ -151,8 +151,9 @@ export interface AdvanceOptions {
   /**
    * Headless run profile. When set, the engine filters plugins by
    * schedule tier and treats the run as non-interactive (see RunProfile).
-   * When undefined, all plugins are eligible and supervised plugins gate
-   * normally — this preserves pre-profile interactive behavior.
+   * When undefined, the engine applies no schedule tier but still excludes
+   * `schedule: 'manual'`, and supervised plugins gate normally — this
+   * preserves pre-profile interactive behavior.
    */
   profile?: RunProfile
   /**
@@ -397,7 +398,13 @@ export type EvalResult =
 
 /** Everything `evaluatePlugin` needs that is not the plugin itself. */
 export interface EvalContext {
-  /** Schedules allowed by the headless profile tier; undefined = unfiltered. */
+  /**
+   * Schedules allowed by the headless profile tier.
+   *
+   * Undefined means no profile was requested, and that is not the same as
+   * every schedule passing: a `manual` schedule is excluded in that case too,
+   * because it runs only when something asked for it by name.
+   */
   allowedSchedules?: ReadonlySet<string>
   /** The requested profile, for the profile-filter detail string. */
   profile?: RunProfile
@@ -515,12 +522,22 @@ function failedDependencies(manifest: PluginManifest, ctx: EvalContext): string[
  */
 export const GATES: readonly Gate[] = [
   // -- Profile tier filter ---------------
+  // A requested profile carries a tier of schedules and the plugin is in it or
+  // it is not. No profile is the second question, and the answer is not "no
+  // filter": `manual` reads as opt-in, and an advance nobody asked for the
+  // manual profile is not that opt-in. So the undefined branch excludes that
+  // one schedule and admits the other three, and it says so in a detail that
+  // names the profile the operator would have to ask for.
   {
     reason: 'profile_schedule',
     applies: ({ manifest, ctx }) =>
-      ctx.allowedSchedules !== undefined && !ctx.allowedSchedules.has(manifest.schedule),
+      ctx.allowedSchedules !== undefined
+        ? !ctx.allowedSchedules.has(manifest.schedule)
+        : manifest.schedule === 'manual',
     detail: ({ manifest, ctx }) =>
-      `profile '${ctx.profile}' filter: schedule '${manifest.schedule}' not in tier`,
+      ctx.allowedSchedules !== undefined
+        ? `profile '${ctx.profile}' filter: schedule '${manifest.schedule}' not in tier`
+        : `schedule 'manual': requires profile 'manual'`,
   },
 
   // -- Tier filter: coarser gate than staleness ---------------
