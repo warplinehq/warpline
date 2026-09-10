@@ -708,8 +708,10 @@ export const GATES: readonly Gate[] = [
     // The run log keeps `skipped (unapproved): ` and names the specific
     // effects; that string is authored at the arm below and is deliberately not
     // this one. `docs/why-the-gate-holds.md` calls it the one-command check.
-    // `board-detail-and-run-log-summary.test.ts` pins the pair so the two
-    // cannot drift apart unnoticed.
+    // `__tests__/dependency-failed.test.ts` pins the pair on the one event that
+    // wrote both, so the two cannot drift apart unnoticed. Editing either string
+    // alone reddens there, which is why they are read in one assertion block
+    // rather than two files apart.
     detail: ({ supersededNote }) =>
       `${supersededNote}unapproved: side effects require session approval`,
   },
