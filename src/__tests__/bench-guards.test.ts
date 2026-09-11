@@ -25,7 +25,16 @@
  *     zero would be a figure a table renderer would happily print.
  */
 import { describe, expect, test } from 'bun:test'
-import { iqr, median, type7Quantile } from '../../bench/stats.js'
+import {
+  iqr,
+  median,
+  SHORTFALL_N,
+  summariseArm,
+  sumTokenClasses,
+  type7Quantile,
+  type SummarisableRun,
+  type TokenClassCounts,
+} from '../../bench/stats.js'
 
 /**
  * Ten wall-clock-shaped values with a deliberate tie at sorted positions 4 and
@@ -93,5 +102,107 @@ describe('type-7 quantiles', () => {
     const given = [...TEN]
     type7Quantile(given, 0.5)
     expect(given).toEqual([...TEN])
+  })
+})
+
+// ─── the per-arm summary ─────────────────────────────────────────────────────
+
+/** A four-class literal, so a test can vary one class without restating four. */
+function tokens(overrides: Partial<TokenClassCounts> = {}): TokenClassCounts {
+  return { input: 100, output: 10, cache_creation: 0, cache_read: 5, ...overrides }
+}
+
+/** One run, warm and passing unless a test says otherwise. */
+function run(overrides: Partial<SummarisableRun> = {}): SummarisableRun {
+  return { cold: false, disposition: 'passed', tokens: tokens(), wall_clock_ms: 1000, ...overrides }
+}
+
+/** `n` warm passing runs whose wall clock ascends, so a median is identifiable. */
+function warmRuns(n: number): SummarisableRun[] {
+  return Array.from({ length: n }, (_, i) => run({ wall_clock_ms: 1000 + i * 100 }))
+}
+
+describe('the four token classes stay four', () => {
+  test('three runs sum per class, and the result carries exactly the four class keys', () => {
+    const summed = sumTokenClasses([
+      run({ tokens: tokens({ input: 1, output: 2, cache_creation: 3, cache_read: 4 }) }),
+      run({ tokens: tokens({ input: 10, output: 20, cache_creation: 30, cache_read: 40 }) }),
+      run({ tokens: tokens({ input: 100, output: 200, cache_creation: 300, cache_read: 400 }) }),
+    ])
+    expect(summed).toEqual({ input: 111, output: 222, cache_creation: 333, cache_read: 444 })
+    // By NAME and not by count: four keys is also what a rename produces.
+    expect(Object.keys(summed).sort()).toEqual(['cache_creation', 'cache_read', 'input', 'output'])
+    expect(Object.keys(summed).filter((k) => k.toLowerCase().includes('total'))).toEqual([])
+  })
+
+  test('a null class stays null through the sum, and a genuine zero contributes zero', () => {
+    const summed = sumTokenClasses([
+      run({ tokens: tokens({ input: 7, cache_read: null }) }),
+      run({ tokens: tokens({ input: 0, cache_read: 3 }) }),
+    ])
+    // A class the CLI never reported and a class it reported as zero are
+    // different facts; coercing the first into the second understates a total.
+    expect(summed.cache_read).toBeNull()
+    expect(summed.input).toBe(7)
+  })
+})
+
+describe('the per-arm summary', () => {
+  test('the cold run is its own row and the medians come from the warm set alone', () => {
+    const cold = run({ cold: true, wall_clock_ms: 99_000, tokens: tokens({ input: 99_999 }) })
+    const summary = summariseArm([cold, ...warmRuns(11)])
+    expect('median' in summary).toBe(true)
+    if (!('median' in summary)) throw new Error('unreachable')
+    // Eleven warm values 1000..2000 by 100: h = 0.5 × 10 = 5 → x[5] = 1500.
+    expect(summary.median.wall_clock_ms).toBe(1500)
+    expect(summary.median.tokens.input).toBe(100)
+    expect(summary.warm_passing).toBe(11)
+    expect(summary.cold_row).not.toBeNull()
+    expect(summary.cold_row?.wall_clock_ms).toBe(99_000)
+    expect(summary.cold_row?.tokens.input).toBe(99_999)
+  })
+
+  test('nine warm passing runs get a shortfall row and no median field at all', () => {
+    const summary = summariseArm(warmRuns(9))
+    expect('median' in summary).toBe(false)
+    expect('iqr' in summary).toBe(false)
+    expect('shortfall' in summary).toBe(true)
+    if (!('shortfall' in summary)) throw new Error('unreachable')
+    expect(summary.shortfall).toEqual({ count: 9, threshold: SHORTFALL_N })
+    expect(SHORTFALL_N).toBe(10)
+  })
+
+  test('an arm where nothing passed reports a total failure rate and a shortfall of zero', () => {
+    const summary = summariseArm([
+      run({ disposition: 'failed-grader' }),
+      run({ disposition: 'failed-schema', tokens: tokens({ input: null }) }),
+      run({ disposition: 'truncated' }),
+      run({ disposition: 'failed-grader' }),
+    ])
+    expect('median' in summary).toBe(false)
+    if (!('shortfall' in summary)) throw new Error('unreachable')
+    expect(summary.shortfall.count).toBe(0)
+    expect(summary.warm_passing).toBe(0)
+    const total = summary.truncation_rate + summary.grader_failure_rate + summary.failed_schema_rate
+    expect(total).toBe(1)
+  })
+
+  test('truncation and grader failure are two rates, and a truncated run moves only the first', () => {
+    const base = [...warmRuns(3)]
+    const before = summariseArm(base)
+    const after = summariseArm([...base.slice(1), run({ disposition: 'truncated' })])
+    expect(before.truncation_rate).toBe(0)
+    expect(after.truncation_rate).toBe(1 / 3)
+    expect(after.grader_failure_rate).toBe(0)
+    expect(Object.keys(after)).toContain('truncation_rate')
+    expect(Object.keys(after)).toContain('grader_failure_rate')
+  })
+
+  test('the same records summarised twice give deep-equal results', () => {
+    // The published figures must be recomputable by a third party from the
+    // committed raw JSON, which they are only if this function reads nothing
+    // but its argument and keeps no state between calls.
+    const records = [run({ cold: true }), ...warmRuns(12)]
+    expect(summariseArm(records)).toEqual(summariseArm(records))
   })
 })

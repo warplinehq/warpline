@@ -57,3 +57,47 @@ export function median(values: readonly number[]): number {
 export function iqr(values: readonly number[]): number {
   return type7Quantile(values, 0.75) - type7Quantile(values, 0.25)
 }
+
+// ─── RED-phase stubs for the per-arm summary ─────────────────────────────────
+// Signatures and a deliberately wrong constant, so the summary tests fail on
+// their own assertions rather than on an unresolved export. Replaced by GREEN.
+
+export interface TokenClassCounts {
+  input: number | null
+  output: number | null
+  cache_creation: number | null
+  cache_read: number | null
+}
+
+export interface SummarisableRun {
+  cold: boolean
+  disposition: 'passed' | 'failed-grader' | 'failed-schema' | 'truncated'
+  tokens: TokenClassCounts
+  wall_clock_ms: number
+}
+
+export const SHORTFALL_N = 10
+
+export function sumTokenClasses(_runs: readonly { tokens: TokenClassCounts }[]): TokenClassCounts {
+  return { input: 0, output: 0, cache_creation: 0, cache_read: 0 }
+}
+
+export interface ArmSummary {
+  warm_passing: number
+  truncation_rate: number
+  grader_failure_rate: number
+  failed_schema_rate: number
+  cold_row: null
+  shortfall: { count: number; threshold: number }
+}
+
+export function summariseArm(_runs: readonly SummarisableRun[]): ArmSummary {
+  return {
+    warm_passing: -1,
+    truncation_rate: -1,
+    grader_failure_rate: -1,
+    failed_schema_rate: -1,
+    cold_row: null,
+    shortfall: { count: -1, threshold: -1 },
+  }
+}
