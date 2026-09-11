@@ -381,20 +381,54 @@ function resultFiles(root: string): string[] {
  * adds nothing a reader opening the file would not get.
  */
 function scanCurrency(root: string): string[] {
-  void root
-  return []
+  const rel = 'bench/README.md'
+  const full = join(root, rel)
+  if (!existsSync(full)) throw new Error(`blind: ${full} is not there to scan`)
+
+  return readFileSync(full, 'utf8')
+    .split('\n')
+    .flatMap((line, i) => {
+      // The allowlist is a literal removal, not a line exemption: whatever is
+      // left of the line after the cap flag is gone is still scanned.
+      const scanned = line.split(BUDGET_FLAG_ALLOWLIST).join(' ')
+      return [...scanned.matchAll(CURRENCY_RE)].map((m) => `${rel}:${i + 1}: ${m[0]}`)
+    })
 }
 
 /** Offenders as `<path>: <key path>`, one per matching key or string value. */
 function scanResultCost(root: string): string[] {
-  void root
-  return []
+  const found: string[] = []
+  for (const rel of resultFiles(root)) {
+    const parsed: unknown = JSON.parse(readFileSync(join(root, rel), 'utf8'))
+    const visit = (node: unknown, path: string): void => {
+      if (typeof node === 'string') {
+        if (RESULT_COST_RE.test(node)) found.push(`${rel}: ${path} (value)`)
+        return
+      }
+      if (Array.isArray(node)) {
+        node.forEach((child, i) => visit(child, path === '' ? String(i) : `${path}.${i}`))
+        return
+      }
+      if (node !== null && typeof node === 'object') {
+        for (const [key, child] of Object.entries(node)) {
+          const next = path === '' ? key : `${path}.${key}`
+          if (RESULT_COST_RE.test(key)) found.push(`${rel}: ${next}`)
+          visit(child, next)
+        }
+      }
+    }
+    visit(parsed, '')
+  }
+  return found.sort()
 }
 
 /** Offenders as `<path>:<line>: <name>`. */
 function scanCompetitors(root: string): string[] {
-  void root
-  return []
+  return benchFiles(root).flatMap((rel) =>
+    readFileSync(join(root, rel), 'utf8')
+      .split('\n')
+      .flatMap((line, i) => [...line.matchAll(COMPETITOR_RE)].map((m) => `${rel}:${i + 1}: ${m[0]}`)),
+  )
 }
 
 /**
@@ -417,8 +451,12 @@ function planningRefPattern(): RegExp {
 }
 
 function planningRefOffenders(root: string): string[] {
-  void root
-  return []
+  const pattern = planningRefPattern()
+  return benchFiles(root).flatMap((rel) =>
+    readFileSync(join(root, rel), 'utf8')
+      .split('\n')
+      .flatMap((line, i) => (pattern.test(line) ? [`${rel}:${i + 1}`] : [])),
+  )
 }
 
 /** A planted opaque identifier, assembled so this file does not carry one. */
