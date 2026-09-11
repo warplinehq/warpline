@@ -23,7 +23,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { loadPluginManifests } from 'warpline/unstable-runtime'
 import { runWarplineArm } from '../../bench/arms.js'
@@ -31,10 +31,12 @@ import { gradeHome } from '../../bench/grade.js'
 import { BenchRunRecordSchema, parseRecord, scrubRecord } from '../../bench/record.js'
 import {
   assertHomeSeam,
+  buildPluginRoot,
   GRADED_PATHS,
   PINNED_PLUGINS,
   seedArmHome,
   withArmHome,
+  writeSessionGrant,
 } from '../../bench/seed.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
@@ -156,5 +158,89 @@ describe('bench harness — the deterministic half, end to end', () => {
     for (const file of tracked) {
       BenchRunRecordSchema.parse(JSON.parse(readFileSync(join(REPO_ROOT, file), 'utf8')))
     }
+  })
+})
+
+/**
+ * The two things the benchmark's own prose asserts about the world, asserted
+ * in CI instead of re-read by a human.
+ *
+ * Offenders are collected and compared against an empty list, never counted:
+ * a failure that says "4 of 5" sends a reader looking, and a failure that says
+ * which directory or which manifest sends them straight there.
+ */
+describe('bench harness — the pin and the grant', () => {
+  const EXAMPLE_ROOT = join(REPO_ROOT, 'examples', 'plugins')
+
+  test('every pinned example resolves to a directory under the example root', () => {
+    const offenders = PINNED_PLUGINS.filter((name) => {
+      const path = join(EXAMPLE_ROOT, name)
+      return !existsSync(path) || !statSync(path).isDirectory()
+    })
+    expect(offenders).toEqual([])
+  })
+
+  /**
+   * Every pinned manifest declares an EMPTY side-effect array, so the grant
+   * seeded into each arm home is provably belt-and-braces today rather than
+   * load-bearing — the gate consults a grant only for a plugin whose array is
+   * non-empty. Earlier prose for this scenario said the fan-out plugin
+   * declares side effects; the manifest says otherwise, and this test is what
+   * keeps the two from drifting apart again.
+   *
+   * What goes wrong the day this turns red: the gate starts holding that
+   * plugin before its handler runs, so the handoff prefix is never emitted at
+   * all, and the failure arrives as a run that parked zero handoffs with no
+   * mention of approval anywhere in it. The grant becomes load-bearing on that
+   * day and the pre-registration's wording about it becomes false.
+   *
+   * Read through the same loader the engine uses, over the seeded root, so
+   * this is the manifest the run would have loaded and not a second copy.
+   */
+  test('every pinned manifest declares an empty side-effect array', async () => {
+    await withArmHome(async (home) => {
+      await buildPluginRoot(home)
+      const { manifests } = await loadPluginManifests(join(home, 'plugins'))
+      expect(manifests.size).toBe(PINNED_PLUGINS.length)
+
+      const offenders = [...manifests.entries()]
+        .filter(([, manifest]) => (manifest.side_effects ?? []).length > 0)
+        .map(([name]) => name)
+      expect(offenders).toEqual([])
+    })
+  })
+
+  /**
+   * The grant is written by hand, because no writer for it is published. So
+   * the payload is asserted directly against the shape the real gate reads: a
+   * payload the gate would reject surfaces downstream as a run that parked
+   * nothing, with nothing in the failure naming approval at all.
+   *
+   * The file the writer produced is read back rather than an inline literal
+   * being checked against itself.
+   */
+  test('the seeded grant carries exactly the four fields the gate reads', async () => {
+    await withArmHome(async (home) => {
+      const path = await writeSessionGrant(home)
+      const payload = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+
+      expect(Object.keys(payload).sort()).toEqual(['expires_at', 'first_granted_at', 'granted_at', 'scopes'])
+      expect(payload.scopes).toBe('*')
+      expect(Date.parse(payload.expires_at as string)).toBeGreaterThan(Date.parse(payload.granted_at as string))
+      expect(statSync(path).mode & 0o777).toBe(0o600)
+    })
+  })
+
+  test('the four graded paths are pairwise distinct', () => {
+    const entries = Object.entries(GRADED_PATHS)
+    const byPath = new Map<string, string>()
+    const offenders: string[] = []
+    for (const [key, relative] of entries) {
+      const prior = byPath.get(relative)
+      if (prior !== undefined) offenders.push(`${prior} and ${key} both resolve to ${relative}`)
+      else byPath.set(relative, key)
+    }
+    expect(offenders).toEqual([])
+    expect(byPath.size).toBe(entries.length)
   })
 })
