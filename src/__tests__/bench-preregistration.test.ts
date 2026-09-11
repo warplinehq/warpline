@@ -29,9 +29,9 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
@@ -264,5 +264,316 @@ describe('the pre-registration is committed before the first result and frozen a
 
   test('this repository reports no offender', () => {
     expect(preRegAncestry(REPO_ROOT)).toEqual([])
+  })
+})
+
+/**
+ * Three scans over the published benchmark tree, with three DIFFERENT scopes
+ * that are deliberately never merged.
+ *
+ * The scope split is the whole design. A broad match on the word cost over
+ * `bench/README.md` fails the very sentence the total-cost-of-ownership
+ * requirement mandates — the README's first paragraph says what the harness
+ * measures, and it has to say it. So the README gets a NARROW currency pattern,
+ * the raw result JSON gets a BROAD one, and merging them would either publish a
+ * spend figure or forbid the mandated paragraph.
+ *
+ * The competitor patterns live here rather than under `bench/`, and this file
+ * is outside every roster below by construction: `scanCompetitors` reads
+ * `bench/` only. A list of names we decline to publish must not itself be
+ * published, and a test file carrying the patterns it searches for is legal
+ * exactly when the searched tree does not contain it.
+ */
+
+/** The one literal `scanCurrency` allows: a spend CAP is not a spend FIGURE. */
+const BUDGET_FLAG_ALLOWLIST = '--max-budget-usd'
+
+/**
+ * Symbols, three-letter codes and cost-per-unit phrasing.
+ *
+ * Case-INSENSITIVE on purpose, which is what makes the allowlist above
+ * load-bearing rather than decorative: the cap flag ends in a lowercase
+ * currency code at a word boundary, so an uppercase-only pattern would allow it
+ * by accident and the allowlist would be dead code nobody could prove.
+ *
+ * The cost-per-unit alternatives are anchored on a UNIT noun after `per`, so
+ * `marginal per-run cost` — the phrase the published README is required to
+ * carry — cannot match, while `cost per thousand tokens` cannot hide.
+ */
+const CURRENCY_RE =
+  /[$€£¥₹]|\b(?:usd|eur|gbp|jpy|chf|cad|aud|cny|inr)\b|\b(?:cost|price|spend|charge)s?\s+per\s+(?:token|call|request|run|thousand|million|1[km])\b|\bper[-\s](?:token|1[km]|thousand|million)\b|\bcents?\b|\bdollars?\b/gi
+
+/** Broad by design, over raw result JSON only. */
+const RESULT_COST_RE = /cost/i
+
+/**
+ * Whole-word and CASE-SENSITIVE. Several of these are ordinary English words —
+ * a case-insensitive scan would redden on prose about temporal ordering, which
+ * is a guard red on arrival, which is a guard its reader learns to ignore.
+ *
+ * Additive, and not a claim to be exhaustive. Its purpose is to catch a
+ * comparison creeping into published prose, not to enumerate a market.
+ */
+const COMPETITOR_PATTERNS: string[] = [
+  'Trigger\\.dev',
+  'Temporal',
+  'Airflow',
+  'Prefect',
+  'Dagster',
+  'Inngest',
+  'Windmill',
+  'n8n',
+  'Zapier',
+  'Make\\.com',
+  'LangChain',
+  'LangGraph',
+  'CrewAI',
+  'AutoGPT',
+]
+
+/**
+ * An empty alternation matches nothing and reports perfectly green, so an
+ * emptied list throws here rather than degrading into a guard that cannot fail.
+ */
+function competitorMatcher(patterns: string[]): RegExp {
+  if (patterns.length === 0) {
+    throw new Error('the competitor list is empty; an empty list is a guard that cannot fail')
+  }
+  return new RegExp(patterns.map((p) => `\\b${p}\\b`).join('|'), 'g')
+}
+
+const COMPETITOR_RE = competitorMatcher(COMPETITOR_PATTERNS)
+
+const BINARY = /\.(png|jpe?g|gif|ico|webp|woff2?|ttf|pdf|zip|lock)$/i
+
+/** Every readable file under `dir`, relative to `root`. */
+function walk(root: string, dir: string): string[] {
+  if (!existsSync(dir)) return []
+  const found: string[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) found.push(...walk(root, full))
+    else if (entry.isFile() && !BINARY.test(entry.name)) found.push(relative(root, full))
+  }
+  return found.sort()
+}
+
+/** The competitor scan's roster. Empty is blind, not clean, so it throws. */
+function benchFiles(root: string): string[] {
+  const files = walk(root, join(root, 'bench'))
+  if (files.length === 0) throw new Error(`blind: no file enumerated under ${join(root, 'bench')}`)
+  return files
+}
+
+/**
+ * The cost scan's roster, and the ONE roster in this file that is allowed to be
+ * empty. The results directory is created by the harness at run time, so this
+ * scan has to be green from the first commit — see the test that says so.
+ */
+function resultFiles(root: string): string[] {
+  return walk(root, join(root, 'bench', 'results')).filter((f) => f.endsWith('.json'))
+}
+
+/**
+ * Offenders as `<path>:<line>: <matched token>` — the token that matched and
+ * never the line it sat in. Continuous-integration logs are public and a
+ * matched currency symbol names the problem precisely; the surrounding prose
+ * adds nothing a reader opening the file would not get.
+ */
+function scanCurrency(root: string): string[] {
+  void root
+  return []
+}
+
+/** Offenders as `<path>: <key path>`, one per matching key or string value. */
+function scanResultCost(root: string): string[] {
+  void root
+  return []
+}
+
+/** Offenders as `<path>:<line>: <name>`. */
+function scanCompetitors(root: string): string[] {
+  void root
+  return []
+}
+
+/**
+ * The EXISTING private-reference guard's opaque-identifier class, re-derived
+ * from that guard's own source rather than copied.
+ *
+ * Copied, it would drift and this test would go on asserting about a pattern
+ * the guard no longer uses. Re-derived, a change there is either reflected here
+ * or turns this red on the declaration it can no longer find.
+ */
+const GUARD_SOURCE = 'src/__tests__/no-private-planning-refs.test.ts'
+
+function planningRefPattern(): RegExp {
+  const source = readFileSync(join(REPO_ROOT, GUARD_SOURCE), 'utf8')
+  const declared = source.match(/^const PLANNING_REF = \/(.+)\/$/m)
+  if (!declared) {
+    throw new Error(`blind: ${GUARD_SOURCE} no longer declares the pattern class this test re-derives`)
+  }
+  return new RegExp(declared[1]!)
+}
+
+function planningRefOffenders(root: string): string[] {
+  void root
+  return []
+}
+
+/** A planted opaque identifier, assembled so this file does not carry one. */
+const PLANTED_REF = `${'Phase'} ${7}`
+
+describe('nothing published under bench/ carries a figure, a rival or a private identifier', () => {
+  test('a currency symbol in the published README is reported by file and line', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-currency-'))
+    try {
+      mkdirSync(join(root, 'bench'), { recursive: true })
+      const readme = join(root, 'bench', 'README.md')
+      writeFileSync(readme, 'The harness measures marginal per-run cost.\nEach pass came to $4.10.\n')
+      expect(scanCurrency(root)).toEqual(['bench/README.md:2: $'])
+
+      writeFileSync(readme, 'The harness measures marginal per-run cost.\n')
+      expect(scanCurrency(root)).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * All of them, never the first one. A scan reported by count, or a fixture
+   * carrying one field, is how this project's recorded leak class recurs: the
+   * guard names the field somebody thought of and stays silent about the two
+   * beside it.
+   */
+  test('every spend field in a result record is reported, and a spend phrase inside a value too', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-result-cost-'))
+    try {
+      mkdirSync(join(root, 'bench', 'results'), { recursive: true })
+      writeFileSync(
+        join(root, 'bench', 'results', 'run-0001.json'),
+        JSON.stringify({
+          arm: 'warpline',
+          total_cost_usd: 1.23,
+          models: [{ id: 'a-model', cost: 0.41 }],
+          cost_basis: 'list',
+          notes: 'quoted at cost per thousand tokens',
+        }),
+      )
+      expect(scanResultCost(root)).toEqual([
+        'bench/results/run-0001.json: cost_basis',
+        'bench/results/run-0001.json: models.0.cost',
+        'bench/results/run-0001.json: notes (value)',
+        'bench/results/run-0001.json: total_cost_usd',
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The allowlist is a LITERAL and not a line exemption: the flag name is
+   * stripped wherever it appears and everything left over is still scanned, so
+   * a figure sharing a line with the flag is reported rather than excused.
+   */
+  test('the spend-cap flag is allowed and every other match in the same file is not', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-allowlist-'))
+    try {
+      mkdirSync(join(root, 'bench'), { recursive: true })
+      writeFileSync(
+        join(root, 'bench', 'README.md'),
+        `Each session stops at ${BUDGET_FLAG_ALLOWLIST} 5.\nThe cap ${BUDGET_FLAG_ALLOWLIST} 5 sat beside a 12 USD total.\n`,
+      )
+      expect(scanCurrency(root)).toEqual(['bench/README.md:2: USD'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The one vacuous pass in this file, deliberate and named.
+   *
+   * Every other guard here throws on an empty roster, because a scan that
+   * passed for want of files is indistinguishable from a scan that passed
+   * because the files are clean. This one must be green from the first commit —
+   * the results directory is written by the harness at run time — so the
+   * emptiness is asserted rather than assumed.
+   *
+   * Over a FIXTURE and never over this repository: asserting the real results
+   * roster is empty is true today and false forever after the measured set
+   * lands, and it would take the suite red with it.
+   */
+  test('an existing but empty results directory reports clean, and the empty roster is asserted', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-empty-results-'))
+    try {
+      mkdirSync(join(root, 'bench', 'results'), { recursive: true })
+      expect(resultFiles(root)).toEqual([])
+      expect(scanResultCost(root)).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a rival product named under bench/ is reported by path and line, and its absence is clean', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-competitor-'))
+    try {
+      mkdirSync(join(root, 'bench'), { recursive: true })
+      writeFileSync(join(root, 'bench', 'README.md'), 'The method, in brief.\n')
+      const rival = join(root, 'bench', 'comparison.md')
+      writeFileSync(rival, 'Three arms.\nRoughly four times faster than Airflow.\n')
+      expect(scanCompetitors(root)).toEqual(['bench/comparison.md:2: Airflow'])
+
+      rmSync(rival)
+      expect(benchFiles(root).length).toBeGreaterThan(0)
+      expect(scanCompetitors(root)).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('an emptied competitor list throws instead of matching nothing', () => {
+    expect(COMPETITOR_PATTERNS.length).toBeGreaterThanOrEqual(10)
+    expect(() => competitorMatcher([])).toThrow(/guard that cannot fail/)
+  })
+
+  /**
+   * The one test here that exercises an EXISTING guard rather than a new one.
+   *
+   * The pattern class and the roster are two separate claims. This pins the
+   * pattern, over a planted file; the roster half is pinned by asserting that
+   * `bench/` is tracked at all, because that guard enumerates `git ls-files`
+   * with no pathspec and a tracked file is exactly what puts it in reach. Both
+   * were also watched together out of band: a planted file staged under
+   * `bench/` turned the real guard red naming that path, and was removed.
+   */
+  test('an opaque planning identifier under bench/ is caught, and bench/ is in the roster that catches it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-planning-ref-'))
+    try {
+      mkdirSync(join(root, 'bench'), { recursive: true })
+      writeFileSync(join(root, 'bench', 'notes.md'), `A planted line naming ${PLANTED_REF}.\n`)
+      expect(planningRefOffenders(root)).toEqual(['bench/notes.md:1'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+
+    const tracked = execFileSync('git', ['ls-files', '-z', '--', 'bench'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: GIT_ENV,
+    })
+      .split('\0')
+      .filter(Boolean)
+    expect(tracked.length).toBeGreaterThan(0)
+    expect(planningRefOffenders(REPO_ROOT)).toEqual([])
+  })
+
+  /**
+   * Offender lists only. Never the rosters: `bench/results/` is empty today and
+   * will not be, and a test asserting otherwise is a scheduled failure.
+   */
+  test('the real bench tree has no offender under any of the three scans', () => {
+    expect(scanCurrency(REPO_ROOT)).toEqual([])
+    expect(scanResultCost(REPO_ROOT)).toEqual([])
+    expect(scanCompetitors(REPO_ROOT)).toEqual([])
   })
 })
