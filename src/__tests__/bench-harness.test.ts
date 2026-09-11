@@ -32,6 +32,7 @@ import {
   ApiUnavailableError,
   parseClaudeResult,
   resolveDisposition,
+  RUN_LOG_PLACEHOLDER,
   runWarplineArm,
 } from '../../bench/arms.js'
 import { gradeHome, type GradeResult } from '../../bench/grade.js'
@@ -650,6 +651,25 @@ describe('bench harness — the result JSON, parsed and dispositioned', () => {
       truncation_subtype: null,
     })
     expect(resolveDisposition({ parsed: clean, graded: gradeOutcome(false) }).disposition).toBe('failed-grader')
+  })
+
+  /**
+   * The discovery seam, asserted before the code that substitutes it exists.
+   *
+   * The consumer prompt is the only place this token appears, and an
+   * unsubstituted one is a session with no discovery path: it finds no
+   * handoffs, writes neither handoff artifact, and fails the grader for a
+   * reason nothing in the output names. A rename on either side is silent
+   * otherwise — the prompt still reads fine and the substitution still runs,
+   * over a token that is no longer there.
+   */
+  test('the run-log placeholder is the one substitution point the consumer prompt carries', () => {
+    const prompt = readFileSync(join(REPO_ROOT, 'bench', 'prompts', 'consumer.md'), 'utf8')
+
+    expect(prompt).toContain(RUN_LOG_PLACEHOLDER)
+    // And exactly one such token in the file, so a second seam cannot be added
+    // on one side without the substitution learning about it.
+    expect(prompt.match(/\{\{[A-Z_]+\}\}/g)).toEqual([RUN_LOG_PLACEHOLDER])
   })
 
   test('an error flag without the api_error terminal reason is the arm failing, not the provider', () => {
