@@ -81,6 +81,153 @@ export const GRADED_PATHS = {
 }
 
 /**
+ * The one directory every graded artifact lives in, DERIVED from the paths
+ * above rather than restated beside them.
+ *
+ * Restated, it would be a second copy of a string that the pre-registration
+ * has frozen, and the two could disagree without anything saying so. Derived,
+ * a graded path that moved out of the shared directory throws here at module
+ * load, before a seeding run can create a control home whose "empty output
+ * directory" is somewhere the grader never looks.
+ */
+export const GRADED_DIR = ((): string => {
+  const dirs = new Set(Object.values(GRADED_PATHS).map((rel) => dirname(rel)))
+  if (dirs.size !== 1) {
+    throw new Error(`the graded paths no longer share one directory: [${[...dirs].sort().join(', ')}]`)
+  }
+  return [...dirs][0] as string
+})()
+
+/** The three arms, closed at three. The seeding recipe differs per arm. */
+export type ArmId = 'warpline' | 'agent-with-state' | 'agent-from-scratch'
+
+/**
+ * Where each source fixture body lands inside a CONTROL home: one flat input
+ * directory, six entries, keyed by the fixture's own basename.
+ *
+ * These six literals are frozen in the method document, and the control prompt
+ * names the same six. A test asserts all three legs agree, because this is the
+ * disagreement that costs a whole measured set: the session looks in one place,
+ * the seeder wrote to another, and every control run fails the grader for a
+ * reason nothing in its output names.
+ *
+ * The runtime's own input defaults are deliberately NOT reused here. Four of
+ * them carry the reference implementation's vocabulary in the path — three
+ * under a plugin-named reference subdirectory and one a plugin-named filename —
+ * so seeding a control home from them would plant that vocabulary inside the
+ * control. Nor do these point back at the repository checkout: a control
+ * session's working directory IS its home, and an input outside the home is an
+ * input the session can follow back to the implementation it is being compared
+ * against.
+ */
+export const CONTROL_INPUT_PATHS: Readonly<Record<string, string>> = Object.freeze({
+  'voice-rules.md': 'inputs/voice-rules.md',
+  'blocklist.json': 'inputs/blocklist.json',
+  'frontmatter-schema.json': 'inputs/frontmatter-schema.json',
+  'announce-draft.json': 'inputs/announce-draft.json',
+  'metrics.json': 'inputs/metrics.json',
+  'metrics-rollup.json': 'inputs/metrics-rollup.json',
+})
+
+/** Where the notes file sits inside a control home. Flat, beside the inputs. */
+export const NOTES_PATH = 'notes.md'
+
+/**
+ * The tracked source the with-state arm's notes copy is made from,
+ * repository-relative.
+ *
+ * Produced by one unmeasured warm-up pass of the from-scratch arm and
+ * committed before any measured run — so it is absent from a checkout that has
+ * not taken that pass yet, and `seedControlHome` refuses by name rather than
+ * seeding a with-state home with no state in it.
+ */
+export const NOTES_FIXTURE = 'bench/fixtures/agent-notes.md'
+
+// Asserted at module load, before any seeding: a control input destination
+// that was absolute would escape the home the session is confined to; one
+// under the graded directory would look to the grader like work the session
+// did; and a destination colliding with the notes path would overwrite the
+// state that defines the with-state arm.
+{
+  const offenders: string[] = []
+  for (const [fixture, rel] of Object.entries(CONTROL_INPUT_PATHS)) {
+    if (isAbsolute(rel)) offenders.push(`'${fixture}' is placed at an absolute path '${rel}'`)
+    if (rel === GRADED_DIR || rel.startsWith(`${GRADED_DIR}/`)) {
+      offenders.push(`'${fixture}' is placed under the graded directory at '${rel}'`)
+    }
+    if (rel === NOTES_PATH) offenders.push(`'${fixture}' is placed at the notes path '${rel}'`)
+  }
+  if (offenders.length > 0) {
+    throw new Error(`control input destinations are unusable: ${offenders.join('; ')}`)
+  }
+}
+
+/**
+ * A seeding refusal, named so a caller can tell it from a filesystem error.
+ *
+ * Every throw of it is a measurement that would have been published as valid:
+ * the wrong recipe applied to an arm, or a with-state run handed no state.
+ */
+export class ControlSeedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ControlSeedError'
+  }
+}
+
+/**
+ * Seed one CONTROL arm home: the six source bodies at flat paths, an empty
+ * output directory, and — for the with-state arm alone — a fresh copy of the
+ * notes source.
+ *
+ * What a control home carries is stated here as a positive property of the
+ * method rather than as a list of omissions. It carries the same six bodies
+ * every arm reads, the directory its four deliverables go in, and nothing
+ * else: no plugin source, no plugin root, no package link, no plugin-named
+ * configuration file, no preferences file and no session grant. A control
+ * session runs with its working directory set to this home and with permission
+ * checks bypassed, so anything placed here is readable by it, and a home
+ * carrying the reference implementation would be a control arm handed the
+ * answer. The companion property sits one layer up: the plugin-directory flag
+ * is withheld from the control arms for exactly this reason. Both halves have
+ * to hold or neither does — repairing one while breaking the other leaves a
+ * comparison that still reports a number.
+ *
+ * Both refusals run BEFORE anything is written, so a refused seed leaves no
+ * half-built home for a later call to mistake for a complete one.
+ */
+export async function seedControlHome(
+  home: string,
+  arm: ArmId,
+  notesSource: string = join(REPO_ROOT, NOTES_FIXTURE),
+): Promise<void> {
+  if (arm === 'warpline') {
+    throw new ControlSeedError(
+      `arm 'warpline' is not a control arm — it is seeded by seedArmHome, and applying the control recipe to it would publish a contaminated measurement as a valid number`,
+    )
+  }
+  if (arm === 'agent-with-state' && !existsSync(notesSource)) {
+    throw new ControlSeedError(
+      `arm 'agent-with-state' has no notes source at '${notesSource}' — a with-state run without state is not the arm the method defines`,
+    )
+  }
+
+  for (const [fixture, rel] of Object.entries(CONTROL_INPUT_PATHS)) {
+    await place(home, fixture, rel)
+  }
+  await mkdir(join(home, GRADED_DIR), { recursive: true })
+
+  if (arm === 'agent-with-state') {
+    // A byte COPY and never a link: a link would let one measured run's edits
+    // reach the tracked fixture, and through it every later run in the set.
+    await copyFile(notesSource, join(home, NOTES_PATH))
+  }
+  // The from-scratch arm gets NO file at the notes path, and not an empty one
+  // either — the prompt's read clause tests for existence, and an empty file
+  // is a file.
+}
+
+/**
  * Refuse unless every arm home is a distinct absolute path.
  *
  * Two arms sharing a home would let one arm read the other's state and grade
