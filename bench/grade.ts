@@ -36,9 +36,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** The channels this home was configured to fan out to, or an empty list. */
-function configuredChannels(home: string): string[] {
-  const config = readJson(join(home, 'config', 'announce-fanout.json'))
+/**
+ * The channel list the fan-out artifact is graded against.
+ *
+ * Read from the harness's OWN tracked fixture and never from the home being
+ * graded. This used to read `config/announce-fanout.json` inside the home,
+ * which quietly made the grader arm-aware: only the warpline arm's home has a
+ * reason to carry a plugin-named configuration file, so a control home graded
+ * false for a reason nothing in the output named — and seeding that file into
+ * a control home to fix it would plant the runtime's own vocabulary inside the
+ * control. One frozen list, outside every home, grades all three arms by the
+ * same key.
+ */
+function gradedChannels(): string[] {
+  const config = readJson(join(import.meta.dir, 'fixtures', 'config', 'announce-fanout.json'))
   if (!isRecord(config) || !Array.isArray(config.channels)) return []
   return config.channels.filter((c): c is string => typeof c === 'string')
 }
@@ -72,11 +83,11 @@ function gradeDraft(path: string): boolean {
   }
 }
 
-/** A fan-out: one entry per configured channel, no more and no fewer. */
-function gradeFanout(path: string, home: string): boolean {
+/** A fan-out: one entry per graded channel, no more and no fewer. */
+function gradeFanout(path: string): boolean {
   const value = readJson(path)
   if (!isRecord(value)) return false
-  const channels = configuredChannels(home)
+  const channels = gradedChannels()
   if (channels.length === 0) return false
   const keys = Object.keys(value).sort()
   const expected = [...channels].sort()
@@ -89,7 +100,7 @@ export function gradeHome(home: string): GradeResult {
   const present = (key: GradedKey): boolean => existsSync(at(key))
 
   const paths: Record<GradedKey, boolean> = {
-    'announce-fanout': present('announce-fanout') && gradeFanout(at('announce-fanout'), home),
+    'announce-fanout': present('announce-fanout') && gradeFanout(at('announce-fanout')),
     'daily-digest': present('daily-digest') && gradeDigest(at('daily-digest')),
     'draft-writer': present('draft-writer') && gradeDraft(at('draft-writer')),
     'metrics-rollup': present('metrics-rollup') && gradeRollup(at('metrics-rollup')),
