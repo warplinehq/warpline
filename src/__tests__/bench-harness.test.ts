@@ -295,11 +295,14 @@ describe('bench harness — the control home', () => {
   }
 
   /**
-   * The four things a control home must not carry, named as the path segment
+   * The five things a control home must not carry, named as the path segment
    * a walk would find: the plugin root, the package directory the one link
-   * lives in, the plugin-named configuration directory, and the grant file.
+   * lives in, the plugin-named configuration directory, the grant file, and
+   * the runtime's preferences file — which is a knob on a runtime a control
+   * arm does not have, and which the frozen method lists beside the other
+   * four rather than a step below them.
    */
-  const REVEALING = ['plugins', 'node_modules', 'config', '.session-approval']
+  const REVEALING = ['plugins', 'node_modules', 'config', '.session-approval', 'preferences.json']
 
   test('the from-scratch home carries the six input bodies and an empty graded directory', async () => {
     await withArmHome(async (home) => {
