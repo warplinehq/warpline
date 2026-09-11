@@ -75,18 +75,78 @@ function isAncestor(root: string, ancestor: string, descendant: string): boolean
   }
 }
 
-/** The method's blob hash at `rev`, or null when the path is not in that tree. */
+/**
+ * The method's blob hash at `rev`, or null when the path is not in that tree.
+ *
+ * git's stderr is dropped rather than inherited: "not in that tree" is ordinary
+ * control flow here, and a `fatal:` line in a suite's output trains its reader
+ * to skim past `fatal:` lines.
+ */
 function blobAt(root: string, rev: string): string | null {
   try {
-    return git(root, ['rev-parse', `${rev}:${PRE_REG}`])
+    return execFileSync('git', ['rev-parse', `${rev}:${PRE_REG}`], {
+      cwd: root,
+      encoding: 'utf8',
+      env: GIT_ENV,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
   } catch {
     return null
   }
 }
 
+/**
+ * Every way the ordering or the freeze is violated in `repoRoot`, by short SHA
+ * and path.
+ *
+ * The blob comparison takes the method AS OF the commit before the first
+ * results commit, falling back to the first results commit itself when that
+ * commit has no parent. Both readings of "unchanged since results existed"
+ * agree wherever a parent exists, and the fallback is what keeps a fixture
+ * whose results commit is the root commit from throwing instead of reporting
+ * the ordering violation it is there to report. A null base means the method
+ * was not in the tree when the first result landed, which the ancestry pass
+ * has already reported — so there is nothing to compare and nothing to add.
+ */
 function preRegAncestry(repoRoot: string): AncestryFinding[] {
-  void repoRoot
-  return []
+  const shallow = git(repoRoot, ['rev-parse', '--is-shallow-repository'])
+  if (shallow !== 'false') {
+    throw new Error(
+      'shallow clone: an ordering check over history it cannot see reports clean while meaning it did not look. Run `git fetch --unshallow`, or check out with fetch-depth: 0.',
+    )
+  }
+
+  const methodAdds = git(repoRoot, ['log', '--diff-filter=A', '--format=%H', '--', PRE_REG])
+    .split('\n')
+    .filter(Boolean)
+  if (methodAdds.length === 0) {
+    throw new Error(
+      `no commit adds ${PRE_REG}: an ordering check with nothing to order is blind, not clean`,
+    )
+  }
+  // git logs newest first, so the oldest add is the last line.
+  const method = methodAdds[methodAdds.length - 1]!
+
+  const resultAdds = git(repoRoot, ['log', '--diff-filter=A', '--format=%H', '--', RESULTS])
+    .split('\n')
+    .filter(Boolean)
+
+  const findings: AncestryFinding[] = []
+  for (const sha of resultAdds) {
+    if (!isAncestor(repoRoot, method, sha)) {
+      findings.push({ kind: 'results-before-method', commit: sha.slice(0, 7) })
+    }
+  }
+
+  if (resultAdds.length > 0) {
+    const first = resultAdds[resultAdds.length - 1]!
+    const base = blobAt(repoRoot, `${first}^`) ?? blobAt(repoRoot, first)
+    if (base !== null && base !== blobAt(repoRoot, 'HEAD')) {
+      findings.push({ kind: 'method-changed-after-results', path: PRE_REG })
+    }
+  }
+
+  return findings
 }
 
 /**
