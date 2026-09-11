@@ -23,8 +23,10 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, relative } from 'node:path'
 import { loadPluginManifests } from 'warpline/unstable-runtime'
 import { runWarplineArm } from '../../bench/arms.js'
 import { gradeHome } from '../../bench/grade.js'
@@ -32,9 +34,14 @@ import { BenchRunRecordSchema, parseRecord, scrubRecord } from '../../bench/reco
 import {
   assertHomeSeam,
   buildPluginRoot,
+  CONTROL_INPUT_PATHS,
+  ControlSeedError,
+  GRADED_DIR,
   GRADED_PATHS,
+  NOTES_PATH,
   PINNED_PLUGINS,
   seedArmHome,
+  seedControlHome,
   withArmHome,
   writeSessionGrant,
 } from '../../bench/seed.js'
@@ -242,5 +249,173 @@ describe('bench harness — the pin and the grant', () => {
     }
     expect(offenders).toEqual([])
     expect(byPath.size).toBe(entries.length)
+  })
+})
+
+/**
+ * The control home, and the three-way agreement the benchmark's own documents
+ * depend on.
+ *
+ * The assertions that make this evidence rather than decoration:
+ *
+ *   - the purity walk runs over BOTH recipes. A walk that only ever looked at
+ *     a control home would be asserting the absence of things nothing put
+ *     there; the same walk over a home the other recipe seeded has to find all
+ *     four of them, or the control assertion proves nothing.
+ *   - the agreement test iterates the EXPORTED constants and never restates a
+ *     path literal. A test carrying its own copy of the strings goes green on
+ *     a matched pair of renames, which is the one failure the agreement exists
+ *     to catch.
+ */
+describe('bench harness — the control home', () => {
+  const FIXTURE_ROOT = join(REPO_ROOT, 'bench', 'fixtures')
+
+  /**
+   * Every path segment under `root`, plus the relative path of every symbolic
+   * link at any depth.
+   *
+   * Recursion is on `isDirectory()`, which is FALSE for a symbolic link to a
+   * directory — deliberately. A `stat`-based walk would follow the package
+   * link in the other recipe's home straight back into the repository and
+   * enumerate the whole checkout.
+   */
+  function walk(root: string): { segments: Set<string>; symlinks: string[] } {
+    const segments = new Set<string>()
+    const symlinks: string[] = []
+    const visit = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name)
+        segments.add(entry.name)
+        if (entry.isSymbolicLink()) symlinks.push(relative(root, full))
+        else if (entry.isDirectory()) visit(full)
+      }
+    }
+    visit(root)
+    return { segments, symlinks }
+  }
+
+  /**
+   * The four things a control home must not carry, named as the path segment
+   * a walk would find: the plugin root, the package directory the one link
+   * lives in, the plugin-named configuration directory, and the grant file.
+   */
+  const REVEALING = ['plugins', 'node_modules', 'config', '.session-approval']
+
+  test('the from-scratch home carries the six input bodies and an empty graded directory', async () => {
+    await withArmHome(async (home) => {
+      await seedControlHome(home, 'agent-from-scratch')
+
+      const missing: string[] = []
+      for (const [fixture, rel] of Object.entries(CONTROL_INPUT_PATHS)) {
+        const placed = join(home, rel)
+        if (!existsSync(placed)) {
+          missing.push(rel)
+          continue
+        }
+        // Bytes, not a parse: the arms are comparable only if every arm reads
+        // the identical body, and a re-serialised JSON document is a different
+        // body that would still parse equal.
+        expect(readFileSync(placed)).toEqual(readFileSync(join(FIXTURE_ROOT, fixture)))
+      }
+      expect(missing).toEqual([])
+
+      const graded = join(home, GRADED_DIR)
+      expect(statSync(graded).isDirectory()).toBe(true)
+      expect(readdirSync(graded)).toEqual([])
+    })
+  })
+
+  test('a control home reveals nothing the other recipe reveals, and that recipe reveals all of it', async () => {
+    await withArmHome(async (home) => {
+      await seedControlHome(home, 'agent-from-scratch')
+      const control = walk(home)
+      expect(REVEALING.filter((name) => control.segments.has(name))).toEqual([])
+      expect(control.symlinks).toEqual([])
+    })
+
+    // The comparison home, seeded by the OTHER recipe, inside its own
+    // set-and-restore of the home variable — that recipe reads the resolver.
+    await withArmHome(async (home) => {
+      await seedArmHome(home)
+      const warpline = walk(home)
+      expect(REVEALING.filter((name) => !warpline.segments.has(name))).toEqual([])
+      expect(warpline.symlinks.length).toBeGreaterThan(0)
+    })
+  })
+
+  test('the with-state home gets a fresh byte copy of the notes source, never a link', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'warpline-bench-notes-'))
+    const source = join(scratch, 'agent-notes.md')
+    try {
+      await writeFile(source, '# what the last pass learned\n\nOne line of it.\n')
+      await withArmHome(async (home) => {
+        await seedControlHome(home, 'agent-with-state', source)
+        const placed = join(home, NOTES_PATH)
+        expect(readFileSync(placed)).toEqual(readFileSync(source))
+        // A link would let one measured run's edits reach the tracked fixture
+        // and therefore every later run in the set.
+        expect(lstatSync(placed).isSymbolicLink()).toBe(false)
+        expect(lstatSync(placed).isFile()).toBe(true)
+      })
+    } finally {
+      await rm(scratch, { recursive: true, force: true })
+    }
+  })
+
+  test('the from-scratch home has no file at the notes path at all', async () => {
+    await withArmHome(async (home) => {
+      await seedControlHome(home, 'agent-from-scratch')
+      // A rejecting stat, not an empty-string read: the prompt's read clause
+      // tests for existence, and an empty file is a file.
+      expect(() => lstatSync(join(home, NOTES_PATH))).toThrow()
+    })
+  })
+
+  test('a with-state seed with no notes source refuses, naming the arm and the path', async () => {
+    await withArmHome(async (home) => {
+      const absent = join(home, 'no-such-notes-source.md')
+      let thrown: unknown
+      try {
+        await seedControlHome(home, 'agent-with-state', absent)
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(ControlSeedError)
+      expect((thrown as Error).message).toContain('agent-with-state')
+      expect((thrown as Error).message).toContain(absent)
+      expect(existsSync(join(home, NOTES_PATH))).toBe(false)
+    })
+  })
+
+  test('the control recipe refuses the warpline arm by name', async () => {
+    await withArmHome(async (home) => {
+      let thrown: unknown
+      try {
+        await seedControlHome(home, 'warpline')
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(ControlSeedError)
+      expect((thrown as Error).message).toContain('warpline')
+    })
+  })
+
+  /**
+   * The three-way agreement: the seeder's constants, the frozen method
+   * document, and the prompt the control arms are handed.
+   *
+   * One test over every leg, iterating the constants. Split in two, one leg
+   * could go red while the other stayed green and a reader would take the
+   * green one as the state of the agreement. The pre-registration freezes once
+   * a result exists, so a drift found after that is a method change rather
+   * than a rename — which is why this runs now.
+   */
+  test('every control path in the seeder appears verbatim in the pre-registration', () => {
+    const preRegistration = readFileSync(join(REPO_ROOT, 'bench', 'PRE-REGISTRATION.md'), 'utf8')
+    const missing: string[] = []
+    for (const rel of [...Object.values(CONTROL_INPUT_PATHS), NOTES_PATH]) {
+      if (!preRegistration.includes(rel)) missing.push(`bench/PRE-REGISTRATION.md: ${rel}`)
+    }
+    expect(missing).toEqual([])
   })
 })
