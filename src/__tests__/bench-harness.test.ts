@@ -410,12 +410,34 @@ describe('bench harness — the control home', () => {
    * a result exists, so a drift found after that is a method change rather
    * than a rename — which is why this runs now.
    */
-  test('every control path in the seeder appears verbatim in the pre-registration', () => {
+  test('every control path in the seeder appears verbatim in the pre-registration and in the prompt', () => {
     const preRegistration = readFileSync(join(REPO_ROOT, 'bench', 'PRE-REGISTRATION.md'), 'utf8')
+    const prompt = readFileSync(join(REPO_ROOT, 'bench', 'prompts', 'agent.md'), 'utf8')
+    const controlPaths = [...Object.values(CONTROL_INPUT_PATHS), NOTES_PATH]
+
     const missing: string[] = []
-    for (const rel of [...Object.values(CONTROL_INPUT_PATHS), NOTES_PATH]) {
+    for (const rel of controlPaths) {
       if (!preRegistration.includes(rel)) missing.push(`bench/PRE-REGISTRATION.md: ${rel}`)
     }
+    // The prompt leg carries the graded paths too: those are the other half of
+    // what this file has to name, and a control session that cannot find the
+    // path writes its output somewhere the grader never looks.
+    for (const rel of [...controlPaths, ...Object.values(GRADED_PATHS)]) {
+      if (!prompt.includes(rel)) missing.push(`bench/prompts/agent.md: ${rel}`)
+    }
+    // And the channel names, read from the fixture the grader itself keys on
+    // rather than restated here. A control home carries no configuration file
+    // naming them, so the prompt is the only place a control session can learn
+    // them — and a channel name that drifted from the fixture would fail every
+    // control run's fan-out with nothing in the output naming the cause.
+    const fixture = JSON.parse(
+      readFileSync(join(FIXTURE_ROOT, 'config', 'announce-fanout.json'), 'utf8'),
+    ) as { channels: string[] }
+    expect(fixture.channels.length).toBeGreaterThan(0)
+    for (const channel of fixture.channels) {
+      if (!prompt.includes(channel)) missing.push(`bench/prompts/agent.md: ${channel}`)
+    }
+
     expect(missing).toEqual([])
   })
 })
