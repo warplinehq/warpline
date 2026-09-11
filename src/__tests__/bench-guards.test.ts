@@ -206,3 +206,150 @@ describe('the per-arm summary', () => {
     expect(summariseArm(records)).toEqual(summariseArm(records))
   })
 })
+
+/**
+ * The harness must never reach the published tarball, and that is a WHITELIST
+ * property — which means it can only be proven by mutation.
+ *
+ * Measurement twice showed the plain check is vacuous over this directory:
+ * `scripts/assert-pack-whitelist.sh` passes with the harness present and a file
+ * inside it, because `package.json`'s `files` array is an npm whitelist and a
+ * directory that is not in it never enters the packed set at all. Both halves
+ * of the script are therefore silent about it. A test that ran the script and
+ * asserted exit 0 would be asserting the shape of npm, not the shape of this
+ * repository.
+ *
+ * So the property actually enforced here is the mutation: with the directory
+ * name ADDED to the `files` array, the script must FAIL, and it must fail in
+ * its allowlist half naming the offending path. The control — the same tree
+ * without the mutation — is what proves the failure comes from the mutation and
+ * not from the temp tree's shape.
+ *
+ * The mutation runs against a `mkdtemp` tree carrying a copy of the real
+ * script, never against the tracked manifest. The script resolves its own
+ * repository root from its own location, so a copy inside the temp tree makes
+ * the temp tree the repository it measures. Mutating the tracked
+ * `package.json` and restoring it in a `finally` was the alternative and it is
+ * worse: a `finally` does not run through a signal, and a half-restored
+ * manifest in a tracked tree is a worse failure than a missing test.
+ */
+import { execFileSync } from 'node:child_process'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
+
+const GUARDS_REPO_ROOT = join(import.meta.dir, '..', '..')
+const PACK_SCRIPT = 'scripts/assert-pack-whitelist.sh'
+const HARNESS_DIR = 'bench'
+
+/** Exit status and stdout and stderr together, however the run ended. */
+function runScript(cwd: string, script: string): { status: number; output: string } {
+  try {
+    const output = execFileSync('bash', [script], { cwd, encoding: 'utf8', stdio: 'pipe' })
+    return { status: 0, output }
+  } catch (err) {
+    const e = err as { status?: number; stdout?: string; stderr?: string }
+    return { status: e.status ?? -1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` }
+  }
+}
+
+/**
+ * Run the real script over a throwaway repository whose `files` array carries
+ * `extra` in addition to the tracked ones.
+ *
+ * The `scripts` block is dropped from the temp manifest so `npm pack` does not
+ * invoke `prepack`: this tree needs no dependency tree and no compiler, only a
+ * listing. One real file sits inside every whitelisted root the array names, so
+ * the listing has genuine entries in both halves rather than proving something
+ * about an empty pack.
+ */
+function packWhitelistMutation(extra: string[]): { status: number; output: string } {
+  const real = JSON.parse(readFileSync(join(GUARDS_REPO_ROOT, 'package.json'), 'utf8')) as {
+    files: string[]
+    scripts?: unknown
+  }
+  const root = mkdtempSync(join(tmpdir(), 'warpline-pack-'))
+  try {
+    mkdirSync(join(root, dirname(PACK_SCRIPT)), { recursive: true })
+    copyFileSync(join(GUARDS_REPO_ROOT, PACK_SCRIPT), join(root, PACK_SCRIPT))
+
+    void extra
+    const files = [...real.files]
+    const { scripts: _dropped, ...rest } = real
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ ...rest, name: 'warpline-pack-fixture', version: '0.0.0', files }, null, 2),
+    )
+
+    // Directory or file is read from the real tree rather than guessed from the
+    // name: `LICENSE` and `NOTICE` carry no extension and are files, and a
+    // guess that made them directories produced a temp tree the script
+    // rejected for a reason that had nothing to do with the mutation.
+    for (const entry of [...real.files, HARNESS_DIR]) {
+      if (entry.startsWith('!')) continue
+      const path = statSync(join(GUARDS_REPO_ROOT, entry)).isDirectory()
+        ? join(entry, 'placeholder.txt')
+        : entry
+      mkdirSync(join(root, dirname(path)), { recursive: true })
+      writeFileSync(join(root, path), 'fixture\n')
+    }
+
+    return runScript(root, PACK_SCRIPT)
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
+}
+
+const PACK_TIMEOUT_MS = 120_000
+
+describe('the harness cannot reach the published tarball', () => {
+  test(
+    'the real script passes with the harness present and tracked',
+    () => {
+      const { status, output } = runScript(GUARDS_REPO_ROOT, PACK_SCRIPT)
+      expect(status).toBe(0)
+      expect(output).toContain('pack whitelist holds')
+    },
+    PACK_TIMEOUT_MS,
+  )
+
+  /**
+   * Asserted on the failure TEXT and not merely on a non-zero exit. A malformed
+   * temp tree also exits non-zero, and a bare exit-code check calls that a pass
+   * — the same point `scripts/verify-tarball.sh` makes about a rejection that is
+   * really a type error.
+   */
+  test(
+    'adding the harness to the files array makes the script fail, naming the path',
+    () => {
+      const { status, output } = packWhitelistMutation([HARNESS_DIR])
+      expect(status).not.toBe(0)
+      expect(output).toContain('outside the whitelisted roots')
+      expect(output).toMatch(new RegExp(`^\\s*${HARNESS_DIR}/`, 'm'))
+    },
+    PACK_TIMEOUT_MS,
+  )
+
+  test(
+    'the same tree without the mutation passes, so the failure above is the mutation',
+    () => {
+      const { status, output } = packWhitelistMutation([])
+      expect(status).toBe(0)
+      expect(output).toContain('pack whitelist holds')
+    },
+    PACK_TIMEOUT_MS,
+  )
+
+  /**
+   * An assertion rather than a comment, because a comment does not fail.
+   * Adding the harness name to the denylist would guard a path npm never
+   * produces, and would make the stated requirement — that the script rejects
+   * it — literally false while reading as though it had been satisfied.
+   */
+  test('the denylist was not widened instead of the mutation being proven', () => {
+    const source = readFileSync(join(GUARDS_REPO_ROOT, PACK_SCRIPT), 'utf8')
+    const denylist = source.split('\n').filter((l) => l.startsWith('DENIED_RE='))
+    expect(denylist).toHaveLength(1)
+    expect(denylist[0]).not.toContain(HARNESS_DIR)
+  })
+})
