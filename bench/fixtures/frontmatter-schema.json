@@ -1,0 +1,8 @@
+{
+  "fields": {
+    "title": "string",
+    "summary": "string",
+    "published_at": "string",
+    "tags": "array"
+  }
+}

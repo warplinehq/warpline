@@ -1,0 +1,5 @@
+{
+  "review_gate": false,
+  "quiet_hours": null,
+  "max_sends_per_day": 20
+}

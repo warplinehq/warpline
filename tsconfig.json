@@ -12,6 +12,7 @@
     ]
   },
   "include": [
+    "bench/**/*.ts",
     "src/**/*.ts",
     "examples/**/*.ts",
     "test-utils/**/*.ts",

@@ -1,0 +1,7 @@
+{
+  "channels": ["benchmark-channel-one", "benchmark-channel-two"],
+  "calls_to_action": {
+    "benchmark-channel-one": "Read the pre-registration before the numbers.",
+    "benchmark-channel-two": "Run the harness against your own checkout."
+  }
+}

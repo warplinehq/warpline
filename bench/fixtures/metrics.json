@@ -1,0 +1,7 @@
+{
+  "series": [
+    { "name": "signup_rate", "latest": 3, "threshold": 5, "direction": "below" },
+    { "name": "error_count", "latest": 42, "threshold": 10, "direction": "above" },
+    { "name": "queue_depth", "latest": 7, "threshold": 25, "direction": "above" }
+  ]
+}

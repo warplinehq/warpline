@@ -1,0 +1,8 @@
+{
+  "rows": [
+    { "date": "2020-01-06", "name": "signup_rate", "value": 4 },
+    { "date": "2020-01-07", "name": "signup_rate", "value": 6 },
+    { "date": "2020-01-06", "name": "error_count", "value": 11 }
+  ],
+  "rollups": []
+}
