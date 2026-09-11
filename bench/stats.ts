@@ -83,7 +83,14 @@ export interface TokenClassFigures {
   cache_read: number
 }
 
-/** The four class names, in fixed order, as the one place they are written. */
+/**
+ * The four class names in fixed order, for the paths that iterate them.
+ *
+ * Not the single source of the key set: `TokenClassCounts` above is, and the
+ * per-class statistic below names all four explicitly because building that
+ * object from this array needs a cast, which would trade a visible repetition
+ * for an invisible hole in the typecheck.
+ */
 const TOKEN_CLASSES = ['input', 'output', 'cache_creation', 'cache_read'] as const
 
 /** What a summary needs from a run. A structural subset of the record shape. */
