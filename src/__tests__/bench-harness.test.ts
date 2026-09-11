@@ -28,8 +28,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { loadPluginManifests } from 'warpline/unstable-runtime'
-import { runWarplineArm } from '../../bench/arms.js'
-import { gradeHome } from '../../bench/grade.js'
+import {
+  ApiUnavailableError,
+  parseClaudeResult,
+  resolveDisposition,
+  runWarplineArm,
+} from '../../bench/arms.js'
+import { gradeHome, type GradeResult } from '../../bench/grade.js'
 import { BenchRunRecordSchema, parseRecord, scrubRecord } from '../../bench/record.js'
 import {
   assertHomeSeam,
@@ -442,5 +447,218 @@ describe('bench harness — the control home', () => {
     }
 
     expect(missing).toEqual([])
+  })
+})
+
+/**
+ * Parsing and dispositioning the command-line tool's result JSON.
+ *
+ * Every fixture below is a module constant and every test here runs with no
+ * subprocess and no provider key, so this whole block is evidence on a branch
+ * rather than something only the operator's machine can produce.
+ *
+ * The authentication fixture is the one that earns the block. It was measured
+ * on this machine, verbatim, by running the arms' own isolation against an
+ * unkeyed environment — and it returned a SUCCESS subtype, a zero spend and
+ * all four token classes present and equal to zero. A parser reading the
+ * subtype, or reading the token shape, calls that a legitimate all-zero run,
+ * fails it at the grader, and publishes a provider outage as the arm's own
+ * failure rate. That is the misattribution these tests exist to make
+ * impossible.
+ */
+
+/** A successful session. The four classes, the duration, and the canonical id. */
+const SUCCESS_RESULT = {
+  type: 'result',
+  subtype: 'success',
+  is_error: false,
+  terminal_reason: 'end_turn',
+  duration_ms: 8421,
+  duration_api_ms: 8104,
+  num_turns: 6,
+  session_id: '11111111-2222-3333-4444-555555555555',
+  total_cost_usd: 0.42,
+  usage: {
+    input_tokens: 14,
+    output_tokens: 233,
+    cache_creation_input_tokens: 18022,
+    cache_read_input_tokens: 4110,
+  },
+  modelUsage: { 'claude-opus-5-20260101': { inputTokens: 14, outputTokens: 233 } },
+  result: 'wrote graded/draft-writer.md and graded/announce-fanout.json',
+}
+
+/** Every class present, every class zero, and nothing wrong with the run. */
+const GENUINE_ZERO_RESULT = {
+  ...SUCCESS_RESULT,
+  usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+}
+
+/** One class absent from the usage object. Not zero — absent. */
+const MISSING_CLASS_RESULT = {
+  ...SUCCESS_RESULT,
+  usage: { input_tokens: 14, output_tokens: 233, cache_creation_input_tokens: 18022 },
+}
+
+/**
+ * The measured authentication failure, captured verbatim this session by
+ * running the arms' own isolation — a fresh configuration directory, the bare
+ * flag, the model flag, JSON output — against an environment with no key.
+ *
+ * Trimmed only of the fields nothing reads (the subagent and fast-mode
+ * blocks); every field any of these tests or the parser touches is as it came
+ * back. Note `subtype: "success"` and the four zeroes sitting beside
+ * `is_error: true`.
+ */
+const AUTH_FAILURE_RESULT = {
+  type: 'result',
+  subtype: 'success',
+  is_error: true,
+  terminal_reason: 'api_error',
+  api_error_status: null,
+  stop_reason: 'stop_sequence',
+  duration_ms: 51,
+  duration_api_ms: 0,
+  num_turns: 1,
+  session_id: 'eb9e877a-faaa-4d34-b97c-c5581275425c',
+  total_cost_usd: 0,
+  usage: {
+    input_tokens: 0,
+    output_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+  },
+  modelUsage: {},
+  permission_denials: [],
+  result: 'Not logged in · Please run /login',
+}
+
+/** The tool's own turn ceiling tripped. The subtype is the record's evidence. */
+const TURN_LIMIT_RESULT = {
+  ...SUCCESS_RESULT,
+  subtype: 'error_max_turns',
+  is_error: true,
+  terminal_reason: 'error',
+}
+
+/** The spend stop point tripped. Same disposition, different subtype. */
+const SPEND_LIMIT_RESULT = {
+  ...SUCCESS_RESULT,
+  subtype: 'error_max_budget_usd',
+  is_error: true,
+  terminal_reason: 'error',
+}
+
+/** A tool failure inside the session: the arm failed to do the work. */
+const IN_SESSION_ERROR_RESULT = {
+  ...SUCCESS_RESULT,
+  is_error: true,
+  terminal_reason: 'error_during_execution',
+}
+
+/** A grade outcome in the shape `gradeHome` returns, without seeding a home. */
+function gradeOutcome(passed: boolean): GradeResult {
+  return {
+    paths: {
+      'announce-fanout': passed,
+      'daily-digest': passed,
+      'draft-writer': passed,
+      'metrics-rollup': passed,
+    },
+    passed,
+  }
+}
+
+describe('bench harness — the result JSON, parsed and dispositioned', () => {
+  test('a successful result yields the four classes, the duration and the canonical model id', () => {
+    const parsed = parseClaudeResult(SUCCESS_RESULT, 'agent-from-scratch')
+
+    expect(parsed.tokens).toEqual({ input: 14, output: 233, cache_creation: 18022, cache_read: 4110 })
+    expect(parsed.duration_ms).toBe(8421)
+    expect(parsed.num_turns).toBe(6)
+    // Read back from the per-model usage key, never echoed from the flag, so
+    // the record names the id that actually served the request.
+    expect(parsed.model_id).toBe('claude-opus-5-20260101')
+  })
+
+  test('a class present and equal to zero is 0, never null and never omitted', () => {
+    const parsed = parseClaudeResult(GENUINE_ZERO_RESULT, 'agent-from-scratch')
+
+    expect(parsed.tokens).toEqual({ input: 0, output: 0, cache_creation: 0, cache_read: 0 })
+    for (const value of Object.values(parsed.tokens)) expect(value).not.toBeNull()
+    // And a genuine all-zero run is not a schema failure.
+    expect(resolveDisposition({ parsed, graded: gradeOutcome(true) }).disposition).toBe('passed')
+  })
+
+  test('a class absent from the usage object is null for that class only, and the run is a schema failure', () => {
+    const parsed = parseClaudeResult(MISSING_CLASS_RESULT, 'agent-from-scratch')
+
+    expect(parsed.tokens.cache_read).toBeNull()
+    expect(parsed.tokens).toEqual({ input: 14, output: 233, cache_creation: 18022, cache_read: null })
+    // Even with every artifact graded true: an unreportable class means the
+    // total is unknown, and an unknown total is not a measurement.
+    expect(resolveDisposition({ parsed, graded: gradeOutcome(true) }).disposition).toBe('failed-schema')
+  })
+
+  test('the measured authentication failure throws by name before any disposition is computed', () => {
+    // The trap, asserted on the fixture itself so a later edit that softened it
+    // would turn this red rather than quietly weakening the test below.
+    expect(AUTH_FAILURE_RESULT.subtype).toBe('success')
+    expect(AUTH_FAILURE_RESULT.total_cost_usd).toBe(0)
+    expect(Object.values(AUTH_FAILURE_RESULT.usage)).toEqual([0, 0, 0, 0])
+
+    expect(() => parseClaudeResult(AUTH_FAILURE_RESULT, 'agent-with-state')).toThrow(ApiUnavailableError)
+    // Named: the arm and the terminal reason, because an operator reading a
+    // halted run has to know which arm and that it was not the arm's fault.
+    expect(() => parseClaudeResult(AUTH_FAILURE_RESULT, 'agent-with-state')).toThrow(/agent-with-state/)
+    expect(() => parseClaudeResult(AUTH_FAILURE_RESULT, 'agent-with-state')).toThrow(/api_error/)
+  })
+
+  test('the turn-ceiling subtype is truncated and the subtype is carried verbatim', () => {
+    const parsed = parseClaudeResult(TURN_LIMIT_RESULT, 'agent-from-scratch')
+    const resolved = resolveDisposition({ parsed, graded: gradeOutcome(true) })
+
+    expect(resolved.disposition).toBe('truncated')
+    expect(resolved.truncation_subtype).toBe('error_max_turns')
+  })
+
+  test('the spend stop point is truncated and the subtype is carried verbatim', () => {
+    const parsed = parseClaudeResult(SPEND_LIMIT_RESULT, 'agent-from-scratch')
+    const resolved = resolveDisposition({ parsed, graded: gradeOutcome(true) })
+
+    expect(resolved.disposition).toBe('truncated')
+    expect(resolved.truncation_subtype).toBe('error_max_budget_usd')
+  })
+
+  test('a run that is simultaneously truncated and grader-failing resolves to truncated', () => {
+    // The precedence is only observable where two of its steps are true at
+    // once. A run truncated mid-work has of course not written the artifacts,
+    // so this is the ordinary case rather than a contrived one — and counting
+    // it as a grader failure would blame the arm for a stop point the method
+    // set.
+    const parsed = parseClaudeResult(SPEND_LIMIT_RESULT, 'agent-from-scratch')
+    const resolved = resolveDisposition({ parsed, graded: gradeOutcome(false) })
+
+    expect(resolved.disposition).toBe('truncated')
+    // One value per run: the grader failure is not also recorded somewhere.
+    expect(resolved.truncation_subtype).toBe('error_max_budget_usd')
+
+    // And with nothing wrong, the chain falls all the way through.
+    const clean = parseClaudeResult(SUCCESS_RESULT, 'agent-from-scratch')
+    expect(resolveDisposition({ parsed: clean, graded: gradeOutcome(true) })).toEqual({
+      disposition: 'passed',
+      truncation_subtype: null,
+    })
+    expect(resolveDisposition({ parsed: clean, graded: gradeOutcome(false) }).disposition).toBe('failed-grader')
+  })
+
+  test('an error flag without the api_error terminal reason is the arm failing, not the provider', () => {
+    // No throw: a tool failure inside the session IS the arm failing to do the
+    // work, and swallowing it as unattributable would remove a real failure
+    // from the published rate.
+    const parsed = parseClaudeResult(IN_SESSION_ERROR_RESULT, 'agent-with-state')
+
+    expect(parsed.is_error).toBe(true)
+    expect(resolveDisposition({ parsed, graded: gradeOutcome(false) }).disposition).toBe('failed-grader')
   })
 })
