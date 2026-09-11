@@ -146,7 +146,7 @@ run is published as its own row and a rotation would make "first" mean a
 different arm in different iterations.
 
 All three arms are pinned to the same provider model and the same command-line
-tool version. See § 9.
+tool version. See § 12.
 
 ### `warpline`
 
@@ -166,7 +166,7 @@ Two segments.
      **absolute path**
    - `--bare`
    - `--permission-mode bypassPermissions`
-   - `--max-budget-usd` at the value in § 8
+   - `--max-budget-usd` at the value in § 11
    - a fresh configuration directory for the arm, exported through
      `CLAUDE_CONFIG_DIR`
 
@@ -246,10 +246,10 @@ arm definition, so the split is given literally.
 ### The `warpline` home receives
 
 - The **six source fixture bodies**, each placed at the path read off the
-  plugin's own manifest default through the same loader the engine uses, or at
-  the literal path the handler derives from the home when the input that names
-  it is optional and undefaulted. Never at a hardcoded path chosen by the
-  harness.
+  plugin's own manifest default through the same loader the engine uses, or —
+  for the shared source metrics and the retained rollup state — at the literal
+  state paths the handlers themselves use. Never at a hardcoded path chosen by
+  the harness.
 - A **copy of each of the five pinned example plugin directories** under the
   home's own plugin root, plus the one package symlink that lets a copied plugin
   resolve the runtime by package self-reference.
