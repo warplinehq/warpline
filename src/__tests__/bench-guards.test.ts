@@ -273,8 +273,7 @@ function packWhitelistMutation(extra: string[]): { status: number; output: strin
     mkdirSync(join(root, dirname(PACK_SCRIPT)), { recursive: true })
     copyFileSync(join(GUARDS_REPO_ROOT, PACK_SCRIPT), join(root, PACK_SCRIPT))
 
-    void extra
-    const files = [...real.files]
+    const files = [...real.files, ...extra]
     const { scripts: _dropped, ...rest } = real
     writeFileSync(
       join(root, 'package.json'),
