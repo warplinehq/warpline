@@ -583,3 +583,85 @@ describe('the advance exit-code matrix, in process', () => {
     expect(stderr).toContain('refusing to create')
   })
 })
+
+/**
+ * The third `75` cause: somebody else is already advancing this home.
+ *
+ * The single catch already reported `75` for any throw out of the advance, so
+ * the number was never the work here — the MESSAGE was. A scheduler's mail
+ * saying only "held by PID 4213" leaves the operator to work out whether
+ * anything ran, whether the next tick will fix it, and whether the lock will
+ * ever clear on its own. All three go in the line.
+ *
+ * Three assertions per contention case, not one. A case asserting only the code
+ * is green against a command with no lock arm in it at all, because a refusal
+ * anywhere inside the advance already produces that code.
+ *
+ * The fixtures are written here rather than imported from the lock suite: they
+ * are four literal fields, and the live-holder one is only correct because both
+ * of its halves are — this process's own id, so the liveness check is true by
+ * construction, and a fresh timestamp, so the two-hour heal cannot fire.
+ */
+describe('a lock somebody else holds', () => {
+  /** Where `advance` looks: it passes no overrides, so the home default. */
+  const lock = (): string => join(home.stateDir, '.lock')
+
+  const writeLock = async (fields: Record<string, unknown>): Promise<void> => {
+    await writeFile(
+      lock(),
+      JSON.stringify({
+        acquired_at: new Date().toISOString(),
+        run_id: 'held-by-someone-else',
+        mode: 'advance',
+        ...fields,
+      }),
+    )
+  }
+
+  test('a live holder is 75, names the holding process, and runs nothing', async () => {
+    await writePlugin(home, 'alpha')
+    await writeLock({ pid: process.pid })
+
+    const { code, stdout, stderr } = await capture(() => main(['advance']))
+
+    expect(code).toBe(75)
+    expect(stdout).toBe('')
+    expect(stderr).toContain(String(process.pid))
+    expect(stderr).toContain('Nothing ran and nothing was written')
+    // The refusal left the home as it found it: the holder's lock is untouched
+    // and no run appeared under it.
+    expect(existsSync(lock())).toBe(true)
+    expect(await readdir(home.runsDir)).toEqual([])
+  })
+
+  test('an orchestrator-held lock is 75 and never prints the word for an absent value', async () => {
+    await writePlugin(home, 'alpha')
+    await writeLock({ pid: null })
+
+    const { code, stdout, stderr } = await capture(() => main(['advance']))
+
+    expect(code).toBe(75)
+    expect(stdout).toBe('')
+    expect(stderr).toContain('orchestrator')
+    // `held by PID null` would satisfy a grep for the holder and tell an
+    // operator nothing.
+    expect(stderr).not.toContain('null')
+    expect(stderr).toContain('Nothing ran and nothing was written')
+    expect(existsSync(lock())).toBe(true)
+    expect(await readdir(home.runsDir)).toEqual([])
+  })
+
+  test('a lock older than two hours heals and the advance runs', async () => {
+    await writePlugin(home, 'alpha')
+    await writeLock({
+      pid: process.pid,
+      acquired_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+    })
+
+    const { code, stdout } = await capture(() => main(['advance']))
+
+    expect(code).not.toBe(75)
+    expect(stdout).toContain('alpha: completed')
+    expect(existsSync(lock())).toBe(false)
+  })
+})
