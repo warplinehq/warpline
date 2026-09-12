@@ -1384,6 +1384,60 @@ describe('bench harness — the driver', () => {
   })
 
   /**
+   * The other half of the same promise, and the half a running process cannot
+   * see: drift that sits ENTIRELY in the records already on disk.
+   *
+   * A measured set spans hours and is resumable, and the tool auto-updates on
+   * its own schedule, so the realistic shape is a set interrupted under one
+   * version and resumed under the next. The comparison the driver used to make
+   * was record-versus-pin for records THIS process wrote, and the pin itself came
+   * off the filename-sorted first record. Nothing ever compared the records on
+   * disk against each other, so a set whose drift was already complete when the
+   * driver started was summarised and published as one configuration.
+   *
+   * Watched accepting it before the fix: the fixture below is a finished set
+   * carrying two tool versions, and runSet returned a summary over it.
+   */
+  test('records already on disk carrying two tool versions are refused before anything is summarised', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      await mkdir(resultsDir, { recursive: true })
+      // A finished set: every arm at its warm target, so the driver breaks out
+      // of the loop on the first pass and the refusal cannot be coming from a
+      // record this process wrote.
+      for (const [index, arm] of ARM_ORDER.entries()) {
+        for (let iteration = 1; iteration <= WARM_TARGET; iteration += 1) {
+          const record = sampleRecord({
+            arm,
+            arm_order_index: index,
+            iteration,
+            cold: false,
+            // The drift sits on the LAST iteration of the last arm, which is
+            // not the filename-sorted first record. A pin taken from that
+            // record reads one version and the set carries two.
+            claude_cli_version: index === ARM_ORDER.length - 1 && iteration === WARM_TARGET ? '2.1.270' : '2.1.269',
+          })
+          await writeFile(
+            join(resultsDir, `${arm}-${String(iteration).padStart(3, '0')}.json`),
+            `${JSON.stringify(record, null, 2)}\n`,
+          )
+        }
+      }
+
+      // Nothing may run: the refusal has to land before a session is paid for,
+      // and before the set is summarised.
+      const refuses: ArmRunner = async (arm) => {
+        throw new Error(`the driver ran ${arm} over a set it should have refused`)
+      }
+      await expect(runSet(opts(resultsDir, notesSource, refuses))).rejects.toThrow(
+        /records on disk carry 2 tool versions: \[2\.1\.269, 2\.1\.270\]/,
+      )
+      // Refused, and it kept every record. A driver that tidied up here would
+      // destroy the evidence of the thing it just refused.
+      expect(readdirSync(resultsDir).length).toBe(WARM_TARGET * ARM_ORDER.length)
+    })
+  })
+
+  /**
    * The cap is what gives the shortfall row a trigger. A loop that ran until
    * every arm passed would spend without bound on an arm that never passes, and
    * the shortfall row the statistics module already implements would be

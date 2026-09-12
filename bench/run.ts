@@ -381,7 +381,26 @@ export async function runSet(options: SetOptions): Promise<SetSummary> {
   let pinnedCli: string | null = null
   for (;;) {
     const state = await resumeState(options.resultsDir)
-    pinnedCli ??= state.runs[0]?.claude_cli_version ?? null
+
+    // Every record on disk against every other, and BEFORE the two breaks
+    // below. The comparison further down is record-versus-pin for records this
+    // process wrote, so drift sitting entirely in records that were already
+    // there was invisible: a set interrupted under one tool version and resumed
+    // under the next was summarised and published as one configuration. A
+    // finished set reaches the break on the first pass, so a refusal placed
+    // after it would never see the case it exists for.
+    const onDisk = new Set(state.runs.map((run) => run.claude_cli_version))
+    if (onDisk.size > 1) {
+      throw new Error(
+        `the records on disk carry ${onDisk.size} tool versions: [${[...onDisk].sort().join(', ')}] — the set is not one configuration and cannot be published as one`,
+      )
+    }
+    // One version or none, so there is nothing left for an ordering to pick
+    // wrongly. This used to read `state.runs[0]`, which is the FILENAME-sorted
+    // first record and not the chronologically first one, so the pin was
+    // whichever arm sorts first rather than whichever ran first.
+    pinnedCli ??= [...onDisk][0] ?? null
+
     if (ARM_ORDER.every((arm) => state.passing[arm] >= WARM_TARGET)) break
     if (state.nextIteration > MAX_ITERATIONS) break
 
