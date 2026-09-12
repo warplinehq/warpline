@@ -651,6 +651,55 @@ export async function handler(manifest, args, signal, capabilities) {
     }
   })
 
+  // -------------------------------------------------------------------
+  // What the quiet-hours arm puts in the per-plugin state map
+  // -------------------------------------------------------------------
+  //
+  // The exit code reads an empty `plugin_states` as the zero-manifest
+  // signature and nothing else — that is written down in `exit-codes.ts` and
+  // it is the whole reason a gated advance is not reported as a failure. The
+  // quiet-hours arm used to hand back a fresh empty map whatever the root
+  // held, so a fleet with a configured window reported "no manifests loaded"
+  // on every tick all night. Under a fifteen-minute timer that is dozens of
+  // false failures between one evening and one morning.
+  //
+  // Nothing in the tree pinned that map before these cases: both existing
+  // quiet-hours tests above use an EMPTY plugin root, so they are satisfied by
+  // an empty map for the right reason and by an empty map for the wrong one
+  // alike. The first case below was watched failing against the old arm.
+  //
+  // Rewrites the home's own preferences rather than building a second home, so
+  // the fixture helpers above stay usable. The window is clock-built for the
+  // reason the comment at `windowAroundNow` gives.
+  async function configureQuietHours() {
+    await writeFile(
+      join(stateDir, 'preferences.json'),
+      JSON.stringify({ review_gate: false, quiet_hours: windowAroundNow() }),
+    )
+  }
+
+  test('two loadable manifests each get a skipped state — quiet-hours arm active', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await createTestPlugin('fx-one')
+    await createTestPlugin('fx-two')
+    await configureQuietHours()
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: join(stateDir, 'engine-state.json'),
+      runsDir,
+      eventsPath,
+    })
+
+    // The early return actually happened. Without this the case is the normal
+    // path under a different name and proves nothing about the arm.
+    expect(result.run_log_path).toBe('')
+
+    expect(result.plugin_states.size).toBe(2)
+    expect(result.plugin_states.get('fx-one')).toBe('skipped')
+    expect(result.plugin_states.get('fx-two')).toBe('skipped')
+  })
+
   test('a plugin root whose manifests all fail to import reports failed, on the result and on the persisted run log', async () => {
     const { runAdvance } = await import('../engine.js')
     await createBrokenPlugin('broken-a')
