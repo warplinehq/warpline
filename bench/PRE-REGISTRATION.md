@@ -32,6 +32,14 @@ of check that can catch it.
 Editable until a result exists is deliberate. A pre-registration that has to be
 right on its first draft gets written badly and defended afterwards.
 
+**It was used.** This document was amended once, while `bench/results/` was still
+empty, and the amendment was substantial: the isolation flags in § 4 and § 8, the
+version pin in § 12, and everything § 9 and § 11 now say about what the counts and
+the cost field mean. Each change is marked where it sits, with what was measured
+and what the earlier draft said. That is the whole value of the ordering being
+enforced by topology rather than asserted: a reader can see the amendment landed
+before any result did.
+
 ---
 
 ## 2. Workload selection rule
@@ -164,16 +172,32 @@ Two segments.
    - `--model` at the pinned id
    - `--plugin-dir` at the checkout's own plugin directory, given as an
      **absolute path**
-   - `--bare`
+   - `--setting-sources` at the **empty string**
+   - `--strict-mcp-config`
+   - `--no-session-persistence`
    - `--permission-mode bypassPermissions`
    - `--max-budget-usd` at the value in § 11
-   - a fresh configuration directory for the arm, exported through
-     `CLAUDE_CONFIG_DIR`
 
-   `--plugin-dir` is the **warpline arm only**. The runtime's own skills are the
-   reference implementation of the thing being measured, and handing them to a
-   control arm would be handing a control the answer. The control arms reach the
-   graded paths by their own means.
+   **No minimal flag, and no configuration-directory variable.** Both were tried
+   and both were measured to fail, on different halves of the same requirement,
+   and the flag set above is the one that holds all three properties this method
+   needs. § 8 gives the measurements.
+
+   `--setting-sources` at the empty string is what suppresses the operator's own
+   instruction file, their own skills, their settings and their hooks.
+   `--strict-mcp-config` suppresses their servers. What remains in every session
+   is the base system prompt and the built-in tool definitions, which every arm
+   pays identically. § 9 puts a figure on it.
+
+   `--plugin-dir` is the **warpline arm only**, and under this flag set it is
+   live: a session given it can see the runtime's two skills, and a session
+   without it cannot. That is checked rather than assumed — the two skill
+   listings were taken in the same batch and were otherwise identical. So this
+   arm runs with the runtime's own skills loaded, which is what a real user of
+   the runtime has. The control arms have none of them and reach the graded
+   paths by their own means. The runtime's own skills are the reference
+   implementation of the thing being measured, and handing them to a control arm
+   would be handing a control the answer.
 
 **The consumer's discovery path**, stated because it is part of the arm
 definition and it is not what a reader would assume: the consumer is handed the
@@ -227,11 +251,25 @@ The from-scratch arm is the producer because it is the arm that starts with no
 notes, which is the only state from which honest first-pass notes can be
 written.
 
-**The warm-up pass carries every isolation flag the measured runs carry.** A
-notes file produced under the operator's ambient configuration is not the fixture
-a stranger reproducing from a clean checkout would get — the ambient
-configuration is instructions, hooks and skills that nobody else has, and it
-would be baked into the committed fixture with no way to see it there.
+**The warm-up pass carries every isolation flag the measured runs carry** — the
+flag set in § 4, the same caps, the same seeded home, the same prompt. A notes
+file produced under the operator's ambient configuration is not the fixture a
+stranger reproducing from a clean checkout would get: the ambient configuration is
+instructions, hooks and skills that nobody else has, and it would be baked into
+the committed fixture with no way to see it there.
+
+**The pass has been taken, once, and the fixture is committed.** It ran before any
+file existed under `bench/results/`, and the harness refuses to take it again once
+one does — a fixture produced after the set began is state the measured runs never
+had. If it ever has to be re-taken the previous notes are discarded rather than
+merged, because merged notes are notes no single session wrote.
+
+The harness **refuses by name** when the session produced no notes file, rather
+than reporting a path or writing an empty one. That refusal is the one that
+matters most here: a fixture committed empty would hand the with-state arm nothing,
+both control arms would then receive an identical prompt over an identical home,
+and the published pair would measure one thing twice while looking exactly like a
+valid result.
 
 The notes path inside a control home is `notes.md`.
 
@@ -360,6 +398,60 @@ The accounting consequence, stated rather than buried: the warpline arm pays one
 process spawn for its consumer session and each control arm pays one for its own,
 so the spawn cost appears once per arm and cancels in the ratio.
 
+### There is no per-run configuration-directory isolation, and that is measured
+
+An earlier draft of this method gave each arm a fresh configuration directory.
+That is not available on this tool, and the reason is worth stating plainly
+because it is the kind of constraint a reader would otherwise assume was an
+oversight.
+
+**Setting the configuration-directory variable to any value at all suppresses the
+subscription credential** — including setting it to the real default path. The
+session then returns an unattributable provider error with all four token classes
+present and equal to zero, which is a shape that satisfies neither the
+genuine-zero branch nor the missing-class branch and would have been published as
+a grader-failure rate blaming the arm. The mechanism is documented: the keychain
+entry is keyed to that variable, so a session with a different value reads a
+different entry. So the variable is **removed from every spawned environment**,
+by the code rather than by whatever shell the harness was launched from.
+
+The **minimal flag** fails for the neighbouring reason: it authenticates strictly
+through an API key or a key helper and reads no subscription credential at all.
+
+A third flag — the tool's own clean-room switch — authenticates, and it was the
+recommendation this method carried for a while. It is **not used**, because it
+also disables the plugin's skills, and it disables them however they are supplied:
+both the plugin flag and the added-directory flag are inert under it. A measured
+set taken under it would have been a warpline arm running without the runtime's
+own skills, reported under an arm definition saying it had them.
+
+So here is what is and is not isolated, stated as two lists rather than one claim:
+
+**Isolated.** The operator's instruction files, their own skills, their settings
+and their hooks, all by `--setting-sources ""`. Their servers, by
+`--strict-mcp-config`. The session store, by `--no-session-persistence`. The
+filesystem each arm can reach, by the per-run home. Every one of these was
+checked by asking a session for a string it could not invent — a slug appearing
+only in the operator's global instruction file — with an unsuppressed positive
+control in the same batch that returned it. The control is what makes the absence
+evidence rather than a confident denial.
+
+**Not isolated.** The configuration directory, for the reason above. The
+credential itself, which is the operator's ambient subscription login.
+
+### Reproducing this without a keychain login
+
+`claude setup-token` is present on the pinned version and mints a one-year
+token, exported through `CLAUDE_CODE_OAUTH_TOKEN`. The documentation describes it
+as the credential for pipelines and scripts where an interactive login is
+unavailable, and it is what the official action takes for a subscription plan.
+That is the reproduction path for a reader with no login on the machine.
+
+**It is untested here, and specifically untested against a fresh configuration
+directory.** An environment token plausibly bypasses the keychain namespacing
+entirely, which would restore per-run configuration isolation for a reader who
+has one — but nothing in this method measured that, and it is not claimed.
+
 ### Arms run sequentially
 
 One arm at a time within an iteration. No two arms hold a home concurrently, and
@@ -385,6 +477,26 @@ Four classes, recorded **separately**, per arm per run:
   dispositioned a schema failure. It is never coerced to zero.
 - No recorded field is a sum across classes. Aggregation happens over the raw
   integers, where a reader can see which classes went into it.
+
+#### Two facts about these counts a reader must not be told wrongly
+
+**The four classes are aggregates across every model a session used.** A session
+that uses a tool spends a small auxiliary allocation on a cheaper model alongside
+the pinned model's work, and the usage object sums them. In one probe that
+auxiliary share was 912 input tokens and 16 output. Every arm pays it, so it is a
+constant rather than a confound — but the published totals are not purely the
+pinned model's, and this document will not say they are. The per-model breakdown
+is what the model id is read back from, so the two models are visible in the same
+object the counts come from.
+
+**Every arm pays a constant floor**, and the consumer additionally pays the
+plugin's two skills. Against roughly 31,550 `cache_creation` tokens for a session
+with nothing suppressed, the flag set in § 4 measured between about 6,000 and
+8,700 in adjacent batches. That is an order of magnitude, not a pin, and it is
+deliberately stated as one: **`cache_creation` is not stable across runs**,
+because the provider's prompt cache warms between them. An identical prompt
+repeated came back 0. So only readings taken in the same batch compare, and a
+reader who reproduces a single number here should not expect to hit it.
 
 ### Wall-clock
 
@@ -474,14 +586,35 @@ leaves four spare iterations per arm.
 `--max-budget-usd 5` per session. When it trips, the command-line tool returns the
 subtype `error_max_budget_usd`, and the run is dispositioned truncated.
 
-The pinned tool version (§ 12) exposes **no turn-cap flag**, so the turn ceiling
-is the tool's own internal default rather than a value this document sets. A run
-truncated by it returns the subtype `error_max_turns` and is dispositioned
-truncated in the same way. Both subtypes are recorded verbatim.
+The pinned tool version (§ 12) exposes **no turn-cap flag**. That was confirmed
+twice, independently, against the tool's own help on this machine — and it is
+worth saying explicitly, because **some current documentation still lists one**.
+It is not there. So the turn ceiling is the tool's own internal default rather
+than a value this document sets, and the spend cap is the only per-session stop
+point this method chooses. A run truncated by the internal default returns the
+subtype `error_max_turns` and is dispositioned truncated in the same way. Both
+subtypes are recorded verbatim.
 
 **A cap is a stop point, not a published figure.** That is why this document sits
 outside the scan that forbids a currency figure in the published surfaces, and
 why the published write-up carries no such flag.
+
+### What the tool's own cost field is, if it is ever quoted
+
+Nothing in this harness reads it: the scrubber removes every such key at the
+record boundary, before the schema parse, so no record and no published figure
+can carry one. Stated here anyway, because a reader running the harness will see
+the field and may quote it.
+
+It is a **client-side imputation at list price, not money charged.** The tool
+computes it locally from the token counts, and the per-model usage block says so
+in as many words — it reports a list basis. These runs are on a subscription, so
+nobody was billed those amounts for them.
+
+That makes it the right figure to publish **if** anyone publishes one, because a
+reader can recompute it from the token counts in the committed records rather
+than take it on trust. It is not a description of spend and must not be presented
+as one.
 
 ---
 
@@ -494,7 +627,30 @@ why the published write-up carries no such flag.
   rather than echoed from the flag, so each record names the id that actually
   served the request. It must be one string across the whole published set; a
   change part-way through voids the set.
-- **Command-line tool version**, pinned exactly: `2.1.268`.
+
+  **The canonical id, as returned, is `claude-opus-5` — undated.** The tool
+  reports a dated form for some models and not for this one, and whichever form
+  it returns is what the record carries verbatim.
+
+  The read-back is by IDENTITY and not by position, which is a correction rather
+  than a preference. A session that uses a tool reports two models and inserts the
+  auxiliary one FIRST, so taking the first key stamped every record in a trial run
+  with a model that did none of the work. A run the pinned model never served
+  yields no id at all, and a record with no id is not publishable — so a silent
+  substitution stops the set rather than entering it.
+- **Command-line tool version**, pinned exactly: `2.1.269 (Claude Code)`.
+
+  **This drifted while the method was being written.** An earlier draft of this
+  section pinned `2.1.268`; the tool auto-updated between the isolation research
+  and the harness being built, and the pin here is the version that runs the
+  measured set rather than the one the research note was written against. Stated
+  rather than quietly corrected, because a version pin that changes without
+  comment is exactly the kind of edit this document's freeze exists to catch.
+
+  An auto-update part-way through a set voids it the same way a model change
+  does, so the driver **compares the version stamped on every record against the
+  first one in the set and stops on a mismatch** rather than leaving it to be
+  noticed afterwards.
 - **Git SHA** and **package version**, stamped into every raw record. Without the
   SHA a raw record is unfalsifiable.
 
