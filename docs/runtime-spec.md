@@ -1739,11 +1739,15 @@ window and the dead-process check are what bound it. An operator who knows the
 holder is gone can delete `.lock` by hand; an operator who is not sure should
 wait for the window.
 
-**An interrupted advance can leave a plugin running.** A `130` reports that the
-command was interrupted, and the plugin that was in flight may run to completion
-in a process the operator believes is dead. The lock leaked by that interruption
-is reclaimed by the two-hour heal, which is why the two facts belong beside each
-other.
+**An interrupted advance can leave a plugin running.** § 11 reserves `130` for
+an interruption and says in as many words that signal handling is not wired into
+this command yet, so whatever code an interrupted advance reports today, the
+plugin that was in flight may run to completion in a process the operator
+believes is dead. The lock that interruption leaves behind is reclaimed by the
+heal described above — on the next advance if the holder's process is gone, and
+at the two-hour window if the lock was orchestrator-held and names no process.
+The two facts belong beside each other because the second is what bounds the
+first.
 
 ### What this does not close: issue #25
 
