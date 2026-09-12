@@ -509,21 +509,36 @@ function armOf(session: SessionId): ArmId {
  * and that object is the only thing that identifies the failure as the
  * provider's rather than the arm's. Output that is not JSON at all is a
  * different thing and throws, naming the arm.
+ *
+ * Standard error is CAPTURED, which it was not. Output that is not JSON at all
+ * is the one failure here where an operator has already spent a session's budget
+ * and has nothing to read: the reason it failed is an unrecognised flag, a
+ * credential prompt, a version drift or a crash, and every one of those is
+ * written exclusively to the stream that used to be dropped. The excerpt goes in
+ * the throw and nowhere else. It never reaches a record, and `parseRecord`
+ * strips a `stderr` key anyway.
  */
 async function runSession(session: SessionId, home: string, promptBody: string): Promise<SessionOutcome> {
   const started = performance.now()
+  let diagnostics = ''
   const stdout = await new Promise<string>((settle, fail) => {
     const child = spawn('claude', buildClaudeArgv(session, promptBody), {
       cwd: home,
       env: buildClaudeEnv(home),
-      stdio: ['ignore', 'pipe', 'ignore'],
+      stdio: ['ignore', 'pipe', 'pipe'],
     })
     let collected = ''
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk: string) => {
       collected += chunk
     })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => {
+      diagnostics += chunk
+    })
     child.on('error', fail)
+    // `close` and not `exit`: it fires once both streams are drained, so the
+    // diagnostics are complete by the time the throw below reads them.
     child.on('close', () => settle(collected))
   })
   const wall_clock_ms = performance.now() - started
@@ -532,7 +547,13 @@ async function runSession(session: SessionId, home: string, promptBody: string):
   try {
     raw = JSON.parse(stdout)
   } catch {
-    throw new Error(`${armOf(session)}: the session printed no result object, so this run measures nothing`)
+    // The tail and not the head: a tool that logged its way to a crash puts the
+    // reason last. An empty capture is stated rather than rendered as silence.
+    throw new Error(
+      `${armOf(session)}: the session printed no result object, so this run measures nothing — it wrote: ${
+        diagnostics.slice(-2000).trim() || '(nothing on either stream)'
+      }`,
+    )
   }
   return { parsed: parseClaudeResult(raw, armOf(session)), wall_clock_ms }
 }
