@@ -16,9 +16,10 @@
  * it proves the other half twice.
  */
 import { describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { grantApproval } from '../../runtime/approval-gate.js'
 import { createTestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
@@ -343,5 +344,242 @@ describe('run(): the preferences report', () => {
     const { stderr } = await capture(() => run([], { stdin: {} }))
 
     expect(prefLines(stderr)).toEqual([])
+  })
+})
+
+/**
+ * A plugin whose manifest cannot be imported at all.
+ *
+ * The engine adds it to `plugin_states` as `failed`, which is the shape that
+ * distinguishes "a plugin failed" (a non-empty map holding a failure) from "the
+ * root held nothing importable" (an empty map). Both are `1`, and a mapper that
+ * conflated them would report the wrong cause to whoever is reading the code.
+ */
+async function writeUnloadablePlugin(dir: string, name: string): Promise<void> {
+  const pluginDir = join(dir, name)
+  await mkdir(pluginDir, { recursive: true })
+  await writeFile(join(pluginDir, 'manifest.ts'), `throw new Error('${name} manifest is broken')`)
+}
+
+/** A state document with the given plugin run records and nothing else. */
+async function writeState(pluginRuns: Record<string, unknown>): Promise<void> {
+  await writeFile(
+    join(home.stateDir, 'engine-state.json'),
+    JSON.stringify({
+      schema_version: 1,
+      last_run_id: null,
+      last_run_at: null,
+      last_interaction_at: null,
+      plugin_runs: pluginRuns,
+      deferrals: [],
+      task_aging: [],
+      completed_tasks: [],
+      pending_gates: [],
+      extensions: {},
+    }),
+  )
+}
+
+/**
+ * A two-plugin fleet whose first level parks at the supervision gate.
+ *
+ * Supervised with a declared side effect and a live grant: the approval gate
+ * passes and the supervision gate holds it, which is the shape the exit code
+ * has to report as `0`. The dependent plugin is left in a later level, still
+ * `pending` when the advance returns — the state a mapper written as "every
+ * plugin reached a terminal state" would wrongly call a failure.
+ */
+async function writeGatedFleet(): Promise<void> {
+  await writePlugin(home, 'producer', {
+    autonomy_level: 'supervised',
+    side_effects: ['sends_email'],
+  })
+  await writePlugin(home, 'consumer', { dependencies: ['producer'] })
+  await grantApproval('producer', 4 * 60 * 60 * 1000, join(home.root, '.session-approval'))
+}
+
+/**
+ * The whole in-process exit-code matrix, one case per arm.
+ *
+ * Everything here goes through `main(argv)` or `run(argv, io)`. The one proof in
+ * this phase that costs a process launch is the signal case, and it belongs to
+ * its own plan and its own file; a launch that crept in here would spend that
+ * budget on cases that do not need it. The grep in this plan's verification is
+ * what holds that, not this comment.
+ */
+describe('the advance exit-code matrix, in process', () => {
+  test('a complete advance where nothing failed is 0', async () => {
+    await writePlugin(home, 'alpha')
+    await writePlugin(home, 'bravo')
+
+    const { code, stdout, stderr } = await capture(() => main(['advance']))
+
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    expect(stdout).toContain('alpha: completed')
+    expect(stdout).toContain('bravo: completed')
+  })
+
+  /**
+   * Nothing due is not nothing installed. The plugin is inside its TTL, so the
+   * filter chain skips it — and a skip is the runtime working, not a fault.
+   */
+  test('a fleet where nothing is due is 0', async () => {
+    await writePlugin(home, 'alpha', { ttl_hours: 24 })
+    await writeState({
+      alpha: { last_run_at: new Date(Date.now() - 60_000).toISOString(), status: 'success' },
+    })
+
+    const { code, stdout } = await capture(() => main(['advance']))
+
+    expect(code).toBe(0)
+    // The rendering, not only the number: every assertion available here that
+    // is about the code alone is also satisfied by a run in which `alpha`
+    // executed, so a broken due-filter would pass. This is the one word that
+    // says the filter chain held.
+    expect(stdout).toContain('alpha: skipped')
+    expect(stdout).toContain('Failed: 0')
+  })
+
+  /**
+   * The gated arm, both ways round on one fixture.
+   *
+   * The state document is removed between the two runs on purpose: the first
+   * advance parks the gate IN that document, so a second advance over it would
+   * be answering a question already asked. Both halves assert the plugin is
+   * actually gated, so a run that silently stopped gating cannot pass this by
+   * returning the right number for the wrong reason.
+   */
+  test('a gated advance is 0, and the same fixture with --strict is 1', async () => {
+    await writeGatedFleet()
+
+    const lenient = await capture(() => main(['advance']))
+
+    expect(lenient.stdout).toContain('producer: gated')
+    expect(lenient.stdout).toContain('consumer: pending')
+    expect(lenient.code).toBe(0)
+
+    await rm(join(home.stateDir, 'engine-state.json'), { force: true })
+
+    const strict = await capture(() => main(['advance', '--strict']))
+
+    expect(strict.stdout).toContain('producer: gated')
+    expect(strict.code).toBe(1)
+  })
+
+  /**
+   * A failed load is `1`, and `--strict` moves nothing.
+   *
+   * Two test bodies rather than two advances in one body, and the reason is
+   * worth writing down: a broken manifest is only broken ONCE per process.
+   * `loadPluginManifests` reaches the manifest through `await import`, so the
+   * second import of the same file URL is served from the runtime's module
+   * cache, resolves without throwing, and carries no `manifest` export — the
+   * plugin then lands in neither the loaded map nor the failure list and the
+   * advance reports `0`. Each test gets its own temp home from `beforeEach`, so
+   * each run imports a URL nothing has seen. The fixture is one helper so the
+   * two halves cannot drift into testing different things.
+   */
+  const writeBrokenFleet = async (): Promise<void> => {
+    await writePlugin(home, 'healthy')
+    await writeUnloadablePlugin(home.pluginsDir, 'broken')
+  }
+
+  test('a plugin that failed to load is 1', async () => {
+    await writeBrokenFleet()
+
+    const { code, stdout } = await capture(() => main(['advance']))
+
+    expect(stdout).toContain('broken: failed')
+    expect(code).toBe(1)
+  })
+
+  test('a plugin that failed to load is still 1 under --strict', async () => {
+    await writeBrokenFleet()
+
+    const { code, stdout } = await capture(() => main(['advance', '--strict']))
+
+    expect(stdout).toContain('broken: failed')
+    expect(code).toBe(1)
+  })
+
+  /**
+   * An empty plugin root is a DIRECTORY THAT EXISTS and holds nothing
+   * importable, which is a different thing from a root that cannot be read —
+   * that one is `75` and has its own case above. An operator whose deployment
+   * dropped the plugins would otherwise get a clean `0` from a run that did
+   * nothing at all.
+   */
+  test('a plugin root that loaded no manifests is 1, with and without --strict', async () => {
+    const lenient = await capture(() => main(['advance']))
+
+    expect(lenient.stdout).toContain('no plugin manifests loaded')
+    expect(lenient.code).toBe(1)
+
+    const strict = await capture(() => main(['advance', '--strict']))
+
+    expect(strict.code).toBe(1)
+  })
+
+  /**
+   * The asymmetry, both halves in one body because the asymmetry IS the claim.
+   *
+   * An unreadable state document is `75` for this command — nothing ran and
+   * nothing was written, so "could not look" must not report as "looked and it
+   * was fine". Every other verb keeps the `1` the dispatcher published for it,
+   * and it keeps it because this command intercepts the error before the
+   * dispatcher's catch can see it, rather than by editing that catch.
+   *
+   * The paired half is `deny` and not `plan`: `plan` reads through the tolerant
+   * accessor precisely so a preview cannot fail, so it would answer `0` here and
+   * prove nothing.
+   *
+   * The bytes are compared before and after both calls. "Nothing was written" is
+   * half of what `75` promises, and a command that healed the document on its
+   * way past would satisfy the code assertion while breaking the promise.
+   */
+  test('a corrupt state document is 75 for advance and still 1 for deny', async () => {
+    await writePlugin(home, 'alpha')
+    const statePath = join(home.stateDir, 'engine-state.json')
+    await writeFile(statePath, '{"schema_version": 1, "plugin_runs":')
+    const before = await readFile(statePath, 'utf-8')
+
+    const advanced = await capture(() => main(['advance']))
+
+    expect(advanced.code).toBe(75)
+    expect(advanced.stdout).toBe('')
+
+    const denied = await capture(() => main(['deny', '--list']))
+
+    expect(denied.code).toBe(1)
+    expect(denied.stderr).toContain('Cannot read engine state')
+
+    expect(await readFile(statePath, 'utf-8')).toBe(before)
+  })
+
+  /**
+   * The flag refusal, and the half that matters more than the number: nothing
+   * ran. An unattended runtime must not acquire a consent path, and the cheapest
+   * true enforcement of that is that the flag does not exist — the message comes
+   * from the parser, not from a check of ours.
+   */
+  test('an unregistered flag runs nothing at all — no run log under the home', async () => {
+    await writePlugin(home, 'alpha')
+
+    const { code, stdout } = await capture(() => main(['advance', '--force']))
+
+    expect(code).toBe(1)
+    expect(stdout).toBe('')
+    expect(await readdir(home.runsDir)).toEqual([])
+  })
+
+  /** The home refusal, re-asserted here so the table has one home. */
+  test('a missing home with no terminal on stdin is 75', async () => {
+    _setHome(join(home.root, 'never-created'))
+
+    const { code, stderr } = await capture(() => run([], { stdin: {} }))
+
+    expect(code).toBe(75)
+    expect(stderr).toContain('refusing to create')
   })
 })
