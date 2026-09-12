@@ -246,7 +246,7 @@ deterministic step reruns to the same answer, and that's a property of the code,
 not of anyone's pricing page.
 
 What I won't do is attach a figure to it here. There's a benchmark now, and it
-lives in its own document. Its method was committed before the first run, and a
+lives in its own document. Its method was committed before the first result, and a
 test checks that ordering by git topology. So read the
 [method](https://github.com/warplinehq/warpline/blob/main/bench/PRE-REGISTRATION.md)
 before the
