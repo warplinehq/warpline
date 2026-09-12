@@ -45,7 +45,7 @@ bun run typecheck           # build, then tsc --noEmit (strict; no
 - `src/schemas/` — manifest, skill-result, board, run-log, lock, engine-state
 - `src/runtime/` — invoke-plugin, run-artifacts, approval-gate, engine, tier, staleness
 - `src/board/` — engine-events, state-manager, board-cli
-- `src/lib/` — fs-atomic, lock-healing, jsonl-logger, api-budget, preferences, paths
+- `src/lib/` — fs-atomic, jsonl-logger, api-budget, preferences, paths
 - `docs/` — doctrine, runtime-spec, board-spec, needs-llm-contract, plugin-authoring
 - `examples/plugins/` — fresh-written examples; never port private plugins here
 
