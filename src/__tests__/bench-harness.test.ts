@@ -77,7 +77,7 @@ import {
   type ArmRunner,
   type ArmRunOutcome,
 } from '../../bench/run.js'
-import { SHORTFALL_N } from '../../bench/stats.js'
+import { iqr, median, SHORTFALL_N, summariseArm } from '../../bench/stats.js'
 import {
   assertHomeSeam,
   buildPluginRoot,
@@ -1596,5 +1596,283 @@ describe('bench harness — the driver', () => {
       encoding: 'utf8',
     })
     expect(status.trim()).toBe('')
+  })
+})
+
+/**
+ * The published README, recomputed from the committed raw records.
+ *
+ * Every figure in `bench/README.md` was hand-transcribed, and until this block
+ * existed nothing re-derived one. The README's own invitation — "every figure
+ * here is recomputable from what's in the repository" — was unaccepted by any
+ * test, which means a record could be re-scrubbed, a quantile rule could drift,
+ * or a cell could be mistyped, and the suite would stay green while the
+ * published surface stopped matching the data under it.
+ *
+ * The expected figures are PARSED OUT OF the README rather than restated here.
+ * A test carrying its own copy of the numbers goes green on a matched pair of
+ * edits, which is the failure the phase already named in 16-08: an agreement
+ * between two documents has to be iterated off one of them, never duplicated
+ * into a third. The only literals below are the table headings and the cell
+ * grammar.
+ *
+ * Every loop here iterates a parsed set, and a parser that matched nothing
+ * would yield a green loop over an empty list — the exact shape of guard this
+ * project has now paid for six times. So every table's row count is asserted
+ * before any cell in it is, and the record roster is asserted to group into
+ * exactly the three arms before a single median is taken.
+ */
+describe('bench README — the published figures against the committed records', () => {
+  type TrackedRecord = ReturnType<typeof BenchRunRecordSchema.parse>
+
+  /** Every tracked record under `bench/results/`, parsed through the schema. */
+  function trackedRecords(): TrackedRecord[] {
+    const listed = execFileSync('git', ['ls-files', '--', 'bench/results/'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    })
+    return listed
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((file) => BenchRunRecordSchema.parse(JSON.parse(readFileSync(join(REPO_ROOT, file), 'utf8'))))
+  }
+
+  const README = readFileSync(join(REPO_ROOT, 'bench', 'README.md'), 'utf8')
+
+  /**
+   * The data rows of the markdown table under one `###` heading, as trimmed
+   * cells with the backtick quoting stripped. The header row and the separator
+   * are dropped; nothing else is.
+   */
+  function tableRows(heading: string): string[][] {
+    const start = README.indexOf(`### ${heading}\n`)
+    if (start < 0) throw new Error(`README carries no section '### ${heading}'`)
+    const rest = README.slice(start + 4 + heading.length)
+    const end = rest.indexOf('\n### ')
+    const section = end < 0 ? rest : rest.slice(0, end)
+    return section
+      .split('\n')
+      .filter((line) => line.startsWith('|'))
+      .slice(2)
+      .map((line) =>
+        line
+          .split('|')
+          .slice(1, -1)
+          .map((cell) => cell.trim().replace(/`/g, '')),
+      )
+  }
+
+  /** `4556.5 (370.5)` → the published median and interquartile range. */
+  function cell(text: string): { median: number; iqr: number } {
+    const match = /^(-?[\d.]+) \(([\d.]+)\)$/.exec(text)
+    if (!match) throw new Error(`not a 'median (iqr)' cell: '${text}'`)
+    return { median: Number(match[1]), iqr: Number(match[2]) }
+  }
+
+  const ARMS = ['warpline', 'agent-with-state', 'agent-from-scratch'] as const
+
+  function byArm(): Map<string, TrackedRecord[]> {
+    const records = trackedRecords()
+    const grouped = new Map<string, TrackedRecord[]>()
+    for (const record of records) {
+      grouped.set(record.arm, [...(grouped.get(record.arm) ?? []), record])
+    }
+    // The sentinel. Everything below iterates this map, so a scan that found
+    // nothing — a moved directory, a rename, an untracked set — has to be red
+    // here rather than pass vacuously three tests further down.
+    expect([...grouped.keys()].sort()).toEqual([...ARMS].sort())
+    for (const arm of ARMS) expect(grouped.get(arm)!.length).toBeGreaterThan(SHORTFALL_N)
+    return grouped
+  }
+
+  test('the tokens-by-class table is the type-7 median and IQR of the committed records', () => {
+    const rows = tableRows('Tokens, by class')
+    expect(rows.length).toBe(4)
+    const grouped = byArm()
+    const summaries = new Map(ARMS.map((arm) => [arm, summariseArm(grouped.get(arm)!)]))
+
+    for (const row of rows) {
+      expect(row.length).toBe(4)
+      const cls = row[0] as 'input' | 'output' | 'cache_creation' | 'cache_read'
+      ARMS.forEach((arm, index) => {
+        const summary = summaries.get(arm)!
+        if (!('median' in summary)) throw new Error(`${arm} reported a shortfall where the README publishes a median`)
+        const published = cell(row[index + 1])
+        // Exact, never `toBeCloseTo`. The half-values are published on purpose:
+        // a type-7 quantile over an even sample lands between two order
+        // statistics, and a tolerance here would agree with a changed
+        // interpolation rule, which is the one thing the rule is pinned for.
+        expect(summary.median.tokens[cls]).toBe(published.median)
+        expect(summary.iqr.tokens[cls]).toBe(published.iqr)
+      })
+    }
+  })
+
+  test('the wall-clock table is the type-7 median and IQR of the committed records', () => {
+    const rows = tableRows('Wall-clock')
+    expect(rows.length).toBe(3)
+    const grouped = byArm()
+
+    for (const row of rows) {
+      expect(row.length).toBe(3)
+      const summary = summariseArm(grouped.get(row[0])!)
+      if (!('median' in summary)) throw new Error(`${row[0]} reported a shortfall where the README publishes a median`)
+      // The README states the arm figures are rounded to the nearest whole
+      // millisecond; the rounding is applied to each statistic, not to the
+      // order statistics it came from.
+      expect(Math.round(summary.median.wall_clock_ms)).toBe(Number(row[1]))
+      expect(Math.round(summary.iqr.wall_clock_ms)).toBe(Number(row[2]))
+    }
+  })
+
+  test('the deterministic-to-judgment split is the type-7 median and IQR of the two segment fields', () => {
+    const rows = tableRows('The deterministic-to-judgment split')
+    expect(rows.length).toBe(2)
+    const warm = byArm()
+      .get('warpline')!
+      .filter((record) => !record.cold && record.disposition === 'passed')
+    expect(warm.length).toBe(SHORTFALL_N)
+
+    const fields = { 'deterministic, the advance': 'runtime_ms', 'judgment, the consumer session': 'consumer_ms' } as const
+    for (const row of rows) {
+      expect(row.length).toBe(3)
+      const field = fields[row[0] as keyof typeof fields]
+      expect(field).toBeDefined()
+      const values = warm.map((record) => record[field])
+      // A null here would mean the published figure was taken over fewer than
+      // the ten runs the prose claims, which is a finding and not a skip.
+      expect(values.filter((value) => value === null)).toEqual([])
+      const present = values as number[]
+      // Two decimal places, string-compared, because that is how the figure is
+      // published: `7.72` and `7.7200001` are the same number and only one of
+      // them is what a reader is asked to reproduce.
+      expect(median(present).toFixed(2)).toBe(Number(row[1]).toFixed(2))
+      expect(iqr(present).toFixed(2)).toBe(Number(row[2]).toFixed(2))
+    }
+  })
+
+  test('the cache-cold first-run table is each arm’s cold record', () => {
+    const rows = tableRows('The cache-cold first run')
+    expect(rows.length).toBe(3)
+    const grouped = byArm()
+
+    for (const row of rows) {
+      expect(row.length).toBe(7)
+      const summary = summariseArm(grouped.get(row[0])!)
+      const cold = summary.cold_row
+      if (!cold) throw new Error(`${row[0]} has no cache-cold record where the README publishes a row`)
+      expect(cold.disposition).toBe(row[1] as typeof cold.disposition)
+      expect(Math.round(cold.wall_clock_ms)).toBe(Number(row[2]))
+      expect(cold.tokens.input).toBe(Number(row[3]))
+      expect(cold.tokens.output).toBe(Number(row[4]))
+      expect(cold.tokens.cache_creation).toBe(Number(row[5]))
+      expect(cold.tokens.cache_read).toBe(Number(row[6]))
+    }
+  })
+
+  /**
+   * The rates table carries its own denominator, which is why this test also
+   * discharges the N claim: the `of 10` in every cell is compared against the
+   * warm passing count the summary actually computed, so an arm that quietly
+   * lost a run cannot keep publishing `0 of 10`.
+   */
+  test('the rates table is three rates over the warm set, each with the denominator the records have', () => {
+    const rows = tableRows('Rates')
+    expect(rows.length).toBe(3)
+    const grouped = byArm()
+
+    for (const row of rows) {
+      expect(row.length).toBe(4)
+      const summary = summariseArm(grouped.get(row[0])!)
+      const rates = [summary.truncation_rate, summary.grader_failure_rate, summary.failed_schema_rate]
+      rates.forEach((rate, index) => {
+        const match = /^(\d+) of (\d+)$/.exec(row[index + 1])
+        if (!match) throw new Error(`not a 'k of n' rate cell: '${row[index + 1]}'`)
+        expect(summary.warm_runs).toBe(Number(match[2]))
+        // Rounded: a non-zero rate times its denominator is a float product
+        // in JS (0.3 × 10 is 3.0000000000000004), and the first real failure
+        // in the set must not arrive as a false red on the arithmetic.
+        expect(Math.round(rate * summary.warm_runs)).toBe(Number(match[1]))
+      })
+    }
+  })
+
+  /**
+   * The N claim over the COMMITTED set, at the boundary rather than near it.
+   * The pre-registration's threshold is ten and the set has exactly ten, so an
+   * arm losing one run has to turn this red — which is why the comparison is
+   * against `SHORTFALL_N` and not against a literal ten restated here.
+   */
+  test('every arm meets the warm passing threshold and carries exactly one cache-cold run', () => {
+    const grouped = byArm()
+    for (const arm of ARMS) {
+      const records = grouped.get(arm)!
+      const warmPassing = records.filter((r) => !r.cold && r.disposition === 'passed')
+      expect(warmPassing.length).toBeGreaterThanOrEqual(SHORTFALL_N)
+      expect(records.filter((r) => r.cold).length).toBe(1)
+    }
+  })
+
+  /**
+   * One configuration, checkable rather than taken on trust — the property the
+   * README's closing paragraph asks a reader to verify. The four provenance
+   * strings are read back OUT of that paragraph, so a README edit that renames
+   * the model or bumps the version without re-running the set turns this red.
+   */
+  test('the committed set is the one configuration the README names', () => {
+    const named = {
+      git_sha: /git SHA\s+`([^`]+)`/.exec(README),
+      package_version: /package version\s+`([^`]+)`/.exec(README),
+      claude_cli_version: /tool version\s+`([^`]+)`/.exec(README),
+      model_id: /model\s+`([^`]+)`/.exec(README),
+    }
+    for (const [field, match] of Object.entries(named)) {
+      if (!match) throw new Error(`the README closing paragraph names no ${field}`)
+    }
+
+    const records = trackedRecords()
+    expect(records.length).toBeGreaterThan(0)
+    for (const field of ['package_version', 'claude_cli_version', 'model_id'] as const) {
+      const distinct = new Set(records.map((record) => record[field]))
+      expect([...distinct]).toEqual([named[field]![1]])
+    }
+    // The records carry the full forty-character object name and the README
+    // abbreviates it, so this is a prefix check in one direction only: an
+    // abbreviation that is not a prefix of the set's SHA is a different commit.
+    const shas = new Set(records.map((record) => record.git_sha))
+    expect(shas.size).toBe(1)
+    expect([...shas][0].startsWith(named.git_sha![1])).toBe(true)
+
+    // The interleaving claim: each arm sat at the same position in every
+    // iteration, and the three positions are distinct. Uniformity alone is
+    // satisfied by three arms all recorded at index zero.
+    const positions = ARMS.map((arm) => {
+      const indices = new Set(records.filter((r) => r.arm === arm).map((r) => r.arm_order_index))
+      expect([...indices].length).toBe(1)
+      return [...indices][0]
+    })
+    expect(new Set(positions).size).toBe(ARMS.length)
+  })
+
+  /**
+   * BENCH-09, over the real README rather than a planted fixture. The boundary
+   * prose existing somewhere in the file is the cheap half; the load-bearing
+   * half is that a reader meets it BEFORE the first figure, because the
+   * requirement is that the harness states its limits before a reader states
+   * them for it. Byte offsets, so a caveat moved below the tables is red.
+   */
+  test('the total-cost-of-ownership boundary is stated before the first table', () => {
+    const firstTable = README.search(/^\|/m)
+    expect(firstTable).toBeGreaterThan(0)
+
+    for (const passage of [
+      "## What this measures, and what it can't",
+      "**It doesn't measure state carried between runs.**",
+      "**It's taken against a runtime with no run lock.**",
+    ]) {
+      const at = README.indexOf(passage)
+      expect(at).toBeGreaterThanOrEqual(0)
+      expect(at).toBeLessThan(firstTable)
+    }
   })
 })
