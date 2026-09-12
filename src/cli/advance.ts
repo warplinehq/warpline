@@ -22,7 +22,10 @@
  *      cost, named rather than hidden: a genuine internal fault inside
  *      `runAdvance` also reports `75`, i.e. "retry later". Under a fifteen-minute
  *      timer that retry is free, and the alternative is a chain somebody has to
- *      keep complete forever.
+ *      keep complete forever. The run-lock arm inside that catch is not the
+ *      start of such a chain: it changes the message and nothing else, both
+ *      arms return the same `75`, and deleting it would cost a sentence rather
+ *      than a code.
  *   3. Nothing executes at module scope. The dispatcher reaches this file
  *      through `await import`, so module scope runs ON IMPORT — including inside
  *      `main(['advance'])` under `bun test`. A signal handler or a
@@ -247,6 +250,28 @@ export async function run(
   try {
     result = await runAdvance({})
   } catch (err) {
+    // Contention on the run lock is not a new exit code — the single catch
+    // below already reports `75` for any throw out of the advance, and this is
+    // one. What it is is a different SENTENCE. "Run lock at … is held by PID
+    // 4213" leaves the operator to work out whether anything ran, whether the
+    // next tick will clear it, and whether it clears on its own at all; those
+    // three answers are the whole content of the mail they just received.
+    //
+    // Recognised by `name`, the way the dispatcher recognises its own typed
+    // error, and for the same reason: an `instanceof` check would import the
+    // runtime lock module into this file's graph to test a string that the
+    // error already carries. The holder is named by the error's own message,
+    // which has the two arms a nullable holder needs — a process id, or an
+    // orchestrator session. Do not reconstruct either of them here.
+    if (err instanceof Error && err.name === 'AdvanceLockedError') {
+      process.stderr.write(
+        `warpline advance: ${err.message} Nothing ran and nothing was written — another ` +
+          `advance holds this home. The next scheduled tick retries, and a lock more than two ` +
+          `hours old is broken automatically. Nothing breaks a lock a live process still ` +
+          `holds; see docs/runtime-spec.md § 12.\n`,
+      )
+      return 75
+    }
     // A stack under a scheduler lands in the operator's mail carrying absolute
     // paths, and none of it is actionable. The message alone, as everywhere else
     // in this CLI.
