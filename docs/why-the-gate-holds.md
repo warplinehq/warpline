@@ -245,15 +245,19 @@ on reproducibility. That's the half I'd keep if I could only keep one. A
 deterministic step reruns to the same answer, and that's a property of the code,
 not of anyone's pricing page.
 
-What I won't do is attach a figure to it. There's no benchmark, this isn't the
-place to imply one exists, and a launch essay quoting a number nobody has
-measured is how a good argument gets retired early. Warpline does track
-per-domain call volume and headroom. See
+What I won't do is attach a figure to it here. There's a benchmark now, and it
+lives in its own document. Its method was committed before the first run, and a
+test checks that ordering by git topology. So read the
+[method](https://github.com/warplinehq/warpline/blob/main/bench/PRE-REGISTRATION.md)
+before the
+[numbers](https://github.com/warplinehq/warpline/blob/main/bench/README.md). The
+README's first paragraph says what the harness can't see, and that's the part I'd
+want read first. Warpline also tracks per-domain call volume and headroom. See
 [api-budget.ts](https://github.com/warplinehq/warpline/blob/main/src/lib/api-budget.ts).
 It's warn-only by design, because a tracker that blocks a call fails closed on
 its own bookkeeping error. Knowing what you spend is the prerequisite for arguing
-about it. Until there's a benchmark, this section is an argument, and I'd rather
-label it as one.
+about it. This section is still an argument. The measured part is over there, and
+I'd rather keep the two labelled.
 
 ## What this follows
 
