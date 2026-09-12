@@ -101,6 +101,27 @@ describe('run-artifacts', () => {
     expect(files.filter((f) => f.endsWith('.json')).length).toBe(5)
   })
 
+  test('trimPluginHistory keeps the operators number, not the old literal 20', async () => {
+    // 5 artifacts, a cap of 2. Under the retired literal all five survive.
+    for (let i = 0; i < 5; i++) {
+      const runId = `plugin-cap-${i}`
+      const ts = new Date(Date.UTC(2026, 3, 1, 0, 0, i)).toISOString()
+      await writeRunArtifact(makeArtifact({ run_id: runId, plugin: 'plugin-cap', started_at: ts }), { runsDir })
+      await appendRunLog(runId, `log-${i}`, { runsDir })
+    }
+    const evicted = await trimPluginHistory('plugin-cap', 2, { runsDir })
+    expect(evicted).toBe(3)
+    const files = await readdir(runsDir)
+    expect(files.filter((f) => f.endsWith('.json')).sort()).toEqual([
+      'plugin-cap-3.json',
+      'plugin-cap-4.json',
+    ])
+    expect(files.filter((f) => f.endsWith('.log')).sort()).toEqual([
+      'plugin-cap-3.log',
+      'plugin-cap-4.log',
+    ])
+  })
+
   test('trimPluginHistory does NOT touch other plugins artifacts', async () => {
     // 21 of plugin-a and 5 of plugin-b
     for (let i = 0; i < 21; i++) {

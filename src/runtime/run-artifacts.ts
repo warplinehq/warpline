@@ -3,9 +3,10 @@
  *
  * Writes `.warpline/runs/<run_id>.json` with the per-attempt extension and a
  * sibling `<run_id>.log` containing captured stdout/stderr with attempt
- * delimiters. Retention trim (`trimPluginHistory`) keeps the 20 newest
- * artifacts per plugin; both JSON + log siblings are deleted atomically so
- * no orphaned .log files accumulate (Pitfall 5 from 121-RESEARCH.md).
+ * delimiters. Retention trim (`trimPluginHistory`) keeps the operator's
+ * `retention.keep_per_plugin` newest artifacts per plugin; both JSON + log
+ * siblings are deleted atomically so no orphaned .log files accumulate
+ * (Pitfall 5 from 121-RESEARCH.md).
  *
  * Default runs directory is resolved relative to this source file so tests
  * can pass `opts.runsDir` pointed at a mkdtemp-backed location.
@@ -13,6 +14,7 @@
 import { readdir, writeFile, unlink, readFile, appendFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { runsDir } from '../lib/paths.js'
+import { DEFAULT_PREFERENCES } from '../lib/preferences.js'
 
 export interface RunArtifact {
   run_id: string
@@ -85,10 +87,14 @@ export async function writeRunLog(
  * Keep the `keep` most recent artifacts for `pluginName`. Deletes both the
  * `.json` and sibling `.log` file together. Returns the number of artifacts
  * evicted so callers can log/assert.
+ *
+ * `keep` defaults to the operator-global policy rather than a literal, so a
+ * caller that passes nothing still gets the operator's number and there is
+ * one of it in the tree.
  */
 export async function trimPluginHistory(
   pluginName: string,
-  keep = 20,
+  keep = DEFAULT_PREFERENCES.retention.keep_per_plugin,
   opts: { runsDir?: string } = {},
 ): Promise<number> {
   const dir = getRunsDir(opts.runsDir)

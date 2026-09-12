@@ -167,6 +167,20 @@ export interface InvokePluginOptions {
   runsDir?: string
   /** Override events.jsonl path for retry notices — same leak class as runsDir. */
   eventsPath?: string
+  /** How many artifacts the end-of-loop trim keeps for this plugin — the
+   *  operator's `retention.keep_per_plugin`, read by whichever caller opts
+   *  into artifact persistence. It does not change WHEN the trim runs, only
+   *  how many artifacts survive it. Omitted, the trim falls back to the same
+   *  policy default, so a caller that does not read preferences is not a
+   *  second retention rule.
+   *
+   *  Worth knowing where this does not reach: the engine leaves
+   *  `persistArtifact` off on the advance path deliberately — see the comment
+   *  above its `invokePlugin` call — because an advance writes a run log and
+   *  not a run artifact.
+   *  So this trim only fires on a manual plugin run, and `src/cli/run-plugin.ts`
+   *  is its one live caller. */
+  retentionKeepPerPlugin?: number
   /** What this plugin's declared dependencies last produced and how their last
    *  runs ended, already resolved by the caller. Optional, like every field
    *  here: the manual CLI path reads no runtime state and omits it, and a
@@ -770,7 +784,9 @@ export async function invokePlugin(
     }
     try {
       await writeRunArtifact(artifact, { runsDir: options.runsDir })
-      await trimPluginHistory(pluginName, 20, { runsDir: options.runsDir })
+      await trimPluginHistory(pluginName, options.retentionKeepPerPlugin, {
+        runsDir: options.runsDir,
+      })
     } catch {
       // Persistence failures must not bubble into the plugin result — the
       // caller already has the in-memory PluginInvocationResult. An operator

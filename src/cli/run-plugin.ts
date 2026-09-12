@@ -40,6 +40,8 @@
  */
 import * as util from 'node:util'
 import { invokePlugin } from '../runtime/invoke-plugin.js'
+import { readPreferences } from '../lib/preferences.js'
+import { preferencesPath } from '../lib/paths.js'
 
 const USAGE =
   'Usage: warpline run <plugin-name> <action-key> [--retries=N] [--json] [--input key=value]...\n' +
@@ -192,6 +194,12 @@ export async function runPlugin(
   if (!plugin || !action) return usage(USAGE)
 
   try {
+    // The one live path to the per-plugin artifact trim, so the one place the
+    // operator's cap has to be read. `readPreferences` falls back to defaults
+    // on a missing or invalid file, so this adds no failure mode to a manual
+    // run that it did not already have.
+    const prefs = await readPreferences(preferencesPath())
+
     // This verb reads no Grant, anywhere in this file, and it did not before
     // this argument existed either. What changes is that the absence is now a
     // statement in the diff rather than something a reader has to notice is
@@ -213,6 +221,7 @@ export async function runPlugin(
         maxRetriesOverride: retriesOverride,
         persistArtifact: true,
         userInitiated: true,
+        retentionKeepPerPlugin: prefs.retention.keep_per_plugin,
       },
       { granted: false, reason: 'manual-run' },
     )
