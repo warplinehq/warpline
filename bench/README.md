@@ -62,7 +62,7 @@ every figure here is recomputable from what's in the repository, and if you thin
 a figure is wrong you can check it rather than argue about it.
 
 **This harness never runs in continuous integration.** The two control arms need
-a provider API key and they spend real money on every run. A benchmark that
+a provider credential and they spend real money on every run. A benchmark that
 charges the project for every pull request gets switched off within a month, and
 a switched-off benchmark is worse than none because nobody notices it stopped.
 
