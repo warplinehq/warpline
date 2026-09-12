@@ -1770,8 +1770,8 @@ holder is gone can delete `.lock` by hand; an operator who is not sure should
 wait for the window.
 
 **An interrupted advance can leave a plugin running.** An advance interrupted by
-SIGINT exits `130` (§ 11) the moment the signal lands, which ends the process and
-not the work: the plugin that was in flight may run to completion in a process
+SIGINT exits `130` (§ 11) as soon as its stdout has drained, which ends the
+process and not the work: the plugin that was in flight may run to completion in a process
 the operator believes is dead. The lock that interruption leaves behind is
 reclaimed by the heal described above — on the next advance if the holder's process is gone, and
 at the two-hour window if the lock was orchestrator-held and names no process.
