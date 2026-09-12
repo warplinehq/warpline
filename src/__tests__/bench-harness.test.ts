@@ -1290,6 +1290,35 @@ describe('bench harness — the driver', () => {
   })
 
   /**
+   * The one drift guard the method promises the DRIVER performs, and the only
+   * one no fixture reached: every other driver test here hands `runSet` the
+   * constant `stamp`, so the abort branch had never been observed red. This
+   * project's recorded failure class is a guard that ran green while the thing
+   * it catches sat outside its reach, so the stamp drifts on purpose.
+   *
+   * The tool auto-updates on its own schedule, which is what makes this
+   * reachable without anybody doing anything: three records taken under one
+   * version and the rest under the next is not one configuration, and a set
+   * like that must stop rather than be published.
+   */
+  test('a tool version that drifts part-way through the set aborts it and names both versions', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      // One version for the first iteration's three arms, another after it.
+      let stamped = 0
+      const drifting = (modelId: string): Provenance => {
+        stamped += 1
+        return { ...stamp(modelId), claude_cli_version: stamped <= ARM_ORDER.length ? '0.0.0 (test)' : '0.0.1 (test)' }
+      }
+
+      await expect(runSet({ ...opts(resultsDir, notesSource, passing), provenance: drifting })).rejects.toThrow(
+        /the command-line tool changed mid-set, from '0\.0\.0 \(test\)' to '0\.0\.1 \(test\)'/,
+      )
+      // Aborted, and the records it already earned are left where they are.
+      expect(readdirSync(resultsDir).length).toBe(2 * ARM_ORDER.length)
+    })
+  })
+
+  /**
    * The cap is what gives the shortfall row a trigger. A loop that ran until
    * every arm passed would spend without bound on an arm that never passes, and
    * the shortfall row the statistics module already implements would be
