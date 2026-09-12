@@ -1204,6 +1204,54 @@ describe('bench harness — the driver', () => {
   })
 
   /**
+   * The homes are removed in a `finally`, and until now the only thing saying so
+   * was a docstring on the test above it: "the homes are gone after the call".
+   * This phase's whole theme is that a property claimed in prose is not a
+   * property checked, so the claim gets a check.
+   *
+   * It matters beyond tidiness. A seeded home carries the plugin directory, the
+   * state, the runs and a session grant, and an iteration that leaked one would
+   * leave the next arm a directory it could read. The removal is also what makes
+   * every home-shaped assertion in this file legal from inside the runner and
+   * nowhere else.
+   *
+   * A fake runner, so this spawns nothing and costs nothing.
+   */
+  test('every home is removed when the iteration returns, and when the runner throws part-way', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      const seen: string[] = []
+      const collecting: ArmRunner = async (_arm, home) => {
+        // Present while the arm is running: without this the assertion below
+        // would pass over a path that never existed.
+        expect(existsSync(home)).toBe(true)
+        seen.push(home)
+        return armOutcome()
+      }
+      await runIteration({ iteration: 1, ...opts(resultsDir, notesSource, collecting) })
+
+      expect(seen.length).toBe(ARM_ORDER.length)
+      expect(seen.filter((home) => existsSync(home))).toEqual([])
+
+      // The same on the throwing path, which is the reason the removal is in a
+      // `finally` rather than after the loop. Thrown on the SECOND arm, so the
+      // iteration is abandoned with a home still assigned to an arm that never
+      // ran.
+      const failed: string[] = []
+      const throwing: ArmRunner = async (arm, home) => {
+        failed.push(home)
+        if (arm === ARM_ORDER[1]) throw new Error('the runner failed part-way through the iteration')
+        return armOutcome()
+      }
+      await expect(runIteration({ iteration: 2, ...opts(resultsDir, notesSource, throwing) })).rejects.toThrow(
+        /failed part-way/,
+      )
+
+      expect(failed.length).toBe(2)
+      expect(failed.filter((home) => existsSync(home))).toEqual([])
+    })
+  })
+
+  /**
    * Seeding is PER ARM, and the split IS the arm definition. A control home
    * carrying the reference implementation is a control arm handed the answer,
    * and this is the same refusal that withholds the plugin-directory flag from
