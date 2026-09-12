@@ -344,6 +344,37 @@ export function resolveDisposition({
 }
 
 /**
+ * Refuse a tree whose code is not the code the stamped SHA names.
+ *
+ * `git rev-parse HEAD` names the commit checked out, never what ran. A set taken
+ * over uncommitted edits stamps every record with a SHA describing a different
+ * tree, and a reader who checks that commit out reproduces something else with no
+ * way to tell. That is worse than a missing stamp, which at least reads as
+ * missing.
+ *
+ * `bench/results/` is excluded, and the exclusion is load-bearing rather than a
+ * loophole: the driver writes a record per run, so the first record dirties the
+ * tree and every stamp after it would refuse. A record is the output and never
+ * the code. Untracked files elsewhere stay in scope, because an untracked module
+ * can be code that ran.
+ *
+ * Compared with `.trim() !== ''` deliberately. The `git status --porcelain |
+ * grep -qv .` shell idiom never prints its sentinel, and it is a recorded
+ * false-green in this project's notes.
+ */
+export function assertCleanWorktree(repoRoot: string): void {
+  const dirty = execFileSync('git', ['status', '--porcelain', '--', '.', ':(exclude)bench/results'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  })
+  if (dirty.trim() !== '') {
+    throw new Error(
+      `the worktree is not clean, so the SHA stamped on every record would not name the code that ran:\n${dirty.trimEnd()}`,
+    )
+  }
+}
+
+/**
  * Stamp a raw record so it can be falsified.
  *
  * Without the commit a published figure is unattributable to any state of the
@@ -353,6 +384,7 @@ export function resolveDisposition({
  */
 export function readProvenance(modelId: string): Provenance {
   const repoRoot = REPO_ROOT
+  assertCleanWorktree(repoRoot)
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { version?: string }
   const capture = (command: string, args: string[]): string =>
     execFileSync(command, args, { cwd: repoRoot, encoding: 'utf8' }).trim()

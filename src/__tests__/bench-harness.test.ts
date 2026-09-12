@@ -23,7 +23,17 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { performance } from 'node:perf_hooks'
@@ -34,6 +44,7 @@ import {
   ADVANCE_TOKENS,
   ApiUnavailableError,
   ARM_ORDER,
+  assertCleanWorktree,
   buildClaudeArgv,
   buildClaudeEnv,
   buildConsumerPrompt,
@@ -864,6 +875,60 @@ describe('bench harness — the three sessions, built', () => {
     } finally {
       if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR
       else process.env.CLAUDE_CONFIG_DIR = prior
+    }
+  })
+
+  /**
+   * The stamped SHA names the commit checked out and not the code that ran, so a
+   * set taken over uncommitted edits describes a tree nobody can reproduce. Over
+   * a fixture repository and never over this one: a check closed over this
+   * checkout could only ever be watched passing, and the refusal is the point.
+   */
+  test('a dirty worktree is refused at stamp time, and a written record is not what makes it dirty', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-bench-clean-'))
+    const fixtureGit = (args: string[]): void => {
+      execFileSync('git', args, {
+        cwd: root,
+        env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+      })
+    }
+    try {
+      fixtureGit(['init', '-q'])
+      writeFileSync(join(root, 'arms.ts'), 'the code that ran\n')
+      fixtureGit(['add', '-A'])
+      fixtureGit([
+        '-c',
+        'user.name=fixture',
+        '-c',
+        'user.email=fixture@example.invalid',
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '-q',
+        '-m',
+        'the measured configuration',
+      ])
+
+      // Clean, so the SHA names what is here.
+      expect(() => assertCleanWorktree(root)).not.toThrow()
+
+      // A record written by the driver dirties the tree on the first run, and
+      // every stamp after it would refuse. A record is output and never code, so
+      // this exclusion is what makes the guard usable rather than a loophole.
+      mkdirSync(join(root, 'bench', 'results'), { recursive: true })
+      writeFileSync(join(root, 'bench', 'results', 'warpline-001.json'), '{"iteration":1}\n')
+      expect(() => assertCleanWorktree(root)).not.toThrow()
+
+      // An edit to the code, named in the refusal.
+      writeFileSync(join(root, 'arms.ts'), 'the code that actually ran\n')
+      expect(() => assertCleanWorktree(root)).toThrow(/would not name the code that ran/)
+
+      // An untracked module elsewhere is in scope too: it can be code that ran.
+      fixtureGit(['checkout', '--', 'arms.ts'])
+      writeFileSync(join(root, 'extra.ts'), 'an untracked module\n')
+      expect(() => assertCleanWorktree(root)).toThrow(/extra\.ts/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
     }
   })
 

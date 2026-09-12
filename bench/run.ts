@@ -33,6 +33,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
   ARM_ORDER,
+  assertCleanWorktree,
   readProvenance,
   resolveDisposition,
   runClaudeArm,
@@ -508,6 +509,11 @@ async function main(argv: readonly string[]): Promise<void> {
     process.stdout.write(`read it by eye, then copy it to ${NOTES_FIXTURE} and commit it.\n`)
     return
   }
+
+  // Before the spend and not only at stamp time. readProvenance refuses a dirty
+  // tree on every record, which catches an edit made part-way through; this
+  // catches the same thing before a single session has been paid for.
+  assertCleanWorktree(REPO_ROOT)
 
   const summary = await runSet({
     runner: runRealArm,
