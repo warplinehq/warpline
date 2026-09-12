@@ -27,8 +27,11 @@ import {
   engineStatePath,
   runsDir as runsDirDefault,
   lockPath as defaultLockPath,
+  lastSuccessfulAdvancePath as defaultDeadManPath,
   warplineHome,
 } from '../lib/paths.js'
+import { atomicWriteText } from '../lib/fs-atomic.js'
+import { advanceCounts } from './exit-codes.js'
 import { acquireLock, releaseLock } from './lock.js'
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
@@ -248,6 +251,16 @@ export interface AdvanceResult {
   plugin_states: Map<string, PluginFsmState | 'skipped'>
   gated_plugins: string[]
   run_log_path: string
+  /**
+   * How many run records this advance's retention prune removed. Zero on the
+   * quiet-hours arm, which returns above the prune — nothing was reclaimed
+   * because nothing looked.
+   *
+   * Additive, and additive is safe here: the benchmark harness stores derived
+   * scalars off this result rather than embedding it, and the run-log parse it
+   * does afterwards strips unknown keys.
+   */
+  pruned: number
 }
 
 // -----------------------------------------------------------------------
@@ -1004,6 +1017,60 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       }
     }
 
+    /**
+     * The dead-man file — `<state>/last-successful-advance`, the whole of this
+     * runtime's monitor interface.
+     *
+     * There is no HTTP surface here and no alerting hook, and a warpline that
+     * has stopped cannot alert that it has stopped, so the signal an outside
+     * detector reads is this file's own age. `docs/runtime-spec.md` § 13 is the
+     * contract; `dead-man.test.ts` holds it.
+     *
+     * Called from every arm that returns a result — the quiet-hours early
+     * return included, because a configured window is hours wide and a detector
+     * that had to tolerate a silent night would throw away the resolution a
+     * fifteen-minute tick buys. NEVER called on a throw, and deliberately not
+     * placed in the release block below: a held lock, a missing home or an
+     * unreadable state document is exactly when the LAST good file, left
+     * standing and going stale, is the thing the operator needs to see.
+     *
+     * The counts come from `advanceCounts`, the walk the exit code itself uses.
+     * Two counters computed in two places is how this file and the monitor
+     * reading it start disagreeing about one advance.
+     *
+     * Nothing else goes in this document. A run id, a timestamp, the advance's
+     * own status, a reason token and three integers — no plugin summary, no
+     * plugin output, no operator configuration value, no path. The key set is
+     * enumerated by a test so that adding a field is a deliberate act.
+     */
+    const writeDeadMan = async (
+      outcome: Pick<AdvanceResult, 'plugin_states' | 'gated_plugins'>,
+      fields: { run_id: string; status: AdvanceResult['status']; skipped_reason: string | null; pruned: number },
+    ): Promise<void> => {
+      const { gated, failed } = advanceCounts(outcome)
+      await atomicWriteText(
+        options.stateDir === undefined
+          ? defaultDeadManPath()
+          : join(dirname(options.stateDir), 'last-successful-advance'),
+        JSON.stringify(
+          {
+            run_id: fields.run_id,
+            completed_at: new Date().toISOString(),
+            // The advance's own status, NOT the exit code. They answer
+            // different questions: a gated advance is `partial` here and `0`
+            // there, and conflating them reads a held gate as a failure.
+            status: fields.status,
+            skipped_reason: fields.skipped_reason,
+            gated,
+            failed,
+            pruned: fields.pruned,
+          },
+          null,
+          2,
+        ) + '\n',
+      )
+    }
+
     // 1. Generate run_id
     const run_id = `${new Date().toISOString().replace(/[:.]/g, '')}-${randomUUID().slice(0, 8)}`
     const started_at = new Date().toISOString()
@@ -1109,12 +1176,19 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       for (const failure of loadFailures) {
         quietStates.set(failure.plugin, 'failed')
       }
+      // `pruned: 0` and it is honest: the prune runs below this guard, so a
+      // skipped advance reclaims nothing. Nothing looked, so nothing went.
+      await writeDeadMan(
+        { plugin_states: quietStates, gated_plugins: [] },
+        { run_id, status: quietStatus, skipped_reason: 'quiet_hours', pruned: 0 },
+      )
       return {
         run_id,
         status: quietStatus,
         plugin_states: quietStates,
         gated_plugins: [],
         run_log_path: '',
+        pruned: 0,
       }
     }
 
@@ -1135,9 +1209,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // Built from the state already read above rather than from a second read.
     const protectedRunIds = new Set(state.pending_gates.map((gate) => gate.run_id))
 
-    // Held rather than discarded. The count is the first link of a thread that
-    // ends on the advance's result and in its machine-readable output; nothing
-    // consumes it yet, and a bare call is how a count stops being threaded.
+    // Held rather than discarded. The count reaches this advance's result and
+    // its dead-man file below, and the machine-readable output renders it from
+    // the result. A bare call is how a count stops being threaded.
     const prunedRunLogs = await pruneRunLogs(runsDir, prefs.retention, protectedRunIds)
 
     // 3a. The headless JSONL run log.
@@ -1858,12 +1932,24 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       fireRunFailure(reason)
     }
 
+    // 12. The dead-man file, last and inside the lock.
+    //
+    // After the run-log write above, which is what makes a detector that finds
+    // this file certain the log it names already exists. Before the release
+    // below, so two advances cannot interleave writes to it. Not in the release
+    // block: a throw must leave the previous file standing.
+    await writeDeadMan(
+      { plugin_states, gated_plugins },
+      { run_id, status: engineStatus, skipped_reason: null, pruned: prunedRunLogs },
+    )
+
     return {
       run_id,
       status: engineStatus,
       plugin_states,
       gated_plugins,
       run_log_path,
+      pruned: prunedRunLogs,
     }
   } finally {
     await releaseLock(resolvedLockPath)

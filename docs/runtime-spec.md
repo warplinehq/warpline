@@ -1764,3 +1764,106 @@ The `deny` verb and the board write the engine state document, under the state
 lock. The `approve` verb does not write that document at all: it reads it, and
 writes the session-approval file — `.session-approval` at the root of the home.
 The run lock guards neither of them.
+
+## 13. The dead-man file
+
+An advance leaves a record of itself at `last-successful-advance`, beside
+`engine-state.json` in the home's state directory. It is JSON, it is rewritten
+in full on every advance that returns, and nothing in this runtime ever reads it
+back.
+
+It exists because this runtime has no other way to tell you it is alive. There is
+no HTTP surface here and no alerting hook — § 7 says why — and a warpline that has
+stopped cannot alert you that it has stopped. The exit code of § 11 reaches you
+only when the command runs; if the timer never fires, no code is ever produced.
+So the interface is a file, and the signal an outside detector reads is the
+file's own age.
+
+### The fields
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `run_id` | string | The advance's own run id. Names the run log written immediately before this file. |
+| `completed_at` | string | ISO 8601 UTC, the moment this file was written. Use the file's mtime for age checks; this field is for a human reading the file. |
+| `status` | `"complete"` \| `"partial"` \| `"failed"` \| `"interrupted"` | The advance's own status. **Not the exit code.** |
+| `skipped_reason` | string \| null | `null` when the advance ran. `"quiet_hours"` when it returned early because a quiet window was active. |
+| `gated` | integer | How many plugins are holding at an approval gate. |
+| `failed` | integer | How many plugins ended failed, manifests that would not load included. |
+| `pruned` | integer | How many run records this advance's retention prune removed. Always `0` on a skipped advance, which returns above the prune. |
+
+Those seven keys are the whole document, and `dead-man.test.ts` enumerates them
+so that adding an eighth has to be a deliberate act. Nothing else belongs here:
+no plugin summary, no plugin output, no value read out of your configuration and
+no path. A field carrying free text would make this file a channel for content it
+was never meant to carry.
+
+**`status` is the advance's status and not the exit code, and the difference
+matters most on the case you will hit most.** An advance that stops at an
+approval gate reports `partial` here and exits `0` there, because a held gate is
+the runtime doing its job. A detector that treats `status` as a pass/fail verdict
+will page you every time a plugin waits for a human. Read `gated` and `failed`
+for the verdict, and read `status` for what the run did.
+
+### When it is written, and when it is not
+
+It is written on **every advance that returns**, whatever that advance found. A
+complete run writes it, a run holding at a gate writes it, a run with a failed
+plugin writes it, a plugin root that loaded nothing writes it, and an advance
+that returned early because quiet hours were configured writes it. Each of those
+arms has a case in `dead-man.test.ts`. The gated arm is the one the file exists
+for: a fleet whose only news is a waiting approval is a healthy fleet, and a
+switch that fired on it would be a switch you learn to ignore.
+
+The quiet-hours arm is written for a reason worth stating. A configured quiet
+window is hours wide. If a skipped advance wrote nothing, every threshold you set
+would have to be wider than that window, and the resolution a fifteen-minute
+timer buys you would be gone. Writing it with `skipped_reason: "quiet_hours"` is
+what lets a detector tell an asleep fleet from a stopped one. Quiet hours are
+opt-in — the window is off until you configure one — so on a home without one
+this field is always `null`.
+
+**It is not written when the advance throws.** This is deliberate and it is the
+requirement most easily implemented backwards. An advance that cannot take the
+run lock, cannot find the home, or cannot read the state document is exactly the
+situation in which you need the last good file left standing, going stale, saying
+what the last successful run was and how long ago it finished. A writer that ran
+on the failure path would overwrite that signal with a fresh timestamp and report
+a wedged runtime as a healthy one. `dead-man.test.ts` proves this by writing a
+file from a real advance, forcing the next advance to throw, and asserting that
+the file's contents and its modification time are both unchanged.
+
+The write is atomic — a temp file and a rename — so a detector reading the file
+while an advance writes it sees either the old document or the new one, never
+half of either. It happens after the run log is written and before the run lock
+is released, which gives you two guarantees: the run log named by `run_id` is
+already on disk when you can see this file, and two advances against one home
+cannot interleave writes to it.
+
+### Reading it
+
+Check the file's age first, then its contents. Five outcomes, in the order you
+should test them:
+
+1. **Stopped.** The file is older than a few times your advance interval, or it
+   does not exist at all on a home that has run before. Nothing is writing it.
+   This is the case no code inside this runtime can report to you, and it is the
+   reason the file exists. A fifteen-minute timer with a one-hour threshold gives
+   three missed ticks of tolerance before it pages.
+2. **Asleep.** `skipped_reason` is `"quiet_hours"`. The advance ran and returned
+   early on purpose. Recent, so it is not stopped; nothing ran, so the counts say
+   nothing.
+3. **Broken.** `failed` is greater than zero. At least one plugin failed or one
+   manifest would not load. Read the run log named by `run_id`.
+4. **Waiting.** `gated` is greater than zero and `failed` is zero. Plugins are
+   holding at approval gates. Whether that pages you is your call — it is the
+   same distinction `warpline advance --strict` makes at the exit code.
+5. **Healthy.** Recent, `failed` is zero, `gated` is zero, `skipped_reason` is
+   `null`.
+
+A healthy file and an all-gated file differ in `gated` and nowhere else, which is
+what makes the two tellable apart by that field alone.
+
+Two operator notes. Set your staleness threshold from your own timer interval,
+not from a number in this document — the runtime does not know how often you run
+it. And do not write to this file yourself: nothing here reads it back, so a file
+you author misleads only your own detector, but it will do that silently.
