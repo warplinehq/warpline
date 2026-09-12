@@ -700,6 +700,67 @@ export async function handler(manifest, args, signal, capabilities) {
     expect(result.plugin_states.get('fx-two')).toBe('skipped')
   })
 
+  test('the same two-manifest skip is 0 through the exit-code mapper — quiet-hours arm active', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const { advanceExitCode } = await import('../exit-codes.js')
+    await createTestPlugin('fx-one')
+    await createTestPlugin('fx-two')
+    await configureQuietHours()
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: join(stateDir, 'engine-state.json'),
+      runsDir,
+      eventsPath,
+    })
+
+    // Asserted through the mapper rather than against a recomputed rule. This
+    // is the value an operator's scheduler actually sees, and it is the one
+    // the arm was getting wrong.
+    expect(result.run_log_path).toBe('')
+    expect(advanceExitCode(result)).toBe(0)
+  })
+
+  test('a load failure is failed on the skip arm too, and the mapper says 1 — quiet-hours arm active', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const { advanceExitCode } = await import('../exit-codes.js')
+    await createTestPlugin('fx-loads')
+    await createBrokenPlugin('fx-broken')
+    await configureQuietHours()
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: join(stateDir, 'engine-state.json'),
+      runsDir,
+      eventsPath,
+    })
+
+    expect(result.run_log_path).toBe('')
+    expect(result.plugin_states.size).toBe(2)
+    expect(result.plugin_states.get('fx-loads')).toBe('skipped')
+    expect(result.plugin_states.get('fx-broken')).toBe('failed')
+    expect(advanceExitCode(result)).toBe(1)
+  })
+
+  test('an empty plugin root still hands back an empty map — quiet-hours arm active', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const { advanceExitCode } = await import('../exit-codes.js')
+    await configureQuietHours()
+
+    const result = await runAdvance({
+      pluginsDir,
+      stateDir: join(stateDir, 'engine-state.json'),
+      runsDir,
+      eventsPath,
+    })
+
+    // The pre-existing behaviour, pinned so the seeding above cannot quietly
+    // take it away. An empty map keeps meaning zero manifests — on this arm
+    // and on every other one — which is the invariant the exit code rests on.
+    expect(result.plugin_states.size).toBe(0)
+    expect(advanceExitCode(result)).toBe(1)
+  })
+
   test('a plugin root whose manifests all fail to import reports failed, on the result and on the persisted run log', async () => {
     const { runAdvance } = await import('../engine.js')
     await createBrokenPlugin('broken-a')

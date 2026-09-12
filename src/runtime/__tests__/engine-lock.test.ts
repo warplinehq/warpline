@@ -173,7 +173,14 @@ describe('runAdvance takes the run lock and gives it back', () => {
 
     // The early return actually happened — otherwise this case is the success
     // case again under a different name, and the arm that leaks is untested.
-    expect(result.plugin_states.size).toBe(0)
+    //
+    // The empty run-log path is what says it, and `alpha` being `skipped`
+    // rather than `completed` is the second half. This used to assert an empty
+    // states map, which was an assertion on a bug: the arm returned a fresh
+    // empty map whatever the root held, and an empty map is the zero-manifest
+    // signature the exit code reads. The proof of the early return was never
+    // the map's size.
+    expect(result.plugin_states.get('alpha')).toBe('skipped')
     expect(result.run_log_path).toBe('')
     expect(existsSync(lockPath())).toBe(false)
   })

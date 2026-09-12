@@ -1087,10 +1087,32 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             : `run ${quietStatus}: ${emptyRootReason}`,
         )
       }
+      // The states map, seeded exactly as the normal path seeds it — the two
+      // loops below the guard, with one literal changed. A skip is what
+      // happened to every manifest that loaded, and a manifest that never
+      // loaded is `failed` here for the same reason it is `failed` there.
+      //
+      // This arm used to hand back a fresh empty map whatever the root held,
+      // and an empty map is not a neutral value: `exit-codes.ts` reads it as
+      // the zero-manifest signature and nothing else, which is what lets a
+      // gated advance exit `0`. So a fleet with a configured quiet window
+      // reported "no manifests loaded" on every tick until morning — under a
+      // fifteen-minute timer, dozens of false failures a night. The fix
+      // belongs here rather than in the mapper: the invariant is that an
+      // empty map means one thing on every arm, and a quiet-hours carve-out
+      // inside the mapper would trade that invariant for a special case in
+      // the one function the command and the suite share.
+      const quietStates = new Map<string, PluginFsmState | 'skipped'>()
+      for (const [name] of plugins) {
+        quietStates.set(name, 'skipped')
+      }
+      for (const failure of loadFailures) {
+        quietStates.set(failure.plugin, 'failed')
+      }
       return {
         run_id,
         status: quietStatus,
-        plugin_states: new Map(),
+        plugin_states: quietStates,
         gated_plugins: [],
         run_log_path: '',
       }
