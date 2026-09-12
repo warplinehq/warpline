@@ -1574,10 +1574,25 @@ it. The flag moves the gated case and nothing else.
 nothing was written: the home is byte-identical to what it was before the command
 started, so there is no half-run to explain and nothing to reconcile.
 
-As of this section's commit, the cause is a throw out of `runAdvance` — which
-includes an `engine-state.json` that fails validation, since that read happens
-inside the advance. Treat `75` as "retry later" rather than as a fault to page
-on. Under a fifteen-minute timer the retry costs nothing.
+As of this section's commit there are two causes.
+
+The first is a throw out of the advance itself — which includes an
+`engine-state.json` that fails validation, since that read happens inside the
+advance. Treat this one as "retry later" rather than as a fault to page on:
+under a fifteen-minute timer the retry costs nothing.
+
+The second is a refusal raised before the advance starts. With no warpline home
+at the resolved path **and** no terminal on standard input, `warpline advance`
+will not create one. Under a scheduler an unset `WARPLINE_HOME` resolves against
+the working directory the scheduler happened to give the job, so a missing home
+means a second empty home is invented, the fleet runs nothing, and the command
+exits `0` reporting healthy. This refusal repeats until the operator sets the
+variable or creates the directory, and the message names both.
+
+The refusal is narrow on purpose: it refuses to **create** a home, never to
+**run** unattended. An existing home with no terminal on standard input is the
+ordinary scheduled case and it proceeds, which is the entire point of running
+this command from a timer.
 
 ### Unknown codes
 

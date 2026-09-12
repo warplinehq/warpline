@@ -40,11 +40,51 @@
  * error to `1` for every other verb, and that mapping must stay exactly as it
  * is — catching it here means this command reports `75` without changing what
  * `plan`, `approve`, `deny` and `revoke` report.
+ *
+ * Three more that arrived with the refusals:
+ *
+ *   5. The home check refuses to CREATE a home, NEVER to RUN unattended, and
+ *      widening it would defeat the phase it belongs to. An existing home with
+ *      no terminal on stdin is the ordinary scheduled case and it proceeds; only
+ *      an ABSENT home with no terminal refuses. Home resolution falls back to
+ *      the nearest ancestor of cwd holding a warpline directory and then to a
+ *      cwd-relative path, and under launchd both of those arms are wrong — a
+ *      second empty home means the fleet runs nothing, writes a fresh state
+ *      document and exits `0` reporting healthy.
+ *   6. The seam is STDIN, not stdout. Keying on stdout would make
+ *      `warpline advance | tee log` refuse for an operator sitting at the
+ *      keyboard, which is the one case a human is there to handle. The check
+ *      goes through `isInteractive`, whose truthiness test is deliberate: a
+ *      piped stream reports `isTTY` as `undefined` rather than `false`, so a
+ *      strict comparison calls a pipe interactive in exactly the case that
+ *      matters.
+ *   7. The preferences report is a SECOND read beside the validated one, not a
+ *      replacement for it. Every reader of preferences keeps its silent
+ *      fallback to defaults, which is right for all of them; what is not right
+ *      is that an operator who widened the retention window and fat-fingered
+ *      the JSON gets the built-in 30-day rule, has the evidence they were
+ *      preserving deleted, and is told so by an exit code of `0`. The report is
+ *      honest about its own reach: malformed JSON and wrong value types are
+ *      caught, a MISSPELLED key is not, because Zod strips unknown keys rather
+ *      than refusing them. The pruned count in the machine-readable output is
+ *      the only confirmation that a retention setting took effect.
+ *
+ * The preferences path comes from the accessor, which resolves to the home
+ * level. The engine derives its own one directory deeper when a host passes a
+ * state override, and that discrepancy is known and deliberately NOT fixed here
+ * — fixing it would put a preferences-resolution change and a retention-policy
+ * change in one bisect. This command passes no override, so both reads land on
+ * the same file and the shipped verb is unaffected.
  */
 import * as nodeUtil from 'node:util'
+import { existsSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
+import { preferencesPath, warplineHome } from '../lib/paths.js'
+import { PreferencesSchema } from '../lib/preferences.js'
 import { runAdvance } from '../runtime/engine.js'
 import type { AdvanceResult, PluginFsmState } from '../runtime/engine.js'
 import { advanceCounts, advanceExitCode } from '../runtime/exit-codes.js'
+import { isInteractive } from './prompt.js'
 
 export const USAGE = `Usage: warpline advance [--strict]
 
@@ -96,7 +136,74 @@ function render(payload: AdvancePayload, json?: boolean): string {
   return json === true ? JSON.stringify(payload) : renderHuman(payload)
 }
 
-export async function run(argv: string[]): Promise<number> {
+/**
+ * The one stream this command reads a property of, as a parameter.
+ *
+ * `{ isTTY?: boolean }` rather than a stream type on purpose: it is exactly what
+ * `isInteractive` takes, so a test drives both branches with a plain object and
+ * no pty is involved anywhere. `main` cannot inject it — the dispatcher forwards
+ * argv and nothing else — which is why these two branches are tested against
+ * `run` directly.
+ */
+export interface AdvanceIo {
+  stdin: { isTTY?: boolean }
+}
+
+/**
+ * Say so, once, when the preferences file exists and cannot be used.
+ *
+ * Modelled on the lock read rather than on `readJsonOrNull`: three states, and
+ * the middle one is the whole point. `readJsonOrNull` returns `null` for a
+ * missing file but RETHROWS on malformed JSON, which is one of the two cases
+ * this has to report rather than raise.
+ *
+ * Reports, never raises. A preferences file that cannot be parsed is not a
+ * reason to refuse an advance — every reader falls back to defaults and the run
+ * is valid. It is a reason to stop the fallback being silent.
+ */
+async function reportUnusablePreferences(): Promise<void> {
+  const path = preferencesPath()
+
+  let raw: string
+  try {
+    raw = await readFile(path, 'utf-8')
+  } catch {
+    // Absent is the ordinary first-run shape and every default legitimately
+    // applies. Any other read error belongs to the engine's own read a moment
+    // later, which is the one that decides whether the advance can proceed.
+    return
+  }
+
+  let reason: string | null = null
+  try {
+    const result = PreferencesSchema.safeParse(JSON.parse(raw))
+    if (!result.success) {
+      const issue = result.error.issues[0]
+      const where = issue?.path.join('.')
+      reason = issue
+        ? `${where === undefined || where === '' ? '(root)' : where}: ${issue.message}`
+        : 'does not match the preferences schema'
+    }
+  } catch (err) {
+    reason = err instanceof Error ? err.message : String(err)
+  }
+
+  if (reason === null) return
+
+  // One line, whatever the runtime's parser put in its message — a multi-line
+  // diagnostic in a scheduler's mail is where a single actionable sentence goes
+  // to be skimmed past.
+  process.stderr.write(
+    `warpline advance: ${path} could not be used (${reason.replace(/\s+/g, ' ')}) — running on ` +
+      `built-in defaults, retention included. Malformed JSON and wrong value types are caught ` +
+      `here; a misspelled key is not, because unknown keys are stripped rather than refused.\n`,
+  )
+}
+
+export async function run(
+  argv: string[],
+  io: AdvanceIo = { stdin: process.stdin },
+): Promise<number> {
   let strict = false
 
   try {
@@ -118,6 +225,23 @@ export async function run(argv: string[]): Promise<number> {
     )
     return 1
   }
+
+  // Above `runAdvance` because there is nowhere below it this could sit: home
+  // resolution creates nothing, and the home comes into existence at whichever
+  // writer reaches its own recursive mkdir first — the run log's or the
+  // artifact store's. There is no single create-on-first-write site to guard,
+  // so the guard goes where the decision is still one decision.
+  const home = warplineHome()
+  if (!existsSync(home) && !isInteractive(io.stdin)) {
+    process.stderr.write(
+      `warpline advance: no warpline home at ${home}, and stdin is not a terminal — refusing to ` +
+        `create one. Set WARPLINE_HOME to the home you meant, or run this once from a terminal ` +
+        `to create that path.\n`,
+    )
+    return 75
+  }
+
+  await reportUnusablePreferences()
 
   let result: AdvanceResult
   try {
