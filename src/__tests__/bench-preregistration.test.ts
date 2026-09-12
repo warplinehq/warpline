@@ -127,9 +127,32 @@ function preRegAncestry(repoRoot: string): AncestryFinding[] {
   // git logs newest first, so the oldest add is the last line.
   const method = methodAdds[methodAdds.length - 1]!
 
-  const resultAdds = git(repoRoot, ['log', '--diff-filter=A', '--format=%H', '--', RESULTS])
-    .split('\n')
-    .filter(Boolean)
+  // `--full-history -m` and not the plain form the method path uses above.
+  // git computes no diff for a merge commit unless it is asked to, so
+  // `--diff-filter=A` alone cannot match one, and a results file that enters
+  // the tree IN a merge is missing from the roster entirely. Both halves below
+  // then report clean while meaning they did not look: the ancestry loop
+  // iterates nothing and the freeze comparison is gated on this same roster.
+  // `-m` prints a merge once per parent, so the dedupe is load-bearing, and a
+  // Set preserves insertion order so the oldest add is still the last entry.
+  const resultAdds = [
+    ...new Set(
+      git(repoRoot, ['log', '--full-history', '-m', '--diff-filter=A', '--format=%H', '--', RESULTS])
+        .split('\n')
+        .filter(Boolean),
+    ),
+  ]
+
+  // Blind is not clean, and this is the roster where that mattered: a tracked
+  // result with no add commit in reach leaves the freeze nothing to measure
+  // against, which is indistinguishable from a clean tree. The method path
+  // already refuses this; this one used to be allowed to be silently empty.
+  const trackedResults = git(repoRoot, ['ls-files', '-z', '--', RESULTS]).split('\0').filter(Boolean)
+  if (trackedResults.length > 0 && resultAdds.length === 0) {
+    throw new Error(
+      `${trackedResults.length} tracked file(s) under ${RESULTS} and no commit that adds one: the freeze has nothing to compare against, which is blind rather than clean`,
+    )
+  }
 
   const findings: AncestryFinding[] = []
   for (const sha of resultAdds) {
@@ -159,25 +182,84 @@ function fixture(commits: { path: string; body: string }[]): { root: string; sha
   git(root, ['init', '-q'])
   const shas: string[] = []
   for (const [i, { path, body }] of commits.entries()) {
-    const full = join(root, path)
-    mkdirSync(dirname(full), { recursive: true })
-    writeFileSync(full, body)
-    git(root, ['add', '--', path])
-    git(root, [
-      '-c',
-      'user.name=fixture',
-      '-c',
-      'user.email=fixture@example.invalid',
-      '-c',
-      'commit.gpgsign=false',
-      'commit',
-      '-q',
-      '-m',
-      `fixture commit ${i}`,
-    ])
+    stage(root, path, body)
+    commit(root, `fixture commit ${i}`)
     shas.push(git(root, ['rev-parse', 'HEAD']))
   }
   return { root, shas }
+}
+
+/** Write a file inside a fixture and stage it. */
+function stage(root: string, path: string, body: string): void {
+  const full = join(root, path)
+  mkdirSync(dirname(full), { recursive: true })
+  writeFileSync(full, body)
+  git(root, ['add', '--', path])
+}
+
+/** Commit whatever is staged, with the identity `GIT_ENV` leaves unset. */
+function commit(root: string, message: string): void {
+  git(root, [
+    '-c',
+    'user.name=fixture',
+    '-c',
+    'user.email=fixture@example.invalid',
+    '-c',
+    'commit.gpgsign=false',
+    'commit',
+    '-q',
+    '-m',
+    message,
+  ])
+}
+
+/**
+ * The one shape a linear fixture cannot produce: the results entering the tree
+ * IN a merge commit rather than in a commit with one parent.
+ *
+ * `git log` computes no diff for a merge unless it is asked to, so
+ * `--diff-filter=A` cannot match one, and a results file that first appears in
+ * the merge itself is absent from an enumeration that does not ask. Every other
+ * fixture here is a straight line, which is why the gap survived review once.
+ *
+ *   * method edited after results   <- PRE-REGISTRATION.md rewritten
+ *   *   the merge adds the results  <- bench/results/run-0001.json enters here
+ *   |\
+ *   | * side
+ *   * | main
+ *   |/
+ *   * the method
+ */
+function mergeFixture(): string {
+  const root = mkdtempSync(join(tmpdir(), 'warpline-prereg-merge-'))
+  git(root, ['init', '-q'])
+
+  stage(root, METHOD.path, METHOD.body)
+  commit(root, 'the method, before any run')
+  // Read rather than assumed: GIT_CONFIG_GLOBAL is /dev/null here, so the
+  // initial branch is whatever this git's compiled-in default is.
+  const main = git(root, ['branch', '--show-current'])
+
+  git(root, ['checkout', '-q', '-b', 'side'])
+  stage(root, 'side.md', 'a change on the side branch\n')
+  commit(root, 'side')
+
+  git(root, ['checkout', '-q', main])
+  stage(root, 'main.md', 'a change on the main branch\n')
+  commit(root, 'main')
+
+  // --no-commit is what lets the results land in the merge commit itself. Its
+  // output is dropped for the reason `blobAt` drops git's stderr: "stopped
+  // before committing as requested" is this fixture working, and a suite that
+  // prints git chatter trains its reader to skim git chatter.
+  execFileSync('git', ['merge', '--no-ff', '--no-commit', 'side'], { cwd: root, env: GIT_ENV, stdio: 'ignore' })
+  stage(root, RESULT.path, RESULT.body)
+  commit(root, 'the merge that also adds the results')
+
+  stage(root, METHOD_EDITED.path, METHOD_EDITED.body)
+  commit(root, 'the method, rewritten once a result existed')
+
+  return root
 }
 
 const METHOD = { path: PRE_REG, body: 'the method, as written before any run\n' }
@@ -211,6 +293,47 @@ describe('the pre-registration is committed before the first result and frozen a
     const { root } = fixture([METHOD, RESULT, METHOD_EDITED])
     try {
       expect(preRegAncestry(root)).toEqual([{ kind: 'method-changed-after-results', path: PRE_REG }])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The same violation as above, arriving through a merge. Watched red before
+   * the enumeration was fixed: the plain `--diff-filter=A` form printed
+   * nothing, `git ls-files` listed one tracked result, and the scan returned an
+   * empty offender list over a method rewritten after that result landed.
+   *
+   * The graph shape is asserted and not assumed. Without a merge commit
+   * carrying the results this test would pass for the ordinary linear reason
+   * and prove nothing about the enumeration.
+   */
+  test('a method edited after results that entered the tree in a merge commit is still reported', () => {
+    const root = mergeFixture()
+    try {
+      expect(git(root, ['rev-list', '--merges', '--count', 'HEAD'])).toBe('1')
+      expect(git(root, ['log', '--diff-filter=A', '--format=%h', '--', RESULTS])).toBe('')
+      expect(git(root, ['ls-files', '--', RESULTS])).toBe(RESULT.path)
+
+      expect(preRegAncestry(root)).toEqual([{ kind: 'method-changed-after-results', path: PRE_REG }])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The one roster in this file that used to be allowed to be silently empty.
+   * A tracked result with no add commit in reach leaves the freeze with nothing
+   * to measure against, and that reads exactly like a clean tree.
+   */
+  test('a tracked result with no commit that adds it throws rather than reporting clean', () => {
+    const { root } = fixture([METHOD])
+    try {
+      stage(root, RESULT.path, RESULT.body)
+      expect(git(root, ['log', '--diff-filter=A', '--format=%h', '--', RESULTS])).toBe('')
+      expect(git(root, ['ls-files', '--', RESULTS])).toBe(RESULT.path)
+
+      expect(() => preRegAncestry(root)).toThrow(/blind rather than clean/)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
