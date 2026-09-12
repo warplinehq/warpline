@@ -74,7 +74,7 @@ import {
   writeEngineState,
 } from './engine-state-store.js'
 import type { Denial, EngineState, PendingGate, PluginRun } from '../schemas/engine-state.js'
-import { writeRunLog, pruneRunLogs, RETENTION_DAYS } from './run-log-store.js'
+import { writeRunLog, pruneRunLogs } from './run-log-store.js'
 import type { RunLog } from '../schemas/run-log.js'
 import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
 import {
@@ -1066,12 +1066,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // placing it after both refusals means the ordering does not depend on
   // that remaining true.
   //
-  // `RETENTION_DAYS` is imported rather than restated. This is the third
-  // record warpline keeps of a run, alongside the per-plugin run artifact and
-  // the engine's own run log, and three formats pruned on three literals is
-  // three retention rules that agree until somebody tunes one.
+  // The window comes from the operator's policy rather than a literal here.
+  // This is the third record warpline keeps of a run, alongside the per-plugin
+  // run artifact and the engine's own run log, and three formats pruned on
+  // three literals is three retention rules that agree until somebody tunes
+  // one.
   const runLogger = new JsonlRunLogger({ logsDir, runId: run_id })
-  await runLogger.prune(RETENTION_DAYS)
+  await runLogger.prune(prefs.retention.days)
   await runLogger.appendEvent({ level: 'info', event: 'run_start' })
 
   // 3b. Emit run_started event
