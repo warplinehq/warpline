@@ -95,6 +95,15 @@ describe('writeRunLog', () => {
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
+/**
+ * One clock reading for every fixture in this file.
+ *
+ * Aging each file off its own `Date.now()` gives two runs written in the same
+ * breath two different mtimes, so a tie-break case would never see a tie and
+ * would pass on insertion order while proving nothing.
+ */
+const NOW = Date.now()
+
 /** The operator's policy, with only the bound under test moved off its default. */
 function policy(over: Partial<RetentionPolicy> = {}): RetentionPolicy {
   return { days: 30, keep_per_plugin: 20, max_bytes: 104857600, ...over }
@@ -117,7 +126,7 @@ interface Fixture {
  * assertion is the arithmetic in the test.
  */
 async function writeRun(dir: string, id: string, fx: Fixture): Promise<void> {
-  const when = new Date(Date.now() - fx.ageDays * DAY_MS)
+  const when = new Date(NOW - fx.ageDays * DAY_MS)
   if (fx.raw !== undefined) {
     await writeFile(join(dir, `${id}.json`), fx.raw)
     await utimes(join(dir, `${id}.json`), when, when)
@@ -241,5 +250,169 @@ describe('pruneRunLogs', () => {
     expect(await pruneRunLogs(tmpDir, policy(), new Set())).toBe(2)
     expect(await pruneRunLogs(tmpDir, policy(), new Set())).toBe(0)
     expect((await readdir(tmpDir)).sort()).toEqual(['keep-me.json', 'keep-me.log'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// pruneRunLogs — the count and byte bounds, applied after the exemptions
+// ---------------------------------------------------------------------------
+
+/**
+ * A minimal document for the byte cases. Every id below is five characters, so
+ * `DOC_BYTES` is the same for all of them and the arithmetic in a budget is the
+ * arithmetic in the assertion rather than an incidental property of a fixture.
+ */
+const byteDoc = (id: string) => ({ run_id: id, status: 'complete' })
+const DOC_BYTES = JSON.stringify(byteDoc('xxxxx')).length
+
+/** An artifact document naming a plugin — what the per-plugin trim writes. */
+const artifactDoc = (id: string, plugin: string) => ({
+  run_id: id,
+  plugin,
+  status: 'success',
+  started_at: '2026-04-03T12:00:00Z',
+})
+
+describe('pruneRunLogs bounds', () => {
+  let tmpDir: string
+
+  beforeEach(async () => {
+    tmpDir = await mkdtemp(join(tmpdir(), 'run-log-bounds-'))
+  })
+
+  afterEach(async () => {
+    await rm(tmpDir, { recursive: true, force: true })
+  })
+
+  it('evicts nothing by the byte rule when the survivor set is within budget', async () => {
+    for (const id of ['run-a', 'run-b', 'run-c']) {
+      await writeRun(tmpDir, id, { doc: byteDoc(id), logBytes: 1_000, ageDays: 1 })
+    }
+
+    const pruned = await pruneRunLogs(tmpDir, policy({ max_bytes: 1_000_000 }), new Set())
+
+    expect(pruned).toBe(0)
+    expect(await readdir(tmpDir)).toHaveLength(6)
+  })
+
+  it('counts a run as the sum of both its files, not the document alone', async () => {
+    await writeRun(tmpDir, 'solo1', { doc: byteDoc('solo1'), logBytes: 1_000, ageDays: 1 })
+
+    // The document alone fits this budget. The pair does not.
+    const pruned = await pruneRunLogs(tmpDir, policy({ max_bytes: DOC_BYTES + 500 }), new Set())
+
+    expect(pruned).toBe(1)
+    expect(await readdir(tmpDir)).toEqual([])
+  })
+
+  it('treats a total exactly equal to the budget as within budget', async () => {
+    await writeRun(tmpDir, 'solo1', { doc: byteDoc('solo1'), logBytes: 1_000, ageDays: 1 })
+
+    const pruned = await pruneRunLogs(tmpDir, policy({ max_bytes: DOC_BYTES + 1_000 }), new Set())
+
+    expect(pruned).toBe(0)
+    expect((await readdir(tmpDir)).sort()).toEqual(['solo1.json', 'solo1.log'])
+  })
+
+  it('evicts oldest-first, one run at a time, until the total is within budget', async () => {
+    await writeRun(tmpDir, 'run-a', { doc: byteDoc('run-a'), logBytes: 1_000, ageDays: 3 })
+    await writeRun(tmpDir, 'run-b', { doc: byteDoc('run-b'), logBytes: 1_000, ageDays: 2 })
+    await writeRun(tmpDir, 'run-c', { doc: byteDoc('run-c'), logBytes: 1_000, ageDays: 1 })
+
+    const oneRun = DOC_BYTES + 1_000
+    const pruned = await pruneRunLogs(tmpDir, policy({ max_bytes: 2 * oneRun }), new Set())
+
+    expect(pruned).toBe(1)
+    expect((await readdir(tmpDir)).sort()).toEqual(['run-b.json', 'run-b.log', 'run-c.json', 'run-c.log'])
+  })
+
+  it('never evicts a delegated or protected run by the byte rule, even as the two oldest and largest', async () => {
+    // The fixture this rule is most easily written wrong against: the two
+    // records worth protecting are the two oldest and the two largest, and a
+    // byte loop written over the raw listing takes them first.
+    await writeRun(tmpDir, 'dele1', { doc: delegatedDoc('dele1'), logBytes: 20_000, ageDays: 400 })
+    await writeRun(tmpDir, 'prot1', { doc: byteDoc('prot1'), logBytes: 20_000, ageDays: 399 })
+    await writeRun(tmpDir, 'run-c', { doc: byteDoc('run-c'), logBytes: 100, ageDays: 1 })
+
+    const pruned = await pruneRunLogs(tmpDir, policy({ max_bytes: 1_000 }), new Set(['prot1']))
+
+    expect(pruned).toBe(1)
+    expect((await readdir(tmpDir)).sort()).toEqual(['dele1.json', 'dele1.log', 'prot1.json', 'prot1.log'])
+  })
+
+  it('evicts every non-exempt survivor at a budget of zero and leaves every exempt one', async () => {
+    await writeRun(tmpDir, 'dele1', { doc: delegatedDoc('dele1'), logBytes: 100, ageDays: 1 })
+    await writeRun(tmpDir, 'prot1', { doc: byteDoc('prot1'), logBytes: 100, ageDays: 1 })
+    await writeRun(tmpDir, 'run-c', { doc: byteDoc('run-c'), logBytes: 100, ageDays: 1 })
+
+    const pruned = await pruneRunLogs(tmpDir, policy({ max_bytes: 0 }), new Set(['prot1']))
+
+    expect(pruned).toBe(1)
+    expect((await readdir(tmpDir)).sort()).toEqual(['dele1.json', 'dele1.log', 'prot1.json', 'prot1.log'])
+  })
+
+  it('lets one large transcript evict several small runs — the accepted cost, asserted', async () => {
+    await writeRun(tmpDir, 'bigxx', { doc: byteDoc('bigxx'), logBytes: 50_000, ageDays: 1 })
+    for (const [id, age] of [['sml-a', 5], ['sml-b', 4], ['sml-c', 3]] as const) {
+      await writeRun(tmpDir, id, { doc: byteDoc(id), logBytes: 1_000, ageDays: age })
+    }
+
+    // A budget the big run exactly fills: the three small ones all go.
+    const pruned = await pruneRunLogs(tmpDir, policy({ max_bytes: 50_000 + DOC_BYTES }), new Set())
+
+    expect(pruned).toBe(3)
+    expect((await readdir(tmpDir)).sort()).toEqual(['bigxx.json', 'bigxx.log'])
+  })
+
+  it('keeps the newest N non-exempt runs, with exempt runs not consuming the count', async () => {
+    for (const [id, age] of [['cnt-a', 5], ['cnt-b', 4], ['cnt-c', 3], ['cnt-d', 2], ['cnt-e', 1]] as const) {
+      await writeRun(tmpDir, id, { doc: byteDoc(id), logBytes: 10, ageDays: age })
+    }
+    await writeRun(tmpDir, 'dele1', { doc: delegatedDoc('dele1'), logBytes: 10, ageDays: 1 })
+
+    const pruned = await pruneRunLogs(tmpDir, policy({ keep_per_plugin: 2 }), new Set())
+
+    // Three of the five non-exempt go. The delegated run is not in the set
+    // being sliced, so it does not push a sixth run over the cap.
+    expect(pruned).toBe(3)
+    expect((await readdir(tmpDir)).sort()).toEqual([
+      'cnt-d.json', 'cnt-d.log', 'cnt-e.json', 'cnt-e.log', 'dele1.json', 'dele1.log',
+    ])
+  })
+
+  it('applies the count bound within one plugin rather than across the directory', async () => {
+    for (const plugin of ['alpha', 'bravo']) {
+      for (const age of [3, 2, 1]) {
+        const id = `${plugin}-${age}`
+        await writeRun(tmpDir, id, { doc: artifactDoc(id, plugin), logBytes: 10, ageDays: age })
+      }
+    }
+    for (const age of [3, 2, 1]) {
+      const id = `engine-${age}`
+      await writeRun(tmpDir, id, { doc: byteDoc(id), logBytes: 10, ageDays: age })
+    }
+
+    const pruned = await pruneRunLogs(tmpDir, policy({ keep_per_plugin: 2 }), new Set())
+
+    // One per bucket, not four out of nine. A directory-wide cap here would
+    // evict artifacts the per-plugin trim had just decided to keep.
+    expect(pruned).toBe(3)
+    const left = (await readdir(tmpDir)).filter((f) => f.endsWith('.json')).sort()
+    expect(left).toEqual(['alpha-1.json', 'alpha-2.json', 'bravo-1.json', 'bravo-2.json', 'engine-1.json', 'engine-2.json'])
+  })
+
+  it('breaks ties in age by run id, not by the order the directory listed them', async () => {
+    // Identical mtimes, written in an order that disagrees with id order, so
+    // keeping `tie-c` cannot be insertion order wearing a tie-break's clothes.
+    // The total order is (age ascending, id ascending); the newest-first slice
+    // therefore keeps the highest id.
+    for (const id of ['tie-c', 'tie-a', 'tie-b']) {
+      await writeRun(tmpDir, id, { doc: byteDoc(id), logBytes: 10, ageDays: 1 })
+    }
+
+    const pruned = await pruneRunLogs(tmpDir, policy({ keep_per_plugin: 1 }), new Set())
+
+    expect(pruned).toBe(2)
+    expect((await readdir(tmpDir)).sort()).toEqual(['tie-c.json', 'tie-c.log'])
   })
 })
