@@ -168,17 +168,20 @@ export const PluginRunSchema = z.object({
    * would have to interpret.
    *
    * The `run_id` inside it may name a run log that has been pruned — logs go
-   * at 30 days by mtime. That is a dangling pointer by design: it resolves to
-   * not-retained, and deleting the pointer to avoid the case would throw away
-   * the only record that the Output existed.
+   * under the operator's configured retention policy. That is a dangling
+   * pointer by design: it resolves to not-retained, and deleting the pointer to
+   * avoid the case would throw away the only record that the Output existed. A
+   * dangling pointer is also not protective — the prune exempts a run a pending
+   * approval gate names, and nothing else.
    *
    * The same argument covers a case it was not written for: a later run of the
    * same plugin that produced NO Output. That run has said nothing about what
    * the plugin produced — this field is a fact about the plugin, not about its
    * last run — so dropping the key would again throw away the only record that
-   * the Output existed, and this time on the ordinary path rather than after 30
-   * days. The engine therefore carries the prior Output forward at every write,
-   * keyed on the run producing nothing and never on how the run ended: a throw,
+   * the Output existed, and this time on the ordinary path rather than after
+   * the retention window. The engine therefore carries the prior Output forward
+   * at every write, keyed on the run producing nothing and never on how the run
+   * ended: a throw,
    * a returned `failed`, and a success with an empty `artifacts_produced` are
    * one case. Preserving on only some of them would make this field mean a
    * fourth thing the sentence above does not say.

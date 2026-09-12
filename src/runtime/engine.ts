@@ -1053,8 +1053,24 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // Guardrail: review_gate — if enabled, treat all autonomous plugins as supervised
   const reviewGateActive = prefs.review_gate
 
-  // 3. Prune old run logs
-  await pruneRunLogs(runsDir)
+  // 3. Prune old run logs.
+  //
+  // At the TOP of the advance, and it stays here. A consumer reads the run-log
+  // path off disk AFTER the advance returns, so a byte eviction at the end of
+  // an advance with a small budget would delete the log that consumer needs.
+  // Accepted cost: an advance is bounded by what it inherited, not by what it
+  // is about to write.
+  //
+  // The protected set is the pending gates' run ids and nothing else. A
+  // `last_output` pointer and a stored last run id are documented to dangle by
+  // design; treating either as protective would be retain-forever by accident.
+  // Built from the state already read above rather than from a second read.
+  const protectedRunIds = new Set(state.pending_gates.map((gate) => gate.run_id))
+
+  // Held rather than discarded. The count is the first link of a thread that
+  // ends on the advance's result and in its machine-readable output; nothing
+  // consumes it yet, and a bare call is how a count stops being threaded.
+  const prunedRunLogs = await pruneRunLogs(runsDir, prefs.retention, protectedRunIds)
 
   // 3a. The headless JSONL run log.
   //

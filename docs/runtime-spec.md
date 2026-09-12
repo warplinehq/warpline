@@ -228,7 +228,8 @@ its temporality stops rather than running under a policy nobody declared.
 
 Versioned history is bounded by run retention, and the bound is not generous:
 an older Output version is reachable exactly while its producing run log
-survives, and run logs are pruned when their mtime is older than 30 days.
+survives, and run logs are pruned under the operator's configured retention
+policy (§ 6).
 
 `append` is a known deferred third value — a run adding to the previous Output
 rather than replacing or superseding it. It is not implemented. It is recorded
@@ -761,43 +762,81 @@ an advance refused for an unreadable root leaves the home byte-identical, as it
 did before this format existed.
 
 Retention is the **same window** as `pruneRunLogs`, read from the **same
-constant** rather than restated — a daily file whose mtime is older than that
-window is unlinked at the start of the next advance. Three formats pruned on
-three literals would be three retention rules that agree until somebody tunes
-one.
+preferences key** (`retention.days`, § 6) rather than restated — a daily file
+whose mtime is older than that window is unlinked at the start of the next
+advance. Three formats pruned on three literals would be three retention rules
+that agree until somebody tunes one.
 
 ## 6. Retention
 
-Last 20 artifacts per plugin. On every invocation that completes with
-`persistArtifact: true`, `trimPluginHistory(pluginName, 20)` runs after the
-terminal write. It reads every `<run_id>.json` in the runs directory,
-filters by plugin, sorts by `started_at` DESC, and deletes both the JSON
-and its `.log` sibling for anything past the 20 newest. Deletion is atomic
-per-run (the JSON and log are unlinked together) so no orphaned `.log` files
-accumulate.
+Three bounds, all of them the operator's, set under `retention` in
+`<home>/preferences.json`:
 
-Applies to NEW runs only. The 51 pre-existing artifacts from pre-121 engine
-runs are left alone; a one-shot cleanup is tracked as deferred work.
+| Key | Default | What it bounds |
+|---|---|---|
+| `retention.days` | `30` | how long a record survives, by mtime |
+| `retention.keep_per_plugin` | `20` | how many records survive, per plugin |
+| `retention.max_bytes` | `104857600` | the total size of `<home>/runs/` |
 
-### The other deletion path
+One policy object, read by every path that deletes. Three record formats pruned
+on three literals would be three retention rules that agree until somebody tunes
+one.
 
-The 20-newest trim is not the only thing that deletes out of `<home>/runs/`,
-and reading this section as though it were will mislead you about what survives.
+### The two deletion paths
 
-`trimPluginHistory` runs only under `persistArtifact: true`. The manual path,
-`warpline run`, passes it. **An engine advance does not, deliberately** — an
-advance writes a `RunLog` rather than a per-plugin `RunArtifact`, so the
-20-newest trim never sees an advance's output at all.
+Two things delete out of `<home>/runs/`, and reading this section as though
+either were the only one will mislead you about what survives.
 
-What deletes an advance's run log is `pruneRunLogs`, and its rule is different:
-any `<run_id>.json` in the runs directory whose **mtime is older than 30 days**,
-regardless of plugin or count. That is the retention bound anything holding a
-`run_id` is subject to — a versioned Output's history, and a `last_output`
-pointer both.
+`trimPluginHistory` runs after the terminal write of any invocation that
+completes with `persistArtifact: true`. The manual path, `warpline run`, passes
+it. **An engine advance does not, deliberately** — an advance writes a `RunLog`
+rather than a per-plugin `RunArtifact`, so this trim never sees an advance's
+output at all. It reads every `<run_id>.json` in the runs directory, filters by
+plugin, sorts by `started_at` DESC, and keeps the `retention.keep_per_plugin`
+newest.
 
-The two also differ in what they leave behind. The 20-newest trim unlinks the
-JSON and its `.log` sibling together. `pruneRunLogs` unlinks the JSON only, so
-a pruned run can strand its own transcript.
+`pruneRunLogs` runs at the top of every advance, over the whole runs directory.
+It deletes **runs, not files**: a run id is enumerated from the union of the
+`.json` and `.log` stems of one directory listing, so a transcript whose
+document is already gone is reachable rather than immortal, and is reclaimed on
+the first advance after this rule shipped.
+
+Two kinds of record are removed from its candidate set before any bound applies,
+and a third is never a candidate at all:
+
+- a run whose document reports the `delegated` status — a result parked pending
+  a human's approval;
+- a run named by a pending approval gate. A stored `run_id` that is not a
+  pending gate's does **not** protect: a `last_output` pointer and a versioned
+  Output's history are documented to dangle (§ 10), and treating a dangling
+  pointer as protective would be retain-forever by accident;
+- a document that will not parse, which is left on disk so an operator can
+  inspect it by hand.
+
+The three bounds then apply, in this order, to what is left: days, then count,
+then bytes. The byte bound is a per-home total with oldest-first eviction, and
+the size counted for a run is its document **plus** its transcript — the
+transcript is normally the larger of the two, so a budget counting only the
+document would not bound this directory. Runs at equal ages are ordered by run
+id, never by the order the directory happened to list them.
+
+Exempt and unparseable records count toward the total even though nothing can
+evict them. That has a consequence worth stating rather than discovering: a home
+whose exempt records alone exceed `retention.max_bytes` evicts every ordinary
+run and is still over budget. A single large legitimate transcript can likewise
+evict several small runs. The prune's own test suite in this repository is what
+holds all of the above — its byte-bound case carries a `delegated` run and a
+gate-referenced run as the two oldest and largest records in its fixture, which
+is the case an eviction loop written over the raw directory listing gets wrong
+while passing.
+
+**Both paths unlink the pair.** A run's `<run_id>.json` and its `<run_id>.log`
+are deleted together on either path, so neither can strand a transcript.
+
+**Confirming a retention setting took effect is an observation, not a read.**
+Unknown keys in `preferences.json` are stripped rather than refused, so a
+misspelled key parses successfully and nothing warns. Set the bound, run an
+advance, and list `<home>/runs/`.
 
 ## 7. HTTP / SSE surface (not in this repo)
 
@@ -1514,8 +1553,9 @@ about which run they describe.
 unambiguous; reading an empty object means guessing whether the plugin produced
 nothing or the writer failed.
 
-The pointer may dangle. Its `run_id` names a run log, and run logs are pruned at
-30 days by mtime (§ 6), so a pointer can outlive the run it names. That resolves
+The pointer may dangle. Its `run_id` names a run log, and run logs are pruned
+under the operator's configured retention policy (§ 6), so a pointer can outlive
+the run it names. A pointer is not protective — § 6 says why. That resolves
 to "run no longer retained" rather than an error, and nothing deletes the
 pointer to avoid the case — the pointer is the only remaining record that the
 Output existed.
