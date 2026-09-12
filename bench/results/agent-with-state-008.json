@@ -1,0 +1,28 @@
+{
+  "arm": "agent-with-state",
+  "iteration": 8,
+  "arm_order_index": 1,
+  "cold": false,
+  "disposition": "passed",
+  "truncation_subtype": null,
+  "tokens": {
+    "input": 14,
+    "output": 7587,
+    "cache_creation": 18026,
+    "cache_read": 141954
+  },
+  "wall_clock_ms": 103296.520792,
+  "runtime_ms": null,
+  "consumer_ms": null,
+  "parked_handoffs": 0,
+  "graded": {
+    "announce-fanout": true,
+    "daily-digest": true,
+    "draft-writer": true,
+    "metrics-rollup": true
+  },
+  "git_sha": "e6cd569ad8cbe5a8b2fc6bb62439f5f1da2712b1",
+  "package_version": "0.3.4",
+  "claude_cli_version": "2.1.269 (Claude Code)",
+  "model_id": "claude-opus-5"
+}

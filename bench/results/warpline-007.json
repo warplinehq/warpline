@@ -1,0 +1,28 @@
+{
+  "arm": "warpline",
+  "iteration": 7,
+  "arm_order_index": 0,
+  "cold": false,
+  "disposition": "passed",
+  "truncation_subtype": null,
+  "tokens": {
+    "input": 14,
+    "output": 4281,
+    "cache_creation": 15296,
+    "cache_read": 137345
+  },
+  "wall_clock_ms": 78390.35025099991,
+  "runtime_ms": 8.732166999951005,
+  "consumer_ms": 78381.61808399996,
+  "parked_handoffs": 2,
+  "graded": {
+    "announce-fanout": true,
+    "daily-digest": true,
+    "draft-writer": true,
+    "metrics-rollup": true
+  },
+  "git_sha": "e6cd569ad8cbe5a8b2fc6bb62439f5f1da2712b1",
+  "package_version": "0.3.4",
+  "claude_cli_version": "2.1.269 (Claude Code)",
+  "model_id": "claude-opus-5"
+}
