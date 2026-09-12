@@ -28,9 +28,44 @@ export const PreferencesSchema = z.object({
     })
     .nullable()
     .default(null),
+
+  /**
+   * How much run history survives, as three bounds an operator sets.
+   *
+   * There is more than one run-record format under the warpline home and each
+   * one prunes itself: the run-log prune, the JSONL logger prune, and the
+   * per-plugin artifact trim. A literal at each call site would be three
+   * retention rules that agree today and drift the first time one of them is
+   * tuned, which is why this is one object the three of them read.
+   *
+   * `max_bytes` is a per-home total over the runs directory with oldest-first
+   * eviction, applied AFTER the day and count rules have run. Accepted cost:
+   * one large legitimate log can evict several small ones. 100 MiB is a chosen
+   * starting point and nothing measured it.
+   *
+   * Not nullable, unlike `quiet_hours`. Quiet hours are opt-in and default to
+   * off. Retention always applies — a null retention block would be the
+   * retain-forever this milestone refuses by name.
+   */
+  retention: z
+    .object({
+      /** Days a run record survives. */
+      days: z.number().int().min(0).default(30),
+      /** Artifacts kept per plugin by the run-artifact trim. */
+      keep_per_plugin: z.number().int().min(0).default(20),
+      /** Whole-home byte budget over the runs directory. 0 is a budget. */
+      max_bytes: z.number().int().min(0).default(104857600),
+    })
+    // `.prefault` rather than `.default`: zod 4 returns a `.default` value
+    // as-is without parsing it, so `.default({})` would yield an empty object
+    // and none of the three field defaults above would ever fire.
+    .prefault({}),
 })
 
 export type Preferences = z.infer<typeof PreferencesSchema>
+
+/** The retention bounds as one value, so a prune takes one parameter not three. */
+export type RetentionPolicy = Preferences['retention']
 
 export const DEFAULT_PREFERENCES: Preferences = PreferencesSchema.parse({})
 
