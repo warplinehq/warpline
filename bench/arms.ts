@@ -323,7 +323,14 @@ export function resolveDisposition({
   parsed,
   graded,
 }: {
-  parsed: ParsedClaudeResult
+  /**
+   * Taken STRUCTURALLY, as the statistics module takes its own input, and for
+   * the same reason. Only two fields decide a disposition, and the warpline arm
+   * dispositions over its SUMMED classes rather than the consumer session's own
+   * — so a caller has to be able to hand in the figures the record will carry.
+   * A whole parsed result still satisfies this, and every existing caller does.
+   */
+  parsed: Pick<ParsedClaudeResult, 'subtype' | 'tokens'>
   graded: GradeResult
 }): ResolvedDisposition {
   if (TRUNCATED_SUBTYPES.has(parsed.subtype)) {
