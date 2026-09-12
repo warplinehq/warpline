@@ -1116,7 +1116,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
     // Guardrail: quiet hours — skip run if active (unless dryRun or force)
     if (isQuietHours(prefs) && !dryRun && !force) {
-      console.log('[engine] Quiet hours active — skipping run')
+      // stderr, not stdout: the output stream is the document. `warpline
+      // advance --json` emits one JSON object there and a monitor outside this
+      // repository parses it, so a diagnostic above that object is a parse
+      // failure nobody can patch from here — and quiet hours is a NORMAL arm,
+      // so it would arrive on an ordinary scheduled night. The same argument
+      // the plan command makes about its own cycle report.
+      process.stderr.write('[engine] Quiet hours active — skipping run\n')
       // The zero-manifest verdict is the same on this path as on the normal
       // one. A skipped cycle over a root that loaded nothing is still a root
       // that loaded nothing, and a carve-out here would be a quiet hour in
@@ -1600,8 +1606,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               : manifest.autonomy_level
           if (effectiveAutonomy === 'supervised') {
             if (dryRun) {
-              // Dry-run: log "would pause here" and continue
-              console.log(`[engine] would pause here for supervised plugin: ${pluginName}`)
+              // Dry-run: report "would pause here" and continue. On stderr like
+              // the quiet-hours line above, even though `advance` cannot reach
+              // this arm — a dry-run flag on that verb is refused by name. A
+              // source guard that allows one exception is a guard with a hole.
+              process.stderr.write(
+                `[engine] would pause here for supervised plugin: ${pluginName}\n`,
+              )
               plugin_states.set(pluginName, 'completed')
               const dryRunElapsed = Date.now() - entryStart
               plugin_entries.push({
