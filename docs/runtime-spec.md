@@ -1619,7 +1619,7 @@ it. The flag moves the gated case and nothing else.
 nothing was written: the home is byte-identical to what it was before the command
 started, so there is no half-run to explain and nothing to reconcile.
 
-As of this section's commit there are two causes.
+There are three causes, and all three have code behind them.
 
 The first is a throw out of the advance itself — which includes an
 `engine-state.json` that fails validation, since that read happens inside the
@@ -1639,9 +1639,124 @@ The refusal is narrow on purpose: it refuses to **create** a home, never to
 ordinary scheduled case and it proceeds, which is the entire point of running
 this command from a timer.
 
+The third is contention on the run lock: another advance is already running
+against this home. The message names the holder and says that nothing ran. This
+one is also "retry later" — the next tick is the retry, and no flag exists to
+break a lock somebody else is holding. § 12 is the whole of it.
+
 ### Unknown codes
 
 New codes may be added over time. A consumer MUST treat any unknown non-zero code
 as failure. Do not read the table above as a closed set: a wrapper that
 special-cases `0`, `1` and `75` and falls through to success on everything else
 will report a green fleet on the first code this document adds.
+
+## 12. The run lock
+
+Two advances against one warpline home must not both write it. `warpline advance`
+takes a lock for the length of the run, and refuses rather than waits.
+
+**The file is `.lock`, beside `engine-state.json` in the home's state
+directory.** It is JSON, and it records when it was taken, the run id that took
+it, the mode (`advance`), and the holding process id — which is `null` when the
+holder is an orchestrator session rather than a long-lived process.
+
+**Acquisition is an exclusive create, not a check followed by a write.** There
+is no window in which two processes both see an absent lock and both proceed.
+
+**A stale lock heals; a live one does not.** A lock is stale when it is more
+than two hours old, or when it names a process id that is no longer running. On
+contention the acquire reads the holder back, and if it is stale it breaks it and
+retries exactly once. A holder that is neither — and a lock file that cannot be
+read back as a lock at all — is refused rather than broken. `lock.test.ts` in
+this repository holds every arm of that, including the two that refuse to unlink
+a file they could not parse.
+
+**Contention exits `75` and names the holder** (§ 11). The message says a
+process id, or says an orchestrator session, and it says that nothing ran. It
+never says the word for an absent value in place of a process id. `advance.test.ts`
+holds both arms, and asserts in each that the holder's lock is still on disk and
+that no run appeared under the home.
+
+**The lock is taken below the plugin-root refusal and above the state read, and
+released in a single `finally` below the return.** That placement is what keeps
+two promises at once: a plugin root that cannot be read is refused before any
+lock exists, and every write the advance makes happens while it holds one. The
+release covers every way out, including the quiet-hours early return and a throw
+from inside the span. `engine-lock.test.ts` holds all three of those arms, and
+the one that matters most is the quiet-hours one: a lock leaked there is
+unhealable for two hours, which under a fifteen-minute timer is eight
+consecutive advances reporting "retry later" to a monitor that reads them as
+merely busy.
+
+### What the lock is and is not for
+
+The lock is **not** what stops a scheduler starting a second copy of the job.
+Two of the three schedulers this runtime is deployed under already do that
+themselves, and their own documentation says so.
+
+- **systemd does not double-fire.** `systemd.timer(5)`: "in case the unit to
+  activate is already active at the time the timer elapses it is not restarted,
+  but simply left running. There is no concept of spawning new service instances
+  in this case."
+- **launchd does not double-fire under `StartInterval`.** `launchd.plist(5)`:
+  "If the job is running during an interval firing, that interval firing will
+  likewise be missed."
+- **cron makes no such statement, in either direction.** Neither `crontab(5)` nor
+  `cron(8)` says anything about skipping a firing while a previous instance of
+  the same job is still running. Treat cron as able to overlap.
+
+So the lock is load-bearing for **cron**, where it is the only protection an
+operator has, and for a **manual advance racing a scheduled one** on all three
+platforms — nothing in any scheduler knows about a human at a terminal. Read it
+that way rather than as a guarantee about schedulers in general, which is a
+guarantee this runtime cannot cash.
+
+### Two locks, and neither moves
+
+There are two lock files in the state directory and they are not the same thing.
+
+`.lock` is the one this section is about: one advance at a time, per home.
+`.state.lock` serialises read-modify-writes of the engine state document, and
+its holders are the board and the `deny` verb. They have different lifetimes and
+different holders.
+
+Neither collapses into the other. The state lock is non-reentrant, and the board
+takes it around a call that writes the state document, so the run lock cannot be
+moved down into that writer without deadlocking against a lock the same process
+already holds. An advance holds its own lock across its state write, which fixes
+the acquisition order as run-lock-first. That order is a fact about the code as
+it stands, not a lock hierarchy the runtime enforces.
+
+### The accepted cost
+
+**No flag breaks a lock another process is holding.** There is no `--force` and
+there will not be one: it is the single way to get two writers onto one home,
+which is the failure the lock exists to prevent. The cost, stated rather than
+discovered: a genuinely wedged live process blocks every advance against that
+home until the two-hour window expires. That is the choice, and the two-hour
+window and the dead-process check are what bound it. An operator who knows the
+holder is gone can delete `.lock` by hand; an operator who is not sure should
+wait for the window.
+
+**An interrupted advance can leave a plugin running.** A `130` reports that the
+command was interrupted, and the plugin that was in flight may run to completion
+in a process the operator believes is dead. The lock leaked by that interruption
+is reclaimed by the two-hour heal, which is why the two facts belong beside each
+other.
+
+### What this does not close: issue #25
+
+**The run lock serialises advance against advance, and nothing more.** It does
+not close issue #25. An advance reads the engine state document at the top and
+writes it at the end, a window that spans plugin execution, and it takes no state
+lock over that window — holding one there would block the board for the length of
+a run. Closing #25 means applying the advance's changes as deltas onto a fresh
+read taken inside the state lock, which this runtime does not do and which is
+tracked as future work rather than implied here to be done.
+
+**Which file each writer writes, since this has been recorded wrongly before.**
+The `deny` verb and the board write the engine state document, under the state
+lock. The `approve` verb does not write that document at all: it reads it, and
+writes the session-approval file — `.session-approval` at the root of the home.
+The run lock guards neither of them.
