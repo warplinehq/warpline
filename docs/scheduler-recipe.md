@@ -118,10 +118,13 @@ Key by key:
 - **`Type=oneshot`**, and it is not cosmetic. `systemd.service(5)`, `Type=`:
   "Behavior of `oneshot` is similar to `exec`; however, the service manager will
   consider the unit up after the main process exits." The default it replaces
-  reports far earlier — "`simple` … the service manager will consider the unit
-  started immediately after the main service process has been forked off (i.e.
-  immediately after `fork()`, … before the new process has called `execve()` to
-  invoke the actual service binary)" — which is before `advance` has run a line.
+  reports far earlier — "`simple` (the default if `ExecStart=` is specified but
+  neither `Type=` nor `BusName=` are, and credentials are not used), the service
+  manager will consider the unit started immediately after the main service
+  process has been forked off (i.e. immediately after `fork()`, and before
+  various process attributes have been configured and in particular before the
+  new process has called `execve()` to invoke the actual service binary)" —
+  which is before `advance` has run a line.
   Expect a oneshot service to read as dead rather than active between ticks; the
   same entry says it "will never enter `active` unit state … it will not show up
   as started afterwards, but as dead." That is correct for a tick job. Do not add
