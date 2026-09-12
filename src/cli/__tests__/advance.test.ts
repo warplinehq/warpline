@@ -665,3 +665,178 @@ describe('a lock somebody else holds', () => {
     expect(existsSync(lock())).toBe(false)
   })
 })
+
+/**
+ * `--json`: one payload, one document, one stream.
+ *
+ * The in-process stdout capture these cases rest on is only truthful because
+ * the engine's two diagnostics were moved to stderr, and it stays truthful only
+ * because `src/runtime/__tests__/engine-stdout.test.ts` keeps them there. That
+ * guard reads the engine's source rather than exercising it, which looks weaker
+ * and reaches further: a patched `process.stdout.write` does not intercept
+ * `console.log` in the test runner's own scope, so everything below would read
+ * clean over a dirty pipe. Do not delete it on the grounds that this file
+ * covers the same ground — this file INHERITS its reach rather than duplicating
+ * it.
+ */
+describe('main([advance, --json])', () => {
+  /** The parsed document, plus the proof it was the only thing on the stream. */
+  const soleDocument = (stdout: string): Record<string, unknown> => {
+    expect(stdout.endsWith('\n')).toBe(true)
+    // Exactly one newline-terminated document, with nothing above or below it.
+    // A diagnostic line on this stream is a parse failure in a monitor nobody
+    // can patch from here.
+    expect(stdout.split('\n').filter((line) => line !== '')).toHaveLength(1)
+    return JSON.parse(stdout) as Record<string, unknown>
+  }
+
+  /** The dead-man file for the advance that just ran, from the home default. */
+  const readDeadMan = async (): Promise<Record<string, unknown>> =>
+    JSON.parse(await readFile(join(home.stateDir, 'last-successful-advance'), 'utf-8')) as Record<
+      string,
+      unknown
+    >
+
+  test('one due plugin: stdout is a single JSON document and nothing else', async () => {
+    await writePlugin(home, 'alpha')
+
+    const { code, stdout, stderr } = await capture(() => main(['advance', '--json']))
+
+    expect(stderr).toBe('')
+    expect(code).toBe(0)
+
+    const doc = soleDocument(stdout)
+
+    // Enumerated rather than spot-checked. This document is parsed outside this
+    // repository, and a field added to it is a field somebody's detector can
+    // start reading — the ones carrying free text are the ones that leak. It
+    // carries a run id, a status, three integers, a code, and the plugin list
+    // the human rendering is built from: a name and a state token each, no
+    // summary, no output, no path.
+    expect(Object.keys(doc).sort()).toEqual([
+      'exit_code',
+      'failed',
+      'gated',
+      'plugins',
+      'pruned',
+      'run_id',
+      'status',
+    ])
+    expect(typeof doc.run_id).toBe('string')
+    expect(doc.status).toBe('complete')
+    expect(doc.gated).toBe(0)
+    expect(doc.failed).toBe(0)
+    expect(doc.exit_code).toBe(0)
+    // Bare strings, not objects a consumer has to unwrap.
+    expect(doc.plugins).toEqual([{ name: 'alpha', state: 'completed' }])
+  })
+
+  test('without the flag the same advance renders for a human and emits no JSON', async () => {
+    await writePlugin(home, 'alpha')
+
+    const { stdout } = await capture(() => main(['advance']))
+
+    expect(stdout).toContain('alpha: completed')
+    expect(stdout).toContain('Gated: 0  Failed: 0  Exit: 0')
+    expect(() => JSON.parse(stdout)).toThrow()
+  })
+
+  test('an advance that pruned nothing emits the count as 0, key present', async () => {
+    await writePlugin(home, 'alpha')
+
+    const doc = soleDocument((await capture(() => main(['advance', '--json']))).stdout)
+
+    // Present-and-zero, never omitted: a monitor has to be able to tell
+    // "nothing to prune" from "this warpline does not report pruning".
+    expect(Object.keys(doc)).toContain('pruned')
+    expect(doc.pruned).toBe(0)
+  })
+
+  test('an advance that pruned three runs emits three, and it is the prune own count', async () => {
+    await writePlugin(home, 'alpha')
+    // Nothing survives its bucket, so all three pre-existing records are doomed.
+    await writeFile(
+      join(home.root, 'preferences.json'),
+      JSON.stringify({ review_gate: false, retention: { keep_per_plugin: 0 } }),
+    )
+    for (const id of ['old-a', 'old-b', 'old-c']) {
+      await writeFile(
+        join(home.runsDir, `${id}.json`),
+        JSON.stringify({ run_id: id, status: 'complete' }),
+      )
+    }
+
+    const doc = soleDocument((await capture(() => main(['advance', '--json']))).stdout)
+
+    expect(doc.pruned).toBe(3)
+    expect(existsSync(join(home.runsDir, 'old-a.json'))).toBe(false)
+    // Threaded, not recounted. The dead-man file carries the same field of the
+    // same result, written by something that never sees this payload — so
+    // equality here means one count reached two consumers.
+    expect(doc.pruned).toBe((await readDeadMan()).pruned)
+  })
+
+  test('the gated and failed counts are the exit-code module own walk, not a second one', async () => {
+    await writeGatedFleet()
+
+    const doc = soleDocument((await capture(() => main(['advance', '--json']))).stdout)
+    const deadMan = await readDeadMan()
+
+    // The honest instrument for "same function, not a recomputation": the
+    // dead-man file's two integers come from `advanceCounts` over this very
+    // result, and nothing in the write path is shared with the rendering. A
+    // second walk beside the mapper's would have to agree with it here.
+    expect(doc.gated).toBe(deadMan.gated)
+    expect(doc.failed).toBe(deadMan.failed)
+    // Non-vacuous: the fixture really is gated, so this is not two zeroes
+    // agreeing with each other.
+    expect(doc.gated).toBe(1)
+    expect(doc.failed).toBe(0)
+  })
+
+  test('--json --strict on a gated fleet returns 1 and the document says 1 too', async () => {
+    await writeGatedFleet()
+
+    const { code, stdout } = await capture(() => main(['advance', '--json', '--strict']))
+    const doc = soleDocument(stdout)
+
+    // The document and the process agree about the same advance. Two records of
+    // one run that can disagree is the whole reason there is one payload.
+    expect(code).toBe(1)
+    expect(doc.exit_code).toBe(1)
+    expect(doc.gated).toBe(1)
+  })
+
+  test('a held run lock writes nothing to stdout — no partial document — and returns 75', async () => {
+    await writePlugin(home, 'alpha')
+    await writeFile(
+      join(home.stateDir, '.lock'),
+      JSON.stringify({
+        acquired_at: new Date().toISOString(),
+        run_id: 'held-by-someone-else',
+        mode: 'advance',
+        pid: process.pid,
+      }),
+    )
+
+    const { code, stdout, stderr } = await capture(() => main(['advance', '--json']))
+
+    expect(code).toBe(75)
+    // Empty, not an error-shaped document. A monitor parsing this stream is
+    // better served by nothing plus a non-zero code than by a document it has
+    // to distinguish from a real one.
+    expect(stdout).toBe('')
+    expect(stderr).toContain(String(process.pid))
+  })
+
+  test('an unknown flag beside --json is still refused by the parser', async () => {
+    await writePlugin(home, 'alpha')
+
+    const { code, stdout, stderr } = await capture(() => main(['advance', '--json', '--force']))
+
+    expect(code).toBe(1)
+    expect(stdout).toBe('')
+    expect(stderr).toContain('--force')
+    expect(await readdir(home.runsDir)).toEqual([])
+  })
+})
