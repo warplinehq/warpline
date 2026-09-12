@@ -814,7 +814,12 @@ and a third is never a candidate at all:
   inspect it by hand.
 
 The three bounds then apply, in this order, to what is left: days, then count,
-then bytes. The byte bound is a per-home total with oldest-first eviction, and
+then bytes. The count bound is applied **within one plugin**, not across the
+directory — applied across it, it would evict artifacts `trimPluginHistory` had
+just decided to keep. An advance's run log names no plugin, and neither does an
+orphan transcript, so all of them share one bucket: on a frequently scheduled
+advance `retention.keep_per_plugin` is the bound that binds, well before
+`retention.days` does. The byte bound is a per-home total with oldest-first eviction, and
 the size counted for a run is its document **plus** its transcript — the
 transcript is normally the larger of the two, so a budget counting only the
 document would not bound this directory. Runs at equal ages are ordered by run

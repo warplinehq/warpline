@@ -51,7 +51,11 @@ export const PreferencesSchema = z.object({
     .object({
       /** Days a run record survives. */
       days: z.number().int().min(0).default(30),
-      /** Artifacts kept per plugin by the run-artifact trim. */
+      /**
+       * Records kept per plugin. Read by the run-artifact trim and by the
+       * run-log prune both; an advance's run log names no plugin, so every
+       * advance shares one bucket under this bound.
+       */
       keep_per_plugin: z.number().int().min(0).default(20),
       /** Whole-home byte budget over the runs directory. 0 is a budget. */
       max_bytes: z.number().int().min(0).default(104857600),
