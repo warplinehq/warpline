@@ -109,3 +109,18 @@ export function pluginConfigPath(pluginName: string): string {
 export function lockPath(): string {
   return path.join(stateDir(), '.lock')
 }
+
+/**
+ * The dead-man file, written by the advance and read by nothing in this repo.
+ *
+ * A sibling of `engine-state.json`, never a field inside it: it is written on
+ * arms that write no state at all, and its whole value to a monitor is that it
+ * can be read without parsing the state document.
+ *
+ * Internal. This is NOT re-exported from `paths-public.ts` — the file is a
+ * contract for an operator's own detector reading the path, not for a consumer
+ * importing a getter.
+ */
+export function lastSuccessfulAdvancePath(): string {
+  return path.join(stateDir(), 'last-successful-advance')
+}
