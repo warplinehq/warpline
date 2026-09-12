@@ -838,10 +838,22 @@ while passing.
 **Both paths unlink the pair.** A run's `<run_id>.json` and its `<run_id>.log`
 are deleted together on either path, so neither can strand a transcript.
 
-**Confirming a retention setting took effect is an observation, not a read.**
-Unknown keys in `preferences.json` are stripped rather than refused, so a
-misspelled key parses successfully and nothing warns. Set the bound, run an
-advance, and list `<home>/runs/`.
+**Confirming a retention setting took effect is still an observation, not a
+read.** Unknown keys in `preferences.json` are stripped rather than refused, so a
+misspelled key parses successfully and nothing warns.
+
+What an advance reports is how many runs it removed, not why. `warpline advance
+--json` carries a `pruned` count for the advance that just ran, and the dead-man
+file (§ 13) carries the same number for the last advance that returned. Read it
+for what it is: one integer standing for all three bounds, which cannot say
+which of them bound, over a prune that runs with the built-in defaults when your
+key was stripped. So a non-zero count does not attribute the eviction to the
+setting you just made, and a `0` says only that nothing was eligible. The count
+also covers one of the two deletion paths — `trimPluginHistory` runs after
+`warpline run` and never during an advance, so nothing it removes is in there.
+
+To confirm a bound: set it, run an advance, and list `<home>/runs/`. The count
+is what tells you whether looking is worth it.
 
 ## 7. HTTP / SSE surface (not in this repo)
 
@@ -1567,10 +1579,15 @@ Output existed.
 
 ## 11. Exit codes
 
-`warpline advance` is the unattended entry point, and its exit code is the whole
-machine interface: this runtime ships no HTTP surface and no alerting hook. The
-codes below are contract surface. A scheduler unit, a monitoring check or a
-wrapper script may key on them.
+`warpline advance` is the unattended entry point, and its exit code is the
+machine interface a scheduler keys on: this runtime ships no HTTP surface and no
+alerting hook. Two things carry detail a code has no room for, and neither
+replaces it — `warpline advance --json` writes one JSON document to stdout
+describing the advance that just ran, and the dead-man file (§ 13) records the
+last one that returned. Both have to be parsed before they can say whether
+anything ran; the code says it without being read. The codes below are contract
+surface. A scheduler unit, a monitoring check or a wrapper script may key on
+them.
 
 | Code | Meaning |
 |------|---------|

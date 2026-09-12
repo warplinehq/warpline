@@ -3,10 +3,13 @@
  * report what happened as an exit code.
  *
  * This is the command a scheduler calls. Nothing about it is interactive, and
- * its exit code is the whole machine interface: there is no HTTP surface and no
- * alerting hook anywhere in this runtime.
+ * its exit code is the machine interface a scheduler keys on: there is no HTTP
+ * surface and no alerting hook anywhere in this runtime. `--json` writes one
+ * document to stdout carrying the detail a code has no room for, and it never
+ * replaces the code — a consumer that reads only the document has to parse
+ * something before it can tell whether anything ran.
  *
- * Four read-path landmines this file exists to respect:
+ * Five read-path landmines this file exists to respect:
  *
  *   1. The exit-code table is PUBLISHED CONTRACT SURFACE, carried in
  *      `docs/runtime-spec.md` § 11. The mapping itself lives in
@@ -33,6 +36,14 @@
  *      a Ctrl-C during the suite would exit it from inside a library.
  *   4. This module NEVER terminates the process. `run` returns a number and
  *      `src/bin/warpline.ts` is the only place a number becomes an exit.
+ *   5. NOTHING reaches stdout on a failure path — not even under `--json`, and
+ *      especially not an error-shaped document. A monitor parsing this stream
+ *      is better served by an empty stream plus a non-zero code than by a
+ *      document it has to distinguish from a real one. Every refusal below
+ *      writes its sentence to stderr and returns; the single emission site is
+ *      past all of them. The engine holds up the other half of that contract:
+ *      it writes nothing to stdout either, which is asserted structurally
+ *      because no in-process capture can observe it.
  *
  * The due-set is `runAdvance`'s and never this file's. `warpline plan` agrees
  * with this command precisely because both route every verdict through the same
@@ -89,27 +100,45 @@ import type { AdvanceResult, PluginFsmState } from '../runtime/engine.js'
 import { advanceCounts, advanceExitCode } from '../runtime/exit-codes.js'
 import { isInteractive } from './prompt.js'
 
-export const USAGE = `Usage: warpline advance [--strict]
+export const USAGE = `Usage: warpline advance [--strict] [--json]
 
 Executes every plugin the engine finds due and exits with a code a scheduler can
 read. The codes are published in docs/runtime-spec.md § 11.
 
   --strict   Report a held approval gate as a failure (exit 1) rather than 0.
+  --json     Write one JSON document to stdout instead of the human rendering.
 `
 
 /**
  * One advance, as the single object every rendering is built from.
  *
- * One payload and one emission site, even though only the human rendering
- * exists today: a second site added later for `--json` is a second chance for
+ * One payload and one emission site: a second site would be a second chance for
  * the two records of one advance to disagree, which is the argument the engine
  * already makes about its own run log.
+ *
+ * The field list is deliberately short, because this document is parsed outside
+ * this repository and every field is one somebody's detector can start reading.
+ * A run id, a status, three integers, a code, and the plugin list the human
+ * rendering is built from — a name and a state token each. No plugin summary,
+ * no plugin output, no path, no operator configuration value. Same constraint
+ * as the dead-man file, for the same reason.
  */
 export interface AdvancePayload {
   run_id: string
   status: AdvanceResult['status']
   gated: number
   failed: number
+  /**
+   * How many run records this advance's retention prune removed.
+   *
+   * Always present, `0` included — a monitor has to be able to tell "nothing to
+   * prune" from "this warpline does not report pruning". Threaded from the
+   * prune's own return value by way of the advance result, never recounted
+   * here; and because unknown keys in `preferences.json` are stripped rather
+   * than refused, this is the only signal that a retention bound did anything
+   * at all.
+   */
+  pruned: number
   exit_code: 0 | 1
   /**
    * Every plugin the run loaded, in the engine's own order.
@@ -134,9 +163,14 @@ function renderHuman(payload: AdvancePayload): string {
   return `${lines.join('\n')}\n`
 }
 
-/** One payload, one rendering today and two once `--json` lands. */
+/**
+ * One payload, two renderings — they cannot drift because there is one source.
+ *
+ * Both arms end in a newline, so the machine rendering is one
+ * newline-terminated document on a stream carrying nothing else.
+ */
 function render(payload: AdvancePayload, json?: boolean): string {
-  return json === true ? JSON.stringify(payload) : renderHuman(payload)
+  return json === true ? `${JSON.stringify(payload)}\n` : renderHuman(payload)
 }
 
 /**
@@ -208,16 +242,21 @@ export async function run(
   io: AdvanceIo = { stdin: process.stdin },
 ): Promise<number> {
   let strict = false
+  let json = false
 
   try {
     // Namespace import above so this call is the only line naming the parser.
+    // Both flags are registered here and nowhere else: an argv inspection
+    // beside this call would be a second way to read flags, and a second way is
+    // a path by which a refused flag gets honoured.
     const { values } = nodeUtil.parseArgs({
       args: argv,
-      options: { strict: { type: 'boolean' } },
+      options: { strict: { type: 'boolean' }, json: { type: 'boolean' } },
       allowPositionals: true,
       strict: true,
     })
     strict = values.strict === true
+    json = values.json === true
   } catch (err) {
     // The parser's own strict mode is what refuses an unregistered flag, and
     // `--yes` and `--force` are two of them. That refusal is worth more than a
@@ -282,15 +321,22 @@ export async function run(
   const exit_code = advanceExitCode(result, { strict })
   const { gated, failed } = advanceCounts(result)
 
+  // The one site anything reaches stdout from, past every refusal above it.
   process.stdout.write(
-    render({
-      run_id: result.run_id,
-      status: result.status,
-      gated,
-      failed,
-      exit_code,
-      plugins: [...result.plugin_states].map(([name, state]) => ({ name, state })),
-    }),
+    render(
+      {
+        run_id: result.run_id,
+        status: result.status,
+        gated,
+        failed,
+        // Read off the result, where the prune's own return value was threaded
+        // to. Counting removals a second time here would be a second answer.
+        pruned: result.pruned,
+        exit_code,
+        plugins: [...result.plugin_states].map(([name, state]) => ({ name, state })),
+      },
+      json,
+    ),
   )
 
   return exit_code
