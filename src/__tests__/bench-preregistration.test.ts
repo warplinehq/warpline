@@ -397,9 +397,15 @@ describe('the pre-registration is committed before the first result and frozen a
  * The scope split is the whole design. A broad match on the word cost over
  * `bench/README.md` fails the very sentence the total-cost-of-ownership
  * requirement mandates — the README's first paragraph says what the harness
- * measures, and it has to say it. So the README gets a NARROW currency pattern,
- * the raw result JSON gets a BROAD one, and merging them would either publish a
- * spend figure or forbid the mandated paragraph.
+ * measures, and it has to say it. So the published prose gets a NARROW currency
+ * pattern, the raw result JSON gets a BROAD one, and merging them would either
+ * publish a spend figure or forbid the mandated paragraph.
+ *
+ * Narrow in PATTERN and not in ROSTER. The currency scan reads every markdown
+ * file under `bench/` and not only the README: a second write-up, a prompt or a
+ * fixture is published just as widely, and a guard that cannot fail for a file
+ * is no guard for that file. `bench/PRE-REGISTRATION.md` is the one named
+ * exemption, because § 11 sets the spend cap and the document is frozen.
  *
  * The competitor patterns live here rather than under `bench/`, and this file
  * is outside every roster below by construction: `scanCompetitors` reads
@@ -422,9 +428,17 @@ const BUDGET_FLAG_ALLOWLIST = '--max-budget-usd'
  * The cost-per-unit alternatives are anchored on a UNIT noun after `per`, so
  * `marginal per-run cost` — the phrase the published README is required to
  * carry — cannot match, while `cost per thousand tokens` cannot hide.
+ *
+ * The requirement names three classes and the first version of this pattern
+ * caught one. A monthly cost, a cost per seat and a projected annual saving all
+ * read clean against a unit list of tokens and calls, so the time units, the
+ * per-head units and the `monthly cost`/`annual saving` adjective form are all
+ * here now, as are the two currency nouns beside `dollars`. `run` stays out of
+ * the `per[-\s]` branch for the same reason it always was: the mandated phrase
+ * is `per-run cost`.
  */
 const CURRENCY_RE =
-  /[$€£¥₹]|\b(?:usd|eur|gbp|jpy|chf|cad|aud|cny|inr)\b|\b(?:cost|price|spend|charge)s?\s+per\s+(?:token|call|request|run|thousand|million|1[km])\b|\bper[-\s](?:token|1[km]|thousand|million)\b|\bcents?\b|\bdollars?\b/gi
+  /[$€£¥₹]|\b(?:usd|eur|gbp|jpy|chf|cad|aud|cny|inr)\b|\b(?:cost|price|spend|charge|saving)s?\s+per\s+(?:token|call|request|run|thousand|million|1[km]|day|week|month|year|seat|user)\b|\bper[-\s](?:token|1[km]|thousand|million|day|week|month|year|seat|user)\b|\b(?:monthly|annual|yearly|per-annum)\s+(?:cost|spend|saving|price|charge)s?\b|\bcents?\b|\bdollars?\b|\bpounds?\b|\beuros?\b/gi
 
 /** Broad by design, over raw result JSON only. */
 const RESULT_COST_RE = /cost/i
@@ -504,18 +518,23 @@ function resultFiles(root: string): string[] {
  * adds nothing a reader opening the file would not get.
  */
 function scanCurrency(root: string): string[] {
-  const rel = 'bench/README.md'
-  const full = join(root, rel)
-  if (!existsSync(full)) throw new Error(`blind: ${full} is not there to scan`)
+  // Every published markdown file under bench/, less the one named exemption.
+  // Markdown only, and that matters: over the TypeScript sources the dollar
+  // alternative matches every `${...}` in a template literal and the scan
+  // reports dozens of offenders that are not figures.
+  const scanned = benchFiles(root).filter((f) => f.endsWith('.md') && f !== PRE_REG)
+  if (scanned.length === 0) throw new Error(`blind: no markdown file to scan under ${join(root, 'bench')}`)
 
-  return readFileSync(full, 'utf8')
-    .split('\n')
-    .flatMap((line, i) => {
-      // The allowlist is a literal removal, not a line exemption: whatever is
-      // left of the line after the cap flag is gone is still scanned.
-      const scanned = line.split(BUDGET_FLAG_ALLOWLIST).join(' ')
-      return [...scanned.matchAll(CURRENCY_RE)].map((m) => `${rel}:${i + 1}: ${m[0]}`)
-    })
+  return scanned.flatMap((rel) =>
+    readFileSync(join(root, rel), 'utf8')
+      .split('\n')
+      .flatMap((line, i) => {
+        // The allowlist is a literal removal, not a line exemption: whatever is
+        // left of the line after the cap flag is gone is still scanned.
+        const stripped = line.split(BUDGET_FLAG_ALLOWLIST).join(' ')
+        return [...stripped.matchAll(CURRENCY_RE)].map((m) => `${rel}:${i + 1}: ${m[0]}`)
+      }),
+  )
 }
 
 /** Offenders as `<path>: <key path>`, one per matching key or string value. */
@@ -596,6 +615,53 @@ describe('nothing published under bench/ carries a figure, a rival or a private 
 
       writeFileSync(readme, 'The harness measures marginal per-run cost.\n')
       expect(scanCurrency(root)).toEqual([])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The roster and the pattern, in one fixture, because the scan used to read
+   * `bench/README.md` and nothing else while the requirement names three
+   * classes of figure and the pattern caught one.
+   *
+   * A second write-up under `bench/` is published as widely as the README, so
+   * its monthly cost is reported by its own path. The frozen method is the ONE
+   * named exemption and carries a figure here to prove the exemption is real
+   * rather than a side effect of the roster having been one file long.
+   */
+  test('a figure in a second published markdown file is reported, and the frozen method is exempt by name', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-currency-roster-'))
+    try {
+      mkdirSync(join(root, 'bench'), { recursive: true })
+      writeFileSync(join(root, 'bench', 'README.md'), 'The harness measures marginal per-run cost.\n')
+      writeFileSync(join(root, PRE_REG), 'The cap is 5 USD a session, and this file is frozen.\n')
+      writeFileSync(
+        join(root, 'bench', 'notes.md'),
+        'A monthly cost of 240.\nA projected annual saving, and 40 per seat.\nIt came to 12 pounds.\n',
+      )
+
+      expect(scanCurrency(root)).toEqual([
+        'bench/notes.md:1: monthly cost',
+        'bench/notes.md:2: annual saving',
+        'bench/notes.md:2: per seat',
+        'bench/notes.md:3: pounds',
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * A roster of nothing reports clean, and this scan's roster is now derived
+   * rather than hardcoded, so it can become empty without the tree being empty.
+   */
+  test('a bench tree with no markdown at all is blind rather than clean', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-currency-blind-'))
+    try {
+      mkdirSync(join(root, 'bench'), { recursive: true })
+      writeFileSync(join(root, 'bench', 'run.ts'), 'const spend = `${12} USD`\n')
+      expect(() => scanCurrency(root)).toThrow(/blind/)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
