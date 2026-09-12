@@ -763,7 +763,8 @@ describe('bench harness — the three sessions, built', () => {
     '--model',
     '--max-budget-usd',
     '--permission-mode',
-    '--safe-mode',
+    '--setting-sources',
+    '--strict-mcp-config',
     '--no-session-persistence',
   ]
 
@@ -782,17 +783,25 @@ describe('bench harness — the three sessions, built', () => {
       expect(argv[argv.indexOf('--model') + 1]).toBe(PINNED_MODEL)
       expect(argv[argv.indexOf('--max-budget-usd') + 1]).toBe(SESSION_BUDGET)
       expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('bypassPermissions')
+      // The EMPTY string, and asserted as a pair for the same reason as the
+      // others: `--setting-sources` carrying any source at all readmits the
+      // operator's instruction file, their skills and their hooks, and the
+      // membership check above would still be green.
+      expect(argv[argv.indexOf('--setting-sources') + 1]).toBe('')
     }
     expect(missing).toEqual([])
   })
 
-  test('no session carries the minimal flag or a turn cap', () => {
+  test('no session carries the minimal flag, the clean-room flag, or a turn cap', () => {
     const offenders: string[] = []
     for (const session of SESSIONS) {
       const argv = buildClaudeArgv(session, 'the body')
-      // The minimal flag cannot reach the subscription credential, and the
-      // pinned tool version has no turn-cap flag — measured, not assumed.
-      for (const absent of ['--bare', '--max-turns']) {
+      // Three absences, each measured on this tool version rather than assumed.
+      // The minimal flag cannot reach the subscription credential at all. The
+      // clean-room flag authenticates but DISABLES THE PLUGIN'S OWN SKILLS, so
+      // under it the plugin flag below is a no-op and the warpline arm's
+      // definition is silently deleted. And there is no turn-cap flag.
+      for (const absent of ['--bare', '--safe-mode', '--max-turns']) {
         if (argv.includes(absent)) offenders.push(`${session}: ${absent}`)
       }
     }

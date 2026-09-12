@@ -383,26 +383,36 @@ export const CONSUMER_PLUGIN_PATH = join(REPO_ROOT, 'plugin')
  * One argv for every session, so the two control arms and the consumer cannot
  * drift into two setups reported as one number.
  *
- * `--safe-mode` rather than `--bare`, measured: `--bare` authenticates strictly
- * through an API key or a key helper, and setting a configuration directory to
- * ANY value — including the real default path — suppresses the subscription
- * credential, because the keychain entry is keyed to that variable. So there is
- * no isolated-and-authenticated combination on this tool version except this
- * one. What it buys is the same clean room the method wanted: no operator
- * instruction file, no skills, no plugins, no hooks, no servers. What it costs
- * is the per-run private configuration directory, and the residual preamble is
- * a constant every arm pays identically.
+ * `--setting-sources ""` plus `--strict-mcp-config`, and NEITHER `--bare` nor
+ * `--safe-mode`. All three were measured on this tool version, and the two
+ * rejected ones fail on different halves of the same requirement:
+ *
+ *   - `--bare` authenticates strictly through an API key or a key helper, and
+ *     setting a configuration directory to ANY value — including the real
+ *     default path — suppresses the subscription credential, because the
+ *     keychain entry is keyed to that variable. So `--bare` cannot authenticate
+ *     here at all, and per-run configuration isolation is not available.
+ *   - `--safe-mode` authenticates, and it also DISABLES THE PLUGIN'S OWN
+ *     SKILLS. A session given `--plugin-dir` under it lists the tool's built-in
+ *     skills and not this checkout's two, and `--add-dir` is inert under it as
+ *     well. That makes the plugin flag below a no-op, which is the warpline
+ *     arm's definition silently deleted.
+ *
+ * The pair that remains holds all three properties. `--setting-sources ""`
+ * suppresses the operator's instruction file, their own skills, their settings
+ * and their hooks — probed for a slug that appears only in the operator's global
+ * instruction file, against an unsuppressed positive control in the same batch
+ * that returned it. `--strict-mcp-config` suppresses their servers. Subscription
+ * auth is intact, with no API key and no long-lived token needed. And the
+ * plugin's two skills load: the same skill listing returned both of them, and
+ * none of the operator's.
+ *
+ * What remains in every session is the base system prompt and the built-in tool
+ * definitions, which every arm pays identically, so they are a constant rather
+ * than a confound.
  *
  * No turn cap is passed because the pinned tool version has no such flag —
  * confirmed absent from its own help — so the spend ceiling is the only one.
- *
- * The plugin flag below is the warpline arm's alone, and it is MEASURED INERT
- * under `--safe-mode` on this tool version: a session given it lists the tool's
- * own built-in skills and not this checkout's two. It is constructed anyway
- * because the frozen method names it as part of that arm's definition, and
- * withholding it silently would be a method change made in code. The consumer
- * prompt does not depend on it — it restates the discovery rules and does the
- * work from the run log it is handed.
  */
 export function buildClaudeArgv(session: SessionId, promptBody: string): string[] {
   const argv = [
@@ -416,7 +426,12 @@ export function buildClaudeArgv(session: SessionId, promptBody: string): string[
     SESSION_BUDGET,
     '--permission-mode',
     'bypassPermissions',
-    '--safe-mode',
+    // The empty value is the whole point: no user settings, no project
+    // settings, no local settings, and so no operator instruction file, no
+    // operator skills and no hooks.
+    '--setting-sources',
+    '',
+    '--strict-mcp-config',
     '--no-session-persistence',
   ]
   // The warpline arm only. The runtime's own skills are the reference
