@@ -7,22 +7,26 @@
  * relative path into the source tree. An arm that imported an internal module
  * would be measuring something no consumer can run.
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { runAdvance, type AdvanceResult } from 'warpline'
 import { EngineStateSchema } from 'warpline/schemas/engine-state'
 import { RunLogSchema } from 'warpline/schemas/run-log'
-import type { GradeResult } from './grade.js'
+import { gradeHome, type GradeResult } from './grade.js'
 import type { BenchDisposition, BenchRunRecord, TokenClasses } from './record.js'
-import { GRADED_PATHS } from './seed.js'
+import { GRADED_PATHS, NOTES_PATH } from './seed.js'
+import { sumTokenClasses } from './stats.js'
 
 /**
  * The prefix a handoff carries. Fixed as contract by the handoff document, and
  * it is the only thing in the run log that identifies one.
  */
 export const NEEDS_LLM_PREFIX = '[needs-llm]'
+
+/** The checkout root, which is also the package root the arms self-reference. */
+const REPO_ROOT = resolve(import.meta.dir, '..')
 
 export interface WarplineArmResult {
   /** Float milliseconds across the measured segment: the advance plus materialisation. */
@@ -316,7 +320,7 @@ export function resolveDisposition({
  * again, so the stamp and the measurement name the same one.
  */
 export function readProvenance(modelId: string): Provenance {
-  const repoRoot = join(import.meta.dir, '..')
+  const repoRoot = REPO_ROOT
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { version?: string }
   const capture = (command: string, args: string[]): string =>
     execFileSync(command, args, { cwd: repoRoot, encoding: 'utf8' }).trim()
@@ -326,5 +330,293 @@ export function readProvenance(modelId: string): Provenance {
     package_version: pkg.version ?? '',
     claude_cli_version: capture('claude', ['--version']),
     model_id: modelId,
+  }
+}
+
+// ─── spawning a session ──────────────────────────────────────────────────────
+
+/** The two arms that are a command-line session and nothing else. */
+export type ControlArmId = Exclude<ArmId, 'warpline'>
+
+/**
+ * The three sessions that spawn the tool: the two control arms, and the
+ * warpline arm's consumer. The warpline arm's own advance is in-process and
+ * spawns nothing, which is why it is not a member here.
+ */
+export type SessionId = ControlArmId | 'consumer'
+
+/** The model every arm passes explicitly, so a default change cannot move it. */
+export const PINNED_MODEL = 'claude-opus-5'
+
+/** The per-session ceiling, as the flag's own string. The only one that exists. */
+export const SESSION_BUDGET = '5'
+
+/** The plugin source the consumer session is pointed at, absolute. */
+export const CONSUMER_PLUGIN_PATH = join(REPO_ROOT, 'plugin')
+
+/**
+ * One argv for every session, so the two control arms and the consumer cannot
+ * drift into two setups reported as one number.
+ *
+ * `--safe-mode` rather than `--bare`, measured: `--bare` authenticates strictly
+ * through an API key or a key helper, and setting a configuration directory to
+ * ANY value — including the real default path — suppresses the subscription
+ * credential, because the keychain entry is keyed to that variable. So there is
+ * no isolated-and-authenticated combination on this tool version except this
+ * one. What it buys is the same clean room the method wanted: no operator
+ * instruction file, no skills, no plugins, no hooks, no servers. What it costs
+ * is the per-run private configuration directory, and the residual preamble is
+ * a constant every arm pays identically.
+ *
+ * No turn cap is passed because the pinned tool version has no such flag —
+ * confirmed absent from its own help — so the spend ceiling is the only one.
+ *
+ * The plugin flag below is the warpline arm's alone, and it is MEASURED INERT
+ * under `--safe-mode` on this tool version: a session given it lists the tool's
+ * own built-in skills and not this checkout's two. It is constructed anyway
+ * because the frozen method names it as part of that arm's definition, and
+ * withholding it silently would be a method change made in code. The consumer
+ * prompt does not depend on it — it restates the discovery rules and does the
+ * work from the run log it is handed.
+ */
+export function buildClaudeArgv(session: SessionId, promptBody: string): string[] {
+  const argv = [
+    '--print',
+    promptBody,
+    '--output-format',
+    'json',
+    '--model',
+    PINNED_MODEL,
+    '--max-budget-usd',
+    SESSION_BUDGET,
+    '--permission-mode',
+    'bypassPermissions',
+    '--safe-mode',
+    '--no-session-persistence',
+  ]
+  // The warpline arm only. The runtime's own skills are the reference
+  // implementation of the thing being measured, and handing them to a control
+  // arm would be handing a control the answer.
+  if (session === 'consumer') argv.push('--plugin-dir', CONSUMER_PLUGIN_PATH)
+  return argv
+}
+
+/**
+ * One env for every session: the inherited environment, the home pointed at
+ * this arm's directory, and the configuration directory variable REMOVED.
+ *
+ * Removed rather than set, and that is a measurement rather than a preference:
+ * with that variable carrying any value at all the session cannot reach the
+ * subscription credential and returns an unattributable provider error with
+ * every token class present and equal to zero. Deleting it here is what makes
+ * the absence a property of the code instead of a property of whatever shell
+ * the harness happened to be launched from.
+ */
+export function buildClaudeEnv(home: string): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...process.env, WARPLINE_HOME: home }
+  delete env.CLAUDE_CONFIG_DIR
+  return env
+}
+
+/**
+ * Substitute the run log path into the consumer prompt: the discovery seam.
+ *
+ * Throws when the token is not there to substitute, and throws again if one
+ * survives the substitution. Both failures are silent otherwise — the prompt
+ * still reads fine, the session finds no handoffs, writes neither handoff
+ * artifact, and the run is dispositioned a grader failure with nothing in the
+ * output naming why.
+ */
+export function buildConsumerPrompt(runLogPath: string): string {
+  const prompt = readFileSync(join(REPO_ROOT, 'bench', 'prompts', 'consumer.md'), 'utf8')
+  if (!prompt.includes(RUN_LOG_PLACEHOLDER)) {
+    throw new Error(`the consumer prompt carries no '${RUN_LOG_PLACEHOLDER}' to substitute — it has no discovery path`)
+  }
+  const body = prompt.split(RUN_LOG_PLACEHOLDER).join(runLogPath)
+  if (body.includes(RUN_LOG_PLACEHOLDER)) {
+    throw new Error(`the consumer prompt still carries '${RUN_LOG_PLACEHOLDER}' after substitution`)
+  }
+  return body
+}
+
+/** What one spawned session reported, and how long the harness watched it. */
+export interface SessionOutcome {
+  parsed: ParsedClaudeResult
+  /** Float milliseconds the harness measured, not the duration the tool reported. */
+  wall_clock_ms: number
+}
+
+/** Which arm a session's failure is named for. A consumer failure is warpline's. */
+function armOf(session: SessionId): ArmId {
+  return session === 'consumer' ? 'warpline' : session
+}
+
+/**
+ * Spawn one session and parse what it printed.
+ *
+ * The working directory is the arm's home, so a relative write from the session
+ * lands inside the home rather than in the checkout.
+ *
+ * Standard output is parsed REGARDLESS of the exit code: the measured
+ * authentication failure exited non-zero and printed a complete result object,
+ * and that object is the only thing that identifies the failure as the
+ * provider's rather than the arm's. Output that is not JSON at all is a
+ * different thing and throws, naming the arm.
+ */
+async function runSession(session: SessionId, home: string, promptBody: string): Promise<SessionOutcome> {
+  const started = performance.now()
+  const stdout = await new Promise<string>((settle, fail) => {
+    const child = spawn('claude', buildClaudeArgv(session, promptBody), {
+      cwd: home,
+      env: buildClaudeEnv(home),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    let collected = ''
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      collected += chunk
+    })
+    child.on('error', fail)
+    child.on('close', () => settle(collected))
+  })
+  const wall_clock_ms = performance.now() - started
+
+  let raw: unknown
+  try {
+    raw = JSON.parse(stdout)
+  } catch {
+    throw new Error(`${armOf(session)}: the session printed no result object, so this run measures nothing`)
+  }
+  return { parsed: parseClaudeResult(raw, armOf(session)), wall_clock_ms }
+}
+
+/**
+ * Refuse a control home seeded for the other control arm.
+ *
+ * The two control arms differ in exactly one thing — whether a file sits at the
+ * notes path — and the prompt body is byte-identical for both. So a home handed
+ * to the wrong arm produces a run that measures the OTHER arm and reports it
+ * under this one's name, and nothing downstream can tell. Two lines, before any
+ * money is spent.
+ */
+export function assertControlHome(arm: ControlArmId, home: string): void {
+  const notes = join(home, NOTES_PATH)
+  const present = existsSync(notes)
+  if (arm === 'agent-with-state' && !present) {
+    throw new Error(`${arm}: no file at '${notes}' — this home would measure the from-scratch arm under this arm's name`)
+  }
+  if (arm === 'agent-from-scratch' && present) {
+    throw new Error(`${arm}: a file is present at '${notes}' — this home would measure the with-state arm under this arm's name`)
+  }
+}
+
+/** One control arm's run: what it reported, how long it took, how it graded. */
+export interface ClaudeArmResult extends SessionOutcome {
+  grade: GradeResult
+}
+
+/**
+ * One control arm iteration. One spawn, one segment.
+ *
+ * It does NOT seed: it is handed a home the control recipe already prepared,
+ * and it asserts that home rather than trusting it.
+ */
+export async function runClaudeArm(arm: ControlArmId, home: string, promptBody: string): Promise<ClaudeArmResult> {
+  assertControlHome(arm, home)
+  const outcome = await runSession(arm, home, promptBody)
+  return { ...outcome, grade: gradeHome(home) }
+}
+
+/** The consumer session's own segment, timed separately from the advance. */
+export interface ConsumerSessionResult {
+  parsed: ParsedClaudeResult
+  consumer_ms: number
+}
+
+/** The warpline arm's judgment half: resolve the parked handoffs, and write them. */
+export async function runConsumerSession(home: string, runLogPath: string): Promise<ConsumerSessionResult> {
+  const outcome = await runSession('consumer', home, buildConsumerPrompt(runLogPath))
+  return { parsed: outcome.parsed, consumer_ms: outcome.wall_clock_ms }
+}
+
+/**
+ * What the advance contributes to the four classes.
+ *
+ * Zero, and each class present and equal to zero rather than absent: the
+ * advance is in-process and asks no provider anything. That it emits nothing at
+ * all is the finding this benchmark exists to put a number on, so it is summed
+ * in explicitly rather than left out of the arithmetic.
+ */
+export const ADVANCE_TOKENS: TokenClasses = Object.freeze({
+  input: 0,
+  output: 0,
+  cache_creation: 0,
+  cache_read: 0,
+})
+
+/** The warpline arm, both segments, as the figures the arm publishes. */
+export interface WarplineIterationResult {
+  /** The four classes summed across the advance and the consumer session. */
+  tokens: TokenClasses
+  /** The sum of both segments, which is what the arm is compared on. */
+  wall_clock_ms: number
+  /** The deterministic segment alone. */
+  runtime_ms: number
+  /** The judgment segment alone. */
+  consumer_ms: number
+  /** Deterministic over judgment. A figure, not something a reader derives. */
+  deterministic_to_judgment_ratio: number
+  parked_handoffs: number
+  advance: AdvanceResult
+  consumer: ParsedClaudeResult
+  grade: GradeResult
+}
+
+/** The three seams a test replaces so the assembly is checkable without a key. */
+export interface WarplineIterationDeps {
+  advance?: (home: string) => Promise<WarplineArmResult>
+  consume?: (home: string, runLogPath: string) => Promise<ConsumerSessionResult>
+  grade?: (home: string) => GradeResult
+}
+
+/**
+ * One whole warpline iteration: the advance, then the session that resolves
+ * what it parked.
+ *
+ * The two segments are summed into one published figure AND kept separately,
+ * because the split is the claim. A reader who only sees the total cannot tell
+ * the deterministic half cost nothing.
+ *
+ * The zero-handoff abort sits between the segments deliberately. A run that
+ * parked nothing has no judgment to buy, so its consumer cost would be a
+ * near-zero this arm had not earned — the degenerate comparison the whole
+ * method exists to avoid, and reachable by nothing more than a seeding
+ * mistake. It throws BEFORE the consumer is spawned, so the abort costs
+ * nothing as well as publishing nothing.
+ */
+export async function runWarplineIteration(
+  home: string,
+  iteration: number,
+  deps: WarplineIterationDeps = {},
+): Promise<WarplineIterationResult> {
+  const advanceFn = deps.advance ?? runWarplineArm
+  const consumeFn = deps.consume ?? runConsumerSession
+  const gradeFn = deps.grade ?? gradeHome
+
+  const first = await advanceFn(home)
+  if (first.parked_handoffs === 0) throw new ZeroHandoffError('warpline', iteration, first.parked_handoffs)
+
+  const second = await consumeFn(home, first.advance.run_log_path)
+
+  return {
+    tokens: sumTokenClasses([{ tokens: ADVANCE_TOKENS }, { tokens: second.parsed.tokens }]),
+    wall_clock_ms: first.runtime_ms + second.consumer_ms,
+    runtime_ms: first.runtime_ms,
+    consumer_ms: second.consumer_ms,
+    deterministic_to_judgment_ratio: first.runtime_ms / second.consumer_ms,
+    parked_handoffs: first.parked_handoffs,
+    advance: first.advance,
+    consumer: second.parsed,
+    grade: gradeFn(home),
   }
 }

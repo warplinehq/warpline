@@ -24,16 +24,30 @@
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { isAbsolute, join, relative } from 'node:path'
 import { loadPluginManifests } from 'warpline/unstable-runtime'
 import {
+  ADVANCE_TOKENS,
   ApiUnavailableError,
+  ARM_ORDER,
+  buildClaudeArgv,
+  buildClaudeEnv,
+  buildConsumerPrompt,
+  CONSUMER_PLUGIN_PATH,
   parseClaudeResult,
+  PINNED_MODEL,
   resolveDisposition,
   RUN_LOG_PLACEHOLDER,
+  runClaudeArm,
   runWarplineArm,
+  runWarplineIteration,
+  SESSION_BUDGET,
+  ZeroHandoffError,
+  type ConsumerSessionResult,
+  type SessionId,
+  type WarplineArmResult,
 } from '../../bench/arms.js'
 import { gradeHome, type GradeResult } from '../../bench/grade.js'
 import { BenchRunRecordSchema, parseRecord, scrubRecord } from '../../bench/record.js'
@@ -680,5 +694,240 @@ describe('bench harness — the result JSON, parsed and dispositioned', () => {
 
     expect(parsed.is_error).toBe(true)
     expect(resolveDisposition({ parsed, graded: gradeOutcome(false) }).disposition).toBe('failed-grader')
+  })
+})
+
+/**
+ * How the three sessions are spawned, asserted from pure builders with no
+ * subprocess and no provider key.
+ *
+ * The argv and env tests are the only guard against the failure that costs a
+ * whole measured set and reports a number anyway: two arms run under two
+ * different setups and published as one comparison. Asserting them from a
+ * builder rather than from a spawn is what lets them run on the branch.
+ *
+ * The flag list is asserted POSITIVELY and the two absent flags are asserted
+ * BY ABSENCE, because both absences are load-bearing and measured: the minimal
+ * flag reads strictly an API key or a key helper and never the subscription
+ * credential, and the pinned tool version has no turn-cap flag at all, so
+ * passing one would abort every session on an unrecognised argument.
+ */
+describe('bench harness — the three sessions, built', () => {
+  const SESSIONS: readonly SessionId[] = ['agent-with-state', 'agent-from-scratch', 'consumer']
+
+  /** Every flag every session carries, whichever session it is. */
+  const SHARED_FLAGS = [
+    '--print',
+    '--output-format',
+    '--model',
+    '--max-budget-usd',
+    '--permission-mode',
+    '--safe-mode',
+    '--no-session-persistence',
+  ]
+
+  test('every session carries the shared flags, the pinned model and the spend ceiling', () => {
+    const missing: string[] = []
+    for (const session of SESSIONS) {
+      const argv = buildClaudeArgv(session, 'the body')
+      for (const flag of SHARED_FLAGS) if (!argv.includes(flag)) missing.push(`${session}: ${flag}`)
+
+      // The prompt body is the positional argument and the value flags carry
+      // their own values, so each is asserted as a PAIR: a flag present with
+      // the wrong value is the failure a membership check cannot see.
+      expect(argv[0]).toBe('--print')
+      expect(argv[1]).toBe('the body')
+      expect(argv[argv.indexOf('--output-format') + 1]).toBe('json')
+      expect(argv[argv.indexOf('--model') + 1]).toBe(PINNED_MODEL)
+      expect(argv[argv.indexOf('--max-budget-usd') + 1]).toBe(SESSION_BUDGET)
+      expect(argv[argv.indexOf('--permission-mode') + 1]).toBe('bypassPermissions')
+    }
+    expect(missing).toEqual([])
+  })
+
+  test('no session carries the minimal flag or a turn cap', () => {
+    const offenders: string[] = []
+    for (const session of SESSIONS) {
+      const argv = buildClaudeArgv(session, 'the body')
+      // The minimal flag cannot reach the subscription credential, and the
+      // pinned tool version has no turn-cap flag — measured, not assumed.
+      for (const absent of ['--bare', '--max-turns']) {
+        if (argv.includes(absent)) offenders.push(`${session}: ${absent}`)
+      }
+    }
+    expect(offenders).toEqual([])
+  })
+
+  test('the consumer alone is pointed at this checkout, as an absolute path', () => {
+    const consumer = buildClaudeArgv('consumer', 'the body')
+    const flag = '--plugin-dir'
+
+    expect(consumer).toContain(flag)
+    const given = consumer[consumer.indexOf(flag) + 1] as string
+    // Absolute, because the flag resolves against the working directory and the
+    // working directory is the arm's home — a relative path does not exist there.
+    expect(isAbsolute(given)).toBe(true)
+    expect(given).toBe(CONSUMER_PLUGIN_PATH)
+    expect(statSync(given).isDirectory()).toBe(true)
+
+    // Withheld from both control arms: the runtime's own skills are the
+    // reference implementation of the thing being measured.
+    for (const control of ['agent-with-state', 'agent-from-scratch'] as const) {
+      expect(buildClaudeArgv(control, 'the body')).not.toContain(flag)
+    }
+  })
+
+  test('each session gets its own home and no configuration directory at all', () => {
+    // Set on the way in, so the removal below is a removal and not an absence
+    // that was already there.
+    const prior = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = '/tmp/would-suppress-the-credential'
+    try {
+      const homes = SESSIONS.map((session) => join(tmpdir(), `home-${session}`))
+      const envs = SESSIONS.map((session, i) => buildClaudeEnv(homes[i] as string))
+
+      for (const [i, env] of envs.entries()) {
+        expect(env.WARPLINE_HOME).toBe(homes[i] as string)
+        // Absent rather than distinct. Measured: that variable carrying ANY
+        // value — including the real default path — suppresses the subscription
+        // credential, and the session returns an unattributable provider error
+        // with all four token classes present and equal to zero.
+        expect('CLAUDE_CONFIG_DIR' in env).toBe(false)
+      }
+      expect(new Set(envs.map((env) => env.WARPLINE_HOME)).size).toBe(SESSIONS.length)
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = prior
+    }
+  })
+
+  test('the consumer prompt reaches the spawn carrying the absolute run-log path', () => {
+    const runLog = '/tmp/warpline-bench-xyz/runs/run-1.json'
+    const body = buildConsumerPrompt(runLog)
+
+    expect(body).toContain(runLog)
+    // An unsubstituted token is a session with no discovery path: it finds no
+    // handoffs, writes neither handoff artifact, and fails the grader for a
+    // reason nothing in its output names.
+    expect(body).not.toContain(RUN_LOG_PLACEHOLDER)
+    expect(buildClaudeArgv('consumer', body)[1]).toContain(runLog)
+  })
+
+  test('the fixed arm order is the three arms, warpline first', () => {
+    expect([...ARM_ORDER]).toEqual(['warpline', 'agent-with-state', 'agent-from-scratch'])
+  })
+})
+
+/**
+ * The warpline arm's two-segment assembly, and the two refusals that spend no
+ * money.
+ *
+ * Every test here injects the segments, so the arithmetic and both refusals are
+ * checkable on the branch — and the zero-handoff test proves the consumer is
+ * never spawned by injecting one that throws if it is reached.
+ */
+describe('bench harness — both segments, summed and refused', () => {
+  /** An advance result in the shape the assembly consumes, without running one. */
+  function advanceResult(overrides: Partial<WarplineArmResult> = {}): WarplineArmResult {
+    return {
+      runtime_ms: 1200,
+      parked_handoffs: 2,
+      advance: { run_log_path: '/tmp/warpline-bench-xyz/runs/run-1.json' } as WarplineArmResult['advance'],
+      ...overrides,
+    }
+  }
+
+  /** A consumer segment in the shape the assembly consumes, without spawning one. */
+  function consumerResult(raw: unknown = SUCCESS_RESULT, consumer_ms = 8400): ConsumerSessionResult {
+    return { parsed: parseClaudeResult(raw, 'warpline'), consumer_ms }
+  }
+
+  test('the published figures are the sum of both segments, with each segment also kept', async () => {
+    const iteration = await runWarplineIteration('/tmp/nowhere', 1, {
+      advance: async () => advanceResult(),
+      consume: async () => consumerResult(),
+      grade: () => gradeOutcome(true),
+    })
+
+    // The advance contributes zero to every class, present and equal to zero,
+    // because it asks no provider anything. That is the finding, not a bug.
+    expect(ADVANCE_TOKENS).toEqual({ input: 0, output: 0, cache_creation: 0, cache_read: 0 })
+    expect(iteration.tokens).toEqual({ input: 14, output: 233, cache_creation: 18022, cache_read: 4110 })
+
+    expect(iteration.wall_clock_ms).toBe(1200 + 8400)
+    expect(iteration.runtime_ms).toBe(1200)
+    expect(iteration.consumer_ms).toBe(8400)
+    // Both present and distinct: one figure standing in for both would hide the
+    // split that is the whole claim.
+    expect(iteration.runtime_ms).not.toBe(iteration.consumer_ms)
+    expect(iteration.deterministic_to_judgment_ratio).toBe(1200 / 8400)
+    expect(iteration.parked_handoffs).toBe(2)
+  })
+
+  test('a null class in either segment stays null in the sum', async () => {
+    const iteration = await runWarplineIteration('/tmp/nowhere', 1, {
+      advance: async () => advanceResult(),
+      consume: async () => consumerResult(MISSING_CLASS_RESULT),
+      grade: () => gradeOutcome(true),
+    })
+
+    // A total over a sample with a hole is not a total, so it is not summed to a
+    // smaller number that looks like a measurement.
+    expect(iteration.tokens.cache_read).toBeNull()
+    expect(resolveDisposition({ parsed: iteration.consumer, graded: gradeOutcome(true) }).disposition).toBe(
+      'failed-schema',
+    )
+  })
+
+  test('a run that parked nothing throws by name and never reaches the consumer', async () => {
+    let thrown: unknown
+    try {
+      await runWarplineIteration('/tmp/nowhere', 7, {
+        advance: async () => advanceResult({ parked_handoffs: 0 }),
+        consume: async () => {
+          throw new Error('the consumer session was spawned for a run that parked nothing')
+        },
+        grade: () => gradeOutcome(true),
+      })
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(ZeroHandoffError)
+    // Named: the arm, the iteration and the count, because an operator reading a
+    // halted set has to know which run and why without opening the code.
+    expect((thrown as Error).message).toContain('warpline')
+    expect((thrown as Error).message).toContain('7')
+    expect((thrown as ZeroHandoffError).count).toBe(0)
+  })
+
+  test('a control arm refuses a home seeded for the other control arm', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'warpline-bench-misseeded-'))
+    try {
+      const withState = join(scratch, 'with-state')
+      const fromScratch = join(scratch, 'from-scratch')
+      await mkdir(withState)
+      await mkdir(fromScratch)
+      // The from-scratch home is the one carrying the notes file, and the
+      // with-state home is the one without: each arm is handed the other's.
+      await writeFile(join(fromScratch, NOTES_PATH), 'notes from a previous pass\n')
+
+      for (const [arm, home] of [
+        ['agent-with-state', withState],
+        ['agent-from-scratch', fromScratch],
+      ] as const) {
+        let thrown: unknown
+        try {
+          await runClaudeArm(arm, home, 'the body')
+        } catch (error) {
+          thrown = error
+        }
+        // Thrown before any spawn, so a mis-seeded home costs nothing.
+        expect((thrown as Error | undefined)?.message).toContain(arm)
+        expect((thrown as Error).message).toContain(join(home, NOTES_PATH))
+      }
+    } finally {
+      await rm(scratch, { recursive: true, force: true })
+    }
   })
 })
