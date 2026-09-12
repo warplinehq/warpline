@@ -456,8 +456,13 @@ export async function runWarmup(options: WarmupOptions): Promise<string> {
 /**
  * The real arms. The only path here that spawns anything or asks a provider
  * anything, and the one seam every test replaces.
+ *
+ * EXPORTED so a shakedown pass can drive one real iteration into a results
+ * directory outside the checkout, before the first tracked record freezes the
+ * method. A shakedown that reconstructed this function would be proving a copy
+ * of the thing the measured set runs, which is worth nothing.
  */
-const runRealArm: ArmRunner = async (arm, home, iteration) => {
+export const runRealArm: ArmRunner = async (arm, home, iteration) => {
   if (arm === 'warpline') {
     const result = await runWarplineIteration(home, iteration)
     return {
