@@ -1773,8 +1773,9 @@ in full on every advance that returns, and nothing in this runtime ever reads it
 back.
 
 It exists because this runtime has no other way to tell you it is alive. There is
-no HTTP surface here and no alerting hook — § 7 says why — and a warpline that has
-stopped cannot alert you that it has stopped. The exit code of § 11 reaches you
+no HTTP surface in this repository — § 7 — and no alerting hook of any kind, and
+a warpline that has stopped cannot alert you that it has stopped. The exit code
+of § 11 reaches you
 only when the command runs; if the timer never fires, no code is ever produced.
 So the interface is a file, and the signal an outside detector reads is the
 file's own age.
