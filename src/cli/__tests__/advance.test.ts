@@ -17,12 +17,14 @@
  */
 import { describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createTestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
 import { main } from '../warpline.js'
+import { run } from '../advance.js'
 
 const REAL_PATHS = _getPaths()
 
@@ -190,5 +192,156 @@ describe('main([advance]) end to end', () => {
     expect(stdout).toBe('')
     expect(stderr).toContain('cannot read plugin root')
     expect(stderr).not.toContain('    at ')
+  })
+})
+
+/**
+ * The refusal to CREATE a home without a terminal.
+ *
+ * These cases call `run(argv, io)` directly rather than `main([...])`, which is
+ * the only way either branch is reachable: `main` cannot inject stdin, and the
+ * ambient `process.stdin.isTTY` is whatever the runner happens to have. A test
+ * keyed on the ambient value asserts one branch on a developer's machine and the
+ * other in CI, which is not a test.
+ *
+ * The discriminator is the MESSAGE, not the code. Against a home that does not
+ * exist the plugin root does not exist either, so `runAdvance` throws and the
+ * command already reports `75` — a case asserting only the number is green
+ * against code that has no refusal in it at all, which is the out-of-reach-guard
+ * shape this project has recorded six times.
+ *
+ * The narrowing, restated because widening it would defeat the phase: this
+ * refuses to CREATE a home, never to RUN headless. An existing home plus a
+ * non-terminal stdin is the case the whole phase exists for and it has a case
+ * of its own below.
+ */
+describe('run(): no home and no terminal', () => {
+  /** A path under the test home that nothing has created. */
+  const absentHome = (): string => join(home.root, 'never-created')
+
+  test('refuses with 75, names WARPLINE_HOME and the path, and creates nothing', async () => {
+    const missing = absentHome()
+    _setHome(missing)
+
+    const first = await capture(() => run([], { stdin: {} }))
+
+    expect(first.code).toBe(75)
+    expect(first.stderr).toContain('refusing to create')
+    expect(first.stderr).toContain('WARPLINE_HOME')
+    expect(first.stderr).toContain(missing)
+    expect(first.stdout).toBe('')
+    expect(existsSync(missing)).toBe(false)
+
+    // Idempotency: a second refusal is a second no-op. Nothing accumulates,
+    // and the home is still absent afterwards.
+    const second = await capture(() => run([], { stdin: {} }))
+
+    expect(second.code).toBe(75)
+    expect(second.stderr).toContain('refusing to create')
+    expect(existsSync(missing)).toBe(false)
+  })
+
+  /**
+   * A terminal means a human is there to see a home appear, so the check does
+   * not fire. The assertion is the ABSENCE of the refusal rather than a code: a
+   * nonexistent home is also a nonexistent plugin root, which the engine refuses
+   * on its own path, so the code is not the discriminator here.
+   */
+  test('a terminal on stdin means the check does not fire', async () => {
+    const missing = absentHome()
+    _setHome(missing)
+
+    const { stderr } = await capture(() => run([], { stdin: { isTTY: true } }))
+
+    expect(stderr).not.toContain('refusing to create')
+    expect(stderr).toContain('cannot read plugin root')
+  })
+
+  /**
+   * The case the phase exists for, asserted explicitly rather than assumed. A
+   * check widened to "refuse to run headless" would turn this red, which is the
+   * point of writing it.
+   */
+  test('an existing home plus a non-terminal stdin runs normally', async () => {
+    await writePlugin(home, 'alpha')
+
+    const { code, stdout, stderr } = await capture(() => run([], { stdin: {} }))
+
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    expect(stdout).toContain('alpha: completed')
+  })
+})
+
+/**
+ * One stderr line when the preferences file exists and cannot be used.
+ *
+ * `readPreferences` keeps its three silent fallbacks; this is a second, reporting
+ * read beside it. A silent default here is how an operator who set a long
+ * retention window and fat-fingered the JSON gets the 30-day rule instead, and
+ * the evidence they were preserving deleted, with exit code 0.
+ */
+describe('run(): the preferences report', () => {
+  /** Every stderr line that mentions the preferences file. */
+  const prefLines = (stderr: string): string[] =>
+    stderr.split('\n').filter((line) => line.includes('preferences.json'))
+
+  test('an absent preferences file says nothing', async () => {
+    await writePlugin(home, 'alpha')
+    await rm(join(home.root, 'preferences.json'), { force: true })
+
+    const { stderr } = await capture(() => run([], { stdin: {} }))
+
+    expect(prefLines(stderr)).toEqual([])
+  })
+
+  test('a valid preferences file says nothing', async () => {
+    await writePlugin(home, 'alpha')
+
+    const { code, stderr } = await capture(() => run([], { stdin: {} }))
+
+    expect(prefLines(stderr)).toEqual([])
+    expect(code).toBe(0)
+  })
+
+  test('a truncated preferences file is exactly one line, and the advance still runs', async () => {
+    await writePlugin(home, 'alpha')
+    await writeFile(join(home.root, 'preferences.json'), '{"review_gate": fal')
+
+    const { code, stdout, stderr } = await capture(() => run([], { stdin: {} }))
+
+    expect(prefLines(stderr)).toHaveLength(1)
+    expect(prefLines(stderr)[0]).toContain(join(home.root, 'preferences.json'))
+    // Reported, not raised: the run is unaffected and still renders.
+    expect(stdout).toContain('Advance ')
+    expect(code).not.toBe(75)
+  })
+
+  test('valid JSON with the wrong type for a known key is the same one line', async () => {
+    await writePlugin(home, 'alpha')
+    await writeFile(join(home.root, 'preferences.json'), JSON.stringify({ review_gate: 'yes' }))
+
+    const { stderr } = await capture(() => run([], { stdin: {} }))
+
+    expect(prefLines(stderr)).toHaveLength(1)
+  })
+
+  /**
+   * The limit of the report, pinned so it is documented rather than discovered.
+   * Zod strips unknown keys instead of failing, so a misspelled retention key
+   * parses clean and this read has nothing to say about it. The pruned count in
+   * the machine-readable output is the only confirmation a retention setting
+   * took effect; this line is not that, and must not be read as if it were.
+   */
+  test('an unknown key inside the retention block says nothing — Zod strips it', async () => {
+    await writePlugin(home, 'alpha')
+    await writeFile(
+      join(home.root, 'preferences.json'),
+      JSON.stringify({ review_gate: false, retention: { dayz: 5 } }),
+    )
+
+    const { stderr } = await capture(() => run([], { stdin: {} }))
+
+    expect(prefLines(stderr)).toEqual([])
   })
 })
