@@ -26,7 +26,9 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join, relative } from 'node:path'
+import { performance } from 'node:perf_hooks'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { warplineHome } from 'warpline/lib/paths'
 import { loadPluginManifests } from 'warpline/unstable-runtime'
 import {
   ADVANCE_TOKENS,
@@ -46,11 +48,25 @@ import {
   SESSION_BUDGET,
   ZeroHandoffError,
   type ConsumerSessionResult,
+  type Provenance,
   type SessionId,
   type WarplineArmResult,
 } from '../../bench/arms.js'
 import { gradeHome, type GradeResult } from '../../bench/grade.js'
 import { BenchRunRecordSchema, parseRecord, scrubRecord } from '../../bench/record.js'
+import {
+  MAX_ITERATIONS,
+  NoNotesProducedError,
+  resumeState,
+  runIteration,
+  runSet,
+  runWarmup,
+  summariseSet,
+  WARM_TARGET,
+  type ArmRunner,
+  type ArmRunOutcome,
+} from '../../bench/run.js'
+import { SHORTFALL_N } from '../../bench/stats.js'
 import {
   assertHomeSeam,
   buildPluginRoot,
@@ -979,5 +995,410 @@ describe('bench harness — both segments, summed and refused', () => {
     } finally {
       await rm(scratch, { recursive: true, force: true })
     }
+  })
+})
+
+/**
+ * The driver, with the arms replaced.
+ *
+ * Every test here injects a fake arm runner, so the whole driver — the fixed
+ * order, the sequencing, the per-arm seeding split, the incremental writes, the
+ * resume arithmetic and both warm-up refusals — is asserted with no provider
+ * key and no spawn of the tool.
+ *
+ * Two parameters are handed in by every test rather than defaulted, and both
+ * for reasons that would otherwise show up as a write inside the repository:
+ *
+ *   - the RESULTS DIRECTORY. The driver's tracked default is bound at its entry
+ *     point alone. A test that used it would plant a fabricated record among the
+ *     published raw data, and a later add of that directory would sweep it in.
+ *   - the NOTES SOURCE. The tracked fixture does not exist while this task runs
+ *     — the next task produces it — and the seeder refuses a with-state home
+ *     with no notes source by name. A test reaching for the tracked path would
+ *     therefore be red until somebody hand-wrote a stub there, which is exactly
+ *     the fabricated with-state fixture that refusal exists to prevent.
+ *
+ * The last test in the block is what makes both claims checkable rather than
+ * stated: it asserts the two tracked directories are clean after the suite ran.
+ */
+describe('bench harness — the driver', () => {
+  /**
+   * A results directory that does NOT exist yet, and a notes source that does,
+   * both under the system temp root and both removed in a `finally`.
+   *
+   * The results directory is deliberately left uncreated: one test asserts the
+   * driver creates it, and a fixture that pre-created it would make that test
+   * unable to fail.
+   */
+  async function withDriverFixtures<T>(
+    fn: (fixtures: { scratch: string; resultsDir: string; notesSource: string; notesBody: string }) => Promise<T>,
+  ): Promise<T> {
+    const scratch = await mkdtemp(join(tmpdir(), 'warpline-bench-driver-'))
+    try {
+      const notesSource = join(scratch, 'notes-source.md')
+      const notesBody = '# what an earlier session learned\n\nthe six inputs are flat, under inputs/\n'
+      await writeFile(notesSource, notesBody)
+      return await fn({ scratch, resultsDir: join(scratch, 'results'), notesSource, notesBody })
+    } finally {
+      await rm(scratch, { recursive: true, force: true })
+    }
+  }
+
+  /** One arm's outcome in the shape the driver consumes, without running an arm. */
+  function armOutcome(overrides: Partial<ArmRunOutcome> = {}): ArmRunOutcome {
+    return {
+      tokens: { input: 10, output: 20, cache_creation: 30, cache_read: 40 },
+      wall_clock_ms: 1_000,
+      runtime_ms: null,
+      consumer_ms: null,
+      parked_handoffs: 2,
+      subtype: 'success',
+      model_id: PINNED_MODEL,
+      grade: gradeOutcome(true),
+      ...overrides,
+    }
+  }
+
+  /**
+   * Provenance without a spawn. The real reader runs `git` and the tool itself,
+   * and the tool is not on a continuous-integration runner.
+   */
+  const stamp = (modelId: string): Provenance => ({
+    git_sha: 'abcdef0',
+    package_version: '0.0.0',
+    claude_cli_version: '0.0.0 (test)',
+    model_id: modelId,
+  })
+
+  /** Everything but the iteration index, which each caller varies. */
+  function opts(resultsDir: string, notesSource: string, runner: ArmRunner) {
+    return { runner, resultsDir, notesSource, provenance: stamp }
+  }
+
+  const passing: ArmRunner = async () => armOutcome()
+
+  test('one iteration visits the three arms in the fixed order and records that index', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      const visited: string[] = []
+      const runner: ArmRunner = async (arm) => {
+        visited.push(arm)
+        return armOutcome()
+      }
+      const records = await runIteration({ iteration: 1, ...opts(resultsDir, notesSource, runner) })
+
+      expect(visited).toEqual([...ARM_ORDER])
+      expect(records.map((r) => r.arm)).toEqual([...ARM_ORDER])
+      // The order is in the DATA and not only in the prose, so an order effect
+      // stays visible instead of being assumed away.
+      expect(records.map((r) => r.arm_order_index)).toEqual([0, 1, 2])
+    })
+  })
+
+  /**
+   * Sequential is a requirement and not an optimisation choice: two arms
+   * holding homes at once on one host puts sibling contention into the
+   * wall-clock, which is the number being published. So the assertion is that
+   * no two intervals OVERLAP, and not merely that three arms ran.
+   */
+  test('the three arms of one iteration are awaited one at a time', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      const intervals: { arm: string; entered: number; left: number }[] = []
+      const runner: ArmRunner = async (arm) => {
+        const entered = performance.now()
+        await new Promise((settle) => setTimeout(settle, 15))
+        intervals.push({ arm, entered, left: performance.now() })
+        return armOutcome()
+      }
+      await runIteration({ iteration: 1, ...opts(resultsDir, notesSource, runner) })
+
+      expect(intervals.map((i) => i.arm)).toEqual([...ARM_ORDER])
+      for (let i = 1; i < intervals.length; i += 1) {
+        expect((intervals[i] as { entered: number }).entered).toBeGreaterThanOrEqual(
+          (intervals[i - 1] as { left: number }).left,
+        )
+      }
+    })
+  })
+
+  test('each arm gets its own home: pairwise distinct absolute paths, every iteration', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      const homes: string[] = []
+      const runner: ArmRunner = async (_arm, home) => {
+        homes.push(home)
+        return armOutcome()
+      }
+      await runIteration({ iteration: 1, ...opts(resultsDir, notesSource, runner) })
+      await runIteration({ iteration: 2, ...opts(resultsDir, notesSource, runner) })
+
+      expect(homes.length).toBe(6)
+      // Relative is refused for the neighbouring reason a collision is: it
+      // resolves against whatever the working directory happens to be.
+      expect(homes.filter((home) => !isAbsolute(home))).toEqual([])
+      expect(new Set(homes).size).toBe(6)
+    })
+  })
+
+  /**
+   * Seeding is PER ARM, and the split IS the arm definition. A control home
+   * carrying the reference implementation is a control arm handed the answer,
+   * and this is the same refusal that withholds the plugin-directory flag from
+   * the controls, one layer down.
+   *
+   * Asserted from inside the runner, because the homes are gone after the call.
+   */
+  test('the warpline home alone carries the reference implementation', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      const seen = new Map<string, Record<string, boolean>>()
+      let warplineSeam = ''
+      let warplineGivenHome = ''
+      const runner: ArmRunner = async (arm, home) => {
+        seen.set(arm, {
+          plugins: existsSync(join(home, 'plugins')),
+          link: lstatSync(join(home, 'node_modules', 'warpline'), { throwIfNoEntry: false })?.isSymbolicLink() ?? false,
+          config:
+            existsSync(join(home, 'config', 'draft-writer.json')) &&
+            existsSync(join(home, 'config', 'announce-fanout.json')),
+          grant: existsSync(join(home, '.session-approval')),
+        })
+        if (arm === 'warpline') {
+          // Through the PUBLISHED accessor, which is the seam the built copy of
+          // the path resolver actually reads — the one comparison that turns
+          // isolated from an assumption into a measurement.
+          warplineSeam = warplineHome()
+          warplineGivenHome = home
+        }
+        return armOutcome()
+      }
+      await runIteration({ iteration: 1, ...opts(resultsDir, notesSource, runner) })
+
+      expect(warplineSeam).toBe(resolve(warplineGivenHome))
+      expect(seen.get('warpline')).toEqual({ plugins: true, link: true, config: true, grant: true })
+      for (const control of ['agent-with-state', 'agent-from-scratch'] as const) {
+        expect(seen.get(control)).toEqual({ plugins: false, link: false, config: false, grant: false })
+      }
+    })
+  })
+
+  /**
+   * The ONE predicate that separates the two control arms. Without it the pair
+   * receives an identical prompt over an identical home, and the published
+   * figures separate nothing — one thing measured twice, looking exactly like a
+   * valid result.
+   *
+   * The bytes asserted are the bytes of the source the TEST handed the driver,
+   * written under a temp directory, which is also what proves the notes source
+   * is a parameter rather than a path the driver reaches for.
+   */
+  test('the with-state home alone holds a copy of the notes source it was handed', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource, notesBody }) => {
+      const notes = new Map<string, string | null>()
+      const runner: ArmRunner = async (arm, home) => {
+        const at = join(home, NOTES_PATH)
+        notes.set(arm, existsSync(at) ? readFileSync(at, 'utf8') : null)
+        return armOutcome()
+      }
+      await runIteration({ iteration: 1, ...opts(resultsDir, notesSource, runner) })
+
+      expect(notes.get('agent-with-state')).toBe(notesBody)
+      expect(notes.get('agent-from-scratch')).toBe(null)
+      expect(notes.get('warpline')).toBe(null)
+    })
+  })
+
+  /**
+   * Written per RUN and not per set: the measured set spans hours, and an abort
+   * partway has to keep what it earned. The exact remaining count is the
+   * assertion — a check that "some" files survived would pass over a driver
+   * that wrote the whole set at the end and happened to have flushed one.
+   */
+  test('a throw mid-set leaves every record already written', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      const runner: ArmRunner = async (arm) => {
+        if (arm === 'agent-with-state') throw new Error('the second arm fell over')
+        return armOutcome()
+      }
+      await expect(runIteration({ iteration: 1, ...opts(resultsDir, notesSource, runner) })).rejects.toThrow(
+        'the second arm fell over',
+      )
+      expect(readdirSync(resultsDir).sort()).toEqual(['warpline-001.json'])
+    })
+  })
+
+  test('the first run of each arm is cold and every later run is warm', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      const first = await runIteration({ iteration: 1, ...opts(resultsDir, notesSource, passing) })
+      const second = await runIteration({ iteration: 2, ...opts(resultsDir, notesSource, passing) })
+
+      expect(first.map((r) => r.cold)).toEqual([true, true, true])
+      expect(second.map((r) => r.cold)).toEqual([false, false, false])
+    })
+  })
+
+  /**
+   * Created at runtime, because a placeholder committed to make it exist IS a
+   * commit adding a file under it — which freezes the pre-registration blob
+   * before any real result exists and destroys the property the ordering guard
+   * is built to deliver.
+   */
+  test('the results directory is created at runtime when absent', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      expect(existsSync(resultsDir)).toBe(false)
+      // And the resume read tolerates the absence rather than throwing on it.
+      expect((await resumeState(resultsDir)).nextIteration).toBe(1)
+
+      await runIteration({ iteration: 1, ...opts(resultsDir, notesSource, passing) })
+      expect(existsSync(resultsDir)).toBe(true)
+    })
+  })
+
+  test('below the warm target the summary is a shortfall row and no median', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      await runIteration({ iteration: 1, ...opts(resultsDir, notesSource, passing) })
+      await runIteration({ iteration: 2, ...opts(resultsDir, notesSource, passing) })
+
+      // Read from the statistics module rather than restated here, which is
+      // also what the driver does.
+      expect(WARM_TARGET).toBe(SHORTFALL_N)
+      const summary = await summariseSet(resultsDir)
+      for (const arm of ARM_ORDER) {
+        const row = summary[arm]
+        expect('shortfall' in row).toBe(true)
+        expect('median' in row).toBe(false)
+        // One cold, one warm passing: the count is the WARM passing one.
+        expect((row as { shortfall: { count: number; threshold: number } }).shortfall).toEqual({
+          count: 1,
+          threshold: SHORTFALL_N,
+        })
+      }
+    })
+  })
+
+  /**
+   * A provider outage says nothing about the arm, and there is no disposition
+   * value meaning "not the arm's fault" — so it aborts the set rather than
+   * entering one of the published rates.
+   */
+  test('an unattributable provider failure aborts the set and leaves the earned records', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      const runner: ArmRunner = async (arm) => {
+        if (arm === 'agent-from-scratch') throw new ApiUnavailableError(arm, 'api_error')
+        return armOutcome()
+      }
+      await expect(runSet(opts(resultsDir, notesSource, runner))).rejects.toBeInstanceOf(ApiUnavailableError)
+      expect(readdirSync(resultsDir).sort()).toEqual(['agent-with-state-001.json', 'warpline-001.json'])
+    })
+  })
+
+  /**
+   * The cap is what gives the shortfall row a trigger. A loop that ran until
+   * every arm passed would spend without bound on an arm that never passes, and
+   * the shortfall row the statistics module already implements would be
+   * unreachable code.
+   */
+  test('a runner that never passes the grader stops at the iteration cap', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      const runner: ArmRunner = async () => armOutcome({ grade: gradeOutcome(false) })
+      const summary = await runSet(opts(resultsDir, notesSource, runner))
+
+      expect(readdirSync(resultsDir).length).toBe(MAX_ITERATIONS * ARM_ORDER.length)
+      for (const arm of ARM_ORDER) {
+        expect('shortfall' in summary[arm]).toBe(true)
+        expect(summary[arm].warm_passing).toBe(0)
+      }
+    })
+  }, 30_000)
+
+  /**
+   * Resumable, because a measured set is not a command that finishes inside one
+   * foreground window. Without this, a relaunch after an interruption restarts
+   * at the first iteration with every arm flagged cold and overwrites the
+   * records it earned.
+   */
+  test('a driver started against existing records resumes rather than restarts', async () => {
+    await withDriverFixtures(async ({ resultsDir, notesSource }) => {
+      await runIteration({ iteration: 1, ...opts(resultsDir, notesSource, passing) })
+      await runIteration({ iteration: 2, ...opts(resultsDir, notesSource, passing) })
+      const earned = readdirSync(resultsDir).sort()
+
+      const state = await resumeState(resultsDir)
+      expect(state.nextIteration).toBe(3)
+      for (const arm of ARM_ORDER) {
+        expect(state.seen[arm]).toBe(true)
+        // Warm passing only: the cold run is excluded from every warm figure.
+        expect(state.passing[arm]).toBe(1)
+      }
+
+      const third = await runIteration({ iteration: state.nextIteration, ...opts(resultsDir, notesSource, passing) })
+      // No arm with a prior record is flagged cold, ever again.
+      expect(third.map((r) => r.cold)).toEqual([false, false, false])
+
+      const after = readdirSync(resultsDir).sort()
+      expect(after.length).toBe(9)
+      for (const name of earned) expect(after).toContain(name)
+      expect(new Set(after).size).toBe(9)
+
+      // And an already-written record is never overwritten: re-running an
+      // iteration that exists refuses rather than replacing what it earned.
+      await expect(runIteration({ iteration: 1, ...opts(resultsDir, notesSource, passing) })).rejects.toThrow(/EEXIST/)
+    })
+  })
+
+  /**
+   * The post-return existence check IS the assertion. Homes are removed in a
+   * `finally`, so a warm-up that reported the in-home path would hand the
+   * operator a path that no longer exists by the time they read it, and the
+   * copy-to-fixture step would have nothing to copy. That failure is silent —
+   * it arrives as a missing file in a manual step.
+   */
+  test('warm-up mode runs the from-scratch arm once and reports a path that outlives the home', async () => {
+    await withDriverFixtures(async ({ resultsDir }) => {
+      const body = '# notes from the one unmeasured pass\n\nwhere each input actually was\n'
+      const arms: string[] = []
+      const runner: ArmRunner = async (arm, home) => {
+        arms.push(arm)
+        await writeFile(join(home, NOTES_PATH), body)
+        return armOutcome()
+      }
+      const produced = await runWarmup({ runner, resultsDir })
+      try {
+        expect(arms).toEqual(['agent-from-scratch'])
+        expect(existsSync(produced)).toBe(true)
+        expect(readFileSync(produced, 'utf8')).toBe(body)
+        expect(existsSync(resultsDir) ? readdirSync(resultsDir) : []).toEqual([])
+      } finally {
+        await rm(dirname(produced), { recursive: true, force: true })
+      }
+    })
+  })
+
+  /**
+   * The worst outcome available, refused by name. A silent miss here commits
+   * the fixture empty or not at all, the with-state arm is handed nothing, both
+   * control arms then receive an identical prompt over an identical home, and
+   * the whole published pair measures one thing twice while looking exactly
+   * like a valid result.
+   */
+  test('warm-up mode refuses by name when the session produced no notes', async () => {
+    await withDriverFixtures(async ({ resultsDir }) => {
+      const runner: ArmRunner = async () => armOutcome()
+      await expect(runWarmup({ runner, resultsDir })).rejects.toBeInstanceOf(NoNotesProducedError)
+      expect(existsSync(resultsDir) ? readdirSync(resultsDir) : []).toEqual([])
+    })
+  })
+
+  /**
+   * The one assertion that makes every claim above checkable rather than
+   * stated. The sibling guard in this suite only sees COMMITTED files under the
+   * results directory; this one sees the untracked write a later add would
+   * sweep into the published raw data, and the fixture half catches a
+   * hand-written stub at the tracked notes path — the fabricated with-state
+   * state the seeder's refusal is designed to make impossible.
+   */
+  test('no driver test wrote into the tracked results directory or at the tracked notes path', () => {
+    const status = execFileSync('git', ['status', '--porcelain', '-uall', '--', 'bench/results', 'bench/fixtures'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+    })
+    expect(status.trim()).toBe('')
   })
 })
