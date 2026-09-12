@@ -26,8 +26,10 @@ import {
   pluginsDir as pluginsDirDefault,
   engineStatePath,
   runsDir as runsDirDefault,
+  lockPath as defaultLockPath,
   warplineHome,
 } from '../lib/paths.js'
+import { acquireLock, releaseLock } from './lock.js'
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { invokePlugin } from './invoke-plugin.js'
@@ -170,6 +172,20 @@ export interface AdvanceOptions {
   pluginsDir?: string
   /** Override state file path (for testing — full path to engine-state.json) */
   stateDir?: string
+  /**
+   * The run lock this advance takes, so two advances cannot write one home.
+   * Defaults to `.lock` beside the state file — `<state>/.lock` under an
+   * ordinary home, and the state override's own directory when one is given.
+   *
+   * What it does NOT guard, because both readings have been made in this
+   * repository before and written down as errors: it does not guard
+   * `engine-state.json`, whose read-modify-write window spans plugin execution
+   * and is serialised by the board's separate `.state.lock` for the board's own
+   * writers and by nothing at all for this one; and it does not guard the
+   * session-approval grant, which the approve verb writes and this advance only
+   * reads. It serialises advance against advance, and that is the whole of it.
+   */
+  lockPath?: string
   /** Override runs directory (for testing) */
   runsDir?: string
   /**
@@ -934,868 +950,901 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         `             the default one at ${getDefaultPluginsDir()}`,
     )
   }
+  // The run lock. Acquired HERE — below the plugin-root refusal above, above
+  // the state read below — so a refused root still leaves the home
+  // byte-identical, while every write this advance makes sits inside the span.
+  // Inside the engine and not in the CLI, because a programmatic host has to be
+  // guarded too: the benchmark harness calls this function with no options at
+  // all under a per-iteration home swap.
+  //
+  // The release is the single `finally` at the bottom of this function, which
+  // closes below the return. That span includes the quiet-hours early return,
+  // and it has to: a `try` ending above that arm, or a `finally` starting
+  // below it, leaks the lock on the one arm nobody looks at — and a leaked lock
+  // refuses every later advance for two hours, reporting "retry later" to a
+  // monitor that believes the fleet is merely busy.
+  //
+  // Two locks, and neither merges into the other. This one and the board's
+  // `<state>/.state.lock` are different files with different semantics and
+  // different holders. The board's is a non-reentrant O_EXCL lock held around
+  // its own read-modify-write of the state document, so this one cannot move
+  // down into the state writer without self-deadlocking the moment the board
+  // calls it. Holding this one across the state write at the end of this
+  // function fixes their acquisition order as advance-first. That is the fact
+  // to record; do not add a second lock, and do not read it as a hierarchy the
+  // code implements.
+  //
+  // `'advance'` is a fixed literal. The lock's mode field must never carry
+  // anything read off disk or off argv.
+  const resolvedLockPath = options.lockPath ?? getDefaultLockPath(options.stateDir)
+  await acquireLock(resolvedLockPath, 'advance')
 
-  // A readable root that produced no manifests is its own outcome, not a
-  // clean run over nothing. Computed once, here, above the quiet-hours guard
-  // — one condition decides both exits, so there is no arm left where a root
-  // that loaded nothing can still report a complete run.
-  const noManifestsLoaded = plugins.size === 0
-  const emptyRootReason = `no plugin manifests loaded from ${resolve(pluginsDir)}`
+  try {
 
-  /**
-   * The failure hook, called from the two places a run can end non-complete:
-   * the quiet-hours early return and the end of the normal path. A hook that
-   * throws is reported and swallowed — a host's notifier failing is not the
-   * engine failing to report.
-   */
-  const fireRunFailure = (reason: string): void => {
-    if (!onRunFailure) return
-    try {
-      onRunFailure(reason)
-    } catch (hookErr) {
-      const msg = hookErr instanceof Error ? hookErr.message : String(hookErr)
-      console.error(`[engine] onRunFailure hook threw: ${msg}`)
+    // A readable root that produced no manifests is its own outcome, not a
+    // clean run over nothing. Computed once, here, above the quiet-hours guard
+    // — one condition decides both exits, so there is no arm left where a root
+    // that loaded nothing can still report a complete run.
+    const noManifestsLoaded = plugins.size === 0
+    const emptyRootReason = `no plugin manifests loaded from ${resolve(pluginsDir)}`
+
+    /**
+     * The failure hook, called from the two places a run can end non-complete:
+     * the quiet-hours early return and the end of the normal path. A hook that
+     * throws is reported and swallowed — a host's notifier failing is not the
+     * engine failing to report.
+     */
+    const fireRunFailure = (reason: string): void => {
+      if (!onRunFailure) return
+      try {
+        onRunFailure(reason)
+      } catch (hookErr) {
+        const msg = hookErr instanceof Error ? hookErr.message : String(hookErr)
+        console.error(`[engine] onRunFailure hook threw: ${msg}`)
+      }
     }
-  }
 
-  // 1. Generate run_id
-  const run_id = `${new Date().toISOString().replace(/[:.]/g, '')}-${randomUUID().slice(0, 8)}`
-  const started_at = new Date().toISOString()
+    // 1. Generate run_id
+    const run_id = `${new Date().toISOString().replace(/[:.]/g, '')}-${randomUUID().slice(0, 8)}`
+    const started_at = new Date().toISOString()
 
-  // 2. Read v2 state
-  // `eventsPath` is threaded so a stub-gate discard notice lands in this run's
-  // event log rather than escaping to the default one.
-  const state = await readEngineState(stateDir, { eventsPath })
+    // 2. Read v2 state
+    // `eventsPath` is threaded so a stub-gate discard notice lands in this run's
+    // event log rather than escaping to the default one.
+    const state = await readEngineState(stateDir, { eventsPath })
 
-  // 2a. Compute degradation tier — from PREVIOUS last_interaction_at (before we update it)
-  const previousLastInteraction = state.last_interaction_at
-  const currentTier: TierName = computeTier(previousLastInteraction)
+    // 2a. Compute degradation tier — from PREVIOUS last_interaction_at (before we update it)
+    const previousLastInteraction = state.last_interaction_at
+    const currentTier: TierName = computeTier(previousLastInteraction)
 
-  // 2b. Update last_interaction_at — persisted in final writeEngineState
-  state.last_interaction_at = new Date().toISOString()
+    // 2b. Update last_interaction_at — persisted in final writeEngineState
+    state.last_interaction_at = new Date().toISOString()
 
-  // 2c. Tier transition BoardEvent — emit when tier is not normal
-  if (currentTier !== 'normal') {
-    const previousMs = previousLastInteraction
-      ? new Date(previousLastInteraction).getTime()
-      : Date.now()
-    const idleDays = Math.round((Date.now() - previousMs) / 86_400_000)
-    const tierTransitionSummary = `Entered ${currentTier} mode (${idleDays}d absent)`
-    // Deliberately null, not `run_id`. The tier transition is a property of
-    // how long the operator has been away — it is observed at the top of an
-    // advance but is not something this advance did, and attributing it to a
-    // run would make "which run raised this" answer a question it did not ask.
-    await emitBoardEvent(
-      makeEvent('notice', 'engine:tier-transition', tierTransitionSummary, null),
-      eventsPath,
-    )
-  }
-
-  // 2d. Read preferences — derive from the state file's directory when a
-  // custom stateDir was given (test isolation / relocated homes), else the
-  // warpline home default. The source system's comment promised this
-  // derivation but never implemented it, so its engine tests silently read
-  // the LIVE preferences file.
-  const resolvedPrefsPath =
-    preferencesPath ??
-    (options.stateDir ? join(dirname(options.stateDir), 'preferences.json') : defaultPreferencesPath())
-  const prefs = await readPreferences(resolvedPrefsPath)
-
-  // Guardrail: quiet hours — skip run if active (unless dryRun or force)
-  if (isQuietHours(prefs) && !dryRun && !force) {
-    console.log('[engine] Quiet hours active — skipping run')
-    // The zero-manifest verdict is the same on this path as on the normal
-    // one. A skipped cycle over a root that loaded nothing is still a root
-    // that loaded nothing, and a carve-out here would be a quiet hour in
-    // which the one status worth reporting stops being reported. A root that
-    // DID load manifests is unaffected: it still reports a complete skip and
-    // still hands back an empty run-log path.
-    // Two conditions, in the same precedence the normal path uses: a root that
-    // loaded NOTHING is `failed`, a root that loaded something but not all of
-    // it is `partial`, and only a root that loaded cleanly is `complete`. The
-    // zero-manifest half was hoisted above this guard when it was written; the
-    // load-failure half was not, so the two arms disagreed on the same root —
-    // `partial` awake and `complete` asleep — against the spec's own statement
-    // that the skip reports the status a normal advance would. No plugin runs
-    // on this path, so load failures are the only way to be partial here.
-    const quietStatus: AdvanceResult['status'] = noManifestsLoaded
-      ? 'failed'
-      : loadFailures.length > 0
-        ? 'partial'
-        : 'complete'
-    await emitRunCompleted(run_id, quietStatus, eventsPath)
-    // This arm sits above the failure-hook block at the end of the function,
-    // so without this call the hook would never fire here and the contract
-    // stated on the option would be false the day it was written.
-    //
-    // Fired for `partial` too, not only `failed`. The end-of-path block fires
-    // on ANY non-complete status, so hooking only the zero-manifest case would
-    // leave the two arms disagreeing about whether the host hears — the same
-    // asymmetry the status fix above just closed, one layer down. Reason shape
-    // matches that block's, so a host cannot tell which arm produced it.
-    if (quietStatus !== 'complete') {
-      const failed = loadFailures.map((f) => f.plugin)
-      fireRunFailure(
-        failed.length > 0
-          ? `run ${quietStatus}: ${failed.length} plugin(s) failed [${failed.join(', ')}]`
-          : `run ${quietStatus}: ${emptyRootReason}`,
+    // 2c. Tier transition BoardEvent — emit when tier is not normal
+    if (currentTier !== 'normal') {
+      const previousMs = previousLastInteraction
+        ? new Date(previousLastInteraction).getTime()
+        : Date.now()
+      const idleDays = Math.round((Date.now() - previousMs) / 86_400_000)
+      const tierTransitionSummary = `Entered ${currentTier} mode (${idleDays}d absent)`
+      // Deliberately null, not `run_id`. The tier transition is a property of
+      // how long the operator has been away — it is observed at the top of an
+      // advance but is not something this advance did, and attributing it to a
+      // run would make "which run raised this" answer a question it did not ask.
+      await emitBoardEvent(
+        makeEvent('notice', 'engine:tier-transition', tierTransitionSummary, null),
+        eventsPath,
       )
     }
-    return {
-      run_id,
-      status: quietStatus,
-      plugin_states: new Map(),
-      gated_plugins: [],
-      run_log_path: '',
+
+    // 2d. Read preferences — derive from the state file's directory when a
+    // custom stateDir was given (test isolation / relocated homes), else the
+    // warpline home default. The source system's comment promised this
+    // derivation but never implemented it, so its engine tests silently read
+    // the LIVE preferences file.
+    const resolvedPrefsPath =
+      preferencesPath ??
+      (options.stateDir ? join(dirname(options.stateDir), 'preferences.json') : defaultPreferencesPath())
+    const prefs = await readPreferences(resolvedPrefsPath)
+
+    // Guardrail: quiet hours — skip run if active (unless dryRun or force)
+    if (isQuietHours(prefs) && !dryRun && !force) {
+      console.log('[engine] Quiet hours active — skipping run')
+      // The zero-manifest verdict is the same on this path as on the normal
+      // one. A skipped cycle over a root that loaded nothing is still a root
+      // that loaded nothing, and a carve-out here would be a quiet hour in
+      // which the one status worth reporting stops being reported. A root that
+      // DID load manifests is unaffected: it still reports a complete skip and
+      // still hands back an empty run-log path.
+      // Two conditions, in the same precedence the normal path uses: a root that
+      // loaded NOTHING is `failed`, a root that loaded something but not all of
+      // it is `partial`, and only a root that loaded cleanly is `complete`. The
+      // zero-manifest half was hoisted above this guard when it was written; the
+      // load-failure half was not, so the two arms disagreed on the same root —
+      // `partial` awake and `complete` asleep — against the spec's own statement
+      // that the skip reports the status a normal advance would. No plugin runs
+      // on this path, so load failures are the only way to be partial here.
+      const quietStatus: AdvanceResult['status'] = noManifestsLoaded
+        ? 'failed'
+        : loadFailures.length > 0
+          ? 'partial'
+          : 'complete'
+      await emitRunCompleted(run_id, quietStatus, eventsPath)
+      // This arm sits above the failure-hook block at the end of the function,
+      // so without this call the hook would never fire here and the contract
+      // stated on the option would be false the day it was written.
+      //
+      // Fired for `partial` too, not only `failed`. The end-of-path block fires
+      // on ANY non-complete status, so hooking only the zero-manifest case would
+      // leave the two arms disagreeing about whether the host hears — the same
+      // asymmetry the status fix above just closed, one layer down. Reason shape
+      // matches that block's, so a host cannot tell which arm produced it.
+      if (quietStatus !== 'complete') {
+        const failed = loadFailures.map((f) => f.plugin)
+        fireRunFailure(
+          failed.length > 0
+            ? `run ${quietStatus}: ${failed.length} plugin(s) failed [${failed.join(', ')}]`
+            : `run ${quietStatus}: ${emptyRootReason}`,
+        )
+      }
+      return {
+        run_id,
+        status: quietStatus,
+        plugin_states: new Map(),
+        gated_plugins: [],
+        run_log_path: '',
+      }
     }
-  }
 
-  // Guardrail: review_gate — if enabled, treat all autonomous plugins as supervised
-  const reviewGateActive = prefs.review_gate
+    // Guardrail: review_gate — if enabled, treat all autonomous plugins as supervised
+    const reviewGateActive = prefs.review_gate
 
-  // 3. Prune old run logs.
-  //
-  // At the TOP of the advance, and it stays here. A consumer reads the run-log
-  // path off disk AFTER the advance returns, so a byte eviction at the end of
-  // an advance with a small budget would delete the log that consumer needs.
-  // Accepted cost: an advance is bounded by what it inherited, not by what it
-  // is about to write.
-  //
-  // The protected set is the pending gates' run ids and nothing else. A
-  // `last_output` pointer and a stored last run id are documented to dangle by
-  // design; treating either as protective would be retain-forever by accident.
-  // Built from the state already read above rather than from a second read.
-  const protectedRunIds = new Set(state.pending_gates.map((gate) => gate.run_id))
+    // 3. Prune old run logs.
+    //
+    // At the TOP of the advance, and it stays here. A consumer reads the run-log
+    // path off disk AFTER the advance returns, so a byte eviction at the end of
+    // an advance with a small budget would delete the log that consumer needs.
+    // Accepted cost: an advance is bounded by what it inherited, not by what it
+    // is about to write.
+    //
+    // The protected set is the pending gates' run ids and nothing else. A
+    // `last_output` pointer and a stored last run id are documented to dangle by
+    // design; treating either as protective would be retain-forever by accident.
+    // Built from the state already read above rather than from a second read.
+    const protectedRunIds = new Set(state.pending_gates.map((gate) => gate.run_id))
 
-  // Held rather than discarded. The count is the first link of a thread that
-  // ends on the advance's result and in its machine-readable output; nothing
-  // consumes it yet, and a bare call is how a count stops being threaded.
-  const prunedRunLogs = await pruneRunLogs(runsDir, prefs.retention, protectedRunIds)
+    // Held rather than discarded. The count is the first link of a thread that
+    // ends on the advance's result and in its machine-readable output; nothing
+    // consumes it yet, and a bare call is how a count stops being threaded.
+    const prunedRunLogs = await pruneRunLogs(runsDir, prefs.retention, protectedRunIds)
 
-  // 3a. The headless JSONL run log.
-  //
-  // Constructed HERE, below the plugin-root refusal near the top of this
-  // function and below the quiet-hours early return, because both of those
-  // arms must leave the warpline home byte-identical and this is the only
-  // writer added since that promise was made. Constructing the logger is
-  // itself write-free — `appendEvent` is what creates the directory — but
-  // placing it after both refusals means the ordering does not depend on
-  // that remaining true.
-  //
-  // The window comes from the operator's policy rather than a literal here.
-  // This is the third record warpline keeps of a run, alongside the per-plugin
-  // run artifact and the engine's own run log, and three formats pruned on
-  // three literals is three retention rules that agree until somebody tunes
-  // one.
-  const runLogger = new JsonlRunLogger({ logsDir, runId: run_id })
-  await runLogger.prune(prefs.retention.days)
-  await runLogger.appendEvent({ level: 'info', event: 'run_start' })
+    // 3a. The headless JSONL run log.
+    //
+    // Constructed HERE, below the plugin-root refusal near the top of this
+    // function and below the quiet-hours early return, because both of those
+    // arms must leave the warpline home byte-identical and this is the only
+    // writer added since that promise was made. Constructing the logger is
+    // itself write-free — `appendEvent` is what creates the directory — but
+    // placing it after both refusals means the ordering does not depend on
+    // that remaining true.
+    //
+    // The window comes from the operator's policy rather than a literal here.
+    // This is the third record warpline keeps of a run, alongside the per-plugin
+    // run artifact and the engine's own run log, and three formats pruned on
+    // three literals is three retention rules that agree until somebody tunes
+    // one.
+    const runLogger = new JsonlRunLogger({ logsDir, runId: run_id })
+    await runLogger.prune(prefs.retention.days)
+    await runLogger.appendEvent({ level: 'info', event: 'run_start' })
 
-  // 3b. Emit run_started event
-  await emitRunStarted(run_id, eventsPath)
+    // 3b. Emit run_started event
+    await emitRunStarted(run_id, eventsPath)
 
-  // 5. Topological sort over the manifests loaded at the top of this function.
-  //    (Step 4 was the load; it now happens above every write.)
-  const levels = topoSort(plugins)
+    // 5. Topological sort over the manifests loaded at the top of this function.
+    //    (Step 4 was the load; it now happens above every write.)
+    const levels = topoSort(plugins)
 
-  // 6. Per-plugin FSM state
-  const plugin_states = new Map<string, PluginFsmState | 'skipped'>()
-  for (const [name] of plugins) {
-    plugin_states.set(name, 'pending')
-  }
+    // 6. Per-plugin FSM state
+    const plugin_states = new Map<string, PluginFsmState | 'skipped'>()
+    for (const [name] of plugins) {
+      plugin_states.set(name, 'pending')
+    }
 
-  const gated_plugins: string[] = []
-  /**
-   * The gates parked by this advance, assembled inside the gated arm where the
-   * plugin's real `SkillResult` is still in scope.
-   */
-  const parked_gates: PendingGate[] = []
-  const plugin_entries: RunLog['plugin_entries'] = []
+    const gated_plugins: string[] = []
+    /**
+     * The gates parked by this advance, assembled inside the gated arm where the
+     * plugin's real `SkillResult` is still in scope.
+     */
+    const parked_gates: PendingGate[] = []
+    const plugin_entries: RunLog['plugin_entries'] = []
 
-  // Seeded BEFORE the overall-status block below, and the ordering is the
-  // point: that block promotes complete to partial when any plugin is
-  // recorded failed, so an all-fail root reports failed only because failed
-  // is already in hand when it runs. Reverse the two and "the root produced
-  // nothing" becomes "some plugins failed" — the conflation this exists to
-  // remove.
-  let engineStatus: AdvanceResult['status'] = noManifestsLoaded ? 'failed' : 'complete'
-  let stopped = false
+    // Seeded BEFORE the overall-status block below, and the ordering is the
+    // point: that block promotes complete to partial when any plugin is
+    // recorded failed, so an all-fail root reports failed only because failed
+    // is already in hand when it runs. Reverse the two and "the root produced
+    // nothing" becomes "some plugins failed" — the conflation this exists to
+    // remove.
+    let engineStatus: AdvanceResult['status'] = noManifestsLoaded ? 'failed' : 'complete'
+    let stopped = false
 
-  // 6b. Evaluation context shared by every plugin in this run. The
-  // approval path is resolved once here so the evaluator does no defaulting.
-  // `profile` alone: headless mode (A2) and the schedule tier are both derived
-  // from it inside the gates, so this run and a `warpline plan` preview cannot
-  // reach the gates carrying different answers to the same question.
-  const evalCtx: EvalContext = {
-    profile,
-    currentTier,
-    force,
-    state,
-    approvalPath: approvalPath ?? sessionApprovalPath(),
-  }
+    // 6b. Evaluation context shared by every plugin in this run. The
+    // approval path is resolved once here so the evaluator does no defaulting.
+    // `profile` alone: headless mode (A2) and the schedule tier are both derived
+    // from it inside the gates, so this run and a `warpline plan` preview cannot
+    // reach the gates carrying different answers to the same question.
+    const evalCtx: EvalContext = {
+      profile,
+      currentTier,
+      force,
+      state,
+      approvalPath: approvalPath ?? sessionApprovalPath(),
+    }
 
-  // 7. Execute each level
-  for (const level of levels) {
-    if (stopped) break
+    // 7. Execute each level
+    for (const level of levels) {
+      if (stopped) break
 
-    // Execute all plugins in this level concurrently
-    await Promise.all(
-      level.map(async (pluginName) => {
-        const manifest = plugins.get(pluginName)!
-        const entryStartedAt = new Date().toISOString()
-        const entryStart = Date.now()
+      // Execute all plugins in this level concurrently
+      await Promise.all(
+        level.map(async (pluginName) => {
+          const manifest = plugins.get(pluginName)!
+          const entryStartedAt = new Date().toISOString()
+          const entryStart = Date.now()
 
-        // -- Due-ness evaluation ---------
-        // Every guard predicate now lives in evaluatePlugin; every write below
-        // stays on this side of the seam, keyed off the returned reason.
-        // `entryStart` is the single clock read threaded in as `now`.
-        const ev = await evaluatePlugin(pluginName, manifest, evalCtx, entryStart)
+          // -- Due-ness evaluation ---------
+          // Every guard predicate now lives in evaluatePlugin; every write below
+          // stays on this side of the seam, keyed off the returned reason.
+          // `entryStart` is the single clock read threaded in as `now`.
+          const ev = await evaluatePlugin(pluginName, manifest, evalCtx, entryStart)
 
-        // -- Dry-run side-effect block -----------------------
-        // Run-only, so it is deliberately outside the evaluator. In
-        // the original chain it sat between the task-lock guard and the
-        // approval guard, so it applies exactly to the outcomes reached after
-        // those guards passed: due, or not-due-because-unapproved.
-        if (dryRun && manifest.side_effects.length > 0 && (ev.due || ev.reason === 'unapproved')) {
-          plugin_states.set(pluginName, 'skipped')
-          const dryBlockElapsed = Date.now() - entryStart
-          plugin_entries.push({
-            plugin: pluginName,
-            status: 'skipped',
-            started_at: entryStartedAt,
-            elapsed_ms: dryBlockElapsed,
-            result_summary: `blocked (dry-run): declares side effects [${manifest.side_effects.join(', ')}]`,
-            retried: false,
-          })
-          await emitPluginSkipped(pluginName, `blocked (dry-run): declares side effects [${manifest.side_effects.join(', ')}]`, run_id, eventsPath)
-          onPluginEnd?.(pluginName, 'skipped', dryBlockElapsed, 'blocked (dry-run)')
-          return
-        }
-
-        // -- Not-due: record the skip the evaluator decided on --
-        // One arm per reason code, dispatched so the compiler owns the
-        // completeness of the set. The arms differ only in their run-log prose,
-        // which is a run-log concern and stays here rather than travelling in
-        // the evaluator's structured reason.
-        //
-        // A `switch` and not a chain of `if`/`return`, because the chain's last
-        // block had no guard: every reason without an arm of its own fell into
-        // it and was recorded as an approval-gate skip, naming session approval
-        // and side effects on a plugin that may declare neither. The `default`
-        // arm below is what a chain cannot have — a place the compiler checks.
-        if (!ev.due) {
-          plugin_states.set(pluginName, 'skipped')
-
-          // Narrowed through a local: a `switch` over a `const` of a literal
-          // union narrows the `default` arm to `never` reliably, which is the
-          // whole mechanism here.
-          const reason = ev.reason
-
-          switch (reason) {
-            // -- Profile tier filter, tier filter, headless supervised bypass
-            //    (A2), manual, task lock --
-            // Five reasons, one arm: they differ only in the detail string the
-            // evaluator already produced, and five copies of the same six lines
-            // hid that the differences below are the real ones.
-            case 'profile_schedule':
-            case 'min_tier':
-            case 'headless_supervised':
-            case 'manual':
-            case 'task_locked': {
-              plugin_entries.push({
-                plugin: pluginName,
-                status: 'skipped',
-                started_at: entryStartedAt,
-                elapsed_ms: Date.now() - entryStart,
-                result_summary: ev.detail,
-                retried: false,
-              })
-              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-              return
-            }
-
-            // -- Fresh within TTL: the run log prefixes the freshness prose --
-            case 'fresh': {
-              plugin_entries.push({
-                plugin: pluginName,
-                status: 'skipped',
-                started_at: entryStartedAt,
-                elapsed_ms: Date.now() - entryStart,
-                result_summary: `skipped: ${ev.detail}`,
-                retried: false,
-              })
-              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-              return
-            }
-
-            // -- Dependency failed: it ran, it failed, and this plugin would
-            //    otherwise read what it left behind on an earlier cycle --
-            // The run log's prefix is added HERE, exactly as the freshness arm
-            // above adds it, and the evaluator's detail stays bare. The board
-            // event takes that bare detail and formats its own
-            // `${plugin}: skipped — ${reason}`, so one `skipped` reaches an
-            // operator instead of two.
-            //
-            // The second not-due arm to call the progress end hook, and the
-            // reason is the approval gate's reason: a dependency failure is
-            // actionable in the way a missing Grant is actionable and unlike
-            // "still fresh", so the operator watching a long advance gets a line
-            // for the plugin they were waiting on instead of silence.
-            //
-            // Not the older rationale, which does not survive a read of source:
-            // that the plan-versus-run harness keys its attempted-set off the
-            // end hook. It keys off `onPluginStart` only (`plan.test.ts`,
-            // `attemptedByRun`), and a gated plugin is correctly outside the
-            // attempted set either way, because this arm returns before the
-            // start hook fires.
-            //
-            // No `plugin_runs` write, for the reason spelled out on the denial
-            // arm below: `runAdvance` has exactly three write sites for that
-            // record and this is not a fourth. A write here would move
-            // `last_run_at` for a plugin that never ran, re-arm the freshness
-            // latch against a run that did not happen, and make a plugin that
-            // never ran indistinguishable from one that ran and produced
-            // nothing — which is the exact confusion this gate exists to end.
-            case 'dependency_failed': {
-              const dependencyFailedElapsed = Date.now() - entryStart
-              plugin_entries.push({
-                plugin: pluginName,
-                status: 'skipped',
-                started_at: entryStartedAt,
-                elapsed_ms: dependencyFailedElapsed,
-                result_summary: `skipped: ${ev.detail}`,
-                retried: false,
-              })
-              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-              onPluginEnd?.(pluginName, 'skipped', dependencyFailedElapsed, 'dependency failed')
-              return
-            }
-
-            // -- Denied: a human answered, and the answer still applies --
-            // The only arm here that does not write `status: 'skipped'`. A
-            // denial is an outcome of supervision, like `gated`, and filing it
-            // as a skip would put it in the same bucket as "no Grant" and
-            // "still fresh" — the log could then no longer tell an unanswered
-            // question from an answered one. The BOARD event carries the same
-            // distinction, via `emitPluginDenied`: making that argument about the
-            // run log and then emitting `plugin: skipped — denied …` next door
-            // left the two logs disagreeing about the same advance.
-            //
-            // No `plugin_runs` write: the plugin did not run. `runAdvance` has
-            // exactly three write sites for that record — the catch around
-            // `invokePlugin`, the gated arm and the autonomous arm, all below —
-            // and neither this arm nor the dependency-failed one above is a
-            // fourth. (`applyPendingGate`
-            // holds the only other one, plus the delete in its discard closure;
-            // both are outside this function and answer a parked gate rather than
-            // an advance.)
-            case 'denied': {
-              plugin_entries.push({
-                plugin: pluginName,
-                status: 'denied',
-                started_at: entryStartedAt,
-                elapsed_ms: Date.now() - entryStart,
-                result_summary: ev.detail,
-                retried: false,
-              })
-              await emitPluginDenied(pluginName, ev.detail, run_id, eventsPath)
-              return
-            }
-
-            // -- Side-effect approval gate ---------------------------------
-            // The run log names the specific effects; the board event does not.
-            // Guarded now, where it used to be the block everything unmatched
-            // fell into, which is why it must never inherit another reason's
-            // run: it ends the progress hook, and it is one of the two not-due
-            // arms that do — the dependency-failed arm above is the other, on
-            // the same argument that an actionable skip earns the operator a
-            // line where "still fresh" does not.
-            case 'unapproved': {
-              const unapprovedElapsed = Date.now() - entryStart
-              plugin_entries.push({
-                plugin: pluginName,
-                status: 'skipped',
-                started_at: entryStartedAt,
-                elapsed_ms: unapprovedElapsed,
-                result_summary: `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
-                retried: false,
-              })
-              await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-              onPluginEnd?.(pluginName, 'skipped', unapprovedElapsed, 'unapproved side effects')
-              return
-            }
-
-            default:
-              assertNever(reason)
+          // -- Dry-run side-effect block -----------------------
+          // Run-only, so it is deliberately outside the evaluator. In
+          // the original chain it sat between the task-lock guard and the
+          // approval guard, so it applies exactly to the outcomes reached after
+          // those guards passed: due, or not-due-because-unapproved.
+          if (dryRun && manifest.side_effects.length > 0 && (ev.due || ev.reason === 'unapproved')) {
+            plugin_states.set(pluginName, 'skipped')
+            const dryBlockElapsed = Date.now() - entryStart
+            plugin_entries.push({
+              plugin: pluginName,
+              status: 'skipped',
+              started_at: entryStartedAt,
+              elapsed_ms: dryBlockElapsed,
+              result_summary: `blocked (dry-run): declares side effects [${manifest.side_effects.join(', ')}]`,
+              retried: false,
+            })
+            await emitPluginSkipped(pluginName, `blocked (dry-run): declares side effects [${manifest.side_effects.join(', ')}]`, run_id, eventsPath)
+            onPluginEnd?.(pluginName, 'skipped', dryBlockElapsed, 'blocked (dry-run)')
+            return
           }
-        }
 
-        // -- Set FSM to running --
-        plugin_states.set(pluginName, 'running')
-        onPluginStart?.(pluginName)
-        await emitPluginStarted(pluginName, run_id, eventsPath)
-
-        // -- Invoke plugin --
-        let invocationResult: Awaited<ReturnType<typeof invokePlugin>>
-        try {
-          // `runId` is threaded so the Outputs this handler returns are stamped
-          // with the advance that produced them, not with a per-invocation id
-          // nothing else knows. `persistArtifact` stays off deliberately — see
-          // the rationale in invoke-plugin.ts; an advance writes a RunLog, not
-          // a RunArtifact.
+          // -- Not-due: record the skip the evaluator decided on --
+          // One arm per reason code, dispatched so the compiler owns the
+          // completeness of the set. The arms differ only in their run-log prose,
+          // which is a run-log concern and stays here rather than travelling in
+          // the evaluator's structured reason.
           //
-          // The Grant was read ONCE, by the dueness check above, and the
-          // witness carries that answer forward instead of asking again. Why
-          // that is sound, and why the arms are what they are, is on
-          // `witnessAfterGrantRead` — one copy, because two copies of an
-          // argument drift and the copy that drifts is the one nobody reads.
-          const witness = witnessAfterGrantRead(pluginName, manifest.side_effects)
+          // A `switch` and not a chain of `if`/`return`, because the chain's last
+          // block had no guard: every reason without an arm of its own fell into
+          // it and was recorded as an approval-gate skip, naming session approval
+          // and side effects on a plugin that may declare neither. The `default`
+          // arm below is what a chain cannot have — a place the compiler checks.
+          if (!ev.due) {
+            plugin_states.set(pluginName, 'skipped')
 
-          // What each DECLARED dependency last produced and how its last run
-          // ended, projected HERE and not from the state read at the top of the
-          // advance. `plugin_runs` is mutated by each level's own writes below,
-          // and level ordering is what puts a level-0 producer's write before a
-          // level-1 consumer's invocation. A projection hoisted out of this
-          // closure is a snapshot taken before any producer ran: the consumer
-          // would read nothing on every advance while every test handing a
-          // literal stayed green.
-          //
-          // Declared names only, so the record never carries a key the
-          // consumer's manifest does not list. `null` for a name with no entry
-          // at all; within an entry, `last_output` is ABSENT rather than null
-          // for a run that produced none, which the member's `?? null` covers.
-          //
-          // ONE projection for both facts. Two would be two reads of a map this
-          // loop mutates, and the one that drifted would be the one nobody
-          // read — the same failure the paragraph above describes for a hoisted
-          // snapshot. `DependencyRun` is a `Pick` of exactly the two fields the
-          // two members expose: this is the boundary where a field is chosen
-          // for exposure to a different plugin, and widening it is what the
-          // leak test watches for.
-          const dependencyRuns = Object.fromEntries(
-            manifest.dependencies.map((d): [string, DependencyRun | null] => {
-              const run = state.plugin_runs[d]
-              return [
-                d,
-                run
-                  ? {
-                      status: run.status,
-                      // A COPY, and the copy is the point. The record lives in
-                      // `state.plugin_runs`, `writeEngineState` persists that
-                      // map unvalidated at the end of the advance, and
-                      // `capabilities.ts` hands whatever is here straight to
-                      // the handler. Passing the live object made a consumer's
-                      // in-place edit — `rec.body = JSON.stringify(patched)` is
-                      // the obvious shape — the engine's persisted state: a
-                      // body over the 16 KiB `OutputRecordSchema` cap bricks
-                      // every later fail-closed read, and because
-                      // `proposalFingerprint` hashes this field, the edit moves
-                      // the PRODUCER's fingerprint and re-arms side effects an
-                      // operator already denied. `status` needs no copy; it is
-                      // a string.
-                      last_output:
-                        run.last_output === undefined
-                          ? undefined
-                          : structuredClone(run.last_output),
-                    }
-                  : null,
-              ]
-            }),
-          )
+            // Narrowed through a local: a `switch` over a `const` of a literal
+            // union narrows the `default` arm to `never` reliably, which is the
+            // whole mechanism here.
+            const reason = ev.reason
 
-          invocationResult = await invokePlugin(
-            pluginName,
-            {},
-            { pluginsDir, runId: run_id, dependencyRuns },
-            witness,
-          )
-        } catch (err) {
-          plugin_states.set(pluginName, 'failed')
-          const errMsg = err instanceof Error ? err.message : String(err)
-          const failedElapsed = Date.now() - entryStart
+            switch (reason) {
+              // -- Profile tier filter, tier filter, headless supervised bypass
+              //    (A2), manual, task lock --
+              // Five reasons, one arm: they differ only in the detail string the
+              // evaluator already produced, and five copies of the same six lines
+              // hid that the differences below are the real ones.
+              case 'profile_schedule':
+              case 'min_tier':
+              case 'headless_supervised':
+              case 'manual':
+              case 'task_locked': {
+                plugin_entries.push({
+                  plugin: pluginName,
+                  status: 'skipped',
+                  started_at: entryStartedAt,
+                  elapsed_ms: Date.now() - entryStart,
+                  result_summary: ev.detail,
+                  retried: false,
+                })
+                await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+                return
+              }
+
+              // -- Fresh within TTL: the run log prefixes the freshness prose --
+              case 'fresh': {
+                plugin_entries.push({
+                  plugin: pluginName,
+                  status: 'skipped',
+                  started_at: entryStartedAt,
+                  elapsed_ms: Date.now() - entryStart,
+                  result_summary: `skipped: ${ev.detail}`,
+                  retried: false,
+                })
+                await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+                return
+              }
+
+              // -- Dependency failed: it ran, it failed, and this plugin would
+              //    otherwise read what it left behind on an earlier cycle --
+              // The run log's prefix is added HERE, exactly as the freshness arm
+              // above adds it, and the evaluator's detail stays bare. The board
+              // event takes that bare detail and formats its own
+              // `${plugin}: skipped — ${reason}`, so one `skipped` reaches an
+              // operator instead of two.
+              //
+              // The second not-due arm to call the progress end hook, and the
+              // reason is the approval gate's reason: a dependency failure is
+              // actionable in the way a missing Grant is actionable and unlike
+              // "still fresh", so the operator watching a long advance gets a line
+              // for the plugin they were waiting on instead of silence.
+              //
+              // Not the older rationale, which does not survive a read of source:
+              // that the plan-versus-run harness keys its attempted-set off the
+              // end hook. It keys off `onPluginStart` only (`plan.test.ts`,
+              // `attemptedByRun`), and a gated plugin is correctly outside the
+              // attempted set either way, because this arm returns before the
+              // start hook fires.
+              //
+              // No `plugin_runs` write, for the reason spelled out on the denial
+              // arm below: `runAdvance` has exactly three write sites for that
+              // record and this is not a fourth. A write here would move
+              // `last_run_at` for a plugin that never ran, re-arm the freshness
+              // latch against a run that did not happen, and make a plugin that
+              // never ran indistinguishable from one that ran and produced
+              // nothing — which is the exact confusion this gate exists to end.
+              case 'dependency_failed': {
+                const dependencyFailedElapsed = Date.now() - entryStart
+                plugin_entries.push({
+                  plugin: pluginName,
+                  status: 'skipped',
+                  started_at: entryStartedAt,
+                  elapsed_ms: dependencyFailedElapsed,
+                  result_summary: `skipped: ${ev.detail}`,
+                  retried: false,
+                })
+                await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+                onPluginEnd?.(pluginName, 'skipped', dependencyFailedElapsed, 'dependency failed')
+                return
+              }
+
+              // -- Denied: a human answered, and the answer still applies --
+              // The only arm here that does not write `status: 'skipped'`. A
+              // denial is an outcome of supervision, like `gated`, and filing it
+              // as a skip would put it in the same bucket as "no Grant" and
+              // "still fresh" — the log could then no longer tell an unanswered
+              // question from an answered one. The BOARD event carries the same
+              // distinction, via `emitPluginDenied`: making that argument about the
+              // run log and then emitting `plugin: skipped — denied …` next door
+              // left the two logs disagreeing about the same advance.
+              //
+              // No `plugin_runs` write: the plugin did not run. `runAdvance` has
+              // exactly three write sites for that record — the catch around
+              // `invokePlugin`, the gated arm and the autonomous arm, all below —
+              // and neither this arm nor the dependency-failed one above is a
+              // fourth. (`applyPendingGate`
+              // holds the only other one, plus the delete in its discard closure;
+              // both are outside this function and answer a parked gate rather than
+              // an advance.)
+              case 'denied': {
+                plugin_entries.push({
+                  plugin: pluginName,
+                  status: 'denied',
+                  started_at: entryStartedAt,
+                  elapsed_ms: Date.now() - entryStart,
+                  result_summary: ev.detail,
+                  retried: false,
+                })
+                await emitPluginDenied(pluginName, ev.detail, run_id, eventsPath)
+                return
+              }
+
+              // -- Side-effect approval gate ---------------------------------
+              // The run log names the specific effects; the board event does not.
+              // Guarded now, where it used to be the block everything unmatched
+              // fell into, which is why it must never inherit another reason's
+              // run: it ends the progress hook, and it is one of the two not-due
+              // arms that do — the dependency-failed arm above is the other, on
+              // the same argument that an actionable skip earns the operator a
+              // line where "still fresh" does not.
+              case 'unapproved': {
+                const unapprovedElapsed = Date.now() - entryStart
+                plugin_entries.push({
+                  plugin: pluginName,
+                  status: 'skipped',
+                  started_at: entryStartedAt,
+                  elapsed_ms: unapprovedElapsed,
+                  result_summary: `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
+                  retried: false,
+                })
+                await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+                onPluginEnd?.(pluginName, 'skipped', unapprovedElapsed, 'unapproved side effects')
+                return
+              }
+
+              default:
+                assertNever(reason)
+            }
+          }
+
+          // -- Set FSM to running --
+          plugin_states.set(pluginName, 'running')
+          onPluginStart?.(pluginName)
+          await emitPluginStarted(pluginName, run_id, eventsPath)
+
+          // -- Invoke plugin --
+          let invocationResult: Awaited<ReturnType<typeof invokePlugin>>
+          try {
+            // `runId` is threaded so the Outputs this handler returns are stamped
+            // with the advance that produced them, not with a per-invocation id
+            // nothing else knows. `persistArtifact` stays off deliberately — see
+            // the rationale in invoke-plugin.ts; an advance writes a RunLog, not
+            // a RunArtifact.
+            //
+            // The Grant was read ONCE, by the dueness check above, and the
+            // witness carries that answer forward instead of asking again. Why
+            // that is sound, and why the arms are what they are, is on
+            // `witnessAfterGrantRead` — one copy, because two copies of an
+            // argument drift and the copy that drifts is the one nobody reads.
+            const witness = witnessAfterGrantRead(pluginName, manifest.side_effects)
+
+            // What each DECLARED dependency last produced and how its last run
+            // ended, projected HERE and not from the state read at the top of the
+            // advance. `plugin_runs` is mutated by each level's own writes below,
+            // and level ordering is what puts a level-0 producer's write before a
+            // level-1 consumer's invocation. A projection hoisted out of this
+            // closure is a snapshot taken before any producer ran: the consumer
+            // would read nothing on every advance while every test handing a
+            // literal stayed green.
+            //
+            // Declared names only, so the record never carries a key the
+            // consumer's manifest does not list. `null` for a name with no entry
+            // at all; within an entry, `last_output` is ABSENT rather than null
+            // for a run that produced none, which the member's `?? null` covers.
+            //
+            // ONE projection for both facts. Two would be two reads of a map this
+            // loop mutates, and the one that drifted would be the one nobody
+            // read — the same failure the paragraph above describes for a hoisted
+            // snapshot. `DependencyRun` is a `Pick` of exactly the two fields the
+            // two members expose: this is the boundary where a field is chosen
+            // for exposure to a different plugin, and widening it is what the
+            // leak test watches for.
+            const dependencyRuns = Object.fromEntries(
+              manifest.dependencies.map((d): [string, DependencyRun | null] => {
+                const run = state.plugin_runs[d]
+                return [
+                  d,
+                  run
+                    ? {
+                        status: run.status,
+                        // A COPY, and the copy is the point. The record lives in
+                        // `state.plugin_runs`, `writeEngineState` persists that
+                        // map unvalidated at the end of the advance, and
+                        // `capabilities.ts` hands whatever is here straight to
+                        // the handler. Passing the live object made a consumer's
+                        // in-place edit — `rec.body = JSON.stringify(patched)` is
+                        // the obvious shape — the engine's persisted state: a
+                        // body over the 16 KiB `OutputRecordSchema` cap bricks
+                        // every later fail-closed read, and because
+                        // `proposalFingerprint` hashes this field, the edit moves
+                        // the PRODUCER's fingerprint and re-arms side effects an
+                        // operator already denied. `status` needs no copy; it is
+                        // a string.
+                        last_output:
+                          run.last_output === undefined
+                            ? undefined
+                            : structuredClone(run.last_output),
+                      }
+                    : null,
+                ]
+              }),
+            )
+
+            invocationResult = await invokePlugin(
+              pluginName,
+              {},
+              { pluginsDir, runId: run_id, dependencyRuns },
+              witness,
+            )
+          } catch (err) {
+            plugin_states.set(pluginName, 'failed')
+            const errMsg = err instanceof Error ? err.message : String(err)
+            const failedElapsed = Date.now() - entryStart
+            plugin_entries.push({
+              plugin: pluginName,
+              status: 'failed',
+              started_at: entryStartedAt,
+              elapsed_ms: failedElapsed,
+              result_summary: `invocation threw: ${errMsg}`,
+              retried: false,
+            })
+            // The run happened and it ended failed, so it is recorded like any
+            // other. Returning here without this write left the PREVIOUS run's
+            // entry in place, and `lastRun` answered with it — "how its last run
+            // ended" naming a run two advances back. `failed` is right for every
+            // path in, not just the invocation: the try also covers
+            // `witnessAfterGrantRead` and the dependency projection, and a throw
+            // out of either is as much a failed run as one out of `invokePlugin`.
+            // Note what does NOT arrive here — a handler that throws is caught
+            // inside `invokePlugin` and comes back as a `failed` result, which
+            // the autonomous write below handles; the reachable `invokePlugin`
+            // case is `loadPluginConfig` rethrowing a non-`PluginConfigError`.
+            //
+            // `lastOutputOf` takes the same carry-forward as the other three
+            // write sites: this run produced nothing, and an Output is a fact
+            // about the plugin rather than about its latest run.
+            const priorThrownEntry = state.plugin_runs[pluginName]
+            state.plugin_runs[pluginName] = {
+              last_run_at: new Date().toISOString(),
+              status: 'failed',
+              duration_ms: failedElapsed,
+              ...lastOutputOf(null, priorThrownEntry),
+            }
+            await emitPluginFailed(pluginName, errMsg, run_id, eventsPath)
+            onPluginEnd?.(pluginName, 'failed', failedElapsed, errMsg)
+            return
+          }
+
+          const { result, retried } = invocationResult
+
+          // -- Supervised: gate (unless dry-run) --
+          // review_gate forces autonomous plugins to be treated as supervised
+          const effectiveAutonomy =
+            reviewGateActive && manifest.autonomy_level === 'autonomous'
+              ? 'supervised'
+              : manifest.autonomy_level
+          if (effectiveAutonomy === 'supervised') {
+            if (dryRun) {
+              // Dry-run: log "would pause here" and continue
+              console.log(`[engine] would pause here for supervised plugin: ${pluginName}`)
+              plugin_states.set(pluginName, 'completed')
+              const dryRunElapsed = Date.now() - entryStart
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'completed',
+                started_at: entryStartedAt,
+                elapsed_ms: dryRunElapsed,
+                result_summary: `[dry-run] would pause here: ${result.summary}`,
+                reversible: result.reversible,
+                undo_instruction: result.undo_instruction,
+                retried,
+              })
+              await emitPluginCompleted(pluginName, `[dry-run] would pause here: ${result.summary}`, run_id, eventsPath)
+              onPluginEnd?.(pluginName, 'completed', dryRunElapsed, '[dry-run] would pause here')
+            } else {
+              plugin_states.set(pluginName, 'gated')
+              gated_plugins.push(pluginName)
+              const gatedElapsed = Date.now() - entryStart
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'gated',
+                started_at: entryStartedAt,
+                elapsed_ms: gatedElapsed,
+                result_summary: result.summary,
+                reversible: result.reversible,
+                undo_instruction: result.undo_instruction,
+                retried,
+              })
+              await emitPluginGated(pluginName, run_id, eventsPath)
+              onPluginEnd?.(pluginName, 'gated', gatedElapsed)
+
+              // -- Record the gated run in state --
+              // Inside this arm, not before the shared `return` below: the
+              // dry-run arm above must stay write-free.
+              //
+              // This is what stops the side effects re-firing. They already went
+              // out — the handler was invoked well above, and the gate only
+              // decides what happens to the RESULT — so without a run record the
+              // plugin was due again on the next advance, and did it all again,
+              // every advance, for the whole grant window, on one human "yes".
+              //
+              // Anchored at the gate's completion time, which is when the run
+              // ended. A later approval is a separate event and must not
+              // retroactively move when the work happened.
+              //
+              // ONE string, used twice. The parked gate below records the same
+              // instant, and the approve verb anchors `plugin_runs.last_run_at`
+              // at the gate's copy when it applies — so two `new Date()` calls
+              // here would let the two disagree by a millisecond and make that
+              // anchoring a lie.
+              const completedAt = new Date().toISOString()
+              // Read before the overwrite, or the carry-forward has nothing to
+              // carry. There may be no entry yet — a plugin's first run.
+              const priorGatedEntry = state.plugin_runs[pluginName]
+              state.plugin_runs[pluginName] = {
+                last_run_at: completedAt,
+                status: 'gated',
+                duration_ms: Date.now() - entryStart,
+                // last_output: written here as well as on the autonomous path. A
+                // gated run produced its Outputs before the gate saw them — and
+                // a gated run that produced none leaves the plugin's prior Output
+                // where it was.
+                ...lastOutputOf(result, priorGatedEntry),
+              }
+
+              // -- Park the REAL result ------------------------------------
+              // Built here, where `result` is in scope, rather than
+              // reconstructed from `plugin_entries` after the level loop. The
+              // reconstruction is what fabricated a partial with an empty
+              // artifacts array: by then the only thing left of the run was its
+              // summary string, so a summary string is all the gate could hold.
+              parked_gates.push({
+                plugin: pluginName,
+                run_id,
+                created_at: completedAt,
+                payload_summary: result.summary,
+                plugin_result: result,
+                run_started_at: entryStartedAt,
+                run_completed_at: completedAt,
+                applied_at: null,
+              })
+            }
+            return
+          }
+
+          // -- Autonomous: completed or failed --
+          const finalStatus = result.status === 'failed' ? 'failed' : 'completed'
+          plugin_states.set(pluginName, finalStatus)
+          const autonomousElapsed = Date.now() - entryStart
           plugin_entries.push({
             plugin: pluginName,
-            status: 'failed',
+            status: finalStatus,
             started_at: entryStartedAt,
-            elapsed_ms: failedElapsed,
-            result_summary: `invocation threw: ${errMsg}`,
-            retried: false,
+            elapsed_ms: autonomousElapsed,
+            result_summary: result.summary,
+            reversible: result.reversible,
+            undo_instruction: result.undo_instruction,
+            retried,
           })
-          // The run happened and it ended failed, so it is recorded like any
-          // other. Returning here without this write left the PREVIOUS run's
-          // entry in place, and `lastRun` answered with it — "how its last run
-          // ended" naming a run two advances back. `failed` is right for every
-          // path in, not just the invocation: the try also covers
-          // `witnessAfterGrantRead` and the dependency projection, and a throw
-          // out of either is as much a failed run as one out of `invokePlugin`.
-          // Note what does NOT arrive here — a handler that throws is caught
-          // inside `invokePlugin` and comes back as a `failed` result, which
-          // the autonomous write below handles; the reachable `invokePlugin`
-          // case is `loadPluginConfig` rethrowing a non-`PluginConfigError`.
-          //
-          // `lastOutputOf` takes the same carry-forward as the other three
-          // write sites: this run produced nothing, and an Output is a fact
-          // about the plugin rather than about its latest run.
-          const priorThrownEntry = state.plugin_runs[pluginName]
+          if (finalStatus === 'failed') {
+            await emitPluginFailed(pluginName, result.summary, run_id, eventsPath)
+          } else {
+            await emitPluginCompleted(pluginName, result.summary, run_id, eventsPath)
+          }
+          onPluginEnd?.(pluginName, finalStatus, autonomousElapsed)
+
+          // -- Update plugin_runs in state --
+          // Read before the overwrite, or the carry-forward has nothing to carry.
+          const priorAutonomousEntry = state.plugin_runs[pluginName]
           state.plugin_runs[pluginName] = {
             last_run_at: new Date().toISOString(),
-            status: 'failed',
-            duration_ms: failedElapsed,
-            ...lastOutputOf(null, priorThrownEntry),
+            // The plugin's own terminal status, carried through rather than
+            // narrowed. `skipped` is the one that used to be lost: it is every
+            // dispatched `[needs-llm]` handoff, and the `else` arm folded it to
+            // `success`. That was internal until `lastRun` published the field —
+            // after which a consumer following the four-state table read
+            // "produced, and its latest run is healthy" for a producer that had
+            // handed its work to an LLM and produced nothing, beside a
+            // carried-forward record that made the claim look corroborated.
+            // `PluginRunSchema` has always admitted `skipped`; only this mapping
+            // refused to emit it.
+            //
+            // Deliberately NOT `delegated`: that value belongs to
+            // `deriveRunStatus`, which feeds the RunArtifact and the board events
+            // and answers a different question. A plain `skipped` and a handoff
+            // lead a consumer to the same action — read the carried-forward
+            // Output, do not treat it as a failure — so a second value here would
+            // be a distinction nothing acts on. Widen if a caller ever needs to
+            // tell them apart.
+            status:
+              result.status === 'failed'
+                ? 'failed'
+                : result.status === 'partial'
+                  ? 'partial'
+                  : result.status === 'skipped'
+                    ? 'skipped'
+                    : 'success',
+            duration_ms: Date.now() - entryStart,
+            // last_output: this run's Output when it produced one, the plugin's
+            // prior Output when it did not, and absent — not null — when there
+            // has never been one.
+            ...lastOutputOf(result, priorAutonomousEntry),
           }
-          await emitPluginFailed(pluginName, errMsg, run_id, eventsPath)
-          onPluginEnd?.(pluginName, 'failed', failedElapsed, errMsg)
-          return
-        }
+        }),
+      )
 
-        const { result, retried } = invocationResult
+      // After level: if any plugin is gated and not dry-run, stop
+      const levelHasGates = level.some(name => plugin_states.get(name) === 'gated')
+      if (levelHasGates && !dryRun) {
+        stopped = true
+        engineStatus = 'partial'
+      }
+    }
 
-        // -- Supervised: gate (unless dry-run) --
-        // review_gate forces autonomous plugins to be treated as supervised
-        const effectiveAutonomy =
-          reviewGateActive && manifest.autonomy_level === 'autonomous'
-            ? 'supervised'
-            : manifest.autonomy_level
-        if (effectiveAutonomy === 'supervised') {
-          if (dryRun) {
-            // Dry-run: log "would pause here" and continue
-            console.log(`[engine] would pause here for supervised plugin: ${pluginName}`)
-            plugin_states.set(pluginName, 'completed')
-            const dryRunElapsed = Date.now() - entryStart
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'completed',
-              started_at: entryStartedAt,
-              elapsed_ms: dryRunElapsed,
-              result_summary: `[dry-run] would pause here: ${result.summary}`,
-              reversible: result.reversible,
-              undo_instruction: result.undo_instruction,
-              retried,
-            })
-            await emitPluginCompleted(pluginName, `[dry-run] would pause here: ${result.summary}`, run_id, eventsPath)
-            onPluginEnd?.(pluginName, 'completed', dryRunElapsed, '[dry-run] would pause here')
-          } else {
-            plugin_states.set(pluginName, 'gated')
-            gated_plugins.push(pluginName)
-            const gatedElapsed = Date.now() - entryStart
-            plugin_entries.push({
-              plugin: pluginName,
-              status: 'gated',
-              started_at: entryStartedAt,
-              elapsed_ms: gatedElapsed,
-              result_summary: result.summary,
-              reversible: result.reversible,
-              undo_instruction: result.undo_instruction,
-              retried,
-            })
-            await emitPluginGated(pluginName, run_id, eventsPath)
-            onPluginEnd?.(pluginName, 'gated', gatedElapsed)
+    // A manifest that never imported gets a row AND a state entry. The row is
+    // what tells an all-fail root apart from an empty one on the artifact; the
+    // state entry is what lets the overall-status computation below see it at
+    // all, because that map is seeded from the manifests that loaded. The row
+    // on its own would leave a mixed root reporting a complete run over a log
+    // carrying failure rows.
+    //
+    // Placed here rather than beside the seeding above, so the level loop —
+    // built from the loaded manifests only — never gets the chance to look up a
+    // name that never loaded. The loader's error text goes in unchanged: the
+    // module-resolution detail is the only part an operator can act on.
+    for (const failure of loadFailures) {
+      plugin_entries.push({
+        plugin: failure.plugin,
+        status: 'failed',
+        started_at,
+        elapsed_ms: 0,
+        result_summary: `manifest did not load: ${failure.error}`,
+        retried: false,
+      })
+      plugin_states.set(failure.plugin, 'failed')
+    }
 
-            // -- Record the gated run in state --
-            // Inside this arm, not before the shared `return` below: the
-            // dry-run arm above must stay write-free.
-            //
-            // This is what stops the side effects re-firing. They already went
-            // out — the handler was invoked well above, and the gate only
-            // decides what happens to the RESULT — so without a run record the
-            // plugin was due again on the next advance, and did it all again,
-            // every advance, for the whole grant window, on one human "yes".
-            //
-            // Anchored at the gate's completion time, which is when the run
-            // ended. A later approval is a separate event and must not
-            // retroactively move when the work happened.
-            //
-            // ONE string, used twice. The parked gate below records the same
-            // instant, and the approve verb anchors `plugin_runs.last_run_at`
-            // at the gate's copy when it applies — so two `new Date()` calls
-            // here would let the two disagree by a millisecond and make that
-            // anchoring a lie.
-            const completedAt = new Date().toISOString()
-            // Read before the overwrite, or the carry-forward has nothing to
-            // carry. There may be no entry yet — a plugin's first run.
-            const priorGatedEntry = state.plugin_runs[pluginName]
-            state.plugin_runs[pluginName] = {
-              last_run_at: completedAt,
-              status: 'gated',
-              duration_ms: Date.now() - entryStart,
-              // last_output: written here as well as on the autonomous path. A
-              // gated run produced its Outputs before the gate saw them — and
-              // a gated run that produced none leaves the plugin's prior Output
-              // where it was.
-              ...lastOutputOf(result, priorGatedEntry),
-            }
-
-            // -- Park the REAL result ------------------------------------
-            // Built here, where `result` is in scope, rather than
-            // reconstructed from `plugin_entries` after the level loop. The
-            // reconstruction is what fabricated a partial with an empty
-            // artifacts array: by then the only thing left of the run was its
-            // summary string, so a summary string is all the gate could hold.
-            parked_gates.push({
-              plugin: pluginName,
-              run_id,
-              created_at: completedAt,
-              payload_summary: result.summary,
-              plugin_result: result,
-              run_started_at: entryStartedAt,
-              run_completed_at: completedAt,
-              applied_at: null,
-            })
-          }
-          return
-        }
-
-        // -- Autonomous: completed or failed --
-        const finalStatus = result.status === 'failed' ? 'failed' : 'completed'
-        plugin_states.set(pluginName, finalStatus)
-        const autonomousElapsed = Date.now() - entryStart
-        plugin_entries.push({
-          plugin: pluginName,
-          status: finalStatus,
-          started_at: entryStartedAt,
-          elapsed_ms: autonomousElapsed,
-          result_summary: result.summary,
-          reversible: result.reversible,
-          undo_instruction: result.undo_instruction,
-          retried,
-        })
-        if (finalStatus === 'failed') {
-          await emitPluginFailed(pluginName, result.summary, run_id, eventsPath)
-        } else {
-          await emitPluginCompleted(pluginName, result.summary, run_id, eventsPath)
-        }
-        onPluginEnd?.(pluginName, finalStatus, autonomousElapsed)
-
-        // -- Update plugin_runs in state --
-        // Read before the overwrite, or the carry-forward has nothing to carry.
-        const priorAutonomousEntry = state.plugin_runs[pluginName]
-        state.plugin_runs[pluginName] = {
-          last_run_at: new Date().toISOString(),
-          // The plugin's own terminal status, carried through rather than
-          // narrowed. `skipped` is the one that used to be lost: it is every
-          // dispatched `[needs-llm]` handoff, and the `else` arm folded it to
-          // `success`. That was internal until `lastRun` published the field —
-          // after which a consumer following the four-state table read
-          // "produced, and its latest run is healthy" for a producer that had
-          // handed its work to an LLM and produced nothing, beside a
-          // carried-forward record that made the claim look corroborated.
-          // `PluginRunSchema` has always admitted `skipped`; only this mapping
-          // refused to emit it.
-          //
-          // Deliberately NOT `delegated`: that value belongs to
-          // `deriveRunStatus`, which feeds the RunArtifact and the board events
-          // and answers a different question. A plain `skipped` and a handoff
-          // lead a consumer to the same action — read the carried-forward
-          // Output, do not treat it as a failure — so a second value here would
-          // be a distinction nothing acts on. Widen if a caller ever needs to
-          // tell them apart.
-          status:
-            result.status === 'failed'
-              ? 'failed'
-              : result.status === 'partial'
-                ? 'partial'
-                : result.status === 'skipped'
-                  ? 'skipped'
-                  : 'success',
-          duration_ms: Date.now() - entryStart,
-          // last_output: this run's Output when it produced one, the plugin's
-          // prior Output when it did not, and absent — not null — when there
-          // has never been one.
-          ...lastOutputOf(result, priorAutonomousEntry),
-        }
-      }),
-    )
-
-    // After level: if any plugin is gated and not dry-run, stop
-    const levelHasGates = level.some(name => plugin_states.get(name) === 'gated')
-    if (levelHasGates && !dryRun) {
-      stopped = true
+    // Determine overall status
+    const allStates = Array.from(plugin_states.values())
+    const hasFailed = allStates.some(s => s === 'failed')
+    if (engineStatus === 'complete' && hasFailed) {
       engineStatus = 'partial'
     }
-  }
 
-  // A manifest that never imported gets a row AND a state entry. The row is
-  // what tells an all-fail root apart from an empty one on the artifact; the
-  // state entry is what lets the overall-status computation below see it at
-  // all, because that map is seeded from the manifests that loaded. The row
-  // on its own would leave a mixed root reporting a complete run over a log
-  // carrying failure rows.
-  //
-  // Placed here rather than beside the seeding above, so the level loop —
-  // built from the loaded manifests only — never gets the chance to look up a
-  // name that never loaded. The loader's error text goes in unchanged: the
-  // module-resolution detail is the only part an operator can act on.
-  for (const failure of loadFailures) {
-    plugin_entries.push({
-      plugin: failure.plugin,
-      status: 'failed',
+    // -- Tier-based task mutations ---------------
+    if (currentTier === 'suspended') {
+      // Soft-archive info-severity tasks that aren't already archived
+      for (const task of state.task_aging) {
+        if (task.severity === 'info' && !task.archived_at) {
+          task.archived_at = new Date().toISOString()
+        }
+      }
+    } else if (currentTier === 'degraded' || currentTier === 'extended') {
+      // Auto-defer info-severity tasks: critical + warning stay active
+      const now = new Date().toISOString()
+      const existingDeferralIds = new Set(state.deferrals.map(d => d.task_id))
+      for (const task of state.task_aging) {
+        if (task.severity === 'info' && !existingDeferralIds.has(task.task_id) && !task.archived_at) {
+          state.deferrals.push({
+            task_id: task.task_id,
+            reason: `Auto-deferred: ${currentTier} tier`,
+            deferred_at: now,
+            expires_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+          })
+        }
+      }
+    }
+
+    // 8. Write updated state (with pending_gates)
+    const updatedState: EngineState & { pending_gates?: unknown[] } = {
+      ...state,
+      last_run_id: run_id,
+      last_run_at: new Date().toISOString(),
+    }
+
+    // Add pending_gates to state for gated plugins. Assembled in the gated arm
+    // above, where the plugin's real result is still in hand.
+    //
+    // **An APPLIED gate survives the advance.** `applyPendingGate` marks rather
+    // than deletes precisely so a second `approve` finds the gate and refuses
+    // instead of falling through to the Grant path — and assigning `parked_gates`
+    // over the whole array destroyed that marker on the next advance, so the
+    // sequence apply, advance, approve minted a session Grant. That is the
+    // wrong-gesture outcome mark-not-delete was chosen to prevent, reintroduced
+    // one advance later.
+    //
+    // They are dropped once older than the gate ceiling, so the array does not
+    // grow without bound, and a plugin that has gated again supersedes its own
+    // marker: the new parked gate is the live answer and the old marker has
+    // nothing left to refuse.
+    //
+    // **An UNAPPLIED gate survives too, under the same ceiling.** It did not,
+    // and the split was never chosen: markers lived a full ceiling while a
+    // parked result lived zero advances, so a daily engine destroyed Monday's
+    // proposal on Tuesday morning before anyone could review it. The ceiling
+    // itself was unreachable in live operation — a limit the spec states and
+    // only seeded-clock tests could ever observe.
+    //
+    // One rule for the whole array now: a gate survives while it is younger than
+    // the ceiling and has not been superseded by a fresh gate for its plugin.
+    // The clock differs because the question does — a marker ages from when the
+    // result was ACCEPTED, a parked gate from when the run PRODUCED it, which is
+    // the clock `applyPendingGate` already expires against.
+    //
+    // A gate missing `run_completed_at` does not survive. Such a gate is refused
+    // at apply time anyway ("carries no record of when its run happened"), so
+    // keeping it would only park something that can never be answered.
+    const gateFloorMs = Date.now() - GATE_MAX_AGE_MS
+    const survivors = state.pending_gates.filter((g) => {
+      if (parked_gates.some((p) => p.plugin === g.plugin)) return false
+      const clock = g.applied_at ?? g.run_completed_at
+      return clock !== null && new Date(clock).getTime() > gateFloorMs
+    })
+    ;(updatedState as Record<string, unknown>)['pending_gates'] = [
+      ...survivors,
+      ...parked_gates,
+    ]
+
+    await writeEngineState(updatedState as EngineState, stateDir)
+
+    // 9. Write run log
+    const completed_at = new Date().toISOString()
+    const runLog: RunLog = {
+      run_id,
       started_at,
-      elapsed_ms: 0,
-      result_summary: `manifest did not load: ${failure.error}`,
-      retried: false,
-    })
-    plugin_states.set(failure.plugin, 'failed')
-  }
-
-  // Determine overall status
-  const allStates = Array.from(plugin_states.values())
-  const hasFailed = allStates.some(s => s === 'failed')
-  if (engineStatus === 'complete' && hasFailed) {
-    engineStatus = 'partial'
-  }
-
-  // -- Tier-based task mutations ---------------
-  if (currentTier === 'suspended') {
-    // Soft-archive info-severity tasks that aren't already archived
-    for (const task of state.task_aging) {
-      if (task.severity === 'info' && !task.archived_at) {
-        task.archived_at = new Date().toISOString()
-      }
+      completed_at,
+      // The artifact carries the engine's own status, unmapped. Folding
+      // everything that was neither complete nor partial into interrupted
+      // recorded an empty root as a killed run — and the verdict is read from
+      // this file, not from the value the caller happened to receive.
+      status: engineStatus,
+      resumed_from: null,
+      summary: `Engine run ${run_id}: ${plugin_entries.length} plugins processed`,
+      plugin_entries,
+      // What the loader FOUND, not what the loop got through. The level loop
+      // breaks when a level gates, so later levels' plugins load and never push
+      // an entry — deriving this from `plugin_entries.length` would under-report
+      // on this runtime's ordinary path.
+      manifests_loaded: plugins.size,
     }
-  } else if (currentTier === 'degraded' || currentTier === 'extended') {
-    // Auto-defer info-severity tasks: critical + warning stay active
-    const now = new Date().toISOString()
-    const existingDeferralIds = new Set(state.deferrals.map(d => d.task_id))
-    for (const task of state.task_aging) {
-      if (task.severity === 'info' && !existingDeferralIds.has(task.task_id) && !task.archived_at) {
-        state.deferrals.push({
-          task_id: task.task_id,
-          reason: `Auto-deferred: ${currentTier} tier`,
-          deferred_at: now,
-          expires_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
-        })
-      }
+
+    await mkdir(runsDir, { recursive: true })
+    const run_log_path = await writeRunLog(runLog, runsDir)
+
+    // 9b. The same run, as JSONL lines.
+    //
+    // Read off `plugin_entries` after the level loop rather than emitted from
+    // each of the eight arms that push one. The arms already agree on what a
+    // plugin's outcome was; a second emission site per arm is eight chances for
+    // the two records of one advance to disagree.
+    for (const entry of runLog.plugin_entries) {
+      await runLogger.appendEvent({
+        level: entry.status === 'failed' ? 'error' : 'info',
+        event: 'plugin_result',
+        plugin: entry.plugin,
+        status: entry.status,
+        elapsed_ms: entry.elapsed_ms,
+        detail: entry.result_summary,
+      })
     }
-  }
-
-  // 8. Write updated state (with pending_gates)
-  const updatedState: EngineState & { pending_gates?: unknown[] } = {
-    ...state,
-    last_run_id: run_id,
-    last_run_at: new Date().toISOString(),
-  }
-
-  // Add pending_gates to state for gated plugins. Assembled in the gated arm
-  // above, where the plugin's real result is still in hand.
-  //
-  // **An APPLIED gate survives the advance.** `applyPendingGate` marks rather
-  // than deletes precisely so a second `approve` finds the gate and refuses
-  // instead of falling through to the Grant path — and assigning `parked_gates`
-  // over the whole array destroyed that marker on the next advance, so the
-  // sequence apply, advance, approve minted a session Grant. That is the
-  // wrong-gesture outcome mark-not-delete was chosen to prevent, reintroduced
-  // one advance later.
-  //
-  // They are dropped once older than the gate ceiling, so the array does not
-  // grow without bound, and a plugin that has gated again supersedes its own
-  // marker: the new parked gate is the live answer and the old marker has
-  // nothing left to refuse.
-  //
-  // **An UNAPPLIED gate survives too, under the same ceiling.** It did not,
-  // and the split was never chosen: markers lived a full ceiling while a
-  // parked result lived zero advances, so a daily engine destroyed Monday's
-  // proposal on Tuesday morning before anyone could review it. The ceiling
-  // itself was unreachable in live operation — a limit the spec states and
-  // only seeded-clock tests could ever observe.
-  //
-  // One rule for the whole array now: a gate survives while it is younger than
-  // the ceiling and has not been superseded by a fresh gate for its plugin.
-  // The clock differs because the question does — a marker ages from when the
-  // result was ACCEPTED, a parked gate from when the run PRODUCED it, which is
-  // the clock `applyPendingGate` already expires against.
-  //
-  // A gate missing `run_completed_at` does not survive. Such a gate is refused
-  // at apply time anyway ("carries no record of when its run happened"), so
-  // keeping it would only park something that can never be answered.
-  const gateFloorMs = Date.now() - GATE_MAX_AGE_MS
-  const survivors = state.pending_gates.filter((g) => {
-    if (parked_gates.some((p) => p.plugin === g.plugin)) return false
-    const clock = g.applied_at ?? g.run_completed_at
-    return clock !== null && new Date(clock).getTime() > gateFloorMs
-  })
-  ;(updatedState as Record<string, unknown>)['pending_gates'] = [
-    ...survivors,
-    ...parked_gates,
-  ]
-
-  await writeEngineState(updatedState as EngineState, stateDir)
-
-  // 9. Write run log
-  const completed_at = new Date().toISOString()
-  const runLog: RunLog = {
-    run_id,
-    started_at,
-    completed_at,
-    // The artifact carries the engine's own status, unmapped. Folding
-    // everything that was neither complete nor partial into interrupted
-    // recorded an empty root as a killed run — and the verdict is read from
-    // this file, not from the value the caller happened to receive.
-    status: engineStatus,
-    resumed_from: null,
-    summary: `Engine run ${run_id}: ${plugin_entries.length} plugins processed`,
-    plugin_entries,
-    // What the loader FOUND, not what the loop got through. The level loop
-    // breaks when a level gates, so later levels' plugins load and never push
-    // an entry — deriving this from `plugin_entries.length` would under-report
-    // on this runtime's ordinary path.
-    manifests_loaded: plugins.size,
-  }
-
-  await mkdir(runsDir, { recursive: true })
-  const run_log_path = await writeRunLog(runLog, runsDir)
-
-  // 9b. The same run, as JSONL lines.
-  //
-  // Read off `plugin_entries` after the level loop rather than emitted from
-  // each of the eight arms that push one. The arms already agree on what a
-  // plugin's outcome was; a second emission site per arm is eight chances for
-  // the two records of one advance to disagree.
-  for (const entry of runLog.plugin_entries) {
     await runLogger.appendEvent({
-      level: entry.status === 'failed' ? 'error' : 'info',
-      event: 'plugin_result',
-      plugin: entry.plugin,
-      status: entry.status,
-      elapsed_ms: entry.elapsed_ms,
-      detail: entry.result_summary,
+      level: engineStatus === 'complete' ? 'info' : 'warn',
+      event: 'run_end',
+      status: engineStatus,
+      detail: runLog.summary,
     })
-  }
-  await runLogger.appendEvent({
-    level: engineStatus === 'complete' ? 'info' : 'warn',
-    event: 'run_end',
-    status: engineStatus,
-    detail: runLog.summary,
-  })
 
-  // 10. Emit run_completed event
-  await emitRunCompleted(run_id, engineStatus, eventsPath)
+    // 10. Emit run_completed event
+    await emitRunCompleted(run_id, engineStatus, eventsPath)
 
-  // 11. Fire onRunFailure exactly once if the run did not complete cleanly.
-  // 'partial' covers any failed or gated plugin, 'failed' a root that loaded
-  // no manifests, 'interrupted' a non-terminating stop. The success path does
-  // not invoke the hook.
-  if (engineStatus !== 'complete') {
-    const failedPlugins = Array.from(plugin_states.entries())
-      .filter(([, s]) => s === 'failed')
-      .map(([name]) => name)
-    // An empty root has no failed plugin to name, and saying the engine did
-    // not complete cleanly tells an operator nothing about an empty
-    // directory. Name the root instead.
-    const reason =
-      failedPlugins.length > 0
-        ? `run ${engineStatus}: ${failedPlugins.length} plugin(s) failed [${failedPlugins.join(', ')}]`
-        : noManifestsLoaded
-          ? `run ${engineStatus}: ${emptyRootReason}`
-          : `run ${engineStatus}: engine did not complete cleanly`
-    fireRunFailure(reason)
-  }
+    // 11. Fire onRunFailure exactly once if the run did not complete cleanly.
+    // 'partial' covers any failed or gated plugin, 'failed' a root that loaded
+    // no manifests, 'interrupted' a non-terminating stop. The success path does
+    // not invoke the hook.
+    if (engineStatus !== 'complete') {
+      const failedPlugins = Array.from(plugin_states.entries())
+        .filter(([, s]) => s === 'failed')
+        .map(([name]) => name)
+      // An empty root has no failed plugin to name, and saying the engine did
+      // not complete cleanly tells an operator nothing about an empty
+      // directory. Name the root instead.
+      const reason =
+        failedPlugins.length > 0
+          ? `run ${engineStatus}: ${failedPlugins.length} plugin(s) failed [${failedPlugins.join(', ')}]`
+          : noManifestsLoaded
+            ? `run ${engineStatus}: ${emptyRootReason}`
+            : `run ${engineStatus}: engine did not complete cleanly`
+      fireRunFailure(reason)
+    }
 
-  return {
-    run_id,
-    status: engineStatus,
-    plugin_states,
-    gated_plugins,
-    run_log_path,
+    return {
+      run_id,
+      status: engineStatus,
+      plugin_states,
+      gated_plugins,
+      run_log_path,
+    }
+  } finally {
+    await releaseLock(resolvedLockPath)
   }
 }
 
@@ -2286,4 +2335,24 @@ function getDefaultRunsDir(): string {
 
 function getDefaultLogsDir(): string {
   return join(warplineHome(), 'logs')
+}
+
+/**
+ * Where the run lock lives, decided at call time and never at import time.
+ *
+ * `AdvanceOptions.stateDir` is the full path to the state FILE, so its
+ * directory IS the state directory, and the lock lands beside
+ * `engine-state.json` — the same derivation the preferences path uses higher up
+ * for the same reason. A relocated home keeps its own lock.
+ *
+ * A module-load-time constant here would freeze whichever home was resolved
+ * when this module was first imported. The benchmark harness swaps the home per
+ * iteration and calls the advance with no options at all, so a frozen default
+ * would put one iteration's lock in another iteration's home and let two
+ * advances both acquire — the one failure the lock exists to prevent.
+ */
+function getDefaultLockPath(stateFilePath?: string): string {
+  return stateFilePath === undefined
+    ? defaultLockPath()
+    : join(dirname(stateFilePath), '.lock')
 }

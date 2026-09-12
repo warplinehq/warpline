@@ -843,10 +843,13 @@ describe('runAdvance refuses a plugin root it cannot read', () => {
     // Named individually so a regression says WHICH write escaped the guard.
     expect(await readdir(ctx.runsDir)).toEqual([])
     expect(existsSync(eventsPath)).toBe(false)
-    // `runAdvance` acquires no lock today, so this clause passes vacuously. It
-    // is here to pin the ordering for whoever adds one, and must NOT be read as
+    // `runAdvance` now takes the run lock, and takes it BELOW this refusal, so
+    // this clause proves a real thing: a root that could not be read is refused
+    // before the lock is created, and a refused advance therefore leaves no
+    // lock behind for the next one to trip over. It still must NOT be read as
     // evidence that the guard sits in the right place — the guard sitting above
-    // every write is what evidences that.
+    // every write is what evidences that. The release half of the lock's
+    // contract belongs to `engine-lock.test.ts`, not here.
     expect(existsSync(lockPath())).toBe(false)
   })
 
