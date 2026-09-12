@@ -277,10 +277,35 @@ export function parseClaudeResult(raw: unknown, arm: ArmId): ParsedClaudeResult 
     subtype: typeof result.subtype === 'string' ? result.subtype : '',
     is_error,
     terminal_reason,
-    // The key, not the flag. A mid-run default change would otherwise be
-    // invisible in N records that all name the id the harness asked for.
-    model_id: Object.keys(asRecord(result.modelUsage))[0] ?? null,
+    model_id: selectModelId(result.modelUsage),
   }
+}
+
+/**
+ * Which of the per-model usage keys names the model that did the work.
+ *
+ * MEASURED, and the reason this is not `keys[0]`: a session that uses a tool
+ * reports TWO models, and the auxiliary one is inserted FIRST. A real smoke
+ * iteration of all three arms returned `claude-haiku-4-5-20251001` — 912 input
+ * tokens for one internal step — ahead of the pinned model that served every
+ * turn. Taking the first key would stamp every record in the published set with
+ * a model that did none of the work, and the method's own requirement that the
+ * id be one string across the whole set would then be checking the auxiliary
+ * model rather than the measured one.
+ *
+ * So the key is SELECTED by matching the pinned id, and the KEY is what is
+ * returned — the dated canonical form when the tool reports one. This is still
+ * a read-back rather than an echo, and it is the stronger version of it: a run
+ * the pinned model never served returns null, and null is not a publishable
+ * record, so a silent model substitution stops the set instead of entering it.
+ */
+function selectModelId(modelUsage: unknown): string | null {
+  for (const [key, entry] of Object.entries(asRecord(modelUsage))) {
+    const canonical = asRecord(entry).canonicalModel
+    const named = typeof canonical === 'string' ? canonical : ''
+    if (key.startsWith(PINNED_MODEL) || named.startsWith(PINNED_MODEL)) return key
+  }
+  return null
 }
 
 /**

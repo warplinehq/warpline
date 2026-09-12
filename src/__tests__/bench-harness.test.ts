@@ -564,6 +564,31 @@ const SPEND_LIMIT_RESULT = {
   terminal_reason: 'error',
 }
 
+/**
+ * A tool-using session, verbatim in the shape a real one returned: TWO models,
+ * with the auxiliary one inserted FIRST.
+ *
+ * Measured during the smoke iteration of all three arms. Every arm passed the
+ * pinned model explicitly and every arm's result named this auxiliary model as
+ * its first per-model usage key — so a parser taking the first key stamps every
+ * record in the published set with a model that did none of the work.
+ */
+const TWO_MODEL_RESULT = {
+  ...SUCCESS_RESULT,
+  modelUsage: {
+    'claude-haiku-4-5-20251001': { inputTokens: 912, outputTokens: 16, canonicalModel: 'claude-haiku-4-5' },
+    'claude-opus-5': { inputTokens: 4, outputTokens: 207, canonicalModel: 'claude-opus-5' },
+  },
+}
+
+/** A session the pinned model never served at all. */
+const WRONG_MODEL_RESULT = {
+  ...SUCCESS_RESULT,
+  modelUsage: {
+    'claude-haiku-4-5-20251001': { inputTokens: 912, outputTokens: 16, canonicalModel: 'claude-haiku-4-5' },
+  },
+}
+
 /** A tool failure inside the session: the arm failed to do the work. */
 const IN_SESSION_ERROR_RESULT = {
   ...SUCCESS_RESULT,
@@ -594,6 +619,22 @@ describe('bench harness — the result JSON, parsed and dispositioned', () => {
     // Read back from the per-model usage key, never echoed from the flag, so
     // the record names the id that actually served the request.
     expect(parsed.model_id).toBe('claude-opus-5-20260101')
+  })
+
+  test('the model id is the pinned one even when an auxiliary model is reported first', () => {
+    // The trap, asserted on the fixture: the auxiliary model IS the first key,
+    // so a parser reading position rather than identity goes green here by
+    // accident the day the tool stops reporting two.
+    expect(Object.keys(TWO_MODEL_RESULT.modelUsage)[0]).toBe('claude-haiku-4-5-20251001')
+
+    expect(parseClaudeResult(TWO_MODEL_RESULT, 'agent-from-scratch').model_id).toBe(PINNED_MODEL)
+  })
+
+  test('a session the pinned model never served has no model id at all', () => {
+    // Null rather than the model that did serve: the record requires a string,
+    // so a silent substitution stops the set instead of entering it under a name
+    // the method never pinned.
+    expect(parseClaudeResult(WRONG_MODEL_RESULT, 'agent-from-scratch').model_id).toBeNull()
   })
 
   test('a class present and equal to zero is 0, never null and never omitted', () => {
