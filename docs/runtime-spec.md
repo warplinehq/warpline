@@ -1519,3 +1519,69 @@ The pointer may dangle. Its `run_id` names a run log, and run logs are pruned at
 to "run no longer retained" rather than an error, and nothing deletes the
 pointer to avoid the case — the pointer is the only remaining record that the
 Output existed.
+
+## 11. Exit codes
+
+`warpline advance` is the unattended entry point, and its exit code is the whole
+machine interface: this runtime ships no HTTP surface and no alerting hook. The
+codes below are contract surface. A scheduler unit, a monitoring check or a
+wrapper script may key on them.
+
+| Code | Meaning |
+|------|---------|
+| `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, or a plugin is holding at an approval gate. |
+| `1` | At least one plugin failed, or the plugin root loaded no manifests at all. |
+| `75` | Could not look. Nothing ran and nothing was written. |
+| `130` | Interrupted by a signal. |
+
+`130` is the conventional code for a process ended by SIGINT. Signal handling is
+not wired into this command yet, so a Ctrl-C today takes whatever the runtime's
+own default is. The value is reserved here so a consumer written now does not
+have to change when it is.
+
+### The code comes from the run's own state, never from its status
+
+The code is computed from exactly two fields of the advance result:
+`plugin_states` and `gated_plugins`. It never reads `AdvanceResult.status`, and
+that distinction is the point. A run that stops at an
+approval gate reports `partial`, because it did not get through the fleet — but a
+held gate is the runtime doing exactly what it is for. Reporting it as a failure
+would train an operator to ignore the code, which is the one outcome that makes
+every other code in this table worthless.
+
+Two consequences worth stating plainly:
+
+- A plugin still in `pending` does not make the code non-zero. The engine stops
+  at the level that gated, so every plugin in a later level is still `pending`
+  when the advance returns. That is the ordinary gated shape, not an error state.
+- `1` for "no manifests loaded" means exactly that: the plugin root held nothing
+  importable, or every manifest in it threw. It is not a count of failures, and a
+  consumer must not read it as one.
+
+### `--strict`
+
+`warpline advance --strict` promotes a held approval gate to `1`. Use it where a
+gate waiting on a human is itself the thing you want paged about — a fleet that
+is supposed to be running fully autonomously, for instance.
+
+`--strict` changes none of the `1` cases. A plugin failure is `1` with it or
+without it, and a plugin root that loaded no manifests is `1` with it or without
+it. The flag moves the gated case and nothing else.
+
+### `75`
+
+`75` means the advance could not reach a state it could act on. Nothing ran and
+nothing was written: the home is byte-identical to what it was before the command
+started, so there is no half-run to explain and nothing to reconcile.
+
+As of this section's commit, the cause is a throw out of `runAdvance` — which
+includes an `engine-state.json` that fails validation, since that read happens
+inside the advance. Treat `75` as "retry later" rather than as a fault to page
+on. Under a fifteen-minute timer the retry costs nothing.
+
+### Unknown codes
+
+New codes may be added over time. A consumer MUST treat any unknown non-zero code
+as failure. Do not read the table above as a closed set: a wrapper that
+special-cases `0`, `1` and `75` and falls through to success on everything else
+will report a green fleet on the first code this document adds.

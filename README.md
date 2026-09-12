@@ -159,6 +159,10 @@ npx warpline configure my-plugin
 # Preview what the next engine advance would do. Executes nothing.
 npx warpline plan
 
+# Execute everything that's due, unattended, and exit with a code a scheduler
+# can read. --strict reports a held approval gate as a failure instead of 0.
+npx warpline advance
+
 # Invoke one plugin handler directly
 npx warpline run my-plugin default
 
@@ -174,9 +178,11 @@ npx warpline deny my-plugin
 npx warpline revoke
 ```
 
-Those eight subcommands are the whole CLI surface. Running everything
-that's due on a schedule is a library call, not a command. It's `runAdvance()`
-from the package root:
+Those nine subcommands are the whole CLI surface. `advance` is the one a
+scheduler calls, and its exit codes are contract surface —
+[the exit code table](docs/runtime-spec.md#11-exit-codes) is what a monitor
+keys on. The same work is also a library call, `runAdvance()` from the package
+root:
 
 ```typescript
 import { runAdvance } from 'warpline'

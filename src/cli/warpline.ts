@@ -36,12 +36,13 @@ Usage: warpline <command> [options]
 
 Commands:
   init       Create the home and copy one example plugin into it
-  plan       Preview the next engine advance without executing it
+  plan       Preview what the next engine tick would do, executing nothing
+  advance    Execute every plugin that is due, then exit with a status code
   scaffold   Generate a plugin directory from the template, or --from a shipped example
   configure  Write a plugin's config from the inputs its manifest declares
   run        Invoke a single plugin handler directly
   approve    Grant a side-effect approval for this session
-  deny       Record a no, so the next advance stops asking
+  deny       Record a no, so the next engine tick stops asking
   revoke     Clear the current session approval
 
   --help     Show this message
@@ -71,6 +72,12 @@ export async function main(argv: string[]): Promise<number> {
         // unhandled one, with a stack. The `await` is what routes it. Every
         // arm that returns a subcommand's promise needs it; a test reads this
         // file to make sure none loses it.
+        return await run(rest)
+      }
+
+      case 'advance': {
+        const { run } = await import('./advance.js')
+        // `return await`, not `return`. See the comment on the `plan` arm.
         return await run(rest)
       }
 
