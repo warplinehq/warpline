@@ -2,9 +2,10 @@
  * Dispatcher tests — in-process, no subprocess.
  *
  * `main()` returns a code and writes through process.stdout/stderr, so the
- * whole contract is assertable by swapping the two write functions. Plan
- * 02-08 budgets the repository to exactly ONE subprocess-launching test file
- * (the `warpline run` SIGINT case); do not spend it here.
+ * whole contract is assertable by swapping the two write functions. The
+ * repository budgets subprocess-launching test files to the interrupt proofs
+ * that cannot be reached any other way — `run-sigint.test.ts` and
+ * `advance-sigint.test.ts` — and to nothing else; do not spend a launch here.
  */
 import { describe, test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'

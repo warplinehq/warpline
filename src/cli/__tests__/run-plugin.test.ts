@@ -3,8 +3,10 @@
  *
  * `runPlugin(argv, signal)` returns a payload and an exit code instead of
  * printing and exiting, so the whole contract is assertable by calling it.
- * Plan 02-08 budgets the repository to exactly ONE subprocess-launching test
- * file (`run-sigint.test.ts`, for the SIGINT->130 path); do not spend it here.
+ * The repository budgets subprocess-launching test files to the interrupt
+ * proofs that cannot be reached any other way — `run-sigint.test.ts` for this
+ * verb, `advance-sigint.test.ts` for `advance` — and to nothing else; do not
+ * spend a launch here.
  *
  * The fixture home is a temp dir whose `plugins/` is a symlink to
  * `test-utils/fixture-plugins`. Module resolution follows the symlink to its

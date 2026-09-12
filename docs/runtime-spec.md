@@ -1594,12 +1594,25 @@ them.
 | `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, or a plugin is holding at an approval gate. |
 | `1` | At least one plugin failed, or the plugin root loaded no manifests at all. |
 | `75` | Could not look. Nothing ran and nothing was written. |
-| `130` | Interrupted by a signal. |
+| `130` | Interrupted by SIGINT. The process stopped; the work may not have. |
 
-`130` is the conventional code for a process ended by SIGINT. Signal handling is
-not wired into this command yet, so a Ctrl-C today takes whatever the runtime's
-own default is. The value is reserved here so a consumer written now does not
-have to change when it is.
+`130` is the conventional code for a process ended by SIGINT, and this command
+reports it deliberately rather than by default: it installs a handler for the
+length of the run, and the handler flushes whatever is queued on stdout before
+terminating, so an interrupt cannot cut a `--json` document in half.
+
+Read `130` as "the process stopped", never as "the work stopped". The advance is
+not interruptible — no abort is threaded into a plugin invocation — so the plugin
+that was in flight may run to completion in a process the operator believes is
+dead. Two consequences follow, and both are bounded rather than open:
+
+- Side effects already begun continue. An interrupt is not a cancellation, and
+  there is no code that means "cancelled cleanly" because there is no such
+  outcome to report.
+- The run lock is left behind: the interrupt ends the process before the
+  release runs. The next advance heals it, because the lock names a process id
+  that is gone (§ 12). So an interrupted advance is recoverable without any flag
+  that breaks a held lock, which is why no such flag exists.
 
 ### The code comes from the run's own state, never from its status
 
@@ -1756,12 +1769,11 @@ window and the dead-process check are what bound it. An operator who knows the
 holder is gone can delete `.lock` by hand; an operator who is not sure should
 wait for the window.
 
-**An interrupted advance can leave a plugin running.** § 11 reserves `130` for
-an interruption and says in as many words that signal handling is not wired into
-this command yet, so whatever code an interrupted advance reports today, the
-plugin that was in flight may run to completion in a process the operator
-believes is dead. The lock that interruption leaves behind is reclaimed by the
-heal described above — on the next advance if the holder's process is gone, and
+**An interrupted advance can leave a plugin running.** An advance interrupted by
+SIGINT exits `130` (§ 11) the moment the signal lands, which ends the process and
+not the work: the plugin that was in flight may run to completion in a process
+the operator believes is dead. The lock that interruption leaves behind is
+reclaimed by the heal described above — on the next advance if the holder's process is gone, and
 at the two-hour window if the lock was orchestrator-held and names no process.
 The two facts belong beside each other because the second is what bounds the
 first.

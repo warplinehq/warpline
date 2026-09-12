@@ -1,14 +1,17 @@
 /**
- * The ONE process-launching test file in the repository.
+ * One of the TWO process-launching test files in the repository — this one for
+ * `warpline run`, and `advance-sigint.test.ts` for `warpline advance`. Both
+ * exist for the same reason and neither is a licence for a third.
  *
  * `warpline run`'s SIGINT->130 contract cannot be observed in-process: it is a
  * signal disposition plus a `process.exit`, and there is no in-process seam for
  * either. Everything else about `run` is covered by `run-plugin.test.ts`
  * without leaving the test process.
  *
- * Keep this file at one launch, one signal, one exit-code assertion. Launching
- * a process is where CLAUDE.md's documented ~3% timeout flake concentrates,
- * which is why the budget for this phase is exactly one such file. If you are
+ * Keep this file at one launch, one signal, one exit-code assertion, and hold
+ * the sibling to the same discipline. Launching a process is where CLAUDE.md's
+ * documented ~3% timeout flake concentrates, which is why a launch is spent
+ * only on a contract that genuinely cannot be reached without one. If you are
  * about to add a second scenario here, it belongs in `run-plugin.test.ts`.
  */
 import { test, expect, beforeAll, afterAll } from 'bun:test'

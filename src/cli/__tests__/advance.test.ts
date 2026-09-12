@@ -840,3 +840,38 @@ describe('main([advance, --json])', () => {
     expect(await readdir(home.runsDir)).toEqual([])
   })
 })
+
+/**
+ * The interrupt handler's REMOVAL, which is the half a launch cannot observe.
+ *
+ * `advance-sigint.test.ts` spends this repository's second process launch on the
+ * signal itself; it kills its child, so it can say nothing about what the
+ * handler leaves behind. This can, and it is the arm that matters to everyone
+ * else: a listener left on the test runner means a Ctrl-C during a suite run
+ * exits the runner 130 from inside a library, with the cause nowhere near the
+ * symptom. The count is taken around a real `main(['advance'])` rather than
+ * asserted against the source text, so a handler installed twice, removed on
+ * only one arm, or removed for the wrong callback all read as a difference here.
+ */
+describe('the interrupt handler does not outlive the call', () => {
+  test('SIGINT listeners are unchanged across a completed advance', async () => {
+    await writePlugin(home, 'alpha')
+    const before = process.listenerCount('SIGINT')
+
+    const { code } = await capture(() => main(['advance']))
+
+    expect(code).toBe(0)
+    expect(process.listenerCount('SIGINT')).toBe(before)
+  })
+
+  test('and unchanged across a refusal that returns early', async () => {
+    const before = process.listenerCount('SIGINT')
+
+    // The parser's refusal returns from inside the `try`, which is the arm a
+    // `finally` exists for.
+    const { code } = await capture(() => main(['advance', '--force']))
+
+    expect(code).toBe(1)
+    expect(process.listenerCount('SIGINT')).toBe(before)
+  })
+})

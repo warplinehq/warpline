@@ -33,9 +33,17 @@
  *      through `await import`, so module scope runs ON IMPORT — including inside
  *      `main(['advance'])` under `bun test`. A signal handler or a
  *      `process.exit` installed out here would register on the test runner, and
- *      a Ctrl-C during the suite would exit it from inside a library.
- *   4. This module NEVER terminates the process. `run` returns a number and
- *      `src/bin/warpline.ts` is the only place a number becomes an exit.
+ *      a Ctrl-C during the suite would exit it from inside a library. The
+ *      interrupt handler therefore goes INSIDE `run`, and comes off again in a
+ *      `finally`: installing it inside and leaving it installed would leak one
+ *      listener per in-process test of this verb, which is the same bug reached
+ *      by a longer road.
+ *   4. This module terminates the process in exactly ONE place — the interrupt
+ *      handler inside `run`, which exits `130`. Every other path returns a
+ *      number and `src/bin/warpline.ts` is where that number becomes an exit.
+ *      The exception is not a convenience: the handler runs while `run` is
+ *      parked on `await runAdvance`, nothing threads an abort into that await,
+ *      so there is no return path for it to take.
  *   5. NOTHING reaches stdout on a failure path — not even under `--json`, and
  *      especially not an error-shaped document. A monitor parsing this stream
  *      is better served by an empty stream plus a non-zero code than by a
@@ -43,7 +51,22 @@
  *      writes its sentence to stderr and returns; the single emission site is
  *      past all of them. The engine holds up the other half of that contract:
  *      it writes nothing to stdout either, which is asserted structurally
- *      because no in-process capture can observe it.
+ *      because no in-process capture can observe it. The interrupt handler's
+ *      own write is a flush barrier carrying no bytes, so it adds nothing to
+ *      that stream and cannot be mistaken for a document.
+ *
+ * The cost of interrupting this command, stated here rather than filed as a
+ * known issue, because the people who pay it read this file. An interrupted
+ * advance exits `130` — the process stopped, NOT the work. The plugin that was
+ * in flight may run to completion in a process the operator believes is dead,
+ * because making the advance genuinely interruptible means threading an abort
+ * through the level loop and the invocation path, and that is engine surgery
+ * this phase deliberately did not do in the same breath as rewiring the lock
+ * and the prune. The run lock the interrupt leaves behind is reclaimed by the
+ * dead-holder heal — the holder's process id is gone, so the next advance heals
+ * the lock rather than waiting out the two-hour window — which is what keeps an
+ * interrupted advance recoverable without a flag that breaks a held lock.
+ * `docs/runtime-spec.md` §§ 11 and 12 carry the same two facts for operators.
  *
  * The due-set is `runAdvance`'s and never this file's. `warpline plan` agrees
  * with this command precisely because both route every verdict through the same
@@ -241,103 +264,134 @@ export async function run(
   argv: string[],
   io: AdvanceIo = { stdin: process.stdin },
 ): Promise<number> {
-  let strict = false
-  let json = false
+  // The interrupt handler, installed HERE and removed in the `finally` below —
+  // never at module scope, for the reason landmine 3 gives: module scope runs on
+  // import, including inside every in-process test of this verb.
+  //
+  // Terminating rather than returning a code is not a shortcut taken to save a
+  // parameter. A signal handler runs while this function is parked on
+  // `await runAdvance`, and nothing threads an abort into that await — the
+  // advance is not interruptible, and this file deliberately does not pretend
+  // otherwise by taking a controller it would never honour. The handler
+  // therefore has no return path: ending the process is the only way the signal
+  // ends anything at all.
+  //
+  // The empty write is a flush barrier carrying no bytes. Under a scheduler
+  // stdout is a pipe, writes to a pipe are asynchronous, and the one `--json`
+  // document this command emits may still be queued when the signal lands;
+  // exiting without waiting for it can cut that document in half. Chunks flush
+  // in order, so a zero-length write's callback runs after every byte handed to
+  // `write` before it.
+  const onInterrupt = (): void => {
+    process.stdout.write('', () => process.exit(130))
+  }
+  process.on('SIGINT', onInterrupt)
 
   try {
-    // Namespace import above so this call is the only line naming the parser.
-    // Both flags are registered here and nowhere else: an argv inspection
-    // beside this call would be a second way to read flags, and a second way is
-    // a path by which a refused flag gets honoured.
-    const { values } = nodeUtil.parseArgs({
-      args: argv,
-      options: { strict: { type: 'boolean' }, json: { type: 'boolean' } },
-      allowPositionals: true,
-      strict: true,
-    })
-    strict = values.strict === true
-    json = values.json === true
-  } catch (err) {
-    // The parser's own strict mode is what refuses an unregistered flag, and
-    // `--yes` and `--force` are two of them. That refusal is worth more than a
-    // hand-rolled one: it cannot be forgotten in review, and it stays correct as
-    // flags are added. Surface the message, never a stack.
-    process.stderr.write(
-      `warpline advance: ${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`,
-    )
-    return 1
-  }
+    let strict = false
+    let json = false
 
-  // Above `runAdvance` because there is nowhere below it this could sit: home
-  // resolution creates nothing, and the home comes into existence at whichever
-  // writer reaches its own recursive mkdir first — the run log's or the
-  // artifact store's. There is no single create-on-first-write site to guard,
-  // so the guard goes where the decision is still one decision.
-  const home = warplineHome()
-  if (!existsSync(home) && !isInteractive(io.stdin)) {
-    process.stderr.write(
-      `warpline advance: no warpline home at ${home}, and stdin is not a terminal — refusing to ` +
-        `create one. Set WARPLINE_HOME to the home you meant, or run this once from a terminal ` +
-        `to create that path.\n`,
-    )
-    return 75
-  }
-
-  await reportUnusablePreferences()
-
-  let result: AdvanceResult
-  try {
-    result = await runAdvance({})
-  } catch (err) {
-    // Contention on the run lock is not a new exit code — the single catch
-    // below already reports `75` for any throw out of the advance, and this is
-    // one. What it is is a different SENTENCE. "Run lock at … is held by PID
-    // 4213" leaves the operator to work out whether anything ran, whether the
-    // next tick will clear it, and whether it clears on its own at all; those
-    // three answers are the whole content of the mail they just received.
-    //
-    // Recognised by `name`, the way the dispatcher recognises its own typed
-    // error, and for the same reason: an `instanceof` check would import the
-    // runtime lock module into this file's graph to test a string that the
-    // error already carries. The holder is named by the error's own message,
-    // which has the two arms a nullable holder needs — a process id, or an
-    // orchestrator session. Do not reconstruct either of them here.
-    if (err instanceof Error && err.name === 'AdvanceLockedError') {
+    try {
+      // Namespace import above so this call is the only line naming the parser.
+      // Both flags are registered here and nowhere else: an argv inspection
+      // beside this call would be a second way to read flags, and a second way is
+      // a path by which a refused flag gets honoured.
+      const { values } = nodeUtil.parseArgs({
+        args: argv,
+        options: { strict: { type: 'boolean' }, json: { type: 'boolean' } },
+        allowPositionals: true,
+        strict: true,
+      })
+      strict = values.strict === true
+      json = values.json === true
+    } catch (err) {
+      // The parser's own strict mode is what refuses an unregistered flag, and
+      // `--yes` and `--force` are two of them. That refusal is worth more than a
+      // hand-rolled one: it cannot be forgotten in review, and it stays correct as
+      // flags are added. Surface the message, never a stack.
       process.stderr.write(
-        `warpline advance: ${err.message} Nothing ran and nothing was written — another ` +
-          `advance holds this home. The next scheduled tick retries, and a lock more than two ` +
-          `hours old is broken automatically. Nothing breaks a lock a live process still ` +
-          `holds; see docs/runtime-spec.md § 12.\n`,
+        `warpline advance: ${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`,
+      )
+      return 1
+    }
+
+    // Above `runAdvance` because there is nowhere below it this could sit: home
+    // resolution creates nothing, and the home comes into existence at whichever
+    // writer reaches its own recursive mkdir first — the run log's or the
+    // artifact store's. There is no single create-on-first-write site to guard,
+    // so the guard goes where the decision is still one decision.
+    const home = warplineHome()
+    if (!existsSync(home) && !isInteractive(io.stdin)) {
+      process.stderr.write(
+        `warpline advance: no warpline home at ${home}, and stdin is not a terminal — refusing to ` +
+          `create one. Set WARPLINE_HOME to the home you meant, or run this once from a terminal ` +
+          `to create that path.\n`,
       )
       return 75
     }
-    // A stack under a scheduler lands in the operator's mail carrying absolute
-    // paths, and none of it is actionable. The message alone, as everywhere else
-    // in this CLI.
-    process.stderr.write(`warpline advance: ${err instanceof Error ? err.message : String(err)}\n`)
-    return 75
+
+    await reportUnusablePreferences()
+
+    let result: AdvanceResult
+    try {
+      result = await runAdvance({})
+    } catch (err) {
+      // Contention on the run lock is not a new exit code — the single catch
+      // below already reports `75` for any throw out of the advance, and this is
+      // one. What it is is a different SENTENCE. "Run lock at … is held by PID
+      // 4213" leaves the operator to work out whether anything ran, whether the
+      // next tick will clear it, and whether it clears on its own at all; those
+      // three answers are the whole content of the mail they just received.
+      //
+      // Recognised by `name`, the way the dispatcher recognises its own typed
+      // error, and for the same reason: an `instanceof` check would import the
+      // runtime lock module into this file's graph to test a string that the
+      // error already carries. The holder is named by the error's own message,
+      // which has the two arms a nullable holder needs — a process id, or an
+      // orchestrator session. Do not reconstruct either of them here.
+      if (err instanceof Error && err.name === 'AdvanceLockedError') {
+        process.stderr.write(
+          `warpline advance: ${err.message} Nothing ran and nothing was written — another ` +
+            `advance holds this home. The next scheduled tick retries, and a lock more than two ` +
+            `hours old is broken automatically. Nothing breaks a lock a live process still ` +
+            `holds; see docs/runtime-spec.md § 12.\n`,
+        )
+        return 75
+      }
+      // A stack under a scheduler lands in the operator's mail carrying absolute
+      // paths, and none of it is actionable. The message alone, as everywhere else
+      // in this CLI.
+      process.stderr.write(`warpline advance: ${err instanceof Error ? err.message : String(err)}\n`)
+      return 75
+    }
+
+    const exit_code = advanceExitCode(result, { strict })
+    const { gated, failed } = advanceCounts(result)
+
+    // The one site anything reaches stdout from, past every refusal above it.
+    process.stdout.write(
+      render(
+        {
+          run_id: result.run_id,
+          status: result.status,
+          gated,
+          failed,
+          // Read off the result, where the prune's own return value was threaded
+          // to. Counting removals a second time here would be a second answer.
+          pruned: result.pruned,
+          exit_code,
+          plugins: [...result.plugin_states].map(([name, state]) => ({ name, state })),
+        },
+        json,
+      ),
+    )
+
+    return exit_code
+  } finally {
+    // Both halves are load-bearing and for different reasons. Without this one,
+    // every in-process test of this verb leaves a listener on the test runner,
+    // and an interrupt during a suite run exits the runner 130 from inside a
+    // library — a bug whose cause is nowhere near its symptom.
+    process.off('SIGINT', onInterrupt)
   }
-
-  const exit_code = advanceExitCode(result, { strict })
-  const { gated, failed } = advanceCounts(result)
-
-  // The one site anything reaches stdout from, past every refusal above it.
-  process.stdout.write(
-    render(
-      {
-        run_id: result.run_id,
-        status: result.status,
-        gated,
-        failed,
-        // Read off the result, where the prune's own return value was threaded
-        // to. Counting removals a second time here would be a second answer.
-        pruned: result.pruned,
-        exit_code,
-        plugins: [...result.plugin_states].map(([name, state]) => ({ name, state })),
-      },
-      json,
-    ),
-  )
-
-  return exit_code
 }

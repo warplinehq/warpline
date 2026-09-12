@@ -14,9 +14,9 @@
  *      runner's summary. So an in-process purity test reads clean over a dirty
  *      pipe: a guard running green while the thing it catches sits outside its
  *      reach.
- *   2. The single process-launching test this repository budgets is the
- *      interrupt proof, and it kills the child before any payload is emitted.
- *      It cannot observe this property either.
+ *   2. The process-launching tests this repository budgets are interrupt
+ *      proofs, and each kills its child before any payload is emitted. Neither
+ *      can observe this property either.
  *
  * There is therefore no behavioural instrument for this at all, and this check
  * is **not** a substitute for one — it is the only thing that reaches the
