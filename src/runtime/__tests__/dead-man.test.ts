@@ -285,6 +285,35 @@ describe('the dead-man file is written on every arm that returned', () => {
   })
 })
 
+describe('the dead-man file follows a relocated state file', () => {
+  test('a state override puts the file beside it and never under the live home', async () => {
+    // Every other case in this file runs with the home and the state override
+    // pointing at the SAME temp root, so all of them are equally satisfied by a
+    // writer that ignores the override and always uses the live-home default.
+    // This is the one case that tells those two implementations apart, and it
+    // is the guard shape this project has recorded running green over something
+    // outside its reach six times.
+    const elsewhere = await createTestHome()
+    try {
+      const relocated = join(elsewhere.stateDir, 'engine-state.json')
+      await writePlugin('alpha')
+
+      const result = await advance({ stateDir: relocated, runsDir: elsewhere.runsDir })
+
+      expect(result.status).toBe('complete')
+      const beside = join(elsewhere.stateDir, 'last-successful-advance')
+      expect(existsSync(beside)).toBe(true)
+      expect(JSON.parse(await readFile(beside, 'utf8')).run_id).toBe(result.run_id)
+
+      // `_setHome` still points at `ctx.root`, so this is the live-home path
+      // the default derivation would have produced. Nothing was written there.
+      expect(existsSync(lastSuccessfulAdvancePath())).toBe(false)
+    } finally {
+      await elsewhere.cleanup()
+    }
+  })
+})
+
 describe('the dead-man file is not written on a throw', () => {
   test('a throw from inside the advance leaves the last good file exactly as it was', async () => {
     await writePlugin('alpha')

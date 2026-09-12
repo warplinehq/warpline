@@ -1784,7 +1784,7 @@ file's own age.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `run_id` | string | The advance's own run id. Names the run log written immediately before this file. |
+| `run_id` | string | The advance's own run id. Names the run log this advance wrote — but only when it ran: an advance skipped for quiet hours still gets a run id and writes no log. |
 | `completed_at` | string | ISO 8601 UTC, the moment this file was written. Use the file's mtime for age checks; this field is for a human reading the file. |
 | `status` | `"complete"` \| `"partial"` \| `"failed"` \| `"interrupted"` | The advance's own status. **Not the exit code.** |
 | `skipped_reason` | string \| null | `null` when the advance ran. `"quiet_hours"` when it returned early because a quiet window was active. |
@@ -1836,9 +1836,11 @@ the file's contents and its modification time are both unchanged.
 The write is atomic — a temp file and a rename — so a detector reading the file
 while an advance writes it sees either the old document or the new one, never
 half of either. It happens after the run log is written and before the run lock
-is released, which gives you two guarantees: the run log named by `run_id` is
-already on disk when you can see this file, and two advances against one home
-cannot interleave writes to it.
+is released, which gives you two guarantees: when the advance ran, the run log
+named by `run_id` is already on disk by the time you can see this file, and two
+advances against one home cannot interleave writes to it. The first guarantee is
+about ordering, not existence — a skipped advance writes this file and no run
+log, and `skipped_reason` is how you know which you are looking at.
 
 ### Reading it
 
@@ -1850,11 +1852,17 @@ should test them:
    This is the case no code inside this runtime can report to you, and it is the
    reason the file exists. A fifteen-minute timer with a one-hour threshold gives
    three missed ticks of tolerance before it pages.
-2. **Asleep.** `skipped_reason` is `"quiet_hours"`. The advance ran and returned
-   early on purpose. Recent, so it is not stopped; nothing ran, so the counts say
-   nothing.
+2. **Asleep.** `skipped_reason` is `"quiet_hours"`. The advance returned early on
+   purpose, so it is recent and it is not stopped. No plugin ran, so `gated` is
+   always `0` here — but `failed` is not: a manifest that would not load is
+   counted on this arm too, which is what lets a broken plugin root show through
+   a quiet night instead of waiting for morning. Check this step before the next
+   one so that a skipped advance with a load failure reads as broken and asleep
+   rather than as broken and awake.
 3. **Broken.** `failed` is greater than zero. At least one plugin failed or one
-   manifest would not load. Read the run log named by `run_id`.
+   manifest would not load. Read the run log named by `run_id` — unless
+   `skipped_reason` is set, in which case there is no log and the failure is a
+   manifest that would not import.
 4. **Waiting.** `gated` is greater than zero and `failed` is zero. Plugins are
    holding at approval gates. Whether that pages you is your call — it is the
    same distinction `warpline advance --strict` makes at the exit code.
