@@ -8,7 +8,6 @@ import {
   acquireLock,
   releaseLock,
   generateRunId,
-  updateLockMode,
 } from '../lock.js'
 import type { WarplineLock } from '../lock.js'
 
@@ -191,59 +190,5 @@ describe('generateRunId', () => {
     const id = generateRunId()
     // Format: 20260403T120000-[8 hex chars]
     expect(id).toMatch(/^\d{8}T\d{6}-[0-9a-f]{8}$/)
-  })
-})
-
-describe('updateLockMode', () => {
-  const baseLock: WarplineLock = {
-    acquired_at: '2026-04-04T10:00:00Z',
-    run_id: '20260404T100000-abcd1234',
-    mode: 'health',
-    pid: 12345,
-  }
-
-  let lockPath: string
-
-  beforeEach(async () => {
-    lockPath = tmpLock()
-    await writeFile(lockPath, JSON.stringify(baseLock))
-  })
-
-  afterEach(async () => {
-    try { await unlink(lockPath) } catch { /* already removed */ }
-  })
-
-  it('updates mode field and preserves other fields', async () => {
-    const result = await updateLockMode(lockPath, 'intel')
-    expect(result.mode).toBe('intel')
-    expect(result.acquired_at).toBe(baseLock.acquired_at)
-    expect(result.run_id).toBe(baseLock.run_id)
-    expect(result.pid).toBe(baseLock.pid)
-  })
-
-  it('writes valid lock back to disk', async () => {
-    await updateLockMode(lockPath, 'ops')
-
-    const writtenData = JSON.parse(await (await import('node:fs/promises')).readFile(lockPath, 'utf-8'))
-    const parsed = WarplineLockSchema.safeParse(writtenData)
-    expect(parsed.success).toBe(true)
-    if (parsed.success) expect(parsed.data.mode).toBe('ops')
-  })
-
-  it('throws when lock file does not exist', async () => {
-    let threw = false
-    try {
-      await updateLockMode('/tmp/nonexistent-lock-xyz.lock', 'intel')
-    } catch (e) {
-      threw = true
-      expect((e as Error).message).toContain('ENOENT')
-    }
-    expect(threw).toBe(true)
-  })
-
-  it('result is valid per WarplineLockSchema', async () => {
-    const result = await updateLockMode(lockPath, 'intelligence')
-    const parsed = WarplineLockSchema.safeParse(result)
-    expect(parsed.success).toBe(true)
   })
 })

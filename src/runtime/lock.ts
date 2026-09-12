@@ -2,7 +2,6 @@ import { z } from 'zod'
 import { writeFile, unlink, readFile } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 
-import { lockPath } from '../lib/paths.js'
 export const WarplineLockSchema = z.object({
   acquired_at: z.string(),
   run_id: z.string(),
@@ -21,7 +20,22 @@ export const WarplineLockSchema = z.object({
 export type WarplineLock = z.infer<typeof WarplineLockSchema>
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000
-const DEFAULT_LOCK_PATH = lockPath()
+
+/**
+ * Every function below takes its lock path as a REQUIRED first parameter.
+ *
+ * There used to be a module-load-time constant here holding `lockPath()`,
+ * which is the one thing `src/lib/paths.ts:17-21` tells you not to write:
+ * a path frozen at import time survives a later re-root. `bench/run.ts` swaps
+ * `WARPLINE_HOME` per iteration and `bench/arms.ts` calls `runAdvance()` with
+ * no options, so a frozen default would put the bench's lock in the wrong home
+ * and let two advances both acquire — the exact failure the lock exists to
+ * prevent. The derivation belongs at the call site, in the engine.
+ *
+ * Do NOT bring the default back as `lockPath: string = lockPath()`: inside
+ * these signatures the parameter shadows the accessor of the same name, so
+ * that initialiser is a TDZ error at call time.
+ */
 
 export function generateRunId(): string {
   const now = new Date()
@@ -47,7 +61,7 @@ export function isLockStale(lock: WarplineLock): boolean {
 }
 
 export async function acquireLock(
-  lockPath: string = DEFAULT_LOCK_PATH,
+  lockPath: string,
   mode: string = 'health',
   opts: { pid?: number | null } = {}
 ): Promise<WarplineLock> {
@@ -62,7 +76,7 @@ export async function acquireLock(
   return lock
 }
 
-export async function releaseLock(lockPath: string = DEFAULT_LOCK_PATH): Promise<void> {
+export async function releaseLock(lockPath: string): Promise<void> {
   try {
     await unlink(lockPath)
   } catch (err: unknown) {
@@ -70,18 +84,12 @@ export async function releaseLock(lockPath: string = DEFAULT_LOCK_PATH): Promise
   }
 }
 
-export async function updateLockMode(
-  lockPath: string = DEFAULT_LOCK_PATH,
-  mode: string
-): Promise<WarplineLock> {
-  const raw = JSON.parse(await readFile(lockPath, 'utf-8'))
-  const lock = WarplineLockSchema.parse(raw)
-  const updated: WarplineLock = { ...lock, mode }
-  await writeFile(lockPath, JSON.stringify(updated, null, 2))
-  return updated
-}
-
-export async function readLock(lockPath: string = DEFAULT_LOCK_PATH): Promise<WarplineLock | null> {
+/**
+ * Read the lock back, or null — for an absent file, for a truncated one, and
+ * for JSON that is not a lock. Callers get one answer for "I could not read a
+ * lock here", and none of them may unlink on it.
+ */
+export async function readLock(lockPath: string): Promise<WarplineLock | null> {
   try {
     const raw = JSON.parse(await readFile(lockPath, 'utf-8'))
     const result = WarplineLockSchema.safeParse(raw)
