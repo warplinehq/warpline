@@ -117,14 +117,14 @@ Key by key:
 
 - **`Type=oneshot`**, and it is not cosmetic. `systemd.service(5)`, `Type=`:
   "Behavior of `oneshot` is similar to `exec`; however, the service manager will
-  consider the unit up **after the main process exits.**" The default it
-  replaces reports far earlier — "`simple` … the service manager will consider
-  the unit started **immediately after the main service process has been forked
-  off** (i.e. immediately after `fork()` … and before the new process has called
-  `execve()`)" — which is before `advance` has run a line. Expect a oneshot
-  service to read as dead rather than active between ticks; the same entry says
-  it "will never enter `active` unit state … it will not show up as started
-  afterwards, but as dead." That is correct for a tick job. Do not add
+  consider the unit up after the main process exits." The default it replaces
+  reports far earlier — "`simple` … the service manager will consider the unit
+  started immediately after the main service process has been forked off (i.e.
+  immediately after `fork()`, … before the new process has called `execve()` to
+  invoke the actual service binary)" — which is before `advance` has run a line.
+  Expect a oneshot service to read as dead rather than active between ticks; the
+  same entry says it "will never enter `active` unit state … it will not show up
+  as started afterwards, but as dead." That is correct for a tick job. Do not add
   `RemainAfterExit=` to make it look otherwise.
 - **`Environment=`** is the unit's way to set a variable for the process:
   "Sets environment variables for executed processes." (`systemd.exec(5)`,
@@ -147,7 +147,7 @@ Key by key:
 Three settings are deliberately *absent*, and their defaults are the reason:
 
 - **`AccuracySec=`** — "Specify the accuracy the timer shall elapse with.
-  **Defaults to 1min.**" (`systemd.timer(5)`.) A minute of slack on a
+  Defaults to 1min." (`systemd.timer(5)`.) A minute of slack on a
   fifteen-minute tick is free. The same entry asks you to "make sure to set this
   value as high as possible and as low as necessary", so leave it alone.
 - **`RandomizedDelaySec=`** — "Defaults to 0, indicating that no randomized
@@ -229,8 +229,9 @@ Key by key, all from `launchd.plist(5)`:
   running the job". Set it. The page does not state a default, so do not build
   on one.
 - **`StandardOutPath` / `StandardErrorPath`** — each "specifies that the given
-  path should be mapped to" the job's stdout or stderr. The parent directory
-  must already exist; see the install steps below.
+  path should be mapped to" the job's stdout or stderr, and "If the file does
+  not exist, it will be created …". The page says nothing about the *directory*,
+  so create it yourself; the install steps below do.
 
 Two keys are deliberately absent. The keep-alive key is documented as being
 "used to control whether your job is to be kept continuously running", and its
@@ -269,10 +270,11 @@ user with UID 501, domain-target is `gui/501/`, service-name is
 the page writes the domain target with a trailing slash; the service name is the
 optional part of the specifier.
 
-The older pair of subcommands still works, which is why a recipe written from
-memory keeps using them and why the error stays invisible. `launchctl(1)` prints,
-on its `load | unload` entry, "Recommended alternative subcommands: bootstrap |
-bootout | enable | disable". Use the ones above.
+The older pair of subcommands is still documented rather than removed, which is
+why a recipe written from memory keeps reaching for them and why the mistake
+stays invisible. `launchctl(1)` prints, on its `load | unload` entry,
+"Recommended alternative subcommands: bootstrap | bootout | enable | disable".
+Use the ones above.
 
 ## The crontab entry
 
@@ -366,11 +368,13 @@ Three things a scheduler operator should read there rather than infer:
 - **`130` means the process stopped, never that the work stopped.** The advance
   is not interruptible, so the plugin in flight may run to completion in a
   process you believe is dead (§ 11). Note also what that code covers: warpline
-  installs a handler for SIGINT and only SIGINT. Stopping the job through your
-  scheduler sends SIGTERM first — launchd waits "between sending the SIGTERM
-  signal and before sending a SIGKILL signal when the job is to be stopped"
-  (`launchd.plist(5)`, `ExitTimeOut`) — and what a SIGTERM'd advance exits is
-  not established by this document. Do not build a monitor rule on it.
+  installs a handler for SIGINT and only SIGINT. Stopping a launchd job is not
+  a SIGINT: that page's `ExitTimeOut` entry describes the wait "between sending
+  the SIGTERM signal and before sending a SIGKILL signal when the job is to be
+  stopped" (`launchd.plist(5)`). What a SIGTERM'd advance exits is not
+  established by this document, and what signal systemd sends on a stop is
+  `systemd.kill(5)`'s `KillSignal=`, which was not read for it either. Do not
+  build a monitor rule on either.
 
 There is one optional systemd setting worth knowing and not shipping.
 `systemd.service(5)`, `SuccessExitStatus=`, carries the worked example
@@ -383,7 +387,7 @@ fifteen-minute tick, a failed state you can see is the more useful signal. It is
 not in the unit above.
 
 The same entry is worth reading for `130`: the set treated as successful is "the
-normal successful exit status 0 and, **except for `Type=oneshot`**, the signals
+normal successful exit status 0 and, except for `Type=oneshot`, the signals
 `SIGHUP`, `SIGINT`, `SIGTERM`, and `SIGPIPE`". The unit above is `Type=oneshot`,
 so an interrupted advance reads as a failure there, which is what you want.
 
@@ -537,8 +541,14 @@ correct whichever way the absence falls, and never a claim:
   use an absolute interpreter path regardless.
 - **launchd's default working directory.** `launchd.plist(5)` documents
   `WorkingDirectory` and does not state a default. The instruction: set it.
-- **What a SIGTERM'd advance exits.** warpline handles SIGINT; SIGTERM is not
-  established. The instruction: do not build a monitor rule on it.
+- **What a SIGTERM'd advance exits, and what signal systemd sends on a stop.**
+  warpline handles SIGINT and only SIGINT. `systemd.kill(5)`, where `KillSignal=`
+  lives, was not read for this document at all. The instruction: do not build a
+  monitor rule on either, and read that page before you do.
+- **Where systemd sends a unit's output by default on your system.** The default
+  quoted above is `systemd-system.conf(5)`'s, and that page was not read here.
+  The instruction: the shipped unit sets no redirection, so check it rather than
+  assume it.
 
 ### If you are on a systemd host, re-read these before you trust the systemd rows
 
