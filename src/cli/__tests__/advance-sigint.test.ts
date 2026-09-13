@@ -39,10 +39,9 @@ let home: string
 
 beforeAll(() => {
   home = mkdtempSync(join(tmpdir(), 'warpline-advance-sigint-'))
-  // `state/` up front because the run lock is written into it and `acquireLock`
-  // does not create the directory — the ordinary shape for a home that has been
-  // advanced before, which is every home a scheduler touches.
-  mkdirSync(join(home, 'state'), { recursive: true })
+  // No `state/` here on purpose. `acquireLock` creates the directory its lock
+  // goes in, so this fixture is the shape a fresh `warpline init` leaves —
+  // which is the shape the first tick of a new scheduler install actually has.
   const plugin = join(home, 'plugins', 'slow')
   mkdirSync(plugin, { recursive: true })
 

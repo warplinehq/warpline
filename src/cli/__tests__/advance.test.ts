@@ -151,6 +151,27 @@ describe('main([advance]) end to end', () => {
   })
 
   /**
+   * A home that has never been advanced — `plugins/` and no `state/`, which is
+   * exactly what `warpline init` leaves behind.
+   *
+   * The run lock is the first writer in an advance, it lives in `state/`, and
+   * no verb creates that directory beforehand. Every other fixture in this
+   * repository starts from a home that already has one, so the suite could
+   * only ever exercise a home the product itself cannot reach: the first
+   * advance on a fresh install exited `75` naming a `.lock` file, and the next
+   * tick did the same thing forever.
+   */
+  test('a home that has never been advanced can be advanced', async () => {
+    await writePlugin(home, 'alpha')
+    await rm(home.stateDir, { recursive: true, force: true })
+
+    const { code, stderr } = await capture(() => main(['advance']))
+
+    expect(stderr).toBe('')
+    expect(code).toBe(0)
+  })
+
+  /**
    * `--force` is refused by `parseArgs` in strict mode, not by a check of ours.
    * That is the whole point: unattended operation must not acquire a consent
    * path by somebody adding a plausible-looking flag, and a parser that refuses

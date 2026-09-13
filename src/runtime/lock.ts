@@ -1,5 +1,6 @@
 import { z } from 'zod'
-import { writeFile, unlink, readFile } from 'node:fs/promises'
+import { mkdir, writeFile, unlink, readFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { randomBytes } from 'node:crypto'
 
 export const WarplineLockSchema = z.object({
@@ -127,6 +128,14 @@ export async function acquireLock(
       mode,
       pid: opts.pid === undefined ? process.pid : opts.pid,
     }
+    // The lock is the FIRST writer in an advance, and every other writer in
+    // this tree does its own recursive mkdir before it writes. This one is the
+    // exception that used to matter most: without it a home that has never
+    // been advanced can never be advanced, because `warpline init` creates
+    // `config/` and `plugins/` and nothing creates the directory the lock goes
+    // in. Inside `write` rather than above the try, so the post-heal retry
+    // gets it too.
+    await mkdir(dirname(lockPath), { recursive: true })
     await writeFile(lockPath, JSON.stringify(lock, null, 2), { flag: 'wx' })
     return lock
   }
