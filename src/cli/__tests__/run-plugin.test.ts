@@ -405,3 +405,100 @@ describe('runPlugin — --input key=value', () => {
     expect(usageError).toMatch(/string/i)
   })
 })
+
+/**
+ * `warpline run --json` puts one JSON document on stdout, the same promise
+ * `warpline advance --json` makes, and it is kept in the same place: the
+ * redirect lives in `invokePlugin`, which both verbs enter.
+ *
+ * Shared mechanism is not shared evidence, which is why this block exists.
+ * This verb hands its document back as a string for the dispatcher to write,
+ * so the stream is supposed to be untouched for the whole call — a handler
+ * printing into it is the one thing that can make it otherwise, and that is
+ * what is asserted here rather than inferred from the other verb's test.
+ */
+describe('runPlugin — a handler cannot reach stdout', () => {
+  let noisyHome: string
+
+  beforeAll(() => {
+    noisyHome = mkdtempSync(join(tmpdir(), 'warpline-run-noisy-'))
+    const dir = join(noisyHome, 'plugins', 'noisy')
+    mkdirSync(dir, { recursive: true })
+    mkdirSync(join(noisyHome, 'config'), { recursive: true })
+    _setHome(noisyHome)
+
+    const manifest = {
+      name: 'noisy',
+      version: '1.0.0',
+      description: 'prints through both writers',
+      inputs: {},
+      outputs: {},
+      capabilities: [],
+      schedule: 'on_run',
+      autonomy_level: 'autonomous',
+      side_effects: [],
+      ttl_hours: 24,
+      dependencies: [],
+      timeout_ms: 5000,
+      max_parallelism: 1,
+      min_tier: 'normal',
+      max_retries: 0,
+      retry_delay_ms: 1,
+    }
+    writeFileSync(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+    writeFileSync(
+      join(dir, 'handler.ts'),
+      `export async function handler() {
+        console.log('CONSOLE FROM RUN')
+        process.stdout.write('RAW FROM RUN\\n')
+        return {
+          status: 'success',
+          phases_completed: ['noisy'],
+          phases_failed: [],
+          errors: [],
+          data_freshness: {},
+          summary: 'noisy: printed and succeeded',
+          artifacts_produced: [],
+          schema_version: 1,
+        }
+      }`,
+    )
+  })
+
+  afterAll(() => {
+    _setHome(home)
+    rmSync(noisyHome, { recursive: true, force: true })
+  })
+
+  test('both writers are redirected to stderr and the document still parses', async () => {
+    const realOut = process.stdout.write
+    const realErr = process.stderr.write
+    let onStdout = ''
+    let onStderr = ''
+    process.stdout.write = ((chunk: string) => {
+      onStdout += chunk
+      return true
+    }) as typeof process.stdout.write
+    process.stderr.write = ((chunk: string) => {
+      onStderr += chunk
+      return true
+    }) as typeof process.stderr.write
+
+    let result: Awaited<ReturnType<typeof runPlugin>>
+    try {
+      result = await runPlugin(['noisy', 'run', '--json'])
+    } finally {
+      process.stdout.write = realOut
+      process.stderr.write = realErr
+    }
+
+    expect(result.payload.ok).toBe(true)
+    // This verb returns its document rather than writing it, so the stream is
+    // untouched for the whole call and the handler is the only thing that could
+    // have put a byte on it.
+    expect(onStdout).toBe('')
+    expect(onStderr).toContain('CONSOLE FROM RUN')
+    expect(onStderr).toContain('RAW FROM RUN')
+    expect(JSON.parse(result.stdout).ok).toBe(true)
+  })
+})

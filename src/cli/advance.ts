@@ -16,16 +16,18 @@
  *      `src/runtime/exit-codes.ts` rather than inline here, so this command and
  *      the suite compute it at one call site instead of two that can disagree
  *      about the same run.
- *   2. Any throw out of `runAdvance` is `75`, never `1`. A throw there means
- *      nothing ran and nothing was written — the engine promises a refused
- *      advance leaves the home byte-identical — which is the definition of
- *      "could not look", and "could not look" must never read as "looked and it
- *      was fine". One catch rather than a growing `instanceof` chain, so a
- *      refusal added later cannot silently fall through to `1`. The accepted
+ *   2. Any throw out of `runAdvance` is `75`, never `1`. A throw there means the
+ *      advance could not finish, which is the definition of "could not look",
+ *      and "could not look" must never read as "looked and it was fine". One
+ *      catch rather than a growing `instanceof` chain, so a refusal added later
+ *      cannot silently fall through to `1`. The accepted
  *      cost, named rather than hidden: a genuine internal fault inside
  *      `runAdvance` also reports `75`, i.e. "retry later". Under a fifteen-minute
  *      timer that retry is free, and the alternative is a chain somebody has to
- *      keep complete forever. The run-lock arm inside that catch is not the
+ *      keep complete forever. Do NOT write "nothing was written" here. Only the
+ *      refusals above the run lock leave the home byte-identical — a fault
+ *      below it arrives after the fleet has run, and `runtime-spec` § 11 now
+ *      says so in the published table this comment used to contradict. The run-lock arm inside that catch is not the
  *      start of such a chain: it changes the message and nothing else, both
  *      arms return the same `75`, and deleting it would cost a sentence rather
  *      than a code.
