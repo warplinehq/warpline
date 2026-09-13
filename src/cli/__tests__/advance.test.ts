@@ -1006,24 +1006,32 @@ export async function handler() {
  * only one arm, or removed for the wrong callback all read as a difference here.
  */
 describe('the interrupt handler does not outlive the call', () => {
-  test('SIGINT listeners are unchanged across a completed advance', async () => {
+  /**
+   * Both signals, because both are installed. They come off one list in one
+   * loop, so an `on` without its `off` is structurally unlikely — but "unlikely
+   * by construction" is the reasoning that let the handler go uncounted for
+   * SIGTERM in the first place.
+   */
+  const SIGNALS = ['SIGINT', 'SIGTERM'] as const
+
+  test('interrupt listeners are unchanged across a completed advance', async () => {
     await writePlugin(home, 'alpha')
-    const before = process.listenerCount('SIGINT')
+    const before = SIGNALS.map((sig) => process.listenerCount(sig))
 
     const { code } = await capture(() => main(['advance']))
 
     expect(code).toBe(0)
-    expect(process.listenerCount('SIGINT')).toBe(before)
+    expect(SIGNALS.map((sig) => process.listenerCount(sig))).toEqual(before)
   })
 
   test('and unchanged across a refusal that returns early', async () => {
-    const before = process.listenerCount('SIGINT')
+    const before = SIGNALS.map((sig) => process.listenerCount(sig))
 
     // The parser's refusal returns from inside the `try`, which is the arm a
     // `finally` exists for.
     const { code } = await capture(() => main(['advance', '--force']))
 
     expect(code).toBe(1)
-    expect(process.listenerCount('SIGINT')).toBe(before)
+    expect(SIGNALS.map((sig) => process.listenerCount(sig))).toEqual(before)
   })
 })
