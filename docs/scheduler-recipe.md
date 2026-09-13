@@ -42,9 +42,11 @@ without creating it.
 
 What the backstop does not catch is a *wrong* home that happens to exist, and
 that is the case to set the variable for. A wrong home with no manifests exits
-`1`, which is visible. A wrong home whose plugins are all fresh or all parked at
-a gate exits `0` and reports a healthy advance against a fleet you did not mean,
-which is not. Set the variable.
+`1`, which is visible. Every other wrong home exits `0` and reports a healthy
+advance against a fleet you did not mean, which is not — whether its plugins
+were still fresh, parked at a gate, or ran to completion. The last of those is
+the worst case on this page: the advance did work, and it did it somewhere
+else. Set the variable.
 
 Skip this step and everything after it verifies the wrong fleet.
 
