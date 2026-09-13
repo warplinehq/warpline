@@ -49,8 +49,11 @@ export function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
     return true
-  } catch {
-    return false
+  } catch (err: unknown) {
+    // EPERM means the process exists and belongs to another user, so we are not
+    // allowed to signal it. That is not the same as gone, and reading it as gone
+    // is what lets the heal path break a live holder's lock. Only ESRCH is dead.
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
   }
 }
 

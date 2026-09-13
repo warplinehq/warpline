@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   WarplineLockSchema,
   isLockStale,
+  isProcessAlive,
   acquireLock,
   releaseLock,
   readLock,
@@ -87,6 +88,30 @@ describe('isLockStale', () => {
       pid: process.pid, // current process (alive)
     }
     expect(isLockStale(lock)).toBe(false)
+  })
+
+  it('returns false when the PID is alive but owned by another user', () => {
+    // `kill(pid, 0)` raises EPERM, not ESRCH, for a process this user may not
+    // signal. The process is running; we are simply not allowed to touch it.
+    // Reading that as dead is what lets the heal path break a live holder's lock.
+    const originalKill = process.kill
+    const eperm = Object.assign(new Error('kill EPERM'), { code: 'EPERM' })
+    process.kill = mock().mockImplementation(() => {
+      throw eperm
+    }) as unknown as typeof process.kill
+
+    try {
+      expect(isProcessAlive(1)).toBe(true)
+      const lock: WarplineLock = {
+        acquired_at: '2026-04-03T11:50:00Z', // 10 mins ago (not time-stale)
+        run_id: 'run-1',
+        mode: 'health',
+        pid: 1, // init/launchd: alive, root-owned, not ours to signal
+      }
+      expect(isLockStale(lock)).toBe(false)
+    } finally {
+      process.kill = originalKill
+    }
   })
 })
 
