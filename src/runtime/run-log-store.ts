@@ -25,8 +25,16 @@
  * decision record. `src/__tests__/no-orphan-schema-fields.test.ts` is what
  * keeps the boundary enforced rather than re-checked by reading.
  *
- * This file is a relocation. Nothing here was rewritten; signatures and
- * behaviour are what they were.
+ * **The relocation was not the last thing that happened to this file.** It
+ * moved unchanged from `src/schemas/run-log.ts`, and that sentence stood on its
+ * own here for one phase too long. `pruneRunLogs` was then rewritten to delete
+ * RUNS rather than files — it enumerates run ids from the union of both
+ * extensions' stems, exempts what an operator is preserving, applies three
+ * bounds in a fixed order, and takes a `RetentionPolicy` its old signature had
+ * no parameter for. Its return value changed again afterwards, to a count of
+ * runs actually gone rather than runs marked for deletion. The other six
+ * helpers are what they were. Do not read this header as a promise that nothing
+ * in the file has behaviour worth checking.
  */
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
