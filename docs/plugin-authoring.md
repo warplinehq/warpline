@@ -607,6 +607,21 @@ Warpline's own suite enforces this mechanically for every shipped example
 manifest and for the text `warpline scaffold` generates — a manifest that does
 work at module scope fails the build, it is not merely discouraged.
 
+### 4. Anything you print goes to stderr
+
+`console.log`, `console.info`, `console.debug` and a raw `process.stdout.write`
+are all redirected to stderr while your module loads and while your handler
+runs. Your line still appears — it just appears on the stream every other
+warpline diagnostic uses.
+
+This is not a style preference. `warpline advance --json` and `warpline run
+--json` each put one JSON document on stdout and nothing else, and that document
+is what a scheduler or a monitor parses. A debug line above it is a parse
+failure in a program you cannot patch, and the failure looks like a warpline bug
+rather than a plugin one. Runtime-spec § 11 carries the same fact for the people
+reading the other end of it, including the three writes the redirect does not
+reach.
+
 ## Testing
 
 Follow the example plugins: export the pure decision logic (the filter, the

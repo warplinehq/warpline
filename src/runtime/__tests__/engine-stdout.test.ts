@@ -36,6 +36,15 @@
  * would be relaxed by the first person it inconvenienced. `console.error` and
  * `console.warn` already go to stderr and are not in scope.
  *
+ * The writer this scope leaves out is the plugin handler, and reading that
+ * omission as coverage is what let one `console.log` in somebody's plugin
+ * corrupt the document for a whole phase. It is not covered from here and it
+ * cannot be: a handler is third-party source this guard has no text for.
+ * `invokePlugin` redirects handler stdout to stderr at run time instead, and
+ * `advance.test.ts` proves that behaviourally with a plugin that prints through
+ * both writers. Two halves of one property, neither reachable by the other's
+ * method.
+ *
  * The precedent is `src/cli/__tests__/dispatcher.test.ts`, which reads the
  * dispatcher's own source for exactly this reason: a property no behavioural
  * arm reaches.

@@ -752,6 +752,57 @@ describe('main([advance, --json])', () => {
     expect(doc.plugins).toEqual([{ name: 'alpha', state: 'completed' }])
   })
 
+  /**
+   * The one writer on this stream the runtime does not own: the plugin
+   * handler, which is third-party code the advance imports and calls in its
+   * own process. `engine-stdout.test.ts` keeps the engine's own diagnostics
+   * off stdout, and that guard is scoped to the engine module on purpose — so
+   * for a long time nothing at all reached the handler, and one debug line in
+   * somebody's plugin turned this document into a parse failure that looked
+   * like a warpline bug.
+   *
+   * Both writers, because they are genuinely two. `engine-stdout.test.ts:9-16`
+   * records that `console.log` does not travel through `process.stdout.write`
+   * in this runner's scope, so a redirect that patches only the write function
+   * leaves the console half printing to the real terminal — green here and
+   * broken in the field.
+   */
+  test('a handler that prints cannot corrupt the document; its output goes to stderr', async () => {
+    await writePlugin(home, 'noisy')
+    await writeFile(
+      join(home.pluginsDir, 'noisy', 'handler.ts'),
+      `
+export async function handler() {
+  console.log('CONSOLE LINE')
+  process.stdout.write('RAW WRITE\\n')
+  return {
+    status: 'success',
+    phases_completed: ['noisy'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'noisy completed',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`,
+    )
+
+    const { code, stdout, stderr } = await capture(() => main(['advance', '--json']))
+
+    expect(code).toBe(0)
+    const doc = soleDocument(stdout)
+    expect(doc.status).toBe('complete')
+    expect(doc.plugins).toEqual([{ name: 'noisy', state: 'completed' }])
+
+    // Redirected, not swallowed. A plugin author's debug line still has to
+    // reach them, and stderr is where every other diagnostic in this runtime
+    // already goes.
+    expect(stderr).toContain('CONSOLE LINE')
+    expect(stderr).toContain('RAW WRITE')
+  })
+
   test('without the flag the same advance renders for a human and emits no JSON', async () => {
     await writePlugin(home, 'alpha')
 

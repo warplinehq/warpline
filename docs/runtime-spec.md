@@ -1614,6 +1614,37 @@ dead. Two consequences follow, and both are bounded rather than open:
   that is gone (§ 12). So an interrupted advance is recoverable without any flag
   that breaks a held lock, which is why no such flag exists.
 
+### What reaches stdout
+
+The document is the only thing on that stream, and the runtime holds that
+against the plugins as well as against itself. While a plugin is being loaded
+and while its handler runs, anything it prints through `process.stdout.write`,
+`console.log`, `console.info` or `console.debug` is redirected to stderr.
+`warpline run --json` gets the same protection from the same place: both verbs
+invoke a handler through one function, and the redirect lives there rather than
+in either verb.
+
+Redirected, not discarded. A plugin author's debug line still reaches them, on
+the stream every other diagnostic in this runtime already uses. It carries no
+label naming the plugin that wrote it, and a level runs its plugins
+concurrently, so two chatty plugins interleave.
+
+Three writes are outside that reach and can still put bytes on stdout:
+
+- A write that reaches file descriptor 1 without going through either of the
+  two paths above — `Bun.write(Bun.stdout, …)`, `fs.writeSync(1, …)`.
+- A child process a handler spawns with stdio inherited from its parent. No
+  in-process redirect covers another process's file descriptors.
+- Anything a handler prints after its timeout or its cancellation fired, once
+  the advance has stopped waiting for that handler and no other plugin is still
+  running. The advance is not interruptible, so an abandoned handler keeps
+  going; the redirect comes off when the last live invocation returns.
+
+The first two are a plugin doing something unusual, and the third only happens
+on a run that already timed out or was cancelled. None of them is ruled out, so
+a consumer that cannot tolerate a corrupt document at all should key on the exit
+code, which reaches it without being parsed.
+
 ### The code comes from the run's own state, never from its status
 
 The code is computed from exactly two fields of the advance result:

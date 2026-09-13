@@ -26,6 +26,7 @@
  */
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { format } from 'node:util'
 import { pluginsDir, pluginConfigPath } from '../lib/paths.js'
 import { loadPluginConfig, PluginConfigError } from '../lib/plugin-config.js'
 import { resolvePluginArgs } from '../schemas/plugin-config.js'
@@ -264,6 +265,93 @@ export function stampOutputs(result: SkillResult, runId: string): SkillResult {
 }
 
 // -------------------------------------------------------------------------
+// Handler output
+// -------------------------------------------------------------------------
+
+/**
+ * Send everything a plugin prints to stderr for as long as plugin code is
+ * running, so stdout stays free for the one document a machine reads.
+ *
+ * `warpline advance --json` and `warpline run --json` each put a single JSON
+ * document on stdout, and that promise is the whole machine interface. The
+ * engine holds up its half — `engine-stdout.test.ts` asserts it against the
+ * engine's own source — but the engine is not the writer that matters here.
+ * The plugin handler is: it is third-party code this runtime imports and calls
+ * in its own process, and one `console.log` in somebody's plugin used to land
+ * a bare line above the document. The monitor that failed to parse it read the
+ * failure as a warpline bug.
+ *
+ * This is the one choke point both verbs route through, which is why the
+ * redirect lives here rather than in either of them.
+ *
+ * Three things are load-bearing:
+ *
+ *   1. **Both writers are patched.** `console.log` does not travel through
+ *      `process.stdout.write` — `engine-stdout.test.ts` records the experiment
+ *      — so patching the write function alone leaves the console half printing
+ *      to the terminal, and a test that only checks the raw write reads green
+ *      over a dirty stream.
+ *   2. **The count is module-level, not per-invocation.** A level's plugins
+ *      run concurrently, so a save/restore pair per call is worse than no
+ *      redirect at all: A saves the real write, B saves A's shim, A restores
+ *      the real one while B is still running, and B's restore then installs
+ *      A's shim permanently — from there the runtime's own document goes to
+ *      stderr. Install on the way in from nothing, restore on the way out to
+ *      nothing.
+ *   3. **Redirected, not swallowed.** A plugin author's debug line still has
+ *      to reach them, and stderr is where every other diagnostic in this
+ *      runtime already goes. Nothing is captured or attributed, so the
+ *      interleaving a concurrent level produces costs nothing to be wrong
+ *      about.
+ *
+ * What it does NOT cover, stated here because a promise a plugin can still
+ * break is not a machine interface: a write that reaches file descriptor 1
+ * without going through either patch (`Bun.write(Bun.stdout, …)`,
+ * `fs.writeSync(1, …)`, a child process the handler spawns with inherited
+ * stdio), and anything a handler prints after its timeout or its cancellation
+ * fired, once the last live invocation has returned and the redirect is off.
+ */
+let printingPlugins = 0
+let restoreStdout: (() => void) | null = null
+
+/** The three console methods that write to stdout. The rest write to stderr. */
+const STDOUT_CONSOLE = ['log', 'info', 'debug'] as const
+
+function redirectPluginOutput(): void {
+  printingPlugins += 1
+  if (printingPlugins > 1) return
+
+  const realWrite = process.stdout.write
+  const realConsole = STDOUT_CONSOLE.map(method => [method, console[method]] as const)
+
+  // `process.stderr.write` is resolved at CALL time, not captured here: a
+  // caller that wraps stderr after this point still sees the plugin's line.
+  // Every argument is forwarded, the callback among them — a dropped callback
+  // is a writer that never learns its chunk flushed.
+  process.stdout.write = function (...writeArgs: unknown[]): boolean {
+    return (process.stderr.write as (...a: unknown[]) => boolean)(...writeArgs)
+  } as typeof process.stdout.write
+
+  for (const [method] of realConsole) {
+    console[method] = (...args: unknown[]): void => {
+      process.stderr.write(`${format(...args)}\n`)
+    }
+  }
+
+  restoreStdout = () => {
+    process.stdout.write = realWrite
+    for (const [method, fn] of realConsole) console[method] = fn
+  }
+}
+
+function releasePluginOutput(): void {
+  printingPlugins -= 1
+  if (printingPlugins > 0) return
+  restoreStdout?.()
+  restoreStdout = null
+}
+
+// -------------------------------------------------------------------------
 // invokePlugin
 // -------------------------------------------------------------------------
 
@@ -314,10 +402,19 @@ export async function invokePlugin(
   let manifest: PluginManifest
 
   try {
-    const [handlerMod, manifestMod] = await Promise.all([
-      import(handlerPath),
-      import(manifestPath),
-    ])
+    // Wrapped because a plugin module can print at module scope, and that
+    // happens on this await.
+    redirectPluginOutput()
+    let handlerMod: { handler: HandlerFn }
+    let manifestMod: { manifest: PluginManifest }
+    try {
+      ;[handlerMod, manifestMod] = await Promise.all([
+        import(handlerPath),
+        import(manifestPath),
+      ])
+    } finally {
+      releasePluginOutput()
+    }
     handlerFn = handlerMod.handler
     manifest = manifestMod.manifest
   } catch (err) {
@@ -620,12 +717,19 @@ export async function invokePlugin(
     })
 
     let rawResult: SkillResultInput
+    // Around the RACE and not inside `executeHandler`: a handler that ignores
+    // its abort signal never returns, and a redirect released inside it would
+    // hold the count above zero forever — from there the runtime's own
+    // document goes to stderr. Released when the race settles, which is why an
+    // abandoned handler's later output is the one hole this leaves.
+    redirectPluginOutput()
     try {
       rawResult = await Promise.race([
         executeHandler(pluginName, handlerFn, manifest, resolvedArgs, attemptCtl.signal, capabilities),
         abortPromise,
       ])
     } finally {
+      releasePluginOutput()
       clearTimeout(timeoutTimer)
       options.signal?.removeEventListener('abort', onExternalAbort)
     }

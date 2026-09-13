@@ -53,7 +53,14 @@
  *      it writes nothing to stdout either, which is asserted structurally
  *      because no in-process capture can observe it. The interrupt handler's
  *      own write is a flush barrier carrying no bytes, so it adds nothing to
- *      that stream and cannot be mistaken for a document.
+ *      that stream and cannot be mistaken for a document. The third writer on
+ *      this stream is the plugin handler, which is not ours at all: its stdout
+ *      is redirected to stderr for the length of its invocation, in
+ *      `invokePlugin` rather than here, because `warpline run` needs the same
+ *      thing and a guard written in one verb is a guard the other lacks. The
+ *      three writes that redirect does not reach are named in `runtime-spec`
+ *      § 11 — the promise is bounded, and stating the bound is how it stays
+ *      worth making.
  *
  * The cost of interrupting this command, stated here rather than filed as a
  * known issue, because the people who pay it read this file. An interrupted
