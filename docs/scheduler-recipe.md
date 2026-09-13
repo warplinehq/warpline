@@ -355,17 +355,26 @@ lock left behind by a dead process heals on the next tick.
 ## Exit codes
 
 The table is in `runtime-spec.md` § 11 and is not restated here. Four codes:
-`0` ran and nothing failed, `1` something failed or no manifests loaded, `75`
-could not finish, `130` interrupted. Treat any unknown non-zero code as failure;
-§ 11 says why that matters.
+`0` ran and nothing failed, `1` something failed, no manifests loaded or the
+command line was not valid, `75` could not finish, `130` interrupted. Treat any
+unknown non-zero code as failure; § 11 says why that matters.
 
-Four things a scheduler operator should read there rather than infer:
+Five things a scheduler operator should read there rather than infer:
 
 - **`75` does not always mean nothing happened.** A refusal before the advance
   starts leaves the home untouched, and those are the common `75`s. But any
   throw out of the advance reports `75` too, including one that lands after the
   fleet has run and sent. If your wrapper retries on `75` automatically, § 11
   says what to look at first.
+
+- **`1` also covers a bad command line.** An unregistered flag or a stray
+  positional is refused by the argument parser before the advance starts: the
+  usage text goes to stderr, nothing goes to stdout, and the command exits `1`
+  having run nothing. `warpline advance strict` — the typo for `--strict` — is
+  refused there rather than quietly running non-strict. So a typo in a unit file
+  reports to your monitor as "a plugin failed", and the dead-man file goes stale
+  underneath it. Run the last probe in § Checking the install once after you
+  edit a unit's command line.
 
 - **A held approval gate exits `0`.** A plugin waiting on a human is the runtime
   doing its job, not a fault. If a waiting gate is itself what you want paged
@@ -479,7 +488,7 @@ terminal is what makes it match the scheduled case.
 | First tick logs "command not found" | The interpreter path. Step 2. |
 | Exits `0` every tick, nothing ever happens | Almost always a home that resolved somewhere you did not mean, so the advance is looking at an empty fleet and correctly reporting nothing to do. Run the last probe above and read the plugin list in the JSON. |
 | Exits `75` every tick | § 11 names three causes: a throw out of the advance, the refusal to create a home, and contention on the run lock. The message distinguishes them. |
-| Exits `1` on a home you know has plugins | The plugin root loaded no manifests, or every manifest in it threw. This is not a count of failures. |
+| Exits `1` on a home you know has plugins | The plugin root loaded no manifests, or every manifest in it threw. This is not a count of failures. Check the unit's command line too: a flag warpline does not know, or a stray word where a flag was meant, is refused with a usage message on stderr and exits `1` having run nothing. |
 | Worked for months, stopped after an upgrade | The absolute interpreter path and the explicit home are pins, and a Node upgrade that moves the binary or a moved home breaks them. That is the cost of the determinism they buy: resolving the interpreter at run time would put back the `PATH` problem step 2 solves. Re-check both after any upgrade or move. |
 
 ## Running the automated judgment consumer with less privilege

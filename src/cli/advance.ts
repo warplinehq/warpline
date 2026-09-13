@@ -308,7 +308,13 @@ export async function run(
       const { values } = nodeUtil.parseArgs({
         args: argv,
         options: { strict: { type: 'boolean' }, json: { type: 'boolean' } },
-        allowPositionals: true,
+        // No positionals, because this verb takes none. `strict: true` refuses
+        // an unregistered FLAG; a positional was accepted and thrown away, so
+        // `warpline advance strict` — the obvious typo for `--strict`, and a
+        // plausible one in a unit file written from memory — ran non-strict
+        // and exited `0` on a fleet full of held gates. That is precisely the
+        // report `--strict` exists to prevent.
+        allowPositionals: false,
         strict: true,
       })
       strict = values.strict === true
@@ -321,6 +327,12 @@ export async function run(
       process.stderr.write(
         `warpline advance: ${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`,
       )
+      // `1` rather than a code of its own, and the table in `runtime-spec`
+      // § 11 now names this as a third cause of `1` rather than enumerating
+      // two. A new code is a contract change for a typo in a unit file; a
+      // documented row is not. What tells the two apart from outside: a
+      // failing advance under `--json` writes a document to stdout and this
+      // path writes nothing there.
       return 1
     }
 

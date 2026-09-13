@@ -198,6 +198,24 @@ describe('main([advance]) end to end', () => {
   })
 
   /**
+   * The typo `--strict` invites, and the one the parser used to let through.
+   * `strict: true` refuses an unregistered FLAG, but a positional was accepted
+   * and thrown away — so this ran non-strict and exited `0` on a fleet full of
+   * held gates, which is the report `--strict` exists to prevent. A crontab
+   * written from memory is exactly where this is typed.
+   */
+  test('a positional is refused rather than ignored', async () => {
+    await writePlugin(home, 'alpha')
+
+    const { code, stdout, stderr } = await capture(() => main(['advance', 'strict']))
+
+    expect(code).toBe(1)
+    expect(stdout).toBe('')
+    expect(stderr).toContain('positional')
+    expect(stderr).toContain('Usage: warpline advance')
+  })
+
+  /**
    * The `75` arm, end to end. A plugin root that cannot be read makes
    * `runAdvance` throw before it writes anything, and "could not look" must not
    * report as "looked and it was fine".
