@@ -803,6 +803,56 @@ export async function handler() {
     expect(stderr).toContain('RAW WRITE')
   })
 
+  /**
+   * Two chatty plugins in one level, which run concurrently.
+   *
+   * This is the case that punishes the obvious implementation. A save/restore
+   * pair taken per invocation has the second plugin saving the first plugin's
+   * shim, so the first plugin's restore puts the real stream back while the
+   * second is still printing, and the second plugin's restore then installs
+   * the first's shim for good — from there the runtime's own document goes to
+   * stderr and every later advance in the process is broken. The redirect
+   * counts instead: installed on the way in from nothing, restored on the way
+   * out to nothing.
+   *
+   * Nothing here asserts which plugin wrote which line. The redirect attributes
+   * nothing, so there is nothing to be wrong about.
+   */
+  test('two plugins printing in one level leave the document intact', async () => {
+    for (const name of ['noisy-a', 'noisy-b']) {
+      await writePlugin(home, name)
+      await writeFile(
+        join(home.pluginsDir, name, 'handler.ts'),
+        `
+export async function handler() {
+  process.stdout.write('RAW ${name}\\n')
+  await new Promise(r => setTimeout(r, 20))
+  console.log('CONSOLE ${name}')
+  return {
+    status: 'success',
+    phases_completed: ['${name}'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: '${name} completed',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`,
+      )
+    }
+
+    const { code, stdout, stderr } = await capture(() => main(['advance', '--json']))
+
+    expect(code).toBe(0)
+    expect(soleDocument(stdout).status).toBe('complete')
+    for (const name of ['noisy-a', 'noisy-b']) {
+      expect(stderr).toContain(`RAW ${name}`)
+      expect(stderr).toContain(`CONSOLE ${name}`)
+    }
+  })
+
   test('without the flag the same advance renders for a human and emits no JSON', async () => {
     await writePlugin(home, 'alpha')
 
