@@ -269,6 +269,11 @@ describe('run(): no home and no terminal', () => {
     expect(first.stderr).toContain('refusing to create')
     expect(first.stderr).toContain('WARPLINE_HOME')
     expect(first.stderr).toContain(missing)
+    // The instruction has to name the verb that creates a home. It used to say
+    // "run this once from a terminal to create that path", which creates
+    // nothing — the test below is the proof of that, and an operator who
+    // followed the old sentence got a second `75` with a different message.
+    expect(first.stderr).toContain('warpline init')
     expect(first.stdout).toBe('')
     expect(existsSync(missing)).toBe(false)
 
@@ -286,8 +291,14 @@ describe('run(): no home and no terminal', () => {
    * not fire. The assertion is the ABSENCE of the refusal rather than a code: a
    * nonexistent home is also a nonexistent plugin root, which the engine refuses
    * on its own path, so the code is not the discriminator here.
+   *
+   * It is also the standing proof that running this verb from a terminal
+   * CREATES NOTHING. The advance gets past the refusal, throws on the absent
+   * plugin root, and leaves the home exactly as absent as it found it — which
+   * is why the refusal's own message names `warpline init` rather than a
+   * terminal.
    */
-  test('a terminal on stdin means the check does not fire', async () => {
+  test('a terminal on stdin means the check does not fire, and still creates no home', async () => {
     const missing = absentHome()
     _setHome(missing)
 
@@ -295,6 +306,7 @@ describe('run(): no home and no terminal', () => {
 
     expect(stderr).not.toContain('refusing to create')
     expect(stderr).toContain('cannot read plugin root')
+    expect(existsSync(missing)).toBe(false)
   })
 
   /**

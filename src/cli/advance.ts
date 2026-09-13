@@ -344,9 +344,16 @@ export async function run(
     const home = warplineHome()
     if (!existsSync(home) && !isInteractive(io.stdin)) {
       process.stderr.write(
+        // Name the verb that does the thing. "Run this once from a terminal"
+        // was the old advice and it creates nothing: with a terminal on stdin
+        // this refusal is skipped, `runAdvance` reaches `loadPluginManifests`
+        // and throws on the absent plugin root before any writer runs — a
+        // second `75` with a different message, and the home still absent.
+        // `warpline init` is the only verb that creates one, and it is safe to
+        // run again.
         `warpline advance: no warpline home at ${home}, and stdin is not a terminal — refusing to ` +
-          `create one. Set WARPLINE_HOME to the home you meant, or run this once from a terminal ` +
-          `to create that path.\n`,
+          `create one. Set WARPLINE_HOME to the home you meant, or run \`warpline init\` once to ` +
+          `create that home — this command never creates one.\n`,
       )
       return 75
     }
