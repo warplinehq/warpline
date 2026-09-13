@@ -31,14 +31,20 @@ Under every scheduler the working directory is not yours. warpline resolves its
 home from `WARPLINE_HOME` first; failing that, from the nearest ancestor of the
 working directory holding a `.warpline` directory; failing that, it uses
 `.warpline` under the working directory. Under a scheduler the second and third
-arms both land somewhere you did not mean, and the third one silently invents an
-empty home. The fleet then runs nothing and the command exits `0` reporting a
-healthy advance.
+arms both land somewhere you did not mean.
 
-There is a backstop. With no home at the resolved path *and* no terminal on
-standard input, `warpline advance` refuses to create one and exits `75`
-(`runtime-spec.md` § 11). The backstop catches a missing home. It does not catch
-a *wrong* home that happens to exist. Set the variable.
+There is a backstop, and it decides which half of that is dangerous. With no
+home at the resolved path *and* no terminal on standard input, `warpline
+advance` refuses to create one and exits `75` (`runtime-spec.md` § 11). So the
+third arm does not invent an empty home under a scheduler — it resolves
+`.warpline` under the working directory, finds nothing there, and refuses
+without creating it.
+
+What the backstop does not catch is a *wrong* home that happens to exist, and
+that is the case to set the variable for. A wrong home with no manifests exits
+`1`, which is visible. A wrong home whose plugins are all fresh or all parked at
+a gate exits `0` and reports a healthy advance against a fleet you did not mean,
+which is not. Set the variable.
 
 Skip this step and everything after it verifies the wrong fleet.
 
@@ -356,10 +362,16 @@ lock left behind by a dead process heals on the next tick.
 
 `review_gate` defaults to `true`, and on that default every plugin declaring
 `autonomy_level: autonomous` is treated as supervised. The plugin still runs —
-the gate decides what happens to the RESULT, not whether the handler is
+this gate decides what happens to the RESULT, not whether the handler is
 invoked — and then that result parks at an approval gate waiting for a human.
 The advance reports `partial`, the plugin's state in the `--json` document is
 `gated`, and the exit code is `0`.
+
+That is the behaviour for a plugin declaring no side effects. A plugin whose
+manifest declares any is stopped by a second and separate gate, before its
+handler is invoked at all, and it reports `skipped` rather than `gated`. No
+`review_gate` setting reaches that one: turning `review_gate` off does not
+approve a side effect, and `runtime-spec.md` § 9 is the gate's specification.
 
 So a fresh install walked through exactly as this page describes gates
 everything on every tick:
