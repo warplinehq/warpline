@@ -1899,7 +1899,7 @@ file's own age.
 |-------|------|---------|
 | `run_id` | string | The advance's own run id. Names the run log this advance wrote — but only when it ran: an advance skipped for quiet hours still gets a run id and writes no log. |
 | `completed_at` | string | ISO 8601 UTC, the moment this file was written. Use the file's mtime for age checks; this field is for a human reading the file. |
-| `status` | `"complete"` \| `"partial"` \| `"failed"` \| `"interrupted"` | The advance's own status. **Not the exit code.** |
+| `status` | `"complete"` \| `"partial"` \| `"failed"` | The advance's own status. **Not the exit code.** |
 | `skipped_reason` | string \| null | `null` when the advance ran. `"quiet_hours"` when it returned early because a quiet window was active. |
 | `gated` | integer | How many plugins are holding at an approval gate. |
 | `failed` | integer | How many plugins ended failed, manifests that would not load included. |
@@ -1910,6 +1910,13 @@ so that adding an eighth has to be a deliberate act. Nothing else belongs here:
 no plugin summary, no plugin output, no value read out of your configuration and
 no path. A field carrying free text would make this file a channel for content it
 was never meant to carry.
+
+**Three values, not four.** The shared status union this field is typed from
+has a fourth member, `"interrupted"`, and no advance can put it here. The engine
+assigns only `complete`, `partial` and `failed`, and an interrupted advance
+exits from its signal handler without reaching this writer at all — which is
+what the paragraph two down says about a throw, and holds for the same reason. A
+detector that branches on `"interrupted"` here gets dead code.
 
 **`status` is the advance's status and not the exit code, and the difference
 matters most on the case you will hit most.** An advance that stops at an

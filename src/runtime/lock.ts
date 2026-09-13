@@ -65,8 +65,10 @@ export function isLockStale(lock: WarplineLock): boolean {
  * The run lock is held by someone else, and this process is not going to wait.
  *
  * `name` is assigned explicitly because the codebase duck-types on `err.name`
- * rather than `instanceof` (`warpline.ts:119`), which is what lets the CLI map
- * a contention to an exit code without importing this class.
+ * rather than `instanceof` — see `main`'s `EngineStateInvalidError` catch in
+ * `warpline.ts` — which is what lets the CLI map a contention to an exit code
+ * without importing this class. Cited by symbol rather than by line number,
+ * because the line this used to name moved into a different arm.
  */
 export class AdvanceLockedError extends Error {
   readonly lockPath: string
