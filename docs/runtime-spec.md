@@ -499,17 +499,27 @@ the mistake this section used to make.
 The first two share a directory and a filename pattern and are not the same
 shape. The third shares neither, on purpose — see below.
 
+**No transcript is written today.** Nothing in this runtime produces a
+`<run_id>.log`. A plugin's output is redirected to stderr for the length of its
+invocation (§ 11) rather than captured, and nothing else writes one — so the
+first row above, the layout below it, and every sentence about a transcript in
+§ 6 describe a file no home currently contains. They are kept rather than
+deleted because the prune already enumerates and deletes the pair correctly, and
+because giving that file a writer is planned rather than abandoned. Read all of
+them as conditional on that landing, and do not build a reader that expects the
+file to be there.
+
 § 6 turns on that distinction: the 20-newest trim only ever sees a
 `RunArtifact`, only `pruneRunLogs` deletes an advance's `RunLog`, and the JSONL
 stream prunes itself on the same window from the same constant.
 
 ### The run artifact
 
-One plugin, invoked directly, writes two sibling files:
+One plugin, invoked directly, writes one file today and is specified for two:
 
-- `<run_id>.json` - structured summary, including every retry attempt.
+- `<run_id>.json` - structured summary, including every retry attempt. Written.
 - `<run_id>.log` - captured stdout + stderr, with `=== Attempt N ===`
-  delimiters between retries.
+  delimiters between retries. **Not written today** — see the note above.
 
 JSON schema:
 
@@ -545,7 +555,7 @@ JSON schema:
 }
 ```
 
-Log file:
+Log file, as specified — and again, nothing writes one today:
 
 ```
 === Attempt 1 ===
@@ -554,8 +564,9 @@ Log file:
 <captured stdout + stderr for attempt 2>
 ```
 
-Cancelled runs persist with `status: 'cancelled'` and partial attempts; the
-log captures whatever the handler emitted before abort.
+Cancelled runs persist with `status: 'cancelled'` and partial attempts. The
+transcript is where whatever the handler emitted before the abort would go,
+once there is one.
 
 A `RunArtifact` also carries an optional `plugin_entries`, kept only for
 backward compatibility with an older combined engine-run shape. Nothing writes
@@ -826,23 +837,26 @@ just decided to keep. An advance's run log names no plugin, and neither does an
 orphan transcript, so all of them share one bucket: on a frequently scheduled
 advance `retention.keep_per_plugin` is the bound that binds, well before
 `retention.days` does. The byte bound is a per-home total with oldest-first eviction, and
-the size counted for a run is its document **plus** its transcript — the
-transcript is normally the larger of the two, so a budget counting only the
-document would not bound this directory. Runs at equal ages are ordered by run
+the size counted for a run is its document **plus** its transcript. Where a
+transcript exists it is normally the larger of the two, which is why a budget
+counting only the document would not bound this directory; no transcript exists
+today (§ 5), so today that arithmetic reduces to the document alone. Runs at equal ages are ordered by run
 id, never by the order the directory happened to list them.
 
 Exempt and unparseable records count toward the total even though nothing can
 evict them. That has a consequence worth stating rather than discovering: a home
 whose exempt records alone exceed `retention.max_bytes` evicts every ordinary
-run and is still over budget. A single large legitimate transcript can likewise
-evict several small runs. The prune's own test suite in this repository is what
+run and is still over budget. A single large legitimate record can likewise
+evict several small ones. The prune's own test suite in this repository is what
 holds all of the above — its byte-bound case carries a `delegated` run and a
 gate-referenced run as the two oldest and largest records in its fixture, which
 is the case an eviction loop written over the raw directory listing gets wrong
 while passing.
 
 **Both paths unlink the pair.** A run's `<run_id>.json` and its `<run_id>.log`
-are deleted together on either path, so neither can strand a transcript.
+are deleted together on either path, so neither can strand a transcript. That
+rule is in place ahead of the file it protects: with no transcript written today
+(§ 5), it has nothing to strand yet.
 
 **Confirming a retention setting took effect is still an observation, not a
 read.** Unknown keys in `preferences.json` are stripped rather than refused, so a

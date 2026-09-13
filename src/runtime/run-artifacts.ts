@@ -1,15 +1,32 @@
 /**
- * Run artifact persistence for manual and scheduled plugin runs.
+ * Run artifact persistence for the direct-invocation path.
  *
- * Writes `.warpline/runs/<run_id>.json` with the per-attempt extension and a
- * sibling `<run_id>.log` containing captured stdout/stderr with attempt
- * delimiters. Retention trim (`trimPluginHistory`) keeps the operator's
- * `retention.keep_per_plugin` newest artifacts per plugin; both JSON + log
- * siblings are deleted atomically so no orphaned .log files accumulate
- * (Pitfall 5 from 121-RESEARCH.md).
+ * `writeRunArtifact` writes `<home>/runs/<run_id>.json`, the structured summary
+ * with its per-attempt array. That is the only file this module writes in
+ * production.
  *
- * Default runs directory is resolved relative to this source file so tests
- * can pass `opts.runsDir` pointed at a mkdtemp-backed location.
+ * **`appendRunLog` and `writeRunLog` have no production caller.** They write
+ * the `<run_id>.log` transcript — captured stdout and stderr under
+ * `=== Attempt N ===` delimiters — and nothing calls them outside this
+ * repository's tests. There is nothing to call them WITH: no part of the
+ * runtime captures a handler's output. A plugin's stdout is redirected to
+ * stderr for the length of its invocation rather than collected, so the text
+ * these two were written to persist does not exist anywhere to be persisted.
+ * This header used to describe the transcript as something the module writes;
+ * it is a specified file with no writer, `runtime-spec` §§ 5 and 6 now say so
+ * to operators, and the backlog carries what wiring it properly would take.
+ *
+ * `trimPluginHistory` keeps the newest `keep` artifacts for one plugin and
+ * unlinks a run's `.json` and `.log` together — two sequential unlinks, not an
+ * atomic operation, so a failure between them can strand one half. That is
+ * bounded today by the transcript never existing. Its default `keep` is the
+ * BUILT-IN policy default and not the operator's; see the docstring on the
+ * function.
+ *
+ * The default runs directory is the home's, resolved through the path accessor
+ * at call time rather than frozen at import — nothing here is relative to this
+ * source file. Tests pass `opts.runsDir` to redirect writes at a mkdtemp-backed
+ * location.
  */
 import { readdir, writeFile, unlink, readFile, appendFile, mkdir } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
