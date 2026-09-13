@@ -352,6 +352,30 @@ When two advances do meet, the second exits `75`, names the holder, and says
 that nothing ran. `runtime-spec.md` § 12 is the whole of it, including how a
 lock left behind by a dead process heals on the next tick.
 
+## Decide about `review_gate` before the first tick
+
+`review_gate` defaults to `true`, and on that default every plugin declaring
+`autonomy_level: autonomous` is treated as supervised. The plugin still runs —
+the gate decides what happens to the RESULT, not whether the handler is
+invoked — and then that result parks at an approval gate waiting for a human.
+The advance reports `partial`, the plugin's state in the `--json` document is
+`gated`, and the exit code is `0`.
+
+So a fresh install walked through exactly as this page describes gates
+everything on every tick:
+
+```
+{"run_id":"...","status":"partial","gated":1,"failed":0,"pruned":0,
+ "exit_code":0,"plugins":[{"name":"metrics-rollup","state":"gated"}]}
+rc=0
+```
+
+That is a correct unattended install that completes nothing until somebody
+approves. It is the right default for a fleet with a human near it, and the
+wrong one for a fleet without. Set `"review_gate": false` in
+`<home>/preferences.json` for the second case, and read `runtime-spec.md` § 9
+before you do — it is the section describing what the gate is holding back.
+
 ## Exit codes
 
 The table is in `runtime-spec.md` § 11 and is not restated here. Four codes:
@@ -486,7 +510,7 @@ terminal is what makes it match the scheduled case.
 |---|---|
 | The job never fires | The unit is installed but not enabled or not bootstrapped. Re-run the install commands and then the matching check above. |
 | First tick logs "command not found" | The interpreter path. Step 2. |
-| Exits `0` every tick, nothing ever happens | Almost always a home that resolved somewhere you did not mean, so the advance is looking at an empty fleet and correctly reporting nothing to do. Run the last probe above and read the plugin list in the JSON. |
+| Exits `0` every tick, nothing ever happens | Either a home that resolved somewhere you did not mean, so the advance is looking at an empty fleet and correctly reporting nothing to do — or `review_gate` is on, which is its default, and every plugin is parking at a gate. Run the last probe above: the `--json` plugin list tells you which, an empty list versus a list of `gated` states. |
 | Exits `75` every tick | § 11 names three causes: a throw out of the advance, the refusal to create a home, and contention on the run lock. The message distinguishes them. |
 | Exits `1` on a home you know has plugins | The plugin root loaded no manifests, or every manifest in it threw. This is not a count of failures. Check the unit's command line too: a flag warpline does not know, or a stray word where a flag was meant, is refused with a usage message on stderr and exits `1` having run nothing. |
 | Worked for months, stopped after an upgrade | The absolute interpreter path and the explicit home are pins, and a Node upgrade that moves the binary or a moved home breaks them. That is the cost of the determinism they buy: resolving the interpreter at run time would put back the `PATH` problem step 2 solves. Re-check both after any upgrade or move. |
