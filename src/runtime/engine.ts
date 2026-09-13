@@ -1223,12 +1223,16 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // 3a. The headless JSONL run log.
     //
     // Constructed HERE, below the plugin-root refusal near the top of this
-    // function and below the quiet-hours early return, because both of those
-    // arms must leave the warpline home byte-identical and this is the only
-    // writer added since that promise was made. Constructing the logger is
+    // function and below the quiet-hours early return. The two arms are no
+    // longer the same promise, and this comment used to say they were. The
+    // plugin-root refusal leaves the home byte-identical; the quiet-hours arm
+    // deliberately does not, because it writes the run-completed event into
+    // `events.jsonl` and the dead-man file. What it does NOT write is a run
+    // log, and that is the property this placement keeps: a skipped advance
+    // leaves no record of a run that did not happen. Constructing the logger is
     // itself write-free — `appendEvent` is what creates the directory — but
-    // placing it after both refusals means the ordering does not depend on
-    // that remaining true.
+    // placing it after both arms means the ordering does not depend on that
+    // remaining true.
     //
     // The window comes from the operator's policy rather than a literal here.
     // This is the third record warpline keeps of a run, alongside the per-plugin

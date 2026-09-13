@@ -764,8 +764,10 @@ did before this format existed.
 Retention is the **same window** as `pruneRunLogs`, read from the **same
 preferences key** (`retention.days`, § 6) rather than restated — a daily file
 whose mtime is older than that window is unlinked at the start of the next
-advance. Three formats pruned on three literals would be three retention rules
-that agree until somebody tunes one.
+advance **that runs**. An advance skipped for quiet hours returns above this
+prune and reclaims nothing (§ 13), so a long quiet window is a stretch of hours
+during which nothing here is reclaimed at all. Three formats pruned on three
+literals would be three retention rules that agree until somebody tunes one.
 
 ## 6. Retention
 
@@ -795,7 +797,11 @@ output at all. It reads every `<run_id>.json` in the runs directory, filters by
 plugin, sorts by `started_at` DESC, and keeps the `retention.keep_per_plugin`
 newest.
 
-`pruneRunLogs` runs at the top of every advance, over the whole runs directory.
+`pruneRunLogs` runs at the top of every advance **that runs**, over the whole
+runs directory. An advance skipped for quiet hours returns above it and prunes
+nothing — § 13 says the same thing about the `pruned` count that advance
+reports, which is always `0`. So a nightly quiet window does not reclaim disk;
+it is the stretch of hours during which none is reclaimed.
 It deletes **runs, not files**: a run id is enumerated from the union of the
 `.json` and `.log` stems of one directory listing, so a transcript whose
 document is already gone is reachable rather than immortal, and is reclaimed on
