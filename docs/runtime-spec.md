@@ -1603,7 +1603,7 @@ them.
 | `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, or a plugin is holding at an approval gate. |
 | `1` | At least one plugin failed, the plugin root loaded no manifests at all, or the command line was not valid. |
 | `75` | Could not finish. Often nothing ran and nothing was written, but not always — see below before treating it as a free retry. |
-| `130` | Interrupted by SIGINT. The process stopped; the work may not have. |
+| `130` | Interrupted by SIGINT or SIGTERM. The process stopped; the work may not have. |
 
 **A `1` before the advance starts is a usage error.** An unregistered flag and a
 positional argument are both refused by the argument parser: the command writes
@@ -1619,6 +1619,21 @@ root each write a document to stdout, and a usage error writes none.
 reports it deliberately rather than by default: it installs a handler for the
 length of the run, and the handler flushes whatever is queued on stdout before
 terminating, so an interrupt cannot cut a `--json` document in half.
+
+**SIGTERM takes the same handler and reports the same code.** That is the signal
+a scheduler sends — `systemctl stop`, a launchd `bootout` and a container stop
+are all SIGTERM, and none of them is a SIGINT. Left to the default disposition
+they killed the process with no flush and no exit code at all, which is the
+failure the SIGINT handler existed to prevent, reached by the route an operator
+is far likelier to take. Everything the rest of this section says about an
+interrupt now reads for both signals. What your scheduler makes of a `130`
+afterwards is its own question and `scheduler-recipe.md` is where it is asked.
+
+The handler also puts a ceiling on itself. It exits as soon as stdout has
+drained, and after two seconds it exits anyway. Without that, a stdout pipe
+whose reader has stopped consuming left the process unkillable by further
+signals — the default disposition is gone while the handler is installed, so
+each one only queued another write.
 
 Read `130` as "the process stopped", never as "the work stopped". The advance is
 not interruptible — no abort is threaded into a plugin invocation — so the plugin

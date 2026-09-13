@@ -41,11 +41,12 @@
  *      listener per in-process test of this verb, which is the same bug reached
  *      by a longer road.
  *   4. This module terminates the process in exactly ONE place — the interrupt
- *      handler inside `run`, which exits `130`. Every other path returns a
- *      number and `src/bin/warpline.ts` is where that number becomes an exit.
- *      The exception is not a convenience: the handler runs while `run` is
- *      parked on `await runAdvance`, nothing threads an abort into that await,
- *      so there is no return path for it to take.
+ *      handler inside `run`, which exits `130` for SIGINT and for SIGTERM
+ *      alike. Every other path returns a number and `src/bin/warpline.ts` is
+ *      where that number becomes an exit. The exception is not a convenience:
+ *      the handler runs while `run` is parked on `await runAdvance`, nothing
+ *      threads an abort into that await, so there is no return path for it to
+ *      take.
  *   5. NOTHING reaches stdout on a failure path — not even under `--json`, and
  *      especially not an error-shaped document. A monitor parsing this stream
  *      is better served by an empty stream plus a non-zero code than by a
@@ -291,10 +292,27 @@ export async function run(
   // exiting without waiting for it can cut that document in half. Chunks flush
   // in order, so a zero-length write's callback runs after every byte handed to
   // `write` before it.
+  //
+  // The bounded fallback beside the barrier is the other half. While this
+  // handler is installed, SIGINT no longer terminates by default — so if stdout
+  // is a pipe whose reader has stopped consuming, the callback never runs and
+  // every further Ctrl-C just queues another empty write. The process becomes
+  // unkillable by the operator sitting in front of it. Two seconds, and
+  // `unref` so the timer cannot hold the event loop open on any other path.
+  //
+  // SIGTERM is handled the same way and for a plainer reason: `systemctl stop`,
+  // a launchd `bootout` and a container stop all send SIGTERM, not SIGINT. Left
+  // to the default disposition those killed the process with no flush and a
+  // `--json` document that could be cut in half, which is the exact failure the
+  // SIGINT handler was added to prevent. Both signals now take the same arm, so
+  // both report the same code — see `runtime-spec` § 11, which had to gain that
+  // fact before this line could be written.
   const onInterrupt = (): void => {
+    setTimeout(() => process.exit(130), 2000).unref()
     process.stdout.write('', () => process.exit(130))
   }
-  process.on('SIGINT', onInterrupt)
+  const INTERRUPTS = ['SIGINT', 'SIGTERM'] as const
+  for (const sig of INTERRUPTS) process.on(sig, onInterrupt)
 
   try {
     let strict = false
@@ -419,7 +437,9 @@ export async function run(
     // Both halves are load-bearing and for different reasons. Without this one,
     // every in-process test of this verb leaves a listener on the test runner,
     // and an interrupt during a suite run exits the runner 130 from inside a
-    // library — a bug whose cause is nowhere near its symptom.
-    process.off('SIGINT', onInterrupt)
+    // library — a bug whose cause is nowhere near its symptom. One `off` per
+    // `on`, off the same list, so a signal added above cannot be left behind
+    // here.
+    for (const sig of INTERRUPTS) process.off(sig, onInterrupt)
   }
 }

@@ -11,12 +11,14 @@
  * testing the test runner, and one that called the handler directly would exit
  * the runner.
  *
- * Keep this file at one launch, one signal, one exit-code assertion. Launching
- * a process is where this repository's documented ~3% timeout flake
- * concentrates, which is why the budget is one such file per contract that
- * genuinely cannot be reached without one. Any further interrupt behaviour —
- * the handler being removed again, for instance — belongs in `advance.test.ts`,
- * which can observe it without spending a launch.
+ * Two launches, one per signal, one exit-code assertion each. The budget was
+ * one until SIGTERM became a published fact in § 11: a second SIGNAL is a
+ * second disposition, and a disposition is exactly the thing no in-process
+ * test can observe. It is not a second assertion about the same mechanism.
+ * Launching a process is where this repository's documented ~3% timeout flake
+ * concentrates, so the budget does not widen past that. Any further interrupt
+ * behaviour — the handler being removed again, for instance — belongs in
+ * `advance.test.ts`, which can observe it without spending a launch.
  */
 import { test, expect, beforeAll, afterAll } from 'bun:test'
 import { spawn } from 'node:child_process'
@@ -97,36 +99,68 @@ afterAll(() => {
   rmSync(home, { recursive: true, force: true })
 })
 
-test('SIGINT during an advance exits 130', async () => {
+/**
+ * One launch, signalled once the advance is unambiguously mid-invocation.
+ *
+ * The run lock is the readiness marker, and it is a cheap one: the engine takes
+ * it after the entry function has installed the handler, so the file existing
+ * proves the handler is up. That is the only thing the wait is for. Signalling
+ * before the handler exists hits the default disposition, which reports a
+ * signal and a null code rather than 130 — which is also why both assertions
+ * below check the signal as well as the code.
+ */
+async function advanceKilledWith(
+  signal: 'SIGINT' | 'SIGTERM',
+): Promise<{ code: number | null; signal: string | null }> {
+  // An interrupted advance exits before its release, so the previous case left
+  // its lock behind — and the lock is what this function waits on. Without this
+  // the second launch reads the FIRST launch's lock as its own readiness marker
+  // and signals before the child has installed anything.
+  const lock = join(home, 'state', '.lock')
+  rmSync(lock, { force: true })
+
   const child = spawn(process.execPath, [ENTRY, 'advance'], {
     env: { ...process.env, WARPLINE_HOME: home },
     stdio: 'ignore',
   })
   const exited = new Promise<{ code: number | null; signal: string | null }>(resolve => {
-    child.on('exit', (code, signal) => resolve({ code, signal }))
+    child.on('exit', (code, sig) => resolve({ code, signal: sig }))
   })
 
-  /**
-   * The run lock is the readiness marker, and it is a cheap one: the engine
-   * takes it after the entry function has installed the handler, so the file
-   * existing proves the handler is up. That is the only thing this wait is for.
-   * Signalling before the handler exists hits the default disposition, which
-   * reports a signal and a null code rather than 130 — which is also why the
-   * assertion below checks the signal as well as the code.
-   */
-  const lock = join(home, 'state', '.lock')
   const deadline = Date.now() + 15_000
   while (!existsSync(lock)) {
     if (Date.now() > deadline) throw new Error('the advance never took its run lock')
     await new Promise<void>(resolve => setTimeout(resolve, 20))
   }
 
-  child.kill('SIGINT')
-  const { code, signal } = await exited
+  child.kill(signal)
+  return await exited
+}
+
+test('SIGINT during an advance exits 130', async () => {
+  const { code, signal } = await advanceKilledWith('SIGINT')
 
   // Exactly 130, not merely non-zero: the handler exited deliberately rather
   // than the default disposition killing the process (which reports a signal
   // and a null code instead).
+  expect(signal).toBeNull()
+  expect(code).toBe(130)
+})
+
+/**
+ * The signal a scheduler actually sends. `systemctl stop`, a launchd `bootout`
+ * and a container stop are all SIGTERM, and until this handler existed they
+ * took the default disposition: no flush, no code, and a `--json` document that
+ * could be cut in half — the failure the SIGINT handler was added to prevent,
+ * reached by the route an operator is far more likely to take.
+ *
+ * The `signal` assertion is the load-bearing half here. A default-disposition
+ * SIGTERM reports `signal: 'SIGTERM'` and `code: null`, so asserting only the
+ * code would pass against a build with no handler at all.
+ */
+test('SIGTERM during an advance exits 130, the same as SIGINT', async () => {
+  const { code, signal } = await advanceKilledWith('SIGTERM')
+
   expect(signal).toBeNull()
   expect(code).toBe(130)
 })

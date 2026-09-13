@@ -409,14 +409,15 @@ Five things a scheduler operator should read there rather than infer:
   fleet is not. That is the pair to look at together.
 - **`130` means the process stopped, never that the work stopped.** The advance
   is not interruptible, so the plugin in flight may run to completion in a
-  process you believe is dead (§ 11). Note also what that code covers: warpline
-  installs a handler for SIGINT and only SIGINT. Stopping a launchd job is not
-  a SIGINT: that page's `ExitTimeOut` entry describes the wait "between sending
-  the SIGTERM signal and before sending a SIGKILL signal when the job is to be
-  stopped" (`launchd.plist(5)`). What a SIGTERM'd advance exits is not
-  established by this document, and what signal systemd sends on a stop is
-  `systemd.kill(5)`'s `KillSignal=`, which was not read for it either. Do not
-  build a monitor rule on either.
+  process you believe is dead (§ 11). warpline handles SIGTERM as well as
+  SIGINT and exits `130` for both, which matters because stopping a job is a
+  SIGTERM and not a SIGINT: `launchd.plist(5)`'s `ExitTimeOut` entry describes
+  the wait "between sending the SIGTERM signal and before sending a SIGKILL
+  signal when the job is to be stopped". It also says that default "is
+  system-defined", so do not assume it is wider than warpline's own two-second
+  ceiling on the flush — check it on your machine if a truncated last document
+  would cost you something. What signal systemd sends on a stop is
+  `systemd.kill(5)`'s `KillSignal=`, which was not read for this document.
 
 There is one optional systemd setting worth knowing and not shipping.
 `systemd.service(5)`, `SuccessExitStatus=`, carries the worked example
@@ -430,8 +431,13 @@ not in the unit above.
 
 The same entry is worth reading for `130`: the set treated as successful is "the
 normal successful exit status 0 and, except for `Type=oneshot`, the signals
-`SIGHUP`, `SIGINT`, `SIGTERM`, and `SIGPIPE`". The unit above is `Type=oneshot`,
-so an interrupted advance reads as a failure there, which is what you want.
+`SIGHUP`, `SIGINT`, `SIGTERM`, and `SIGPIPE`". Read the shape of that before
+reasoning from it. Those are SIGNALS, and an advance that catches SIGTERM and
+exits `130` did not die of a signal — it exited with a status, so the signal
+half of that set does not reach it whatever your `Type=` is, and `130` is not
+`0`. On the unit above, which is `Type=oneshot`, a stopped advance reads as a
+failure, which is what you want. That reading was not checked on a systemd
+host; the last section says which rows on this page were.
 
 ## Monitoring
 
@@ -583,10 +589,14 @@ correct whichever way the absence falls, and never a claim:
   use an absolute interpreter path regardless.
 - **launchd's default working directory.** `launchd.plist(5)` documents
   `WorkingDirectory` and does not state a default. The instruction: set it.
-- **What a SIGTERM'd advance exits, and what signal systemd sends on a stop.**
-  warpline handles SIGINT and only SIGINT. `systemd.kill(5)`, where `KillSignal=`
-  lives, was not read for this document at all. The instruction: do not build a
-  monitor rule on either, and read that page before you do.
+- **What signal systemd sends on a stop, and what it makes of a `130`.** What a
+  SIGTERM'd advance exits is no longer one of these: warpline handles SIGTERM,
+  and the suite launches a real process and signals it to prove the `130`. What
+  is still unestablished is systemd's end — `systemd.kill(5)`, where
+  `KillSignal=` lives, was not read for this document at all, and the
+  `SuccessExitStatus=` reading above was read from source rather than on a host.
+  The instruction: read `systemd.kill(5)` on your own machine before you build a
+  monitor rule on a stopped unit's status.
 - **Where systemd sends a unit's output by default on your system.** The default
   quoted above is `systemd-system.conf(5)`'s, and that page was not read here.
   The instruction: the shipped unit sets no redirection, so check it rather than
