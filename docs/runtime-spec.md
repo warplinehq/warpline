@@ -1593,7 +1593,7 @@ them.
 |------|---------|
 | `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, or a plugin is holding at an approval gate. |
 | `1` | At least one plugin failed, or the plugin root loaded no manifests at all. |
-| `75` | Could not look. Nothing ran and nothing was written. |
+| `75` | Could not finish. Often nothing ran and nothing was written, but not always — see below before treating it as a free retry. |
 | `130` | Interrupted by SIGINT. The process stopped; the work may not have. |
 
 `130` is the conventional code for a process ended by SIGINT, and this command
@@ -1676,9 +1676,10 @@ it. The flag moves the gated case and nothing else.
 
 ### `75`
 
-`75` means the advance could not reach a state it could act on. Nothing ran and
-nothing was written: the home is byte-identical to what it was before the command
-started, so there is no half-run to explain and nothing to reconcile.
+`75` means the advance could not finish. Read it as "could not look", never as
+"looked and it was fine" — but do not read it as "nothing happened" either. Two
+of the three causes below leave the home untouched. The third does not, and it
+is the one a monitor is most likely to meet.
 
 There are three causes, and all three have code behind them.
 
@@ -1687,13 +1688,36 @@ The first is a throw out of the advance itself — which includes an
 advance. Treat this one as "retry later" rather than as a fault to page on:
 under a fifteen-minute timer the retry costs nothing.
 
+**This cause is not free of side effects, and the distinction matters to
+anything that retries automatically.** One arm of it is: a plugin root that
+cannot be read is refused above every writer in the advance, including the run
+lock, so that one does leave the home byte-identical. The rest do not.
+`warpline advance` maps *any* throw out of the advance to `75`, deliberately
+and with no chain of special cases, so a
+state write that hits a full disk, a run-log write that fails, or an append to
+`events.jsonl` that fails all arrive here. Those writes happen after the fleet
+has run, and a plugin that has already sent has already sent. Even a throw from
+the retention prune, which runs before the first plugin, arrives after run logs
+have been deleted. A wrapper that reads `75` as "safe, nothing happened, retry"
+will retry a fleet that already acted.
+
+What discriminates, if you need to know: a `run_started` event in
+`events.jsonl` with no matching `run_completed` for the same `run_id` means the
+advance reached the fleet and did not get out of it. Its absence is weaker than
+it looks — the retention prune runs above that event, so a throw there leaves no
+`run_started` and has still deleted files. The dead-man file (§ 13) does not
+help here at all: it is written only by an advance that returns, so a `75`
+leaves it reading whatever the last completed advance left, and its age cannot
+tell the two apart.
+
 The second is a refusal raised before the advance starts. With no warpline home
 at the resolved path **and** no terminal on standard input, `warpline advance`
 will not create one. Under a scheduler an unset `WARPLINE_HOME` resolves against
 the working directory the scheduler happened to give the job, so a missing home
 means a second empty home is invented, the fleet runs nothing, and the command
 exits `0` reporting healthy. This refusal repeats until the operator sets the
-variable or creates the directory, and the message names both.
+variable or creates the directory, and the message names both. Nothing is
+written on this arm: it is decided before the advance is called at all.
 
 The refusal is narrow on purpose: it refuses to **create** a home, never to
 **run** unattended. An existing home with no terminal on standard input is the
@@ -1701,8 +1725,9 @@ ordinary scheduled case and it proceeds, which is the entire point of running
 this command from a timer.
 
 The third is contention on the run lock: another advance is already running
-against this home. The message names the holder and says that nothing ran. This
-one is also "retry later" — the next tick is the retry, and no flag exists to
+against this home. The message names the holder and says that nothing ran, which
+holds: the lock is taken above every writer in the advance, so the loser never
+reaches one. This one is also "retry later" — the next tick is the retry, and no flag exists to
 break a lock somebody else is holding. § 12 is the whole of it.
 
 ### Unknown codes

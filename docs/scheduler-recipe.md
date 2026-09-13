@@ -356,10 +356,16 @@ lock left behind by a dead process heals on the next tick.
 
 The table is in `runtime-spec.md` § 11 and is not restated here. Four codes:
 `0` ran and nothing failed, `1` something failed or no manifests loaded, `75`
-could not look and nothing was written, `130` interrupted. Treat any unknown
-non-zero code as failure; § 11 says why that matters.
+could not finish, `130` interrupted. Treat any unknown non-zero code as failure;
+§ 11 says why that matters.
 
-Three things a scheduler operator should read there rather than infer:
+Four things a scheduler operator should read there rather than infer:
+
+- **`75` does not always mean nothing happened.** A refusal before the advance
+  starts leaves the home untouched, and those are the common `75`s. But any
+  throw out of the advance reports `75` too, including one that lands after the
+  fleet has run and sent. If your wrapper retries on `75` automatically, § 11
+  says what to look at first.
 
 - **A held approval gate exits `0`.** A plugin waiting on a human is the runtime
   doing its job, not a fault. If a waiting gate is itself what you want paged
