@@ -171,9 +171,11 @@ export interface InvokePluginOptions {
   /** How many artifacts the end-of-loop trim keeps for this plugin — the
    *  operator's `retention.keep_per_plugin`, read by whichever caller opts
    *  into artifact persistence. It does not change WHEN the trim runs, only
-   *  how many artifacts survive it. Omitted, the trim falls back to the same
-   *  policy default, so a caller that does not read preferences is not a
-   *  second retention rule.
+   *  how many artifacts survive it. Omitted, the trim falls back to the
+   *  BUILT-IN default in `DEFAULT_PREFERENCES` — which is not the operator's
+   *  number, because nothing on that path reads `preferences.json`. It keeps
+   *  the built-in in one place rather than as a literal per call site; a
+   *  caller that wants the operator's number has to read it and pass it.
    *
    *  Worth knowing where this does not reach: the engine leaves
    *  `persistArtifact` off on the advance path deliberately — see the comment

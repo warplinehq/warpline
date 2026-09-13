@@ -8,6 +8,7 @@ import { mkdtemp, rm, readdir, readFile, writeFile, mkdir } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { warplineHome } from '../../lib/paths.js'
+import { DEFAULT_PREFERENCES } from '../../lib/preferences.js'
 import {
   writeRunArtifact, appendRunLog, writeRunLog, trimPluginHistory,
   getRunsDir, type RunArtifact,
@@ -101,7 +102,15 @@ describe('run-artifacts', () => {
     expect(files.filter((f) => f.endsWith('.json')).length).toBe(5)
   })
 
-  test('trimPluginHistory keeps the operators number, not the old literal 20', async () => {
+  /**
+   * The name this test used to carry claimed the default now comes from the
+   * policy object rather than a literal, and the body passes `2` explicitly —
+   * which the old signature honoured too. It proved the argument, not the
+   * default, and a name that asserts something the body never reaches is how a
+   * reader concludes a property is covered when it is not. Renamed to what it
+   * does; the default has its own case below.
+   */
+  test('trimPluginHistory honours the cap it is given', async () => {
     // 5 artifacts, a cap of 2. Under the retired literal all five survive.
     for (let i = 0; i < 5; i++) {
       const runId = `plugin-cap-${i}`
@@ -120,6 +129,31 @@ describe('run-artifacts', () => {
       'plugin-cap-3.log',
       'plugin-cap-4.log',
     ])
+  })
+
+  /**
+   * The omitted-argument arm, named for what the default IS. It is the
+   * built-in — `DEFAULT_PREFERENCES` is `PreferencesSchema.parse({})` and
+   * nothing on this path reads `preferences.json` — so asserting against
+   * `DEFAULT_PREFERENCES.retention.keep_per_plugin` is asserting against the
+   * built-in and against nothing an operator set.
+   */
+  test('trimPluginHistory omitted falls back to the built-in cap, not the operators file', async () => {
+    const keep = DEFAULT_PREFERENCES.retention.keep_per_plugin
+    for (let i = 0; i < keep + 2; i++) {
+      const runId = `plugin-default-${String(i).padStart(2, '0')}`
+      const ts = new Date(Date.UTC(2026, 3, 1, 0, 0, i)).toISOString()
+      await writeRunArtifact(
+        makeArtifact({ run_id: runId, plugin: 'plugin-default', started_at: ts }),
+        { runsDir },
+      )
+    }
+
+    const evicted = await trimPluginHistory('plugin-default', undefined, { runsDir })
+
+    expect(evicted).toBe(2)
+    const files = await readdir(runsDir)
+    expect(files.filter((f) => f.startsWith('plugin-default-')).length).toBe(keep)
   })
 
   test('trimPluginHistory does NOT touch other plugins artifacts', async () => {

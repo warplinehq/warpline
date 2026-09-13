@@ -88,9 +88,18 @@ export async function writeRunLog(
  * `.json` and sibling `.log` file together. Returns the number of artifacts
  * evicted so callers can log/assert.
  *
- * `keep` defaults to the operator-global policy rather than a literal, so a
- * caller that passes nothing still gets the operator's number and there is
- * one of it in the tree.
+ * `keep` defaults to the **built-in** policy default, not to the operator's
+ * file. `DEFAULT_PREFERENCES` is `PreferencesSchema.parse({})`, computed at
+ * module load, and nothing on this path reads `preferences.json` — the literal
+ * `20` was replaced by an expression that evaluates to `20`. What it buys is
+ * one place the built-in lives rather than a literal per call site, which is
+ * worth having; it is not the operator's number and a docstring here used to
+ * say it was.
+ *
+ * The one caller that persists artifacts (`src/cli/run-plugin.ts`, through
+ * `invokePlugin`'s `retentionKeepPerPlugin`) reads preferences and passes the
+ * operator's number explicitly. A future caller that omits the argument is
+ * opting into the built-in, and should say so at its call site.
  */
 export async function trimPluginHistory(
   pluginName: string,
