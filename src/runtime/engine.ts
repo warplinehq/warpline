@@ -990,7 +990,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // `'advance'` is a fixed literal. The lock's mode field must never carry
   // anything read off disk or off argv.
   const resolvedLockPath = options.lockPath ?? getDefaultLockPath(options.stateDir)
-  await acquireLock(resolvedLockPath, 'advance')
+  const heldLock = await acquireLock(resolvedLockPath, 'advance')
 
   try {
 
@@ -1963,7 +1963,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       pruned: prunedRunLogs,
     }
   } finally {
-    await releaseLock(resolvedLockPath)
+    // By run id, so this release cannot remove a lock this advance no longer
+    // holds — an advance whose own lock aged past the TTL is healed and
+    // reacquired by the next tick, and an unconditional unlink here deleted
+    // that one on the way out.
+    await releaseLock(resolvedLockPath, heldLock.run_id)
   }
 }
 

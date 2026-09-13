@@ -1758,6 +1758,15 @@ read back as a lock at all — is refused rather than broken. `lock.test.ts` in
 this repository holds every arm of that, including the two that refuse to unlink
 a file they could not parse.
 
+**A release removes only the lock it took.** Both unlinks in the lock module
+read the file back and compare the run id before deleting anything. Without
+that, an advance whose own lock was healed out from under it — the two-hour
+window expired while the run was still going — deletes the *next* advance's
+live lock on its way out, and the tick after that acquires cleanly while two
+advances are still running. The narrowing is real and it is not a guarantee: a
+read followed by an unlink is not atomic, and there is no portable
+compare-and-delete to make it one.
+
 **Contention exits `75` and names the holder** (§ 11). The message says a
 process id, or says an orchestrator session, and it says that nothing ran. It
 never says the word for an absent value in place of a process id. `advance.test.ts`

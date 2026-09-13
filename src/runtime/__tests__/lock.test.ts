@@ -280,18 +280,63 @@ describe('acquireLock — contention and healing', () => {
 })
 
 describe('releaseLock', () => {
-  it('removes the lock file', async () => {
+  it('removes the lock it took', async () => {
     const lockPath = tmpLock()
-    await writeFile(lockPath, '{}')
-    await releaseLock(lockPath)
-    // File should no longer exist
+    const lock = await acquireLock(lockPath, 'advance')
+    await releaseLock(lockPath, lock.run_id)
+    expect(await readLock(lockPath)).toBeNull()
     let threw = false
     try {
-      await (await import('node:fs/promises')).readFile(lockPath)
+      await readFile(lockPath)
     } catch {
       threw = true
     }
     expect(threw).toBe(true)
+  })
+
+  /**
+   * The shape this exists for, and it is not exotic. An advance whose own lock
+   * ages past the two-hour TTL — a laptop that slept mid-advance — has that
+   * lock healed and reacquired by the next tick. When the first advance
+   * finally finishes, an unconditional unlink in its release deletes the
+   * SECOND advance's live lock, and the tick after that acquires cleanly while
+   * two advances are still running. One documented steal becomes an unbounded
+   * number of them.
+   */
+  it('leaves a live lock another run acquired in the meantime', async () => {
+    const lockPath = tmpLock()
+    const mine = await acquireLock(lockPath, 'advance')
+
+    // The heal-and-reacquire, compressed: the next tick's lock is at the same
+    // path under a different run id.
+    await unlink(lockPath)
+    const theirs = await acquireLock(lockPath, 'advance')
+    expect(theirs.run_id).not.toBe(mine.run_id)
+
+    await releaseLock(lockPath, mine.run_id)
+
+    const survivor = await readLock(lockPath)
+    expect(survivor?.run_id).toBe(theirs.run_id)
+    await unlink(lockPath)
+  })
+
+  /**
+   * Same rule as the acquire path: a file that could not be read back as a
+   * lock is refused rather than broken, by every caller, including the one
+   * that believes it owns the path.
+   */
+  it('leaves a file it cannot read back as a lock', async () => {
+    const lockPath = tmpLock()
+    await writeFile(lockPath, '{}')
+    await releaseLock(lockPath, '20260403T120000-deadbeef')
+    expect(await readFile(lockPath, 'utf-8')).toBe('{}')
+    await unlink(lockPath)
+  })
+
+  it('is a no-op on an absent lock', async () => {
+    const lockPath = tmpLock()
+    await releaseLock(lockPath, '20260403T120000-deadbeef')
+    expect(await readLock(lockPath)).toBeNull()
   })
 })
 
