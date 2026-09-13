@@ -1618,7 +1618,17 @@ root each write a document to stdout, and a usage error writes none.
 `130` is the conventional code for a process ended by SIGINT, and this command
 reports it deliberately rather than by default: it installs a handler for the
 length of the run, and the handler flushes whatever is queued on stdout before
-terminating, so an interrupt cannot cut a `--json` document in half.
+terminating, so an interrupt arriving between the document being written and the
+command returning cannot cut that document in half.
+
+That window is the honest size of the claim, and it is small. The document is
+the last thing the command writes and it returns a few statements later, at
+which point the handler comes off — so the barrier covers the tail of a run that
+lasted seconds or minutes, and an interrupt landing anywhere earlier finds
+nothing queued because nothing has been written. It is free and it is correct
+and it is not a general promise about this stream: a command that exits without
+draining a pipe can truncate on the ordinary path too, with no signal involved
+at all.
 
 **SIGTERM takes the same handler and reports the same code.** That is the signal
 a scheduler sends — `systemctl stop`, a launchd `bootout` and a container stop
