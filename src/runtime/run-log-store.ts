@@ -134,7 +134,9 @@ async function classifyDocument(path: string): Promise<{ status: string; plugin:
 
 /**
  * Delete runs the operator's retention policy no longer keeps. Returns the
- * number of RUNS removed, not the number of files.
+ * number of RUNS removed, not the number of files — and removed means gone
+ * from the directory, not scheduled for removal. A run whose files survive the
+ * unlink is not in the count.
  *
  * A run is a pair — `<run_id>.json` and `<run_id>.log` — and both go together,
  * because a prune that unlinks one of them strands the other forever. Run ids
@@ -261,11 +263,25 @@ export async function pruneRunLogs(
     }
   }
 
+  // The count is of runs actually GONE, not of runs marked for deletion. Both
+  // unlinks swallow their errors — a permission error, a file another process
+  // holds open — and returning `doomed.size` reported those as removed. § 6
+  // makes this integer the only confirmation that a retention setting took
+  // effect, which makes an over-count the one thing it must not do.
+  //
+  // Asked by looking rather than by trusting the unlink's own result: a run is
+  // removed when neither of its two files is on disk any more. That answers the
+  // question directly and costs two stats per doomed run, on a path that just
+  // did two unlinks.
+  let removed = 0
   for (const id of doomed) {
-    await unlink(join(baseDir, runLogFilename(id))).catch(() => {})
-    await unlink(join(baseDir, runTranscriptFilename(id))).catch(() => {})
+    const docPath = join(baseDir, runLogFilename(id))
+    const logPath = join(baseDir, runTranscriptFilename(id))
+    await unlink(docPath).catch(() => {})
+    await unlink(logPath).catch(() => {})
+    if (!existsSync(docPath) && !existsSync(logPath)) removed += 1
   }
-  return doomed.size
+  return removed
 }
 
 /**

@@ -848,7 +848,10 @@ are deleted together on either path, so neither can strand a transcript.
 read.** Unknown keys in `preferences.json` are stripped rather than refused, so a
 misspelled key parses successfully and nothing warns.
 
-What an advance reports is how many runs it removed, not why. `warpline advance
+What an advance reports is how many runs it removed, not why. Removed means
+gone from the directory and not merely selected: a run whose files survive the
+unlink — a permission error, a file something else holds open — is not in the
+count. `warpline advance
 --json` carries a `pruned` count for the advance that just ran, and the dead-man
 file (§ 13) carries the same number for the last advance that returned. Read it
 for what it is: one integer standing for all three bounds, which cannot say

@@ -12,6 +12,7 @@
  * can pass `opts.runsDir` pointed at a mkdtemp-backed location.
  */
 import { readdir, writeFile, unlink, readFile, appendFile, mkdir } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { runsDir } from '../lib/paths.js'
 import { DEFAULT_PREFERENCES } from '../lib/preferences.js'
@@ -86,7 +87,7 @@ export async function writeRunLog(
 /**
  * Keep the `keep` most recent artifacts for `pluginName`. Deletes both the
  * `.json` and sibling `.log` file together. Returns the number of artifacts
- * evicted so callers can log/assert.
+ * actually removed — an eviction whose unlink failed is not counted.
  *
  * `keep` defaults to the **built-in** policy default, not to the operator's
  * file. `DEFAULT_PREFERENCES` is `PreferencesSchema.parse({})`, computed at
@@ -132,11 +133,19 @@ export async function trimPluginHistory(
   // Newest first — slice(keep) peels off anything past the retention cap.
   matching.sort((a, b) => b.startedAt.localeCompare(a.startedAt))
   const toDelete = matching.slice(keep)
+  // Same rule as `pruneRunLogs`: the number returned is of artifacts actually
+  // gone, not of artifacts selected for eviction. Both unlinks swallow their
+  // errors, so `toDelete.length` counted a file held open or a directory the
+  // process cannot write as removed.
+  let removed = 0
   for (const { runId } of toDelete) {
-    await unlink(join(dir, `${runId}.json`)).catch(() => {})
-    await unlink(join(dir, `${runId}.log`)).catch(() => {})
+    const jsonPath = join(dir, `${runId}.json`)
+    const logPath = join(dir, `${runId}.log`)
+    await unlink(jsonPath).catch(() => {})
+    await unlink(logPath).catch(() => {})
+    if (!existsSync(jsonPath) && !existsSync(logPath)) removed += 1
   }
-  return toDelete.length
+  return removed
 }
 
 /**

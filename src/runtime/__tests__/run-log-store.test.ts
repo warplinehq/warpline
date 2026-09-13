@@ -17,7 +17,7 @@
  * directory happened to list its entries.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, mkdtemp, rm, readdir, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, readdir, utimes, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -184,6 +184,32 @@ describe('pruneRunLogs', () => {
 
     expect(pruned).toBe(1)
     expect(await readdir(tmpDir)).toEqual([])
+  })
+
+  /**
+   * The count is what an operator confirms a retention setting by (§ 6), which
+   * makes an over-count the one failure it must not have. Both unlinks swallow
+   * their errors, so the old `doomed.size` reported a run as removed when its
+   * files were still on disk.
+   *
+   * A read-only runs directory is the cheapest way to make the unlink fail for
+   * real rather than by mocking the filesystem. The mode is restored in the
+   * same test, or `rm -r` in the afterEach cannot remove the directory either.
+   */
+  it('counts runs it actually removed, not runs it marked for deletion', async () => {
+    await writeRun(tmpDir, 'doomed-run', { doc: runLogDoc('doomed-run'), logBytes: 64, ageDays: 31 })
+
+    await chmod(tmpDir, 0o555)
+    let pruned: number
+    try {
+      pruned = await pruneRunLogs(tmpDir, policy(), new Set())
+    } finally {
+      await chmod(tmpDir, 0o755)
+    }
+
+    expect(pruned).toBe(0)
+    expect(existsSync(join(tmpDir, 'doomed-run.json'))).toBe(true)
+    expect(existsSync(join(tmpDir, 'doomed-run.log'))).toBe(true)
   })
 
   it('keeps a run inside the window', async () => {

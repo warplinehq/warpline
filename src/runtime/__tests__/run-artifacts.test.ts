@@ -4,7 +4,7 @@
  * Uses mkdtemp for isolation. No mock.module (CLAUDE.md gotchas).
  */
 import { describe, test, it, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdtemp, rm, readdir, readFile, writeFile, mkdir } from 'node:fs/promises'
+import { chmod, mkdtemp, rm, readdir, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { warplineHome } from '../../lib/paths.js'
@@ -154,6 +154,35 @@ describe('run-artifacts', () => {
     expect(evicted).toBe(2)
     const files = await readdir(runsDir)
     expect(files.filter((f) => f.startsWith('plugin-default-')).length).toBe(keep)
+  })
+
+  /**
+   * Same rule as `pruneRunLogs`, for the same reason: both unlinks swallow
+   * their errors, so the old `toDelete.length` counted an artifact as evicted
+   * when it was still on disk. A read-only runs directory makes the unlink
+   * fail for real rather than by mocking the filesystem; the mode is restored
+   * inside the test or the afterEach cannot remove the directory.
+   */
+  test('trimPluginHistory counts artifacts it actually removed', async () => {
+    for (let i = 0; i < 3; i++) {
+      const ts = new Date(Date.UTC(2026, 3, 1, 0, 0, i)).toISOString()
+      await writeRunArtifact(
+        makeArtifact({ run_id: `plugin-ro-${i}`, plugin: 'plugin-ro', started_at: ts }),
+        { runsDir },
+      )
+    }
+
+    await chmod(runsDir, 0o555)
+    let evicted: number
+    try {
+      evicted = await trimPluginHistory('plugin-ro', 1, { runsDir })
+    } finally {
+      await chmod(runsDir, 0o755)
+    }
+
+    expect(evicted).toBe(0)
+    const files = await readdir(runsDir)
+    expect(files.filter((f) => f.startsWith('plugin-ro-')).length).toBe(3)
   })
 
   test('trimPluginHistory does NOT touch other plugins artifacts', async () => {
