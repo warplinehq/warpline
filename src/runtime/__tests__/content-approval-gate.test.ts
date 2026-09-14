@@ -508,7 +508,12 @@ describe('the content-authority decision', () => {
 
     const manifest = consumerManifestFor(PRODUCER)
     const ctx = evalCtxFor(state, manifest)
-    const now = Date.parse('2026-09-14T12:00:00.000Z')
+    // One instant, captured once and injected into both evaluations. Read from
+    // the clock rather than frozen: every fixture here derives from the live
+    // clock (`approvalFor` sets `approved_at` to now - 30min with a null
+    // `not_before`), so a frozen literal drifts out of the approval window and
+    // the case stops being due — a time bomb, not a determinism check.
+    const now = Date.now()
 
     const first = await evaluatePlugin(CONSUMER, manifest, ctx, now)
     const second = await evaluatePlugin(CONSUMER, manifest, ctx, now)
