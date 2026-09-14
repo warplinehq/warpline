@@ -220,6 +220,12 @@ function offendingSymbols(
     file.startsWith(`${REPO_ROOT}/`) ? file.slice(REPO_ROOT.length + 1) : file
 
   function descend(file: string, name: string): void {
+    // The definer is skipped for the same reason it is in the closure at all:
+    // being reachable is the defect, and a forbidden symbol is already recorded
+    // at the site that NAMES it. Walking inside its own declaration would only
+    // report it against itself.
+    if (forbidden.has(name)) return
+
     const key = `${file}#${name}`
     if (visited.has(key)) return
     visited.add(key)
@@ -352,5 +358,164 @@ describe('no approval-gate symbol is reachable from the content-approval path', 
     expect(REAL_FORBIDDEN.has('applyPendingGate')).toBe(true)
     expect(REAL_FORBIDDEN.has('PendingGateSchema')).toBe(true)
     expect(REAL_FORBIDDEN.has('checkApproval')).toBe(true)
+  })
+})
+
+/**
+ * The paired red-proof.
+ *
+ * The real assertion above passes over a branch that is clean today, and this
+ * is what stops it being trusted on that basis: the SAME helper, handed a
+ * closure that does reach the session-grant machinery, must report it. Fixtures
+ * are built in memory — a `Map` of synthetic paths to source text — so nothing
+ * touches disk and no directory is left behind.
+ */
+const FIXTURE_ENGINE = '/fixture/engine.ts'
+const FIXTURE_SIBLING = '/fixture/sibling.ts'
+const FIXTURE_GATE = '/fixture/gate.ts'
+
+const FIXTURE_FORBIDDEN = new Set(['checkApproval', 'mergeGrant', 'MAX_GRANT_WINDOW_MS'])
+
+const GATE_SOURCE = `export function checkApproval(g: unknown): boolean {\n  return g !== undefined\n}\n`
+
+/** Case 1's broken engine, pinned so the vacuity assertion can read it back. */
+const DIRECT_BREAK = `import { checkApproval } from './gate.js'
+export function contentGateApplies(g: unknown): boolean {
+  return checkApproval(g)
+}
+`
+
+const FIXTURE_ROOTS = ['contentGateApplies'] as const
+
+describe('the same helper reports a closure that does reach the grant machinery', () => {
+  test('a direct call from a content root', () => {
+    const sources = new Map([
+      [FIXTURE_ENGINE, DIRECT_BREAK],
+      [FIXTURE_GATE, GATE_SOURCE],
+    ])
+    expect(offendingSymbols(sources, FIXTURE_ENGINE, FIXTURE_ROOTS, FIXTURE_FORBIDDEN)).toEqual([
+      '/fixture/engine.ts#contentGateApplies: checkApproval',
+    ])
+  })
+
+  /**
+   * The case a single-file scan misses, and the one `deny.test.ts:498-511`
+   * records having paid for: a grant write added to a helper two modules down
+   * broke the prohibition with that test still green.
+   */
+  test('a call two modules down, through a local helper and a relative sibling', () => {
+    const sources = new Map([
+      [
+        FIXTURE_ENGINE,
+        `import { deep } from './sibling.js'
+export function contentGateApplies(g: unknown): boolean {
+  return local(g)
+}
+function local(g: unknown): boolean {
+  return deep(g)
+}
+`,
+      ],
+      [
+        FIXTURE_SIBLING,
+        `export function deep(g: unknown): boolean {
+  return mergeGrant(g)
+}
+declare function mergeGrant(g: unknown): boolean
+`,
+      ],
+    ])
+    expect(offendingSymbols(sources, FIXTURE_ENGINE, FIXTURE_ROOTS, FIXTURE_FORBIDDEN)).toEqual([
+      '/fixture/sibling.ts#deep: mergeGrant',
+    ])
+  })
+
+  /**
+   * Two mutually recursive helpers. The walk must terminate and still report —
+   * proving the visited set is doing its job rather than the walk being shallow
+   * enough never to meet the cycle.
+   */
+  test('a cycle terminates and the offender past it is still reported', () => {
+    const sources = new Map([
+      [
+        FIXTURE_ENGINE,
+        `export function contentGateApplies(g: unknown): boolean {
+  return ping(g)
+}
+function ping(g: unknown): boolean {
+  return pong(g)
+}
+function pong(g: unknown): boolean {
+  return ping(g) && MAX_GRANT_WINDOW_MS > 0
+}
+declare const MAX_GRANT_WINDOW_MS: number
+`,
+      ],
+    ])
+    expect(offendingSymbols(sources, FIXTURE_ENGINE, FIXTURE_ROOTS, FIXTURE_FORBIDDEN)).toEqual([
+      '/fixture/engine.ts#pong: MAX_GRANT_WINDOW_MS',
+    ])
+  })
+
+  /**
+   * The assertion that makes this guard FUNCTION-granular rather than
+   * file-granular. The fixture module imports the gate and calls it — just not
+   * from anywhere the content roots reach. A file-level import-closure
+   * predicate reports this red, which is why it could only ever have been made
+   * green with a hand list of blessed call sites; this one reports it clean.
+   */
+  test('a call outside the roots closure, in the same module, is not an offender', () => {
+    const sources = new Map([
+      [
+        FIXTURE_ENGINE,
+        `import { checkApproval } from './gate.js'
+export function contentGateApplies(g: unknown): boolean {
+  return clean(g)
+}
+function clean(g: unknown): boolean {
+  return g !== undefined
+}
+export function sessionGrantPath(g: unknown): boolean {
+  return checkApproval(g)
+}
+`,
+      ],
+      [FIXTURE_GATE, GATE_SOURCE],
+    ])
+    expect(offendingSymbols(sources, FIXTURE_ENGINE, FIXTURE_ROOTS, FIXTURE_FORBIDDEN)).toEqual([])
+  })
+
+  /**
+   * The named-elsewhere half, driven by the REAL forbidden set rather than a
+   * set written for the fixture.
+   *
+   * The four cases above prove the walk reports a break. This one additionally
+   * proves the real set's MEMBERSHIP: it goes green only if the union of the
+   * two symbols the requirement names outside the gate module actually landed.
+   * Without it those two are covered by a count and nothing demonstrates the
+   * guard reddening on them.
+   */
+  test('a root reaching the artifact declared in engine.ts is reported, against the real set', () => {
+    const sources = new Map([
+      [
+        FIXTURE_ENGINE,
+        `export function contentGateApplies(g: unknown): boolean {
+  return applyPendingGate(g)
+}
+declare function applyPendingGate(g: unknown): boolean
+`,
+      ],
+    ])
+    expect(offendingSymbols(sources, FIXTURE_ENGINE, FIXTURE_ROOTS, REAL_FORBIDDEN)).toEqual([
+      '/fixture/engine.ts#contentGateApplies: applyPendingGate',
+    ])
+  })
+
+  /**
+   * Vacuity. A fixture that silently failed to carry what it claims would make
+   * the red-proof above pass by returning the wrong answer for the right shape.
+   */
+  test('the case-1 fixture really does carry the break it claims', () => {
+    expect(DIRECT_BREAK).toContain('checkApproval')
   })
 })
