@@ -338,6 +338,7 @@ export async function handler() {
       pluginRuns?: Record<string, unknown>
       appliedAt?: string | null
       denials?: Record<string, unknown>
+      approvals?: Record<string, unknown>
     } = {},
   ): Promise<{ startedAt: string; completedAt: string }> {
     const startedAt = new Date(Date.now() - clocks.startedAgoMs).toISOString()
@@ -352,6 +353,7 @@ export async function handler() {
           ...extra.pluginRuns,
         },
         denials: extra.denials ?? {},
+        approvals: extra.approvals ?? {},
         pending_gates: [
           {
             plugin,
@@ -676,21 +678,32 @@ export async function handler() {
    * live. The invariant belongs to the exported function, which any caller can
    * reach, so that is where it is held.
    */
-  async function expireThroughApply(plugin: string, extra: Parameters<typeof seedGate>[2]) {
+  async function expireThroughApply(
+    plugin: string,
+    extra: Parameters<typeof seedGate>[2],
+    manifests?: ReadonlyMap<string, PluginManifest>,
+  ) {
     const HOUR = 60 * 60 * 1000
     await seedGate(plugin, { startedAgoMs: 26 * HOUR, completedAgoMs: 25 * HOUR }, extra)
     const state = await readEngineState(statePath)
     const gate = findPendingGate(state, plugin)
     expect(gate).toBeDefined()
+    const own = gatedManifest(plugin)
     const outcome = await applyPendingGate(
       state,
       gate as NonNullable<typeof gate>,
-      { ...makeManifest(plugin, ['sends_email']), ttl_hours: 48 },
-      { statePath },
+      own,
+      { statePath, manifests: manifests ?? new Map([[plugin, own]]) },
     )
     expect(outcome.outcome).toBe('refused')
     return readState()
   }
+
+  /** The manifest `expireThroughApply` hands the gated plugin, spelled once. */
+  const gatedManifest = (plugin: string): PluginManifest => ({
+    ...makeManifest(plugin, ['sends_email']),
+    ttl_hours: 48,
+  })
 
   /**
    * Driven through `applyPendingGate` directly, and that is the point rather
@@ -769,6 +782,198 @@ export async function handler() {
     // And it is left exactly as it was. Re-stamping it would revive an answer
     // to a proposal that no longer exists.
     expect(state.denials['gated-writer'].fingerprint).toBe(stale)
+  })
+
+  // ── The live-approval arm of the same carve-out (19-11, R11) ────────────
+  //
+  // Test 19 holds the denial arm. These hold the arm beside it, on the
+  // identical argument: an outstanding answer is BOUND to the bytes in
+  // `plugin_runs`, and the discard's delete takes `last_output` with it
+  // permanently. For a denial the binding is the plugin's own proposal; for a
+  // content approval it is the PRODUCER's Output, which is why the reference
+  // these cases exercise runs the other way round — the gated plugin is the
+  // producer, and the approval that protects it is keyed by the consumer.
+
+  /** The approved bytes, sitting where the producer's Output lives. */
+  const APPROVED_OUTPUT = {
+    type: 'brief',
+    format: 'markdown' as const,
+    path: 'batch.md',
+    run_id: 'run-a',
+    produced_at: '2026-08-29T10:00:00.000Z',
+  }
+
+  const CONSUMER = 'batch-sender'
+
+  /** A content-class consumer whose first declared dependency is the gated plugin. */
+  const consumerManifest = (producer: string): PluginManifest => ({
+    ...makeManifest(CONSUMER, ['sends_email']),
+    approval_class: 'content',
+    dependencies: [producer],
+  })
+
+  /**
+   * A live content approval for {@link CONSUMER}, bound to `producer`'s Output.
+   *
+   * `not_after` is a naked wall clock far enough out that no test run reaches
+   * it — the shape `warpline approve --content` stores — so the standing is
+   * decided by the fingerprint rather than by the window.
+   */
+  const liveApprovalSeed = (producer: string) => ({
+    pluginRuns: {
+      [producer]: {
+        last_run_at: '2026-08-29T10:00:00.000Z',
+        status: 'gated',
+        last_output: APPROVED_OUTPUT,
+      },
+    },
+    approvals: {
+      [CONSUMER]: {
+        plugin: CONSUMER,
+        producer,
+        fingerprint: denialFingerprint(producer, ['sends_email'], [APPROVED_OUTPUT]),
+        run_id: 'run-a',
+        approved_at: '2026-08-29T11:00:00.000Z',
+        not_before: null,
+        not_after: '2099-01-01T00:00',
+        zone: 'UTC',
+        effect_id: null,
+        marked_at: null,
+        confirmed_at: null,
+      },
+    },
+  })
+
+  const approvalManifests = (producer: string): ReadonlyMap<string, PluginManifest> =>
+    new Map([
+      [producer, gatedManifest(producer)],
+      [CONSUMER, consumerManifest(producer)],
+    ])
+
+  test('19c: a discard leaves plugin_runs alone while a live approval is bound to this plugin\'s bytes', async () => {
+    const state = await expireThroughApply(
+      'gated-writer',
+      liveApprovalSeed('gated-writer'),
+      approvalManifests('gated-writer'),
+    )
+
+    // The entry survives, `last_output` and all. The approval names a RUN and a
+    // FINGERPRINT, and the bytes behind both live in this entry — deleting it
+    // moves the fingerprint the operator's yes was bound to, and no later
+    // gesture can put them back. The operator's answer would become
+    // unhonourable, silently, because of a gate belonging to a different
+    // question.
+    expect(state.plugin_runs['gated-writer']).toBeDefined()
+    expect(state.plugin_runs['gated-writer'].last_output).toEqual(APPROVED_OUTPUT)
+
+    // The consequence, stated as the next advance would read it: still live,
+    // so the approved batch can still go out.
+    const { approvalStanding } = await import('../../runtime/engine.js')
+    expect(
+      approvalStanding(state as never, CONSUMER, approvalManifests('gated-writer'), Date.now())
+        .standing,
+    ).toBe('live')
+
+    // The GATE is still discarded — that half is unchanged, exactly as in 19.
+    expect(state.pending_gates).toEqual([])
+  })
+
+  test('19d: a discard with no answer of either kind still deletes plugin_runs, exactly as before', async () => {
+    // Non-vacuity for 19c: same path, same discard, and the only difference is
+    // whether anything outstanding references the plugin. With no denial and no
+    // approval the delete goes ahead, which is what makes the plugin due again
+    // after its inputs moved — the whole point of the refusal.
+    const state = await expireThroughApply('gated-writer', {
+      pluginRuns: {
+        'gated-writer': {
+          last_run_at: '2026-08-29T10:00:00.000Z',
+          status: 'gated',
+          last_output: APPROVED_OUTPUT,
+        },
+      },
+    })
+
+    expect(state.plugin_runs['gated-writer']).toBeUndefined()
+  })
+
+  test('19e: running the discard twice changes nothing the first run preserved', async () => {
+    const seed = liveApprovalSeed('gated-writer')
+    const manifests = approvalManifests('gated-writer')
+    const first = await expireThroughApply('gated-writer', seed, manifests)
+    expect(first.plugin_runs['gated-writer'].last_output).toEqual(APPROVED_OUTPUT)
+    expect(first.pending_gates).toEqual([])
+
+    // The second run, against the document the first one left. The gate is
+    // already gone, so `applyPendingGate` is handed the same gate object again —
+    // the discard is reached by identity and the filter is a no-op. Nothing
+    // throws, and nothing the first run preserved is destroyed by the second.
+    const state = await readEngineState(statePath)
+    const stale = {
+      plugin: 'gated-writer',
+      run_id: 'run-a',
+      created_at: '2026-08-29T10:00:00.000Z',
+      payload_summary: RESULT.summary,
+      plugin_result: RESULT,
+      run_started_at: '2026-08-29T09:00:00.000Z',
+      run_completed_at: '2026-08-29T10:00:00.000Z',
+      applied_at: null,
+    }
+    const outcome = await applyPendingGate(state, stale as never, gatedManifest('gated-writer'), {
+      statePath,
+      manifests,
+    })
+
+    expect(outcome.outcome).toBe('refused')
+    const second = await readState()
+    expect(second.plugin_runs['gated-writer']).toBeDefined()
+    expect(second.plugin_runs['gated-writer'].last_output).toEqual(APPROVED_OUTPUT)
+    expect(second.pending_gates).toEqual([])
+    expect(second.approvals[CONSUMER]).toBeDefined()
+  })
+
+  test('19f: the gate-apply branch runs inside the state lock, so a concurrent approval write cannot interleave', async () => {
+    // The wedge, not a hoped-for race: the test HOLDS the state document's own
+    // lock, starts the command, and only then does the concurrent write. Both
+    // orders are imposed. `deny.test.ts` records that an interleave cannot be
+    // produced from outside the process for a command too fast to catch — which
+    // is why the slow side here is the lock and not a timer.
+    await writeGatedPlugin('gated-writer')
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
+
+    const { pathsForStateFile, withStateLockAt } = await import('../../board/state-manager.js')
+    const lockPath = pathsForStateFile(statePath).lockPath
+
+    let pending: ReturnType<typeof capture> | undefined
+    let appliedWhileHeld: boolean | undefined
+
+    await withStateLockAt(lockPath, async () => {
+      pending = capture('approve', ['gated-writer'])
+      // Long enough for the command to reach its apply if nothing stopped it.
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      // The positive control, read off disk while the wedge is still closed: a
+      // command that has already applied would make the merge assertion below
+      // green for the wrong reason.
+      appliedWhileHeld = (await readState()).pending_gates[0].applied_at !== null
+
+      const doc = await readState()
+      doc.approvals = liveApprovalSeed('gated-writer').approvals
+      await writeFile(statePath, JSON.stringify(doc))
+    })
+
+    const result = await (pending as NonNullable<typeof pending>)
+
+    expect(appliedWhileHeld).toBe(false)
+    expect(result.code).toBe(0)
+
+    // Both writes landed and the document is consistent: the apply is recorded
+    // AND the approval another attachment wrote is still there. Unlocked, the
+    // command read the document before that write and wrote its snapshot back
+    // over it.
+    const after = await readState()
+    expect(after.pending_gates[0].applied_at).not.toBeNull()
+    expect(after.approvals[CONSUMER]).toBeDefined()
+    expect(after.plugin_runs['gated-writer']).toBeDefined()
   })
 
   test('20: a live denial refuses the grant, and nothing is written', async () => {
