@@ -870,12 +870,29 @@ and a third is never a candidate at all:
 
 - a run whose document reports the `delegated` status — a result parked pending
   a human's approval;
-- a run named by a pending approval gate. A stored `run_id` that is not a
-  pending gate's does **not** protect: a `last_output` pointer and a versioned
+- a run named by a pending approval gate;
+- a run named by a content approval **whose fire window is still open** (§ 10,
+  `approvals`). The bytes an operator froze live in the producer's run log, and
+  reclaiming that log while their yes is outstanding would leave an approval
+  bound to nothing. A stored `run_id` that is neither a pending gate's nor an
+  open approval's does **not** protect: a `last_output` pointer and a versioned
   Output's history are documented to dangle (§ 10), and treating a dangling
   pointer as protective would be retain-forever by accident;
 - a document that will not parse, which is left on disk so an operator can
   inspect it by hand.
+
+**An approval's protection ENDS when its window closes**, and that is the
+deletion path for the approved payload. From the first advance after
+`not_after`, the referenced run is an ordinary candidate again and the three
+bounds below reclaim it with no new mechanism — automated, and running inside
+every advance rather than waiting on operator hygiene. A frozen batch is
+recipient data; a carve-out that never released would be retain-forever with a
+carve-out's name on it. The binding that named the run is swept in the same
+advance (§ 10, "Expiry and deletion"), and both decisions read one predicate, so
+a released run and a retained binding cannot come apart. Protection does not
+depend on the mark: an approval already spent still protects its run while its
+window is open, and a marked-unconfirmed one stops protecting when the window
+closes exactly as an unmarked one does.
 
 The three bounds then apply, in this order, to what is left: days, then count,
 then bytes. The count bound is applied **within one plugin**, not across the
@@ -1789,6 +1806,58 @@ direction, never a fire and never a throw.
 A lapsed window does not auto-approve, does not extend and does not degrade to
 an ordinary send. It stops applying, and the operator is the only one who can
 write another.
+
+#### Expiry and deletion
+
+A record whose window has closed is **removed from this subtree** at the
+end-of-run state write, unless it is marked-unconfirmed. Nothing an operator
+does is required, and the sweep runs inside every advance.
+
+This is the second half of one deletion policy. The first half is retention: an
+approval stops protecting its producer's run the moment its window closes (§ 6),
+so the approved bytes are reclaimed by the ordinary prune. This half removes what
+is left — a fingerprint, a producer name, a run id and some timestamps — once
+there is nothing for it to bind to. Both halves read the **same** window
+predicate over the **same** instant, which is what stops a run being released
+while its binding is retained, or the reverse.
+
+The one exception:
+
+| state at expiry | what happens |
+|---|---|
+| `marked_at` null | dropped |
+| `marked_at` set, `confirmed_at` null | **kept** — this is the did-it-ship evidence |
+| `confirmed_at` set | dropped |
+
+A marked-unconfirmed record is never replaced by absence. It is the runtime's
+account of a fire it began and cannot prove it finished, and deleting it would
+destroy that account for a send that may well have landed. Keeping it is safe
+because it holds no payload — those bytes went with the run log. The operator
+settles it at the sink using the effect id.
+
+A **confirmed** record past its window is dropped, and one consequence is worth
+stating rather than discovering: the ordinary not-due report naming a spent
+approval and the instant it fired stops being rendered once the window closes.
+The plugin simply reads as having no approval, which it no longer has.
+
+Two ceilings this does not reach:
+
+- `plugin_runs[producer].last_output` is **not** deleted by the sweep. It is the
+  producer's own record, carried forward across a run that produced nothing and
+  overwritten by that producer's next Output; its lifetime is bound to the
+  producer, not to any approval, and shortening it here would break a contract
+  the approval never opened.
+- There is **no operator gesture that resolves an `indeterminate` record**. A
+  marked-unconfirmed approval therefore survives the sweep indefinitely, by
+  design and for want of a verb. It authorises nothing — every advance refuses
+  it with `indeterminate` — but it does not go away on its own.
+
+A zone the host tz database can no longer resolve **retains** the record rather
+than sweeping it, and does not fail the advance. Deleting recipient-bound data
+because the host forgot a timezone is not a deletion policy. Note that this is
+the opposite direction from the fire decision, which reads an unresolvable zone
+as a closed window and refuses: both are the conservative answer to their own
+question — never fire on a window you cannot read, never delete on one either.
 
 #### The spend mark
 

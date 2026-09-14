@@ -601,6 +601,44 @@ export function approvalStanding(
 }
 
 /**
+ * Has this approval's fire window closed at `now`?
+ *
+ * **One predicate, two consumers, and that is the whole reason it is a
+ * function.** An advance asks this question twice, at two ends of `runAdvance`:
+ * once near the top, to decide which runs the prune must exempt, and once at
+ * the end-of-run assembly, to decide which bindings to sweep. Those two sites
+ * are a thousand lines apart and cannot share one computed value, so they share
+ * this — because two independently written window checks are two answers that
+ * can disagree about the same record. A run released while its binding is
+ * retained is a dangling approval; a binding deleted while its run is pinned is
+ * retain-forever wearing a deletion policy.
+ *
+ * It is NOT the same question `approvalStanding` answers, and must not be
+ * mistaken for it. That function decides AUTHORITY — window, fingerprint,
+ * producer identity, mark state, all of it — at the single call site the fire
+ * decision is read from. This one reads one bound, is consumed by two readers
+ * that never fire anything, and is deliberately a hair wider: strictly-less-than
+ * rather than the standing's `>=`, so an approval sitting exactly on its
+ * closing instant keeps its payload for one more advance. Wider in the
+ * retaining direction is the safe error; narrower would delete bytes an
+ * authority read still considers.
+ *
+ * **A zone the host tz database no longer knows RETAINS.** `resolveWallClock`
+ * throws on one, and both alternatives to catching it are worse than the edge:
+ * letting the throw escape fails the whole advance over a single unparseable
+ * record, and treating the throw as "closed" deletes recipient-bound data
+ * because the host forgot a timezone. That is not a deletion policy, it is data
+ * loss. The conservative answer is the record stays.
+ */
+function windowClosed(approval: Approval, now: number): boolean {
+  try {
+    return resolveWallClock(approval.not_after, approval.zone) < now
+  } catch {
+    return false
+  }
+}
+
+/**
  * What a content-authorised fire carries forward to the invocation.
  *
  * A pure function of `(state, manifest, now)`: the fingerprint comes from the
@@ -945,6 +983,53 @@ function mergeApprovals(
     if (record.marked_at !== null) merged[plugin] = record
   }
   return merged
+}
+
+/**
+ * Drop every approval whose fire window has closed, except the did-it-ship
+ * evidence.
+ *
+ * The deletion path the fourth Prohibition requires, stated as one filter. A
+ * frozen batch is recipient data: EDPB ¶82 wants its deletion automated and
+ * tested rather than left to operator hygiene, and this runs inside every
+ * advance.
+ *
+ * **Two objects, two halves, and only one of them is here.** The PAYLOAD is not
+ * in this record — the record holds a hex fingerprint, a producer name, a run id
+ * and timestamps, while the bytes live in the producer's run log. That half is
+ * closed by `protectedRunIds` releasing the run the moment the window closes,
+ * which hands the bytes to ordinary retention. This is the other half: the
+ * BINDING, once there is nothing left for it to bind to.
+ *
+ * **The marked-unconfirmed exception is D-11a, and it is not a leak.** A record
+ * with `marked_at` set and `confirmed_at` null is the runtime's account of a
+ * fire it began and cannot prove it finished. Deleting it would destroy the
+ * did-it-ship evidence for a send that may well have landed — repudiation, not
+ * hygiene — and it is safe to keep because the payload went with the run log.
+ * The operator resolves it at the sink with the effect id.
+ *
+ * A CONFIRMED record past its window is dropped, which means the state report
+ * naming a spent approval stops being rendered once the window closes. Said out
+ * loud here so it reads as a decision rather than as a surprise.
+ *
+ * **Two ceilings, stated rather than hidden.**
+ * `state.plugin_runs[producer].last_output` is NOT deleted by this: it is the
+ * producer's own record, preserved across a run that produced nothing and
+ * overwritten by the producer's next Output, and deleting it would break a
+ * contract this change did not open. And there is still no operator gesture that
+ * resolves an `indeterminate` record — so a marked-unconfirmed one survives
+ * here indefinitely, by design and for want of a verb.
+ */
+function sweepExpiredApprovals(
+  approvals: EngineState['approvals'],
+  now: number,
+): EngineState['approvals'] {
+  const kept: EngineState['approvals'] = {}
+  for (const [plugin, record] of Object.entries(approvals)) {
+    const markedUnconfirmed = record.marked_at !== null && record.confirmed_at === null
+    if (!windowClosed(record, now) || markedUnconfirmed) kept[plugin] = record
+  }
+  return kept
 }
 
 /**
@@ -1849,11 +1934,42 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // Accepted cost: an advance is bounded by what it inherited, not by what it
     // is about to write.
     //
-    // The protected set is the pending gates' run ids and nothing else. A
-    // `last_output` pointer and a stored last run id are documented to dangle by
-    // design; treating either as protective would be retain-forever by accident.
-    // Built from the state already read above rather than from a second read.
+    // The protected set is the pending gates' run ids and the runs an OPEN
+    // content approval still names. A `last_output` pointer and a stored last
+    // run id are documented to dangle by design; treating either as protective
+    // would be retain-forever by accident. Built from the state already read
+    // above rather than from a second read.
+    //
+    // The approval arm is the second kind of held record `pruneRunLogs`'s own
+    // docstring anticipated — "a later release adds a second kind of held
+    // record and joins the same set by the same mechanism" — so
+    // `run-log-store.ts` is unchanged: its parameter is already a
+    // `ReadonlySet<string>`, and dedup is free because it is a `Set`, which is
+    // why an id named by both a gate and an approval is protected once.
+    //
+    // **Only while the window is OPEN**, which is the deletion path the fourth
+    // Prohibition requires. A frozen batch is recipient data and its bytes live
+    // in the producer's run log; a set that never releases would pin them
+    // forever. Releasing on close hands them straight back to ordinary
+    // retention — already running, already tested, no new mechanism — and the
+    // binding itself is swept at the end-of-run assembly below.
+    //
+    // **`windowClosed` and not a second window comparison**, and the two sites
+    // are far enough apart that the sharing has to be the FUNCTION rather than
+    // a computed value: this runs before the level loop and the sweep runs
+    // after it. `approvalNow` is what keeps them from disagreeing about the
+    // instant as well as about the rule — one clock read, both readers.
+    //
+    // `run_id` is nullable: an Output that carried none came from a run the
+    // store cannot name, and null protects nothing rather than protecting
+    // everything.
+    const approvalNow = options.now ?? Date.now()
     const protectedRunIds = new Set(state.pending_gates.map((gate) => gate.run_id))
+    for (const approval of Object.values(state.approvals)) {
+      if (approval.run_id !== null && !windowClosed(approval, approvalNow)) {
+        protectedRunIds.add(approval.run_id)
+      }
+    }
 
     // Held rather than discarded. The count reaches this advance's result and
     // its dead-man file below, and the machine-readable output renders it from
@@ -2696,9 +2812,30 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // lands, which would reintroduce the window one layer down.
     // `announceDiscards: false` because the top-of-advance read already
     // announced anything discardable.
+    //
+    // **The expiry sweep runs AFTER the merge, and the order is deliberate.**
+    // `mergeApprovals` begins from `{ ...disk }` — the disk record is the floor,
+    // because another attachment's approval must not be erased by a snapshot
+    // taken before it existed. So a key swept out of the in-memory subtree
+    // BEFORE the merge is put straight back by that spread: it is on disk, this
+    // process is not claiming otherwise, and the floor wins. Sweeping the merged
+    // result is what actually deletes the binding, and it is also the more
+    // correct answer: an expired record another attachment wrote mid-advance is
+    // expired too, and there is no reason this advance should be the one that
+    // preserves it.
+    //
+    // It cannot destroy the mark, which is the one thing this ordering had to be
+    // checked against. `confirmContentMarks` ran above, on the in-memory
+    // subtree; a record it stamped is marked, and the merge's marked arm carries
+    // it over disk. The sweep then drops it only if its window has ALSO closed,
+    // and a record confirmed inside this advance is a record whose window was
+    // open when the fire was authorised.
     await lockStateDocument(stateDir, async () => {
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
-      updatedState.approvals = mergeApprovals(disk.approvals, updatedState.approvals)
+      updatedState.approvals = sweepExpiredApprovals(
+        mergeApprovals(disk.approvals, updatedState.approvals),
+        approvalNow,
+      )
       await writeEngineState(updatedState as EngineState, stateDir)
       // The home's layout version, stamped beside the document it describes and
       // inside the same lock, so the two halves of the migration cannot land

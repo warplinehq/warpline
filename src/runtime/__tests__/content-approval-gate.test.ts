@@ -351,8 +351,18 @@ describe('a content approval fires the approved bytes and nothing else', () => {
 
   /**
    * A lapsed window does not fire, and — the half worth asserting — it does not
-   * quietly extend itself or re-approve. The record on disk after the advance is
-   * byte-identical to the one before it.
+   * quietly extend itself or re-approve.
+   *
+   * This used to assert that the record on disk was BYTE-IDENTICAL afterwards,
+   * which was the cheapest way to say "nothing rewrote it". It no longer is,
+   * and not because the guard weakened: a lapsed, unmarked record is now SWEPT
+   * by the end-of-run assembly, because retaining a recipient-bound binding
+   * past its window with no deletion path is the thing the fourth Prohibition
+   * forbids. Absence is a strictly stronger answer than byte-identity to the
+   * question this case asks — a record that is gone has certainly not extended
+   * itself — so the assertion moved rather than being dropped. The sweep's own
+   * arms, including the marked-unconfirmed record it must NOT delete, are
+   * `approval-retention.test.ts`.
    */
   test('a lapsed window does not fire, does not extend and does not re-approve', async () => {
     await writeTracerPair()
@@ -360,12 +370,13 @@ describe('a content approval fires the approved bytes and nothing else', () => {
     const state = seedState(APPROVED_BODY)
     state.approvals[CONSUMER] = { ...approvalFor(APPROVED_BODY), not_after: '2020-01-01T00:00' }
     await writeState(state)
-    const before = JSON.stringify((await readState()).approvals)
+    expect((await readState()).approvals[CONSUMER]).toBeDefined()
 
     await advance()
 
     expect(existsSync(sentinel)).toBe(false)
-    expect(JSON.stringify((await readState()).approvals)).toBe(before)
+    // Not extended, not re-approved, and not left behind either.
+    expect((await readState()).approvals[CONSUMER]).toBeUndefined()
   })
 
   /**
