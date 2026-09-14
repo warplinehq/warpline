@@ -757,11 +757,17 @@ function contentGateApplies(g: GateInput): boolean {
  *
  * **Interpolation is closed by construction.** Declared plugin names, closed
  * enum values, and runtime-derived closed-form values — a hex fingerprint, a
- * hex effect id, an ISO instant the runtime produced. Never the approved bytes
- * and never anything read out of `last_output`. These strings reach the run
- * log's summary, the board event and the preview, all of which are read and
- * shared, and this repository has twice paid for an operator-configured value
- * arriving in a result summary.
+ * hex effect id, an ISO instant the runtime produced. Never the approved bytes,
+ * never anything read out of `last_output`, and never a field an operator typed
+ * and this runtime merely stored: the window bounds and the zone are all three
+ * operator-supplied, and the approvals record on disk is hand-editable besides.
+ * These strings reach the run log's summary, the board event and the preview,
+ * all of which are read and shared, and this repository has twice paid for an
+ * operator-configured value arriving in a result summary.
+ *
+ * The cost is that a refusal says WHICH bound failed rather than what it was.
+ * That is the right way round: the operator can read their own record back with
+ * `warpline plan`, and cannot take back a value that has already been shared.
  */
 function contentGateDetail(g: GateInput): string {
   const s = g.contentStanding
@@ -775,14 +781,24 @@ function contentGateDetail(g: GateInput): string {
         `unapproved: a content fire was marked at ${s.approval.marked_at} and never confirmed, ` +
         'so the runtime cannot tell whether it completed'
       )
+    // The window bounds and the zone are OPERATOR-TYPED strings that arrived on
+    // a command line and were stored verbatim, so neither may be interpolated
+    // here however harmless it looks — the operator can read their own window
+    // back with `warpline plan`, and these strings go somewhere they cannot
+    // take it back from.
     case 'before_window':
-      return `unapproved: the content approval window has not opened yet (${s.approval.not_before ?? s.approval.approved_at} ${s.approval.zone})`
+      return 'unapproved: the content approval window has not opened yet'
     case 'outside_window':
-      return `unapproved: the content approval window closed at ${s.approval.not_after} ${s.approval.zone}`
+      return 'unapproved: the content approval window has closed'
+    // The fingerprint is a runtime-derived closed-form value and is safe; the
+    // record's `producer` is not. In THIS arm it may be the very name that no
+    // longer matches the declared dependency, so it is not a declared plugin
+    // name at all, and the arm cannot tell that case from the fingerprint-drift
+    // one without a second read.
     case 'content_moved':
       return (
-        `unapproved: the approved content has moved — the approval covers ` +
-        `'${s.approval.producer}' at ${s.approval.fingerprint}, which is no longer what would ship`
+        `unapproved: the approved content has moved — the fingerprint on file ` +
+        `(${s.approval.fingerprint}) is no longer what would ship`
       )
     case 'live':
       // Unreachable behind the predicate above; written out so the record

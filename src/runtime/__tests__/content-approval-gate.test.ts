@@ -523,6 +523,70 @@ describe('the content-authority decision', () => {
   })
 
   /**
+   * The refusal detail carries no operator-typed value.
+   *
+   * The window bounds and the zone arrive on a command line and are stored
+   * verbatim, and the approvals record on disk is hand-editable besides — so
+   * none of the three may reach a detail string, which lands in the run log's
+   * summary, the board event and `warpline plan`, all of them read and shared.
+   * Asserted as an ABSENCE of distinctive sentinel values rather than as a
+   * substring match on the wording: the wording is allowed to change, and a
+   * leak appended to a correct sentence is invisible to `toContain`.
+   */
+  test('a refusal detail carries no operator-typed window value', async () => {
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = {
+      ...approvalFor(APPROVED_BODY),
+      not_after: '2020-03-14T15:09',
+      zone: 'America/Argentina/Ushuaia',
+    }
+
+    const manifest = consumerManifestFor(PRODUCER)
+    const result = await evaluatePlugin(CONSUMER, manifest, evalCtxFor(state, manifest), Date.now())
+
+    expect(result.due).toBe(false)
+    if (result.due) throw new Error('unreachable')
+    expect(result.detail).not.toContain('2020-03-14T15:09')
+    expect(result.detail).not.toContain('Ushuaia')
+    expect(result.detail).not.toContain('Argentina')
+    // Non-vacuity: the detail is a real refusal, not an empty string that would
+    // satisfy every assertion above.
+    expect(result.detail).toContain('window has closed')
+  })
+
+  /**
+   * The same for the content-moved arm. The record's `producer` is exactly the
+   * name that may no longer be the declared dependency, so it is not a declared
+   * plugin name and does not belong in a shared string. The hex fingerprint is
+   * runtime-derived and does.
+   */
+  test('the content-moved detail carries the fingerprint and no producer name', async () => {
+    const OTHER = 'other-builder'
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
+
+    // The manifest now declares OTHER, so the record's producer is stale.
+    const manifest = consumerManifestFor(OTHER)
+    const ctx: EvalContext = {
+      currentTier: 'normal',
+      force: false,
+      state,
+      approvalPath: join(home.root, '.session-approval'),
+      manifests: new Map([
+        [PRODUCER, producerManifest()],
+        [CONSUMER, manifest],
+      ]),
+    }
+
+    const result = await evaluatePlugin(CONSUMER, manifest, ctx, Date.now())
+
+    expect(result.due).toBe(false)
+    if (result.due) throw new Error('unreachable')
+    expect(result.detail).not.toContain(PRODUCER)
+    expect(result.detail).toContain(state.approvals[CONSUMER]!.fingerprint)
+  })
+
+  /**
    * The backstop edge. A host tz database that no longer knows the zone must
    * land on a refusal, never on a fire and never on a throw — a throw here would
    * reach `plan`, which is contracted never to fail.
