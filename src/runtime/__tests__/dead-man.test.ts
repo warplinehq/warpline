@@ -40,6 +40,7 @@ import type { AdvanceOptions, AdvanceResult } from '../engine.js'
 import { advanceCounts } from '../exit-codes.js'
 import { grantApproval } from '../approval-gate.js'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
+import { seedContentRefusals } from './helpers/content-refusal.js'
 import { _setHome, lastSuccessfulAdvancePath } from '../../lib/paths.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
 
@@ -244,6 +245,36 @@ describe('the dead-man file is written on every arm that returned', () => {
     const counts = advanceCounts(result)
 
     expect({ gated: doc.gated, failed: doc.failed, refused: doc.refused }).toEqual(counts)
+  })
+
+  /**
+   * The disagreement HEAD-12 exists to prevent, reached through a new cause.
+   *
+   * A content refusal exits `0`, so a monitor keying on the exit code alone
+   * learns nothing from it — which is the point: a held gate is the runtime
+   * doing its job. The failure that leaves is silent. A fleet can refuse every
+   * send on every advance for a week while this file reads healthy, and the
+   * count is the only thing standing between an operator and that week.
+   *
+   * Asserted through the file alone, not through the result: a detector reads
+   * this document and nothing else, so the claim has to be stated in the terms
+   * that detector has.
+   */
+  test('a refusal-only advance is non-zero in refused, so the file and the exit code agree', async () => {
+    await seedContentRefusals({ pluginsDir: ctx.pluginsDir, statePath, names: ['sender'] })
+
+    const result = await advance()
+    const doc = await readDeadMan()
+
+    // Non-vacuous: the refusal really happened on this advance.
+    expect(result.refused_plugins).toEqual([{ plugin: 'sender', reason: 'outside_window' }])
+
+    expect(doc.refused).toBe(1)
+    // The other two are zero, which is what makes `refused` the field that
+    // tells this file apart from a healthy one — the same property `gated` has.
+    expect(doc.gated).toBe(0)
+    expect(doc.failed).toBe(0)
+    expect(doc.skipped_reason).toBeNull()
   })
 
   test('the prune count reaches the result and the file', async () => {

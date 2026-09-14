@@ -2287,14 +2287,25 @@ should test them:
    manifest would not load. Read the run log named by `run_id` — unless
    `skipped_reason` is set, in which case there is no log and the failure is a
    manifest that would not import.
-4. **Waiting.** `gated` is greater than zero and `failed` is zero. Plugins are
-   holding at approval gates. Whether that pages you is your call — it is the
-   same distinction `warpline advance --strict` makes at the exit code.
-5. **Healthy.** Recent, `failed` is zero, `gated` is zero, `skipped_reason` is
-   `null`.
+4. **Waiting.** `gated` or `refused` is greater than zero and `failed` is zero.
+   Plugins are holding — at a session approval gate, or on a content approval
+   that no longer authorises the fire. Whether that pages you is your call — it
+   is the same distinction `warpline advance --strict` makes at the exit code,
+   and it covers both fields for the same reason.
 
-A healthy file and an all-gated file differ in `gated` and nowhere else, which is
-what makes the two tellable apart by that field alone.
+   Read `refused` on its own terms. A non-zero `gated` usually means a human has
+   not answered yet; a non-zero `refused` means a human already did, and the
+   answer stopped applying — the window closed, or the approved bytes moved. A
+   fleet that refuses every send on every advance for a week is a fleet doing
+   nothing, and `failed` and `gated` both stay `0` throughout. This field is the
+   only thing in the document that shows it. `warpline advance --json` carries
+   the reason for each refusal; this file carries the count.
+5. **Healthy.** Recent, `failed` is zero, `gated` is zero, `refused` is zero,
+   `skipped_reason` is `null`.
+
+A healthy file, an all-gated file and an all-refused file differ in `gated` and
+`refused` and nowhere else, which is what makes the three tellable apart by
+those two fields alone.
 
 Two operator notes. Set your staleness threshold from your own timer interval,
 not from a number in this document — the runtime does not know how often you run
