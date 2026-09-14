@@ -1802,19 +1802,67 @@ takes a lock for the length of the run, and refuses rather than waits.
 
 **The file is `.lock`, beside `engine-state.json` in the home's state
 directory.** It is JSON, and it records when it was taken, the run id that took
-it, the mode (`advance`), and the holding process id — which is `null` when the
-holder is an orchestrator session rather than a long-lived process.
+it, the mode (`advance`), the holding process id — which is `null` when the
+holder is an orchestrator session rather than a long-lived process — and the
+`host` identifier of the machine that took it, which is `null` when that machine
+could not identify itself. `host` is **nullable and optional** (§ The host
+identifier, below).
 
 **Acquisition is an exclusive create, not a check followed by a write.** There
 is no window in which two processes both see an absent lock and both proceed.
 
 **A stale lock heals; a live one does not.** A lock is stale when it is more
-than two hours old, or when it names a process id that is no longer running. On
+than two hours old, or when it names a process id that is no longer running **on
+the machine that took it**. The process-id test is reached only when the lock's
+`host` and the reading machine's `host` are both known and equal; in every other
+combination it is skipped and only the two-hour window expires the lock. On
 contention the acquire reads the holder back, and if it is stale it breaks it and
 retries exactly once. A holder that is neither — and a lock file that cannot be
 read back as a lock at all — is refused rather than broken. `lock.test.ts` in
 this repository holds every arm of that, including the two that refuse to unlink
 a file they could not parse.
+
+### The host identifier
+
+A home can be attached from more than one machine. A process id is only
+meaningful against the kernel that issued it, and the liveness test asks the
+**local** kernel whatever the lock says — so without a host identifier, machine
+B reads machine A's live lock as a dead process, heals it, and two advances run
+against one home. That is the single way to get two writers, which is what the
+lock exists to prevent.
+
+**Known and known and equal, or no process-id test at all.** Either side `null`,
+either side absent, or the two known and different: the lock expires only by the
+two-hour window.
+
+**`null` never compares equal to `null`.** A machine that could not identify
+itself stores `null`, and two such machines are not the same machine. No literal
+placeholder string is ever written in place of an unknown host — that is the
+shape Git's `gc.pid` has, and it makes two unidentified machines compare equal.
+
+**The field is nullable and optional, and the optionality is load-bearing.** A
+required field would make every in-flight lock written by an older build
+unparseable, and an unparseable lock is refused rather than broken — so the
+upgrade would strand every home that had an advance running when it happened. A
+record carrying no `host` key behaves exactly as the `null` case.
+
+**The stored value is not the machine's identifier.** It is an HMAC over the
+machine id, keyed by the id and taking a fixed warpline application UUID as the
+message — the remedy `machine-id(5)` prescribes for its own *"must not be used
+directly"* and *"must not be exposed ... on the network"*. A warpline home may
+sit on a network mount, so the raw identifier must not be written there. What
+that buys is precisely that the stored value cannot be used **as** a machine id
+anywhere else. It does not buy unguessability. The identifier is derived from
+`/etc/machine-id`, then `/var/lib/dbus/machine-id`, then the macOS
+`IOPlatformUUID`, then `null`. The machine's operator-facing name is never
+consulted: it is operator-chosen, routinely duplicated across a fleet, and
+changes without the machine changing.
+
+**The honest ceiling.** The host field makes the lock honest across machines; it
+does not make it correct. Where a container image bakes in a machine id, or two
+containers bind-mount one, the identifier lies **in the dangerous direction** —
+two machines look like one — and warpline cannot detect it. A
+PID-namespace-based identity is the named upgrade path and is not implemented.
 
 **A release removes only the lock it took.** Both unlinks in the lock module
 read the file back and compare the run id before deleting anything. Without
@@ -1888,7 +1936,8 @@ there will not be one: it is the single way to get two writers onto one home,
 which is the failure the lock exists to prevent. The cost, stated rather than
 discovered: a genuinely wedged live process blocks every advance against that
 home until the two-hour window expires. That is the choice, and the two-hour
-window and the dead-process check are what bound it. An operator who knows the
+window and the dead-process check are what bound it — and for a lock taken on a
+different machine, only the two-hour window bounds it. An operator who knows the
 holder is gone can delete `.lock` by hand; an operator who is not sure should
 wait for the window.
 
@@ -1896,8 +1945,9 @@ wait for the window.
 SIGINT or SIGTERM exits `130` (§ 11) as soon as its stdout has drained, or after
 two seconds if it has not, which ends the process and not the work: the plugin that was in flight may run to completion in a process
 the operator believes is dead. The lock that interruption leaves behind is
-reclaimed by the heal described above — on the next advance if the holder's process is gone, and
-at the two-hour window if the lock was orchestrator-held and names no process.
+reclaimed by the heal described above — on the next advance if the holder's process is gone and the
+lock was taken on this same machine, and at the two-hour window if the lock was orchestrator-held,
+names no process, or came from another machine.
 The two facts belong beside each other because the second is what bounds the
 first.
 

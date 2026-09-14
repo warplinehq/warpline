@@ -18,6 +18,27 @@ export const WarplineLockSchema = z.object({
    * expires abandoned locks.
    */
   pid: z.number().nullable(),
+  /**
+   * Which machine holds the lock, or null when this one could not identify
+   * itself. A pid is only meaningful against the kernel that issued it, and a
+   * home can be attached from more than one machine, so without this field
+   * machine B reads machine A's live lock as stale and heals it — two writers
+   * on one home, the one failure the lock exists to prevent.
+   *
+   * Null means the derivation chain found nothing here. It costs the liveness
+   * check: a lock with a null host on either side is never judged dead by pid
+   * and expires only by the 2h TTL. Two null hosts NEVER compare equal — that
+   * is the whole of the rule, and it is what Git's `gc.pid` gets wrong by
+   * writing a literal placeholder string on failure, which makes two machines
+   * that could not identify themselves look like the same machine.
+   *
+   * Optional as well as nullable, and the optionality is load-bearing. A
+   * required field makes every in-flight lock written by the previous build
+   * unparseable, an unparseable lock is refused rather than broken, and so the
+   * upgrade would strand every home that had an advance running when it
+   * happened. A record with no `host` key behaves as the null case.
+   */
+  host: z.string().nullable().optional(),
 })
 
 export type WarplineLock = z.infer<typeof WarplineLockSchema>
@@ -168,11 +189,24 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-export function isLockStale(lock: WarplineLock): boolean {
+/**
+ * Is this lock safe to break?
+ *
+ * The TTL branch is unconditional. The pid branch is reached only when the
+ * lock's host and this machine's host are BOTH known and equal — anything else
+ * is a pid from a kernel that is not this one, and `process.kill(pid, 0)`
+ * answers about the local kernel whatever the lock says. Either side null,
+ * either side absent, or the two known and different: the pid branch is skipped
+ * entirely and only the 2h TTL expires the lock.
+ */
+export function isLockStale(lock: WarplineLock, read: MachineIdReader = readMachineIdFromHost): boolean {
   const age = Date.now() - new Date(lock.acquired_at).getTime()
   if (age > TWO_HOURS_MS) return true
-  if (lock.pid !== null && !isProcessAlive(lock.pid)) return true
-  return false
+  if (lock.pid === null) return false
+  const theirs = lock.host ?? null
+  const ours = deriveHost(read)
+  if (theirs === null || ours === null || theirs !== ours) return false
+  return !isProcessAlive(lock.pid)
 }
 
 /**
@@ -231,8 +265,9 @@ function lockedError(lockPath: string, held: WarplineLock | null): AdvanceLocked
 export async function acquireLock(
   lockPath: string,
   mode: string = 'health',
-  opts: { pid?: number | null } = {}
+  opts: { pid?: number | null; readMachineId?: MachineIdReader } = {}
 ): Promise<WarplineLock> {
+  const read = opts.readMachineId ?? readMachineIdFromHost
   // { flag: 'wx' } = O_CREAT|O_EXCL — exclusive create, EEXIST if the path is
   // taken, and it refuses a symlink rather than following one. Do not replace
   // it with an existence check and a write; that is the TOCTOU race this flag
@@ -243,6 +278,7 @@ export async function acquireLock(
       run_id: generateRunId(),
       mode,
       pid: opts.pid === undefined ? process.pid : opts.pid,
+      host: deriveHost(read),
     }
     // The lock is the FIRST writer in an advance, and every other writer in
     // this tree does its own recursive mkdir before it writes. This one is the
@@ -263,7 +299,7 @@ export async function acquireLock(
   }
 
   const held = await readLock(lockPath)
-  if (held === null || !isLockStale(held)) throw lockedError(lockPath, held)
+  if (held === null || !isLockStale(held, read)) throw lockedError(lockPath, held)
 
   // Stale. Break it and retry once. The window between the unlink and the
   // retry is the same race `state-manager.ts:112-116` already accepts in

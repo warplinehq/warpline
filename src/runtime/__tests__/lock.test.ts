@@ -53,6 +53,13 @@ function injectedReader(answers: Partial<Record<MachineIdSource, string | null>>
 const MACHINE_A = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
 const MACHINE_B = '0f9e8d7c6b5a49382716f5e4d3c2b1a0'
 
+/** This machine, for host cases. */
+const readerA = (): MachineIdReader => injectedReader({ 'etc-machine-id': MACHINE_A })
+/** Some other machine. */
+const readerB = (): MachineIdReader => injectedReader({ 'etc-machine-id': MACHINE_B })
+/** A machine that cannot identify itself. */
+const readerNone = (): MachineIdReader => injectedReader({})
+
 describe('deriveHost', () => {
   it('returns a hex string that is neither the machine id nor a substring of it', () => {
     const host = deriveHost(injectedReader({ 'etc-machine-id': MACHINE_A }))
@@ -151,8 +158,9 @@ describe('isLockStale', () => {
       run_id: 'run-1',
       mode: 'health',
       pid: 999999,
+      host: deriveHost(readerA()), // same machine, so the pid branch is reached
     }
-    expect(isLockStale(lock)).toBe(true)
+    expect(isLockStale(lock, readerA())).toBe(true)
 
     process.kill = originalKill
   })
@@ -163,8 +171,68 @@ describe('isLockStale', () => {
       run_id: 'run-1',
       mode: 'health',
       pid: process.pid, // current process (alive)
+      host: deriveHost(readerA()),
     }
-    expect(isLockStale(lock)).toBe(false)
+    expect(isLockStale(lock, readerA())).toBe(false)
+  })
+
+  it('never breaks a foreign host lock by pid, and expires it only by the TTL', () => {
+    const originalKill = process.kill
+    process.kill = mock().mockImplementation(() => {
+      throw new Error('ESRCH')
+    }) as unknown as typeof process.kill
+    try {
+      const foreign = { run_id: 'run-1', mode: 'advance', pid: 999999, host: deriveHost(readerB()) }
+      // Dead on THIS kernel, but the pid was never issued by it.
+      expect(isLockStale({ ...foreign, acquired_at: '2026-04-03T11:50:00Z' }, readerA())).toBe(false)
+      expect(isLockStale({ ...foreign, acquired_at: '2026-04-03T09:00:00Z' }, readerA())).toBe(true)
+    } finally {
+      process.kill = originalKill
+    }
+  })
+
+  it('skips the pid branch when neither side can identify itself', () => {
+    const originalKill = process.kill
+    process.kill = mock().mockImplementation(() => {
+      throw new Error('ESRCH')
+    }) as unknown as typeof process.kill
+    try {
+      // Two nulls are not a match. Git's `gc.pid` writes a literal placeholder
+      // here instead, and two unidentified machines then look like one.
+      const lock: WarplineLock = {
+        acquired_at: '2026-04-03T11:50:00Z',
+        run_id: 'run-1',
+        mode: 'advance',
+        pid: 999999,
+        host: null,
+      }
+      expect(deriveHost(readerNone())).toBeNull()
+      expect(isLockStale(lock, readerNone())).toBe(false)
+      expect(isLockStale({ ...lock, acquired_at: '2026-04-03T09:00:00Z' }, readerNone())).toBe(true)
+    } finally {
+      process.kill = originalKill
+    }
+  })
+
+  it('treats a pre-upgrade record carrying no host key as the null case', () => {
+    const raw = {
+      acquired_at: '2026-04-03T11:50:00Z',
+      run_id: 'run-1',
+      mode: 'advance',
+      pid: 999999,
+      // no `host` key at all — written by the build before this field existed
+    }
+    const parsed = WarplineLockSchema.safeParse(raw)
+    expect(parsed.success).toBe(true)
+    const originalKill = process.kill
+    process.kill = mock().mockImplementation(() => {
+      throw new Error('ESRCH')
+    }) as unknown as typeof process.kill
+    try {
+      expect(isLockStale(parsed.data as WarplineLock, readerA())).toBe(false)
+    } finally {
+      process.kill = originalKill
+    }
   })
 
   it('returns false when the PID is alive but owned by another user', () => {
@@ -184,8 +252,9 @@ describe('isLockStale', () => {
         run_id: 'run-1',
         mode: 'health',
         pid: 1, // init/launchd: alive, root-owned, not ours to signal
+        host: deriveHost(readerA()), // matching host, so the pid branch is reached
       }
-      expect(isLockStale(lock)).toBe(false)
+      expect(isLockStale(lock, readerA())).toBe(false)
     } finally {
       process.kill = originalKill
     }
@@ -322,18 +391,45 @@ describe('acquireLock — contention and healing', () => {
     expect(onDisk?.run_id).toBe(acquired.run_id)
   })
 
-  it('heals a fresh lock whose PID is not alive', async () => {
-    await holder({ pid: 999999 })
+  it('heals a fresh lock whose PID is not alive on the same host', async () => {
+    await holder({ pid: 999999, host: deriveHost(readerA()) })
     const originalKill = process.kill
     process.kill = mock().mockImplementation(() => {
       throw new Error('ESRCH')
     }) as unknown as typeof process.kill
     try {
-      const acquired = await acquireLock(lockPath, 'advance', { pid: null })
+      const acquired = await acquireLock(lockPath, 'advance', { pid: null, readMachineId: readerA() })
       expect(acquired.run_id).not.toBe('held-run-id')
     } finally {
       process.kill = originalKill
     }
+  })
+
+  it('refuses a fresh lock whose dead PID belongs to another host', async () => {
+    await holder({ pid: 999999, host: deriveHost(readerB()) })
+    const originalKill = process.kill
+    process.kill = mock().mockImplementation(() => {
+      throw new Error('ESRCH')
+    }) as unknown as typeof process.kill
+    try {
+      let refused = false
+      try {
+        await acquireLock(lockPath, 'advance', { pid: null, readMachineId: readerA() })
+      } catch (e) {
+        refused = (e as Error).name === 'AdvanceLockedError'
+      }
+      expect(refused).toBe(true)
+      expect((await readLock(lockPath))?.run_id).toBe('held-run-id')
+    } finally {
+      process.kill = originalKill
+    }
+  })
+
+  it('stamps the acquiring machine host onto the lock it writes', async () => {
+    const lock = await acquireLock(lockPath, 'advance', { readMachineId: readerA() })
+    expect(lock.host).toBe(deriveHost(readerA()))
+    const onDisk = await readLock(lockPath)
+    expect(onDisk?.host).toBe(lock.host)
   })
 
   it('refuses a fresh pid-null holder without printing a PID', async () => {
