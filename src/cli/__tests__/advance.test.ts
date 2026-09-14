@@ -1074,16 +1074,29 @@ describe('main([advance, --json]) over a content refusal', () => {
     const doc = soleDocument((await capture(() => main(['advance', '--json']))).stdout)
 
     expect(doc.refused).toBe(3)
-    // An ARRAY that survived `JSON.stringify` with three elements in it. A
-    // `Map` here would have serialised to `{}` — present, empty, and wrong on
-    // exactly the advances this field exists for.
-    expect(Array.isArray(doc.refused_plugins)).toBe(true)
-    expect(doc.refused_plugins).toHaveLength(3)
     expect([...(doc.refused_plugins as { plugin: string }[])].map((r) => r.plugin).sort()).toEqual([
       'sender-a',
       'sender-b',
       'sender-c',
     ])
+  })
+
+  test('the refusal list survives JSON.stringify as an array, not as {}', async () => {
+    await seedContentRefusals({
+      pluginsDir: home.pluginsDir,
+      statePath: statePath(),
+      names: ['sender-a', 'sender-b', 'sender-c'],
+    })
+
+    const { stdout } = await capture(() => main(['advance', '--json']))
+
+    // Parsed back out of the stream, not read off an in-process object: the
+    // claim is about what a scheduler's `jq` receives. A `Map` on the payload
+    // would serialise to `{}` here — the field present, empty, and wrong on
+    // exactly the advances it exists for, which is why an array was chosen.
+    const doc = soleDocument(stdout)
+    expect(Array.isArray(doc.refused_plugins)).toBe(true)
+    expect(doc.refused_plugins).toHaveLength(3)
   })
 
   /**

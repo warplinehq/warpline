@@ -248,7 +248,7 @@ describe('the dead-man file is written on every arm that returned', () => {
   })
 
   /**
-   * The disagreement HEAD-12 exists to prevent, reached through a new cause.
+   * The disagreement the counts exist to prevent, reached through a new cause.
    *
    * A content refusal exits `0`, so a monitor keying on the exit code alone
    * learns nothing from it — which is the point: a held gate is the runtime

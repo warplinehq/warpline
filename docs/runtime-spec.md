@@ -2226,8 +2226,8 @@ detector that branches on `"interrupted"` here gets dead code.
 matters most on the case you will hit most.** An advance that stops at an
 approval gate reports `partial` here and exits `0` there, because a held gate is
 the runtime doing its job. A detector that treats `status` as a pass/fail verdict
-will page you every time a plugin waits for a human. Read `gated` and `failed`
-for the verdict, and read `status` for what the run did.
+will page you every time a plugin waits for a human. Read `gated`, `refused` and
+`failed` for the verdict, and read `status` for what the run did.
 
 ### When it is written, and when it is not
 

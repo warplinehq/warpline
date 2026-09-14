@@ -379,8 +379,9 @@ So a fresh install walked through exactly as this page describes gates
 everything on every tick:
 
 ```
-{"run_id":"...","status":"partial","gated":1,"failed":0,"pruned":0,
- "exit_code":0,"plugins":[{"name":"metrics-rollup","state":"gated"}]}
+{"run_id":"...","status":"partial","gated":1,"failed":0,"refused":0,
+ "pruned":0,"exit_code":0,"refused_plugins":[],
+ "plugins":[{"name":"metrics-rollup","state":"gated"}]}
 rc=0
 ```
 
@@ -477,8 +478,9 @@ Two things that catch people out, both covered in § 13:
   `skipped_reason: "quiet_hours"` and no run log. Quiet hours are off until you
   configure a window, so on most homes that field is always `null`.
 - **The file's `status` is not the exit code.** An advance holding at a gate
-  reports `partial` there and exits `0`. Read `gated` and `failed` for the
-  verdict.
+  reports `partial` there and exits `0`. Read `gated`, `refused` and `failed`
+  for the verdict — all three, because an advance that refused every send leaves
+  the first and the last at `0`.
 
 ## Retention
 
@@ -538,7 +540,7 @@ terminal is what makes it match the scheduled case.
 |---|---|
 | The job never fires | The unit is installed but not enabled or not bootstrapped. Re-run the install commands and then the matching check above. |
 | First tick logs "command not found" | The interpreter path. Step 2. |
-| Exits `0` every tick, nothing ever happens | Either a home that resolved somewhere you did not mean, so the advance is looking at an empty fleet and correctly reporting nothing to do — or `review_gate` is on, which is its default, and every plugin is parking at a gate. Run the last probe above: the `--json` plugin list tells you which, an empty list versus a list of `gated` states. |
+| Exits `0` every tick, nothing ever happens | Three causes, and the `--json` document tells them apart. A home that resolved somewhere you did not mean, so the advance is looking at an empty fleet and correctly reporting nothing to do — the plugin list is empty. Or `review_gate` is on, which is its default, and every plugin is parking at a gate — the list is full of `gated` states and `gated` is non-zero. Or a content approval is no longer authorising the fire, in which case `refused` is non-zero and `refused_plugins` names the plugin and the reason: the window closed, the approved bytes moved, or a marked fire was never confirmed. Run the last probe above. |
 | Exits `75` every tick | § 11 names three causes: a throw out of the advance, the refusal to create a home, and contention on the run lock. The message distinguishes them. |
 | Exits `1` on a home you know has plugins | The plugin root loaded no manifests, or every manifest in it threw. This is not a count of failures. Check the unit's command line too: a flag warpline does not know, or a stray word where a flag was meant, is refused with a usage message on stderr and exits `1` having run nothing. |
 | Worked for months, stopped after an upgrade | The absolute interpreter path and the explicit home are pins, and a Node upgrade that moves the binary or a moved home breaks them. That is the cost of the determinism they buy: resolving the interpreter at run time would put back the `PATH` problem step 2 solves. Re-check both after any upgrade or move. |

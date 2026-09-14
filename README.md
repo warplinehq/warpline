@@ -160,7 +160,8 @@ npx warpline configure my-plugin
 npx warpline plan
 
 # Execute everything that's due, unattended, and exit with a code a scheduler
-# can read. --strict reports a held approval gate as a failure instead of 0.
+# can read. --strict reports a held approval gate, or a content approval that
+# refused the fire, as a failure instead of 0.
 npx warpline advance
 
 # Invoke one plugin handler directly
