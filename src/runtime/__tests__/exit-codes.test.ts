@@ -201,7 +201,7 @@ describe('advanceCounts', () => {
     expect(counts.failed).toBe(
       [...result.plugin_states.values()].filter((s) => s === 'failed').length,
     )
-    expect(counts).toEqual({ gated: 1, failed: 0 })
+    expect(counts).toEqual({ gated: 1, failed: 0, refused: 0 })
   })
 
   test('counts a load failure as failed', async () => {
@@ -210,7 +210,7 @@ describe('advanceCounts', () => {
 
     const counts = advanceCounts(await advance())
 
-    expect(counts).toEqual({ gated: 0, failed: 1 })
+    expect(counts).toEqual({ gated: 0, failed: 1, refused: 0 })
   })
 })
 

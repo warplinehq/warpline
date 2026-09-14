@@ -20,7 +20,7 @@
  * standing, because a stale file is precisely the signal an operator needs.
  *
  * The key-enumeration case asserts the exact top-level key set. The document is
- * a run id, timestamps, a status, a reason token and three integers, and
+ * a run id, timestamps, a status, a reason token and four integers, and
  * nothing else — no plugin summary, no plugin output, no operator
  * configuration value, no path outside the home. This project has twice had to
  * fix a leak where operator values reached a summary field, and a free-text
@@ -243,7 +243,7 @@ describe('the dead-man file is written on every arm that returned', () => {
     const doc = await readDeadMan()
     const counts = advanceCounts(result)
 
-    expect({ gated: doc.gated, failed: doc.failed }).toEqual(counts)
+    expect({ gated: doc.gated, failed: doc.failed, refused: doc.refused }).toEqual(counts)
   })
 
   test('the prune count reaches the result and the file', async () => {
@@ -278,6 +278,7 @@ describe('the dead-man file is written on every arm that returned', () => {
       'failed',
       'gated',
       'pruned',
+      'refused',
       'run_id',
       'skipped_reason',
       'status',

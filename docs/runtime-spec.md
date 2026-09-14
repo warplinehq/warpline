@@ -1816,7 +1816,7 @@ them.
 
 | Code | Meaning |
 |------|---------|
-| `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, or a plugin is holding at an approval gate. |
+| `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, a plugin is holding at an approval gate, or a content approval declined to authorise a fire. |
 | `1` | At least one plugin failed, the plugin root loaded no manifests at all, or the command line was not valid. |
 | `75` | Could not finish. Often nothing ran and nothing was written, but not always — see below before treating it as a free retry. |
 | `130` | Interrupted by SIGINT or SIGTERM. The process stopped; the work may not have. |
@@ -1907,8 +1907,9 @@ code, which reaches it without being parsed.
 
 ### The code comes from the run's own state, never from its status
 
-The code is computed from exactly two fields of the advance result:
-`plugin_states` and `gated_plugins`. It never reads `AdvanceResult.status`, and
+The code is computed from exactly three fields of the advance result:
+`plugin_states`, `gated_plugins` and `refused_plugins`. It never reads
+`AdvanceResult.status`, and
 that distinction is the point. A run that stops at an
 approval gate reports `partial`, because it did not get through the fleet — but a
 held gate is the runtime doing exactly what it is for. Reporting it as a failure
@@ -1926,13 +1927,24 @@ Two consequences worth stating plainly:
 
 ### `--strict`
 
-`warpline advance --strict` promotes a held approval gate to `1`. Use it where a
-gate waiting on a human is itself the thing you want paged about — a fleet that
-is supposed to be running fully autonomously, for instance.
+`warpline advance --strict` promotes a gated **or refused** advance to `1`. Use
+it where a gate waiting on a human is itself the thing you want paged about — a
+fleet that is supposed to be running fully autonomously, for instance.
+
+A content refusal is `0` on its own. A content approval that no longer
+authorises the fire — the window closed, the approved bytes moved, a marked fire
+never confirmed (§ 5) — is the same gate holding for a different reason, and a
+held gate is the runtime doing its job. Without `--strict` the code says so, and
+the count is what tells you it happened: `warpline advance --json` carries
+`refused` and the structured reason for each refusal, and the dead-man file
+(§ 13) carries the count. That pair is deliberate. A fleet can refuse every send
+on every advance for a week, and nothing about the exit code alone would
+distinguish that from a fleet with nothing to do.
 
 `--strict` changes none of the `1` cases. A plugin failure is `1` with it or
 without it, and a plugin root that loaded no manifests is `1` with it or without
-it. The flag moves the gated case and nothing else.
+it. The flag moves the gated and refused cases and nothing else — and it moves
+them together, as one `1`: an advance with both is not two failures.
 
 ### `75`
 
@@ -2194,10 +2206,11 @@ file's own age.
 | `skipped_reason` | string \| null | `null` when the advance ran. `"quiet_hours"` when it returned early because a quiet window was active. |
 | `gated` | integer | How many plugins are holding at an approval gate. |
 | `failed` | integer | How many plugins ended failed, manifests that would not load included. |
+| `refused` | integer | How many plugins a content approval declined to authorise — the window closed, the approved bytes moved, or a marked fire was never confirmed (§ 5). The **count only**: the reasons are plugin-derived and reach a reader through `warpline advance --json`, never through this file. |
 | `pruned` | integer | How many run records this advance's retention prune removed. Always `0` on a skipped advance, which returns above the prune. |
 
-Those seven keys are the whole document, and `dead-man.test.ts` enumerates them
-so that adding an eighth has to be a deliberate act. Nothing else belongs here:
+Those eight keys are the whole document, and `dead-man.test.ts` enumerates them
+so that adding a ninth has to be a deliberate act. Nothing else belongs here:
 no plugin summary, no plugin output, no value read out of your configuration and
 no path. A field carrying free text would make this file a channel for content it
 was never meant to carry.

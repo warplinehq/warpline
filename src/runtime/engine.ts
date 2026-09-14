@@ -33,6 +33,10 @@ import {
 import { atomicWriteText } from '../lib/fs-atomic.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
 import { advanceCounts } from './exit-codes.js'
+// The account's own type, imported rather than re-spelled as a `Pick` here: a
+// second spelling is a second answer about which fields of an advance the
+// record is derived from, and the two only have to disagree once.
+import type { AdvanceOutcome } from './exit-codes.js'
 import { acquireLock, releaseLock } from './lock.js'
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
@@ -1433,15 +1437,20 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
      * reading it start disagreeing about one advance.
      *
      * Nothing else goes in this document. A run id, a timestamp, the advance's
-     * own status, a reason token and three integers — no plugin summary, no
+     * own status, a reason token and four integers — no plugin summary, no
      * plugin output, no operator configuration value, no path. The key set is
      * enumerated by a test so that adding a field is a deliberate act.
+     *
+     * `refused` is the COUNT and never the reasons. The structured reasons a
+     * content refusal carries are plugin-derived, and a list of them here would
+     * be exactly the free-text channel the paragraph above refuses. A consumer
+     * that wants them reads `warpline advance --json`.
      */
     const writeDeadMan = async (
-      outcome: Pick<AdvanceResult, 'plugin_states' | 'gated_plugins'>,
+      outcome: AdvanceOutcome,
       fields: { run_id: string; status: AdvanceResult['status']; skipped_reason: string | null; pruned: number },
     ): Promise<void> => {
-      const { gated, failed } = advanceCounts(outcome)
+      const { gated, failed, refused } = advanceCounts(outcome)
       await atomicWriteText(
         options.stateDir === undefined
           ? defaultDeadManPath()
@@ -1457,6 +1466,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             skipped_reason: fields.skipped_reason,
             gated,
             failed,
+            refused,
             pruned: fields.pruned,
           },
           null,
@@ -1579,7 +1589,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // `pruned: 0` and it is honest: the prune runs below this guard, so a
       // skipped advance reclaims nothing. Nothing looked, so nothing went.
       await writeDeadMan(
-        { plugin_states: quietStates, gated_plugins: [] },
+        // Nothing was evaluated, so nothing was refused — the same honesty
+        // `pruned: 0` makes below, and the same empty array this arm returns.
+        { plugin_states: quietStates, gated_plugins: [], refused_plugins: [] },
         { run_id, status: quietStatus, skipped_reason: 'quiet_hours', pruned: 0 },
       )
       return {
@@ -2428,7 +2440,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // below, so two advances cannot interleave writes to it. Not in the release
     // block: a throw must leave the previous file standing.
     await writeDeadMan(
-      { plugin_states, gated_plugins },
+      { plugin_states, gated_plugins, refused_plugins },
       { run_id, status: engineStatus, skipped_reason: null, pruned: prunedRunLogs },
     )
 

@@ -28,18 +28,30 @@
  */
 import type { AdvanceResult } from './engine.js'
 
-/** The only two fields of an advance the exit code is allowed to read. */
-export type AdvanceOutcome = Pick<AdvanceResult, 'plugin_states' | 'gated_plugins'>
+/** The only three fields of an advance the exit code is allowed to read. */
+export type AdvanceOutcome = Pick<
+  AdvanceResult,
+  'plugin_states' | 'gated_plugins' | 'refused_plugins'
+>
 
 export interface AdvanceCounts {
   /** How many plugins are holding at an approval gate. */
   gated: number
   /** How many plugins ended in `'failed'`, load failures included. */
   failed: number
+  /**
+   * How many plugins a content approval declined to authorise.
+   *
+   * A count, never the reasons. The structured reasons are on the result and
+   * reach a consumer through `warpline advance --json`; a plugin-derived list
+   * in the dead-man file would widen that document past what it permits, and
+   * this is the type that document's writer reads.
+   */
+  refused: number
 }
 
 /**
- * The gated and failed counts for the run's own record.
+ * The gated, failed and refused counts for the run's own record.
  *
  * Exported so the record a monitor reads and the code it reads are derived from
  * one walk over one map. A second count computed somewhere else is a second
@@ -53,7 +65,13 @@ export function advanceCounts(result: AdvanceOutcome): AdvanceCounts {
     // error rather than a silently-always-false branch.
     if (state === 'failed') failed += 1
   }
-  return { gated: result.gated_plugins.length, failed }
+  return {
+    gated: result.gated_plugins.length,
+    failed,
+    // `.length` over the structured array the engine already populated. No
+    // second walk: a refusal is counted where the advance recorded it.
+    refused: result.refused_plugins.length,
+  }
 }
 
 /**
@@ -65,8 +83,18 @@ export function advanceCounts(result: AdvanceOutcome): AdvanceCounts {
  * `'failed'` — so an empty map means the plugin root held nothing importable.
  * It is not a count of failures and must not be read as one.
  *
- * `opts.strict` promotes a held gate to `1`. It changes none of the `1` cases:
- * a plugin failure and a zero-manifest root are `1` with it or without it.
+ * `opts.strict` promotes a held gate to `1`, and a content refusal with it. It
+ * changes none of the `1` cases: a plugin failure and a zero-manifest root are
+ * `1` with it or without it.
+ *
+ * A refusal on its own is `0`, for the reason stated at the top of this file: a
+ * held approval gate is the runtime doing its job, and a content refusal is the
+ * same gate holding because the bytes a human approved are no longer the bytes
+ * that would ship. Reporting it as a failure trains an operator to ignore the
+ * code. Reporting it as nothing is the other failure — an unattended fleet can
+ * refuse every send for a week while every monitor reads healthy — which is why
+ * the count reaches `--json` and the dead-man file whatever this returns, and
+ * why `--strict` covers it.
  */
 export function advanceExitCode(
   result: AdvanceOutcome,
@@ -74,9 +102,13 @@ export function advanceExitCode(
 ): 0 | 1 {
   if (result.plugin_states.size === 0) return 1
 
-  const { gated, failed } = advanceCounts(result)
+  const { gated, failed, refused } = advanceCounts(result)
   if (failed > 0) return 1
-  if (gated > 0) return opts.strict === true ? 1 : 0
+  // Gated OR refused, one clause and one `1`. Not additive over exit codes:
+  // two reasons to report a held gate are still one held advance. Evaluated
+  // below the `failed` check so a failure outranks both, which is the
+  // precedence every installed scheduler unit already keys on.
+  if (gated > 0 || refused > 0) return opts.strict === true ? 1 : 0
 
   return 0
 }
