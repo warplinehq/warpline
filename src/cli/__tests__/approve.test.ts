@@ -15,7 +15,13 @@ import { tmpdir } from 'node:os'
 import { _setHome, sessionApprovalPath } from '../../lib/paths.js'
 import { checkApproval, mergeGrant, MAX_GRANT_WINDOW_MS } from '../../runtime/approval-gate.js'
 import { invokePlugin } from '../../runtime/invoke-plugin.js'
-import { applyPendingGate, denialFingerprint, findPendingGate, GATE_MAX_AGE_MS } from '../../runtime/engine.js'
+import {
+  applyPendingGate,
+  denialFingerprint,
+  findPendingGate,
+  GATE_MAX_AGE_MS,
+  proposalFingerprint,
+} from '../../runtime/engine.js'
 import { readEngineState } from '../../runtime/engine-state-store.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
@@ -1033,8 +1039,19 @@ describe('warpline approve --content', () => {
     )
   }
 
+  /** The producer Output every case gets unless it asks for a different one. */
+  const DEFAULT_OUTPUT = {
+    type: 'brief',
+    format: 'json',
+    body: '{"batch":"twelve invoices"}',
+    run_id: 'run-the-operator-read',
+  }
+
   /** State with the bystander approval and, optionally, a producer Output. */
-  async function seedContentState(producerRan: boolean): Promise<void> {
+  async function seedContentState(
+    producerRan: boolean,
+    lastOutput: Record<string, unknown> = DEFAULT_OUTPUT,
+  ): Promise<void> {
     await mkdir(join(root, 'state'), { recursive: true })
     await writeFile(
       statePath,
@@ -1045,12 +1062,7 @@ describe('warpline approve --content', () => {
               [PRODUCER]: {
                 last_run_at: new Date(Date.now() - 3_600_000).toISOString(),
                 status: 'success',
-                last_output: {
-                  type: 'brief',
-                  format: 'json',
-                  body: '{"batch":"twelve invoices"}',
-                  run_id: 'run-the-operator-read',
-                },
+                last_output: lastOutput,
               },
             }
           : {},
@@ -1058,6 +1070,29 @@ describe('warpline approve --content', () => {
       }),
     )
   }
+
+  /**
+   * The bytes as the operator actually sees them, cut out of stdout between the
+   * two delimiters the command prints.
+   *
+   * Cutting rather than substring-matching is what makes "renders whole" a real
+   * assertion: a truncating renderer produces a SHORTER slice, and a `toContain`
+   * on a prefix would pass on one. The delimiters are plain text and a body may
+   * forge them; that costs a confused test parser, never a hidden byte, because
+   * every byte between them is printed and every control character in them is
+   * escaped.
+   */
+  const BEGIN = '----- begin approved bytes -----\n'
+  const END = '\n----- end approved bytes -----'
+  function renderedBody(stdout: string): string {
+    const start = stdout.indexOf(BEGIN)
+    expect(start).toBeGreaterThanOrEqual(0)
+    const end = stdout.indexOf(END, start)
+    expect(end).toBeGreaterThan(start)
+    return stdout.slice(start + BEGIN.length, end)
+  }
+
+  const approveArgs = [CONSUMER, '--content', '--not-after', '2099-01-01T00:00']
 
   const readState = async (): Promise<{ approvals: Record<string, Record<string, unknown>> }> =>
     JSON.parse(await readFile(statePath, 'utf-8'))
@@ -1237,5 +1272,120 @@ describe('warpline approve --content', () => {
 
     expect(await approvalsOnDisk()).toBe(before)
     expect(existsSync(approvalPath)).toBe(false)
+  })
+
+  // -- What the operator actually reads ------------------------------------
+  // The whole guarantee rests on the operator having SEEN the bytes. A renderer
+  // that strips escapes hides the evidence an attack was attempted, one that
+  // truncates hides the tail where a payload appended after a benign opening
+  // would sit, and one that resolves a `path` Output reads a file the runtime
+  // was never asked to read.
+
+  test('C9: an ANSI sequence renders visible and no raw ESC byte reaches the terminal', async () => {
+    await writeContentPair()
+    await seedContentState(true, {
+      ...DEFAULT_OUTPUT,
+      format: 'text',
+      body: 'twelve invoices [31mand one wire transfer[0m',
+    })
+
+    const { code, stdout } = await capture('approve', approveArgs)
+
+    expect(code).toBe(0)
+    expect(renderedBody(stdout)).toBe('twelve invoices \\x1b[31mand one wire transfer\\x1b[0m')
+    // Escaped, never stripped: the literal four characters are present AND the
+    // byte that would repaint the screen is absent from the whole of stdout.
+    expect(stdout).toContain('\\x1b')
+    expect(stdout).not.toContain('')
+  })
+
+  test('C10: BEL, NUL, CR and DEL render as visible escapes and none reaches the terminal', async () => {
+    await writeContentPair()
+    await seedContentState(true, {
+      ...DEFAULT_OUTPUT,
+      format: 'text',
+      body: 'ab c\rde\\f',
+    })
+
+    const { code, stdout } = await capture('approve', approveArgs)
+
+    expect(code).toBe(0)
+    // The authored backslash is escaped too, so an escape the renderer emitted
+    // is tellable apart from one the plugin wrote.
+    expect(renderedBody(stdout)).toBe('a\\x07b\\x00c\\x0dd\\x7fe\\\\f')
+    for (const raw of ['', ' ', '\r', '']) {
+      expect(stdout).not.toContain(raw)
+    }
+  })
+
+  test('C11: a newline inside the body stays a newline', async () => {
+    await writeContentPair()
+    await seedContentState(true, {
+      ...DEFAULT_OUTPUT,
+      format: 'text',
+      body: 'to: a@example.com\nto: b@example.com',
+    })
+
+    const { code, stdout } = await capture('approve', approveArgs)
+
+    expect(code).toBe(0)
+    // Line structure is what the operator is reading. Escaping it would make a
+    // multi-line batch unreadable, which defeats the point of showing it.
+    expect(renderedBody(stdout)).toBe('to: a@example.com\nto: b@example.com')
+    expect(stdout).not.toContain('\\x0a')
+  })
+
+  test('C12: a 16 KiB multi-byte body renders whole, with no truncation marker', async () => {
+    const body = '日'.repeat(5461) + 'a'
+    expect(Buffer.byteLength(body, 'utf8')).toBe(16_384)
+    await writeContentPair()
+    await seedContentState(true, { ...DEFAULT_OUTPUT, format: 'text', body })
+
+    const { code, stdout } = await capture('approve', approveArgs)
+
+    expect(code).toBe(0)
+    // Whole, asserted by equality on the cut slice rather than by a prefix
+    // match — a truncating renderer produces a shorter slice and fails here.
+    expect(renderedBody(stdout)).toBe(body)
+    for (const marker of ['…', '[truncated]', '...']) {
+      expect(stdout).not.toContain(marker)
+    }
+  })
+
+  test('C13: an Output declaring a path is refused, and the path is neither read nor echoed', async () => {
+    const secret = join(root, 'not-ours.txt')
+    await writeFile(secret, 'bytes the runtime was never asked to read')
+    await writeContentPair()
+    await seedContentState(true, { type: 'artifact', format: 'text', path: secret, run_id: 'run-p' })
+    const before = await approvalsOnDisk()
+
+    const { code, stdout, stderr } = await capture('approve', approveArgs)
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(CONSUMER)
+    expect(stderr.toLowerCase()).toContain('path')
+    expect(stderr).toContain('Nothing was written')
+    // The path is refused outright, never resolved — so it is not echoed
+    // either: an operator's path is exactly the kind of value that carries a
+    // machine's secrets into a shell history.
+    expect(stderr).not.toContain(secret)
+    expect(stdout).not.toContain('bytes the runtime was never asked to read')
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C14: the fingerprint prints whole on its own line and is the one the gate compares', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+
+    const { code, stdout } = await capture('approve', approveArgs)
+
+    expect(code).toBe(0)
+    const state = await readEngineState(statePath)
+    const expected = proposalFingerprint(state, PRODUCER, makeManifest(PRODUCER, []))
+    // Line equality, not a prefix match: a renderer printing the first eight
+    // characters would satisfy `toContain` and leave the operator unable to
+    // check the value a later drift refusal cites.
+    expect(stdout.split('\n')).toContain(expected)
+    expect((await readState()).approvals[CONSUMER].fingerprint).toBe(expected)
   })
 })
