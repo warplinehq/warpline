@@ -18,10 +18,12 @@ import { invokePlugin } from '../../runtime/invoke-plugin.js'
 import {
   applyPendingGate,
   denialFingerprint,
+  evaluatePlugin,
   findPendingGate,
   GATE_MAX_AGE_MS,
   proposalFingerprint,
 } from '../../runtime/engine.js'
+import type { EvalContext } from '../../runtime/engine.js'
 import { readEngineState } from '../../runtime/engine-state-store.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
@@ -1387,5 +1389,169 @@ describe('warpline approve --content', () => {
     // check the value a later drift refusal cites.
     expect(stdout.split('\n')).toContain(expected)
     expect((await readState()).approvals[CONSUMER].fingerprint).toBe(expected)
+  })
+  // -- Withdrawal, and the one record that cannot be erased -----------------
+  // `revoke` retires a grant and `deny` answers a proposal with a no. Neither
+  // is an operator taking back a yes they gave to specific bytes, which is what
+  // `--remove` is for. The exception is a record marked and never confirmed:
+  // absence would destroy the only evidence that a send may have landed, so
+  // that one record refuses both withdrawal and re-approval until the operator
+  // resolves it at the sink.
+
+  /** The approval record every case below starts from, before its overrides. */
+  const approvalFor = (over: Record<string, unknown> = {}) => ({
+    plugin: CONSUMER,
+    producer: PRODUCER,
+    fingerprint: 'b'.repeat(64),
+    run_id: 'run-the-operator-read',
+    approved_at: '2026-09-01T00:00:00.000Z',
+    not_before: null,
+    not_after: '2099-01-01T00:00',
+    zone: 'UTC',
+    effect_id: null,
+    marked_at: null,
+    confirmed_at: null,
+    ...over,
+  })
+
+  /** Put a record on disk for the consumer, leaving the bystander alone. */
+  async function putApproval(record: Record<string, unknown>): Promise<void> {
+    const raw = JSON.parse(await readFile(statePath, 'utf-8'))
+    raw.approvals[CONSUMER] = record
+    await writeFile(statePath, JSON.stringify(raw))
+  }
+
+  /** The consumer's manifest as the evaluator sees it. */
+  const consumerManifest = (): PluginManifest => ({
+    ...makeManifest(CONSUMER, ['sends_email']),
+    approval_class: 'content',
+    dependencies: [PRODUCER],
+  })
+
+  const MARKED = {
+    effect_id: 'c'.repeat(64),
+    marked_at: '2026-09-10T08:30:00.000Z',
+  }
+
+  test('C15: --remove withdraws a live record, and the next evaluation is ordinary not-due', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    expect((await capture('approve', approveArgs)).code).toBe(0)
+    expect((await readState()).approvals[CONSUMER]).toBeDefined()
+
+    const { code, stdout } = await capture('approve', [CONSUMER, '--content', '--remove'])
+
+    expect(code).toBe(0)
+    expect(stdout).toContain(CONSUMER)
+    expect((await readState()).approvals[CONSUMER]).toBeUndefined()
+    // The bystander is untouched: withdrawing is a per-plugin gesture too.
+    expect((await readState()).approvals['someone-else']).toEqual(BYSTANDER)
+
+    // Ordinary not-due, not a refusal. A withdrawal puts the plugin back where
+    // it was before anyone answered, which is unapproved and unremarkable —
+    // reporting it as a refusal would tell an operator reading `plan` that
+    // something went wrong when they are the one who took the yes back.
+    const state = await readEngineState(statePath)
+    const manifest = consumerManifest()
+    const ctx: EvalContext = {
+      currentTier: 'normal',
+      force: false,
+      state,
+      approvalPath,
+      manifests: new Map([
+        [PRODUCER, makeManifest(PRODUCER, [])],
+        [CONSUMER, manifest],
+      ]),
+    }
+    const ev = await evaluatePlugin(CONSUMER, manifest, ctx, Date.now())
+    expect(ev.due).toBe(false)
+    if (ev.due) throw new Error('unreachable')
+    expect(ev.reason).toBe('unapproved')
+    expect(ev.detail).toContain('no content approval on file')
+  })
+
+  test('C16: --remove with no record on file is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    const before = await approvalsOnDisk()
+
+    const { code, stderr } = await capture('approve', [CONSUMER, '--content', '--remove'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(CONSUMER)
+    expect(stderr).toContain('Nothing was removed')
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C17: approving over a marked-unconfirmed record is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor(MARKED))
+    const before = await approvalsOnDisk()
+
+    const { code, stderr } = await capture('approve', approveArgs)
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(CONSUMER)
+    expect(stderr).toContain(MARKED.effect_id)
+    expect(stderr).toContain(MARKED.marked_at)
+    expect(stderr).toContain('Nothing was written')
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C18: --remove over a marked-unconfirmed record is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor(MARKED))
+    const before = await approvalsOnDisk()
+
+    const { code, stderr } = await capture('approve', [CONSUMER, '--content', '--remove'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(CONSUMER)
+    expect(stderr).toContain(MARKED.effect_id)
+    expect(stderr).toContain(MARKED.marked_at)
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C19: --remove over a confirmed record succeeds — a spent record is a report, not a question', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor({ ...MARKED, confirmed_at: '2026-09-10T08:30:04.000Z' }))
+
+    const { code } = await capture('approve', [CONSUMER, '--content', '--remove'])
+
+    expect(code).toBe(0)
+    expect((await readState()).approvals[CONSUMER]).toBeUndefined()
+  })
+
+  test('C20: --remove reaches the record of a plugin that is no longer installed', async () => {
+    // Validated against `state.approvals` and not against the manifests. Were
+    // it the other way round, uninstalling a plugin after approving it would
+    // strand its record with no CLI gesture that reaches it.
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor())
+    await rm(join(root, 'plugins', CONSUMER), { recursive: true, force: true })
+
+    const { code } = await capture('approve', [CONSUMER, '--content', '--remove'])
+
+    expect(code).toBe(0)
+    expect((await readState()).approvals[CONSUMER]).toBeUndefined()
+    expect((await readState()).approvals['someone-else']).toEqual(BYSTANDER)
+  })
+
+  test('C21: --remove without --content is refused rather than merging a grant', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    const before = await approvalsOnDisk()
+
+    const { code, stderr } = await capture('approve', ['render-issue', '--remove'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('--content')
+    expect(stderr).toContain('revoke')
+    expect(existsSync(approvalPath)).toBe(false)
+    expect(await approvalsOnDisk()).toBe(before)
   })
 })

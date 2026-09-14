@@ -1663,6 +1663,58 @@ A lapsed window does not auto-approve, does not extend and does not degrade to
 an ordinary send. It stops applying, and the operator is the only one who can
 write another.
 
+#### Writing and withdrawing one (`warpline approve --content`)
+
+`warpline approve <plugin> --content --not-after <wall> [--not-before <wall>]
+[--zone <iana>]` writes the record above for one plugin, and
+`warpline approve <plugin> --content --remove` takes it back. Both validate
+everything inside a single state-lock critical section before mutating anything,
+so a refused command leaves the document byte-unchanged.
+
+**The command prints the bytes it is asking about.** The whole guarantee rests
+on the operator having read them, so the producer's inline body is written to
+stdout between two delimiters, preceded by the whole untruncated fingerprint and
+by the window both as it was typed and as it resolves to instants — a zone
+mistake is invisible in a wall clock and obvious in the instant it lands on.
+Every C0 control character except LF and TAB, DEL, and every C1 control
+character render as a visible `\xNN` escape. They are escaped and never
+stripped: a stripping renderer removes the evidence that an ANSI repaint was
+attempted, and repainting is how a screen is made to disagree with the record.
+Nothing is ever truncated — the Output schema's 16 KiB inline cap is the only
+bound, and cutting would hide the tail, which is where a long batch's surprises
+sit.
+
+**An Output declaring `path` rather than `body` is refused, not read.** The
+runtime does not resolve, normalise or stat the path, and does not repeat it in
+the refusal. Approving by content means the operator saw the exact bytes; a path
+is a promise about a file that may say something else by the time it is read,
+and refusing outright is how the verb sidesteps path traversal entirely rather
+than defending against it.
+
+**Withdrawal is validated against the record, not against what is installed.**
+A plugin uninstalled after it was approved is still reachable by name from
+`--remove`; were it checked against the loaded manifests, its record would be
+stranded in the state document with no gesture that reaches it. `--remove` is
+not `revoke`, which retires a session grant, and not `deny`, which answers a
+proposal with a no — it is the yes to specific bytes taken back, and it leaves
+the plugin reported as ordinary unapproved rather than as refused.
+
+**Two refusals protect a marked-unconfirmed record.** For a record with
+`marked_at` set and `confirmed_at` still null, both a fresh approval and a
+`--remove` are refused, naming the plugin, the `effect_id` and the `marked_at`
+instant. A fresh approval would erase the open question rather than answer it,
+and re-arm a send that may already have gone out; a removal would destroy the
+only evidence that a send may have landed. A record whose `confirmed_at` is set
+is a state report rather than an open question, and removes normally.
+
+**The gap that leaves, stated rather than closed.** There is no operator command
+today that resolves an indeterminate record, so such a record is currently
+permanent: it can be neither re-approved nor removed. That is the conservative
+direction and it is deliberate — the record holds a fingerprint, a producer
+name, a run id and three timestamps, and no payload, so what persists is a
+reference rather than content. The resolution gesture is a later addition made
+on purpose, not something to reach by loosening either refusal.
+
 ### `last_output`
 
 A pointer to the most recent Output a plugin produced, so a reader can name it

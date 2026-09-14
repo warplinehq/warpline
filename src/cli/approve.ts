@@ -22,7 +22,10 @@
  * later unattended advance may ship exactly those and nothing else. It writes
  * no grant and applies no parked result. Like the pair above it is refused
  * whole when mixed with either — there is no half-answer that is not a lie
- * about one of the three.
+ * about one of the three. It is the only one of the three with a withdrawal
+ * gesture of its own, `--content --remove`: `revoke` retires a grant and `deny`
+ * answers a proposal with a no, and neither of those is an operator taking back
+ * a yes they already gave to specific bytes.
  *
  * **The gate-apply branch reaches no symbol in `approval-gate.ts`, and so does
  * the content branch.** That is what makes "an outcome review mints no
@@ -62,6 +65,7 @@
 import { parseArgs } from 'node:util'
 import {
   applyPendingGate,
+  approvalStanding,
   denialStanding,
   findPendingGate,
   loadPluginManifests,
@@ -76,7 +80,7 @@ import {
   readEngineStateReadOnly,
   writeEngineState,
 } from '../runtime/engine-state-store.js'
-import type { EngineState } from '../schemas/engine-state.js'
+import type { Approval, EngineState } from '../schemas/engine-state.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { engineStatePath, pluginsDir, sessionApprovalPath } from '../lib/paths.js'
 import { suggest } from './suggest.js'
@@ -110,6 +114,8 @@ Content approval (one plugin, declaring approval_class: 'content'):
   --not-after <w>   REQUIRED. Wall clock the window closes, YYYY-MM-DDTHH:mm.
   --not-before <w>  Wall clock the window opens. Default: now.
   --zone <iana>     IANA zone both bounds are read in. Default: UTC.
+  --remove          Withdraw the content approval. Only with --content; a
+                    session grant is withdrawn with 'warpline revoke'.
 `
 
 const MINUTE = 60 * 1000
@@ -168,6 +174,25 @@ const BODY_END = '----- end approved bytes -----'
  * and one they cannot. The fingerprint is printed before the body, so a forged
  * copy inside it arrives after the one the runtime computed.
  */
+/**
+ * The sentence both marked-unconfirmed refusals say, so they cannot drift into
+ * saying two different things about one record.
+ *
+ * It names the plugin, the effect id and the instant of the mark and NOTHING
+ * else — no producer name, no window bound, and never a byte of the approved
+ * content. The effect id is the operator's handle at the sink, which is where
+ * the open question is actually settled; it is null only on a record marked by
+ * a runtime that predates the id, and saying so beats printing the word null.
+ */
+function markedUnconfirmed(plugin: string, approval: Approval): string {
+  const effect = approval.effect_id === null ? '(none recorded)' : approval.effect_id
+  return (
+    `${plugin} was marked at ${approval.marked_at} and never confirmed, so the runtime does not ` +
+    `know whether those bytes shipped. Resolve it at the sink using effect id ${effect} first. ` +
+    `Nothing was written.\n`
+  )
+}
+
 function escapeForOperator(body: string): string {
   // A character loop rather than a regex character class: the bounds below are
   // numbers a reader can check against the four rules above, where a class of
@@ -246,6 +271,19 @@ async function approveContent(
           `Approve it with 'warpline approve ${consumer}', or change its manifest. ` +
           `Nothing was written.\n`,
       )
+      return 1
+    }
+
+    // -- The open question -------------------------------------------------
+    // A record marked and never confirmed says the runtime began firing and
+    // cannot prove it finished. Writing a fresh approval over it would erase
+    // that question rather than answer it, and re-arm a send that may already
+    // have gone out. The standing is READ, never re-derived here: a hand-rolled
+    // `marked_at !== null && confirmed_at === null` is a second answer to a
+    // question that already has one, and two answers eventually disagree.
+    const standing = approvalStanding(state, consumer, manifests, now)
+    if (standing.standing === 'indeterminate') {
+      process.stderr.write(markedUnconfirmed(consumer, standing.approval))
       return 1
     }
 
@@ -385,6 +423,74 @@ async function approveContent(
   })
 }
 
+/**
+ * Take back a standing yes to specific bytes.
+ *
+ * Validated against **`state.approvals`**, not against the loaded manifests, on
+ * the argument `deny --remove` makes one file over: a plugin uninstalled after
+ * it was approved must still be reachable from the CLI, or its record is
+ * stranded in the state document for good. The manifest map is still passed,
+ * because `approvalStanding` takes it — and the one arm this function refuses on
+ * is decided before the map is consulted at all.
+ *
+ * The read and the write are ONE critical section, which is what makes the
+ * marked-unconfirmed refusal enforceable rather than advisory: a record could
+ * otherwise be marked between a read that saw it unmarked and the write that
+ * removed it.
+ */
+async function removeContentApproval(
+  consumer: string,
+  manifests: Map<string, PluginManifest>,
+  now: number,
+): Promise<number> {
+  const statePath = engineStatePath()
+  const lockPath = pathsForStateFile(statePath).lockPath
+
+  return await withStateLockAt(lockPath, async () => {
+    let state: EngineState
+    try {
+      state = await readEngineState(statePath)
+    } catch (err) {
+      if (!(err instanceof EngineStateInvalidError)) throw err
+      process.stderr.write(`Cannot read engine state: ${err.reason}\nNothing was removed.\n`)
+      return 1
+    }
+
+    // `Object.hasOwn`, not `!== undefined`: this name comes straight from the
+    // operator and is deliberately not checked against the manifests, so
+    // `--remove toString` arrives here — and a plain index read answers that
+    // with an inherited function, which would make the guard miss, the delete
+    // remove nothing, and the operator be told an approval they never had was
+    // taken back.
+    if (!Object.hasOwn(state.approvals, consumer)) {
+      process.stderr.write(
+        `No content approval recorded for ${consumer}, so there is nothing to withdraw. ` +
+          `Nothing was removed.\n`,
+      )
+      return 1
+    }
+
+    // A marked record is never replaced by absence. Deleting it destroys the
+    // only evidence that a send may have landed, which is the same question the
+    // refusal to re-approve exists to keep open — the two are one rule seen from
+    // its two sides, so they say the same sentence.
+    const standing = approvalStanding(state, consumer, manifests, now)
+    if (standing.standing === 'indeterminate') {
+      process.stderr.write(markedUnconfirmed(consumer, standing.approval))
+      return 1
+    }
+
+    delete state.approvals[consumer]
+    await writeEngineState(state, statePath)
+    process.stdout.write(
+      `Withdrew the content approval for ${consumer}. Those bytes will not ship on any later ` +
+        `advance, and ${consumer} is reported as unapproved again rather than as refused — ` +
+        `withdrawing is not a no to the proposal, it is the yes taken back.\n`,
+    )
+    return 0
+  })
+}
+
 export async function run(argv: string[]): Promise<number> {
   let values: {
     all?: boolean
@@ -395,6 +501,7 @@ export async function run(argv: string[]): Promise<number> {
     'not-after'?: string
     'not-before'?: string
     zone?: string
+    remove?: boolean
   }
   let positionals: string[]
   try {
@@ -411,6 +518,7 @@ export async function run(argv: string[]): Promise<number> {
         'not-after': { type: 'string' },
         'not-before': { type: 'string' },
         zone: { type: 'string' },
+        remove: { type: 'boolean' },
       },
       allowPositionals: true,
       strict: true,
@@ -454,6 +562,36 @@ export async function run(argv: string[]): Promise<number> {
       )
       return 1
     }
+    // Withdrawing takes back a window that is already on the record; it does
+    // not set one. Vanishing silently is what this file refuses to do with a
+    // flag the operator typed, so the window flags are named rather than
+    // ignored.
+    if (values.remove) {
+      const windowFlags = [
+        values['not-after'] !== undefined ? '--not-after' : null,
+        values['not-before'] !== undefined ? '--not-before' : null,
+        values.zone !== undefined ? '--zone' : null,
+      ].filter((f): f is string => f !== null)
+      if (windowFlags.length > 0) {
+        process.stderr.write(
+          `--remove withdraws the approval whole, so ${windowFlags.join(', ')} ` +
+            `${windowFlags.length === 1 ? 'has' : 'have'} nothing to act on — an approval is ` +
+            `taken back, never edited in place. Nothing was removed.\n`,
+        )
+        return 1
+      }
+    }
+  } else if (values.remove) {
+    // Not a no-op and not a grant gesture. Falling through here would have
+    // merged a session Grant while the operator was asking for something to be
+    // taken away, which is the wrong-gesture mistake this whole file is shaped
+    // around.
+    process.stderr.write(
+      `--remove withdraws a content approval and only makes sense with --content. ` +
+        `A session grant is retired with 'warpline revoke', and a proposal is answered ` +
+        `no with 'warpline deny'. Nothing was written.\n`,
+    )
+    return 1
   }
 
   if (values.all && positionals.length > 0) {
@@ -478,6 +616,15 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   const { manifests, failures } = await loadPluginManifests(pluginsDir())
+
+  // -- Withdrawal: answered by the record, not by what is installed ---------
+  // Returns BEFORE the name validation below, and that position is the point.
+  // A plugin uninstalled after it was approved has no manifest, so validating
+  // this name against the manifests would report it unknown and strand its
+  // record in the state document with no CLI gesture that reaches it.
+  if (values.content && values.remove) {
+    return await removeContentApproval(positionals[0]!, manifests, Date.now())
+  }
 
   // Name validation, all of it, before any write.
   if (!values.all) {
