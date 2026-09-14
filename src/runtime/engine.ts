@@ -3087,12 +3087,27 @@ export function findPendingGate(state: EngineState, plugin: string): PendingGate
  * Downstream dependents are NOT run from here. They run on the next advance,
  * under the normal guard chain — a CLI command that ran them would have
  * bypassed every gate that chain applies.
+ *
+ * `opts.manifests` is required rather than optional, and the whole `opts`
+ * default is gone with it. The discard's carve-out below asks
+ * `approvalStanding` whether an outstanding content approval is bound to this
+ * plugin's bytes, and that question cannot be answered from `manifest` alone —
+ * the record names a PRODUCER, whose manifest is what the fingerprint is
+ * computed over. A defaulted empty map would answer "no approval" for every
+ * caller that forgot one, which is the destructive direction: the delete would
+ * go ahead and the binding would be gone permanently. A required parameter
+ * makes that omission a compile error instead of a silent data loss.
  */
 export async function applyPendingGate(
   state: EngineState,
   gate: PendingGate,
   manifest: PluginManifest,
-  opts: { statePath: string; eventsPath?: string; now?: number } = { statePath: engineStatePath() },
+  opts: {
+    statePath: string
+    manifests: ReadonlyMap<string, PluginManifest>
+    eventsPath?: string
+    now?: number
+  },
 ): Promise<GateApplyOutcome> {
   const now = opts.now ?? Date.now()
 
@@ -3169,8 +3184,42 @@ export async function applyPendingGate(
     // disk, and it is not made here.
     const standing = denialStanding(state, gate.plugin, manifest)
 
+    // **Not while a live content approval is bound to it either**, and on the
+    // identical argument the denial arm above makes at length. An approval is a
+    // standing yes to SPECIFIC BYTES, and those bytes are
+    // `plugin_runs[producer].last_output`. Delete that entry and the
+    // fingerprint the operator's yes was bound to can never be recomputed: the
+    // record survives, matches nothing, and the answer becomes unhonourable —
+    // permanently, because the destroyed Output never returns. The two
+    // carve-outs are joined by an `or` rather than one replacing the other, so
+    // a plugin with no approval reaches exactly the behaviour it reached
+    // before.
+    //
+    // The reference runs BOTH WAYS, which is why this is a scan and not a
+    // lookup. `approvals` is keyed by the CONSUMER, and the bytes belong to the
+    // PRODUCER — so the plugin whose gate is being discarded is protected when
+    // it is named as either. The producer case is the one the delete actually
+    // destroys; the consumer case is included because a consumer's own entry is
+    // what the next advance's freshness latch reads.
+    //
+    // **This is a CONSUMER of the record, not a second read of the authority
+    // for the fire decision.** R2's Acceptance says it in those words: other
+    // readers — R8's merge, this carve-out, R15's protected set — "consume the
+    // record and never decide whether to fire". Authority for the fire decision
+    // is read at exactly one call site, and it is not this one. Nothing here
+    // admits anything; every path out of it is a skipped delete.
+    //
+    // `approvalStanding` rather than a hand-rolled window-and-fingerprint
+    // predicate, for the reason the denial lookup is a function too: a
+    // re-derived predicate is a second answer that can disagree with the first.
+    const approvalHolds = Object.entries(state.approvals).some(
+      ([consumer, approval]) =>
+        (consumer === gate.plugin || approval.producer === gate.plugin) &&
+        approvalStanding(state, consumer, opts.manifests, now).standing === 'live',
+    )
+
     state.pending_gates = state.pending_gates.filter((g) => g !== gate)
-    if (standing.standing !== 'live') {
+    if (standing.standing !== 'live' && !approvalHolds) {
       delete state.plugin_runs[gate.plugin]
     }
     await writeEngineState(state, opts.statePath)

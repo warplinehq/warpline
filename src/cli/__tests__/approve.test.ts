@@ -896,6 +896,30 @@ export async function handler() {
     expect(state.plugin_runs['gated-writer']).toBeUndefined()
   })
 
+  test('19d2: an approval whose window has closed protects nothing', async () => {
+    // The second non-vacuity for 19c, and the one that matters more: the record
+    // is PRESENT and the reference is real — only the standing differs. An
+    // existence test in place of the standing would pass 19c and this case
+    // would catch it, because a closed window is precisely when the binding
+    // should stop pinning anything.
+    const seed = liveApprovalSeed('gated-writer')
+    const state = await expireThroughApply(
+      'gated-writer',
+      {
+        ...seed,
+        approvals: {
+          [CONSUMER]: { ...(seed.approvals[CONSUMER] as object), not_after: '2000-01-02T00:00' },
+        },
+      },
+      approvalManifests('gated-writer'),
+    )
+
+    expect(state.plugin_runs['gated-writer']).toBeUndefined()
+    // The record itself is left alone — this carve-out reads it and never
+    // rewrites it.
+    expect(state.approvals[CONSUMER]).toBeDefined()
+  })
+
   test('19e: running the discard twice changes nothing the first run preserved', async () => {
     const seed = liveApprovalSeed('gated-writer')
     const manifests = approvalManifests('gated-writer')

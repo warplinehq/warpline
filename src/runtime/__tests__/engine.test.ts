@@ -1841,7 +1841,7 @@ export async function handler(manifest, args) {
       parked,
       gate as NonNullable<typeof gate>,
       manifests.get('gated-writer') as PluginManifest,
-      { statePath },
+      { statePath, manifests },
     )
     expect(applied.outcome).toBe('applied')
 
@@ -1861,7 +1861,7 @@ export async function handler(manifest, args) {
       after,
       survivor as NonNullable<typeof survivor>,
       manifests.get('gated-writer') as PluginManifest,
-      { statePath },
+      { statePath, manifests },
     )
     expect(second.outcome).toBe('already_applied')
   })
@@ -1934,7 +1934,7 @@ export async function handler(manifest, args) {
       parked,
       gate as NonNullable<typeof gate>,
       manifests.get('gated-keeper') as PluginManifest,
-      { statePath },
+      { statePath, manifests },
     )
     expect(applied.outcome).toBe('applied')
 

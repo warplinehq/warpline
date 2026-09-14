@@ -63,6 +63,8 @@
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { parseArgs } from 'node:util'
+import { mkdir } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import {
   applyPendingGate,
   approvalStanding,
@@ -670,6 +672,43 @@ export async function run(argv: string[]): Promise<number> {
   // fresh install still reaches the Grant path unchanged.
   const statePath = engineStatePath()
   if (!values.all) {
+    // **The named path is one locked read-modify-write, and it has to be.**
+    // Everything below reads the state document and then writes it back through
+    // `applyPendingGate`, and R11's own Edge Coverage row assumes that window is
+    // serialised against a concurrent `approve --content`. It was not: only the
+    // content branch took a lock, this branch read and wrote outside one, and
+    // `applyPendingGate` writes state per call without taking one of its own. A
+    // content approval landing from a second attachment between the read and the
+    // apply was simply overwritten.
+    //
+    // The lock wraps the LOOP rather than each call, because the module
+    // docstring's observation above is what makes per-call locking wrong here:
+    // `applyPendingGate` writes state per call, so several gated plugins are
+    // several read-modify-writes over one in-memory document, and a lock
+    // released between them reopens the window it was taken to close.
+    //
+    // Nothing nests. `applyPendingGate` takes no lock — the sibling gate in
+    // `engine.ts` asserts that its body never names one — and the imported lock
+    // is a non-reentrant `O_EXCL` acquire that would block for the state
+    // manager's full ceiling and then throw.
+    //
+    // The same derived lock path the content branch uses: the lock that guards
+    // THIS document, never whatever the state manager's module paths happen to
+    // point at.
+    //
+    // `null` means "fell through to the Grant path"; every other value is this
+    // command's exit code, decided while the lock was held.
+    const lockPath = pathsForStateFile(statePath).lockPath
+    // The lock is an `O_EXCL` file, so its directory has to exist before the
+    // acquire — and on a fresh home it does not, because `resolveHome` creates
+    // nothing. Without this, `approve <plugin>` on a brand-new install died
+    // with an ENOENT on a lock file instead of merging the Grant it was asked
+    // for. `recursive: true` so an existing directory is a no-op rather than a
+    // second failure mode.
+    await mkdir(dirname(lockPath), { recursive: true })
+    const settled = await withStateLockAt(
+      lockPath,
+      async (): Promise<number | null> => {
     let state
     try {
       state = await readEngineState(statePath)
@@ -780,7 +819,14 @@ export async function run(argv: string[]): Promise<number> {
           continue
         }
 
-        const result = await applyPendingGate(state, gate, manifest, { statePath, now })
+        // `manifests` is the whole loaded map, not this plugin's manifest: the
+        // discard's approval carve-out resolves a PRODUCER named on an approval
+        // record, which is a different plugin from the one being applied.
+        const result = await applyPendingGate(state, gate, manifest, {
+          statePath,
+          manifests,
+          now,
+        })
 
         if (result.outcome === 'applied') {
           applied.push(name)
@@ -881,6 +927,14 @@ export async function run(argv: string[]): Promise<number> {
       )
       return 1
     }
+        // Fell through: no parked gate to apply and no denial standing in the
+        // way. The Grant write below touches the grant file and not this
+        // document, so it happens OUTSIDE the lock rather than holding it over
+        // an unrelated file.
+        return null
+      },
+    )
+    if (settled !== null) return settled
   }
 
   if (values.all) {
