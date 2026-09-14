@@ -661,6 +661,7 @@ set is closed — an unlisted value fails validation rather than being dropped.
 | `skipped` | The plugin was not due — fresh, filtered, locked, without a session Grant, or holding a declared dependency whose last run failed |
 | `gated` | Supervised: the handler ran and its result was parked pending a human answer |
 | `denied` | A human answered no, and the answer still applies to what is being proposed |
+| `refused` | A human answered yes, and the conditions that yes was bound to no longer hold |
 
 `plugin_entries` therefore no longer means "the plugins the engine attempted".
 A plugin whose `manifest.ts` failed to import gets a `failed` entry too,
@@ -673,6 +674,15 @@ telling those two apart is the whole diagnosis.
 together and apart from `skipped`. A denial recorded as `skipped` would land in
 the same bucket as "no Grant" and "still fresh", and the log could no longer
 tell an unanswered question from an answered one.
+
+`refused` sits beside them on the same argument one step over. It is the
+outcome of a content approval that existed and stopped applying, and recording
+it as `skipped` would put a lapsed authority in the same bucket as "no Grant"
+and "still fresh" — so the log could no longer tell an authority that lapsed
+from one that was never asked for. A `refused` entry carries a `reason`, the
+closed-set cause below; every other status leaves it absent. The field is
+optional and never defaulted, so a run log written before it existed reads back
+as what it says rather than as a refusal with a placeholder cause.
 
 Adding a member fans out into this table and into every run log written
 afterwards, so the set is not extended casually.

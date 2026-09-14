@@ -101,6 +101,79 @@ describe('PluginLogEntrySchema', () => {
   })
 
   it('still rejects a status outside the set', () => {
-    expect(PluginLogEntrySchema.safeParse({ ...entry, status: 'refused' }).success).toBe(false)
+    expect(PluginLogEntrySchema.safeParse({ ...entry, status: 'abandoned' }).success).toBe(false)
+  })
+
+  /**
+   * `refused` is the other side of `denied`: a human DID say yes, and the
+   * conditions that yes was bound to stopped holding. The `reason` beside it is
+   * what a scheduler switches on, which is why it is a closed set and not prose.
+   */
+  it('round-trips a refused entry carrying its reason', () => {
+    const result = PluginLogEntrySchema.safeParse({
+      ...entry,
+      status: 'refused',
+      result_summary: 'unapproved: the content approval window has closed',
+      reason: 'outside_window',
+    })
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.data.status).toBe('refused')
+    expect(result.data.reason).toBe('outside_window')
+  })
+
+  /**
+   * The field is optional rather than required-on-refused. Zod cannot express
+   * "required only for one status member" without a refinement, and a
+   * refinement here would reject a log already on disk — which is the one thing
+   * a run-log schema may not do.
+   */
+  it('accepts a refused entry with no reason', () => {
+    const result = PluginLogEntrySchema.safeParse({ ...entry, status: 'refused' })
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.data.reason).toBeUndefined()
+  })
+
+  it('rejects a reason outside the closed set', () => {
+    expect(
+      PluginLogEntrySchema.safeParse({ ...entry, status: 'refused', reason: 'already_spent' })
+        .success,
+    ).toBe(false)
+  })
+
+  /**
+   * The backward-compatibility half, and the reason `reason` is `.optional()`
+   * and not defaulted: a run log written before either member existed carries
+   * five statuses and no `reason` key, and must read back byte-for-byte as what
+   * it says rather than as a refusal with a placeholder cause.
+   */
+  it('parses a run log written before refused and reason existed', () => {
+    const stored = {
+      run_id: '20260403T120000-a1b2c3d4',
+      started_at: '2026-04-03T12:00:00Z',
+      completed_at: '2026-04-03T12:05:00Z',
+      status: 'complete',
+      resumed_from: null,
+      summary: 'Health check complete',
+      plugin_entries: (['completed', 'failed', 'skipped', 'gated', 'denied'] as const).map(
+        (status) => ({ ...entry, status }),
+      ),
+    }
+
+    const result = RunLogSchema.safeParse(stored)
+
+    expect(result.success).toBe(true)
+    if (!result.success) return
+    expect(result.data.plugin_entries.map((e) => e.status)).toEqual([
+      'completed',
+      'failed',
+      'skipped',
+      'gated',
+      'denied',
+    ])
+    expect(result.data.plugin_entries.every((e) => e.reason === undefined)).toBe(true)
   })
 })

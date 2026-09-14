@@ -1868,21 +1868,49 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               // arms that do — the dependency-failed arm above is the other, on
               // the same argument that an actionable skip earns the operator a
               // line where "still fresh" does not.
+              //
+              // TWO CLASSES, and the split is deliberate. A `session`-class
+              // plugin is held for want of a Grant, and the run log names the
+              // specific effects it would have performed — authored here, as it
+              // has been. A `content`-class one is held by an approvals record,
+              // and every operator string on that path has ONE author,
+              // `contentGateDetail`, whose output arrives as `ev.detail` and is
+              // used verbatim. A second author here is the `skipped` twice trap:
+              // two strings for one fact, free to disagree.
+              //
+              // The branch reads `manifest.approval_class` — a manifest read,
+              // not an authority read — so `approvalStanding` still has exactly
+              // one caller.
               case 'unapproved': {
                 const unapprovedElapsed = Date.now() - entryStart
+                const contentClass = manifest.approval_class === 'content'
+                // `ev.refusal` is set only where a content approval existed and
+                // stopped applying — so it is already `undefined` for every
+                // session-class plugin, for a content-class one with no record
+                // on file, and for a window that has not opened. One guard, and
+                // no second test of the same fact.
+                const status = ev.refusal === undefined ? 'skipped' : 'refused'
                 if (ev.refusal !== undefined) {
                   refused_plugins.push({ plugin: pluginName, reason: ev.refusal })
                 }
                 plugin_entries.push({
                   plugin: pluginName,
-                  status: 'skipped',
+                  status,
                   started_at: entryStartedAt,
                   elapsed_ms: unapprovedElapsed,
-                  result_summary: `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
+                  result_summary: contentClass
+                    ? ev.detail
+                    : `skipped (unapproved): side effects [${manifest.side_effects.join(', ')}] require session approval`,
+                  reason: ev.refusal,
                   retried: false,
                 })
                 await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-                onPluginEnd?.(pluginName, 'skipped', unapprovedElapsed, 'unapproved side effects')
+                onPluginEnd?.(
+                  pluginName,
+                  status,
+                  unapprovedElapsed,
+                  contentClass ? ev.detail : 'unapproved side effects',
+                )
                 return
               }
 

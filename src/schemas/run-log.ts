@@ -44,11 +44,33 @@ export const PluginLogEntrySchema = z.object({
    * instead would put it in the same bucket as "no session Grant" and "still
    * fresh", so the log could no longer tell an unanswered question from an
    * answered one — the conflation a denied outcome exists to remove.
+   *
+   * `refused` sits beside `denied` and makes the same argument one step over:
+   * a human DID say yes, and the conditions that yes was bound to no longer
+   * hold. Recording it as `skipped` would put a lapsed authority in the same
+   * bucket as "no session Grant" and "still fresh", so the log could no longer
+   * tell an authority that lapsed from one that was never asked for — the
+   * conflation a refused outcome exists to remove.
    */
-  status: z.enum(['completed', 'failed', 'skipped', 'gated', 'denied']),
+  status: z.enum(['completed', 'failed', 'skipped', 'gated', 'denied', 'refused']),
   started_at: z.string(),
   elapsed_ms: z.number().int(),
   result_summary: z.string(),
+  /**
+   * Which of the three ways a content approval stopped applying, populated
+   * only on a `refused` entry.
+   *
+   * The closed set is what lets a scheduler switch on the cause without
+   * parsing `result_summary`'s prose, which is written for an operator and is
+   * free to change wording.
+   *
+   * `.optional()` rather than defaulted: a run log written before this field
+   * existed reads back with the key absent, which is the truth — that advance
+   * recorded no refusal reason, rather than having recorded one meaning
+   * nothing. Zod strips unknown keys in the other direction, so an older
+   * reader is unharmed too.
+   */
+  reason: RefusalReasonSchema.optional(),
   reversible: z.boolean().optional(),
   undo_instruction: z.string().optional(),
   retried: z.boolean().default(false),
