@@ -414,13 +414,21 @@ Five things a scheduler operator should read there rather than infer:
   underneath it. Run the last probe in § Checking the install once after you
   edit a unit's command line.
 
-- **A held approval gate exits `0`.** A plugin waiting on a human is the runtime
-  doing its job, not a fault. If a waiting gate is itself what you want paged
-  about, `warpline advance --strict` promotes it to `1` and changes none of the
-  other `1` cases.
+- **A held approval gate exits `0`, and so does a content refusal.** A plugin
+  waiting on a human is the runtime doing its job, not a fault; a plugin whose
+  content approval no longer authorises the fire is the same gate holding for a
+  different reason. If either is itself what you want paged about, `warpline
+  advance --strict` promotes both to `1` and changes none of the other `1`
+  cases. An advance with one of each is still a single `1`.
+
+  Watch `refused` even when you do not run `--strict`. A fleet can refuse every
+  send on every advance indefinitely with `failed` and `gated` both at `0`
+  throughout, which is the one unhealthy shape the exit code alone cannot show
+  you. The count is in `warpline advance --json` and in the dead-man file; the
+  reason for each refusal is in the `--json` payload only.
 - **A tick against a home with no manifests still fires and exits `1`**, and it
-  writes the dead-man file with both counts at zero. The unit is healthy and the
-  fleet is not. That is the pair to look at together.
+  writes the dead-man file with all three counts at zero. The unit is healthy
+  and the fleet is not. That is the pair to look at together.
 - **`130` means the process stopped, never that the work stopped.** The advance
   is not interruptible, so the plugin in flight may run to completion in a
   process you believe is dead (§ 11). warpline handles SIGTERM as well as

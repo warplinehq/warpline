@@ -23,6 +23,10 @@ import { grantApproval } from '../../runtime/approval-gate.js'
 import { createTestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
+import { proposalFingerprint } from '../../runtime/engine.js'
+import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
+import { defaultEngineState } from '../../schemas/engine-state.js'
+import { seedContentRefusals } from '../../runtime/__tests__/helpers/content-refusal.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
 import { main } from '../warpline.js'
 import { run } from '../advance.js'
@@ -147,7 +151,7 @@ describe('main([advance]) end to end', () => {
     expect(stderr).toBe('')
     expect(code).toBe(0)
     expect(stdout).toContain('alpha: completed')
-    expect(stdout).toContain('Gated: 0  Failed: 0  Exit: 0')
+    expect(stdout).toContain('Gated: 0  Refused: 0  Failed: 0  Exit: 0')
   })
 
   /**
@@ -761,15 +765,18 @@ describe('main([advance, --json])', () => {
     // Enumerated rather than spot-checked. This document is parsed outside this
     // repository, and a field added to it is a field somebody's detector can
     // start reading — the ones carrying free text are the ones that leak. It
-    // carries a run id, a status, three integers, a code, and the plugin list
-    // the human rendering is built from: a name and a state token each, no
-    // summary, no output, no path.
+    // carries a run id, a status, four integers, a code, the plugin list the
+    // human rendering is built from — a name and a state token each — and the
+    // refusal list, a plugin name and a closed-enum reason each. No summary, no
+    // output, no path.
     expect(Object.keys(doc).sort()).toEqual([
       'exit_code',
       'failed',
       'gated',
       'plugins',
       'pruned',
+      'refused',
+      'refused_plugins',
       'run_id',
       'status',
     ])
@@ -889,7 +896,7 @@ export async function handler() {
     const { stdout } = await capture(() => main(['advance']))
 
     expect(stdout).toContain('alpha: completed')
-    expect(stdout).toContain('Gated: 0  Failed: 0  Exit: 0')
+    expect(stdout).toContain('Gated: 0  Refused: 0  Failed: 0  Exit: 0')
     expect(() => JSON.parse(stdout)).toThrow()
   })
 
@@ -990,6 +997,175 @@ export async function handler() {
     expect(stdout).toBe('')
     expect(stderr).toContain('--force')
     expect(await readdir(home.runsDir)).toEqual([])
+  })
+})
+
+/**
+ * Refusals in the `--json` payload: the count, the reasons, and neither the
+ * bytes.
+ *
+ * A content refusal exits `0`, which is correct and which is also why it is
+ * invisible to anything keying on the code alone. These cases pin the other
+ * half — that the document a scheduler logs says it happened, says which
+ * plugin, and says which of the three reasons — and that it says none of it by
+ * quoting what the operator approved.
+ *
+ * The counting cases use the shared `outside_window` fixture. The no-leak case
+ * deliberately does not: nothing in that fixture ever puts approved bytes where
+ * the runtime reads them, so a sentinel planted on it would be absent for the
+ * reason that it was never present. It uses `content_moved`, where the bytes
+ * really are on the path.
+ */
+describe('main([advance, --json]) over a content refusal', () => {
+  const statePath = (): string => join(home.stateDir, 'engine-state.json')
+
+  const soleDocument = (stdout: string): Record<string, unknown> => {
+    expect(stdout.endsWith('\n')).toBe(true)
+    expect(stdout.split('\n').filter((line) => line !== '')).toHaveLength(1)
+    return JSON.parse(stdout) as Record<string, unknown>
+  }
+
+  test('an advance whose only event is a refusal exits 0 and reports it with its reason', async () => {
+    await seedContentRefusals({
+      pluginsDir: home.pluginsDir,
+      statePath: statePath(),
+      names: ['sender'],
+    })
+
+    const { code, stdout, stderr } = await capture(() => main(['advance', '--json']))
+
+    expect(stderr).toBe('')
+    expect(code).toBe(0)
+
+    const doc = soleDocument(stdout)
+
+    expect(doc.refused).toBe(1)
+    // The plugin name and the closed-set reason, as a structured pair. A
+    // scheduler switching on the reason is the consumer this field exists for.
+    expect(doc.refused_plugins).toEqual([{ plugin: 'sender', reason: 'outside_window' }])
+    // The document agrees with the process about the same advance.
+    expect(doc.exit_code).toBe(0)
+    expect(doc.gated).toBe(0)
+    expect(doc.failed).toBe(0)
+  })
+
+  test('the same advance under --strict exits 1, and the document says 1 too', async () => {
+    await seedContentRefusals({
+      pluginsDir: home.pluginsDir,
+      statePath: statePath(),
+      names: ['sender'],
+    })
+
+    const { code, stdout } = await capture(() => main(['advance', '--json', '--strict']))
+    const doc = soleDocument(stdout)
+
+    expect(code).toBe(1)
+    expect(doc.exit_code).toBe(1)
+    expect(doc.refused).toBe(1)
+  })
+
+  test('three refusals are counted individually and each carries its own entry', async () => {
+    await seedContentRefusals({
+      pluginsDir: home.pluginsDir,
+      statePath: statePath(),
+      names: ['sender-a', 'sender-b', 'sender-c'],
+    })
+
+    const doc = soleDocument((await capture(() => main(['advance', '--json']))).stdout)
+
+    expect(doc.refused).toBe(3)
+    // An ARRAY that survived `JSON.stringify` with three elements in it. A
+    // `Map` here would have serialised to `{}` — present, empty, and wrong on
+    // exactly the advances this field exists for.
+    expect(Array.isArray(doc.refused_plugins)).toBe(true)
+    expect(doc.refused_plugins).toHaveLength(3)
+    expect([...(doc.refused_plugins as { plugin: string }[])].map((r) => r.plugin).sort()).toEqual([
+      'sender-a',
+      'sender-b',
+      'sender-c',
+    ])
+  })
+
+  /**
+   * The leak assertion, over the serialised payload as a whole.
+   *
+   * Exact-equality is not available here — the document legitimately contains a
+   * plugin name and a reason token — so the instrument is the sentinel's
+   * absence from the whole string, paired with a REACHABILITY assertion that it
+   * is present in the state document the runtime reads. Without that pair, this
+   * case is green on bytes the runtime never saw, which is this repository's
+   * recorded failure shape.
+   */
+  test('no approved byte reaches the --json payload', async () => {
+    /** Distinctive, and alnum-plus-hyphen so no escaping can alter it. */
+    const LEAK = 'SENTINELb7f3donotleak'
+    const APPROVED = `{"batch":"${LEAK} the twelve invoices the operator read"}`
+    const DRIFTED = APPROVED.replace('twelve', 'thirteen')
+    const PRODUCER = 'batch-builder'
+    const CONSUMER = 'batch-sender'
+
+    // Fresh and long-lived, so the producer does not re-run on this advance and
+    // undo the drift before the gate ever reads it.
+    await writePlugin(home, PRODUCER, { ttl_hours: 24 })
+    await writePlugin(home, CONSUMER, {
+      ttl_hours: 24,
+      dependencies: [PRODUCER],
+      side_effects: ['sends_email'],
+      approval_class: 'content',
+    })
+
+    const seed = (body: string): ReturnType<typeof defaultEngineState> => {
+      const state = defaultEngineState()
+      state.plugin_runs[PRODUCER] = {
+        last_run_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+        status: 'success',
+        last_output: { type: 'brief', format: 'json', body },
+      }
+      return state
+    }
+
+    const producerManifest = PluginManifestSchema.parse({
+      name: PRODUCER,
+      version: '1.0.0',
+      description: 'producer',
+      autonomy_level: 'autonomous',
+      ttl_hours: 24,
+    })
+
+    const state = seed(DRIFTED)
+    state.approvals[CONSUMER] = {
+      plugin: CONSUMER,
+      producer: PRODUCER,
+      // Bound to the APPROVED bytes, computed through the one entry point, so
+      // the drift below is the runtime's own arithmetic and not this file's.
+      fingerprint: proposalFingerprint(seed(APPROVED), PRODUCER, producerManifest),
+      run_id: 'run-the-operator-read',
+      approved_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      not_before: null,
+      not_after: '2099-01-01T00:00',
+      zone: 'UTC',
+      effect_id: null,
+      marked_at: null,
+      confirmed_at: null,
+    }
+    await writeFile(statePath(), JSON.stringify(state))
+
+    // Reachability: the sentinel really is in the document the runtime reads,
+    // so the absence below is a statement about the payload rather than about
+    // a fixture that never produced it.
+    expect(await readFile(statePath(), 'utf-8')).toContain(LEAK)
+
+    const { code, stdout } = await capture(() => main(['advance', '--json']))
+    const doc = soleDocument(stdout)
+
+    // The refusal happened, and it is the drifted-content one.
+    expect(code).toBe(0)
+    expect(doc.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'content_moved' }])
+
+    // The whole serialised payload, not a field of it: a leak is only a leak
+    // once it is on the stream, and this is the stream.
+    expect(stdout).not.toContain(LEAK)
+    expect(JSON.stringify(doc)).not.toContain(LEAK)
   })
 })
 

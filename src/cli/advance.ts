@@ -138,7 +138,8 @@ export const USAGE = `Usage: warpline advance [--strict] [--json]
 Executes every plugin the engine finds due and exits with a code a scheduler can
 read. The codes are published in docs/runtime-spec.md § 11.
 
-  --strict   Report a held approval gate as a failure (exit 1) rather than 0.
+  --strict   Report a held approval gate, or a content approval that refused
+             the fire, as a failure (exit 1) rather than 0.
   --json     Write one JSON document to stdout instead of the human rendering.
 `
 
@@ -151,10 +152,17 @@ read. The codes are published in docs/runtime-spec.md § 11.
  *
  * The field list is deliberately short, because this document is parsed outside
  * this repository and every field is one somebody's detector can start reading.
- * A run id, a status, three integers, a code, and the plugin list the human
- * rendering is built from — a name and a state token each. No plugin summary,
- * no plugin output, no path, no operator configuration value. Same constraint
- * as the dead-man file, for the same reason.
+ * A run id, a status, four integers, a code, the plugin list the human
+ * rendering is built from — a name and a state token each — and one refusal
+ * list of a plugin name and a closed-enum reason. No plugin summary, no plugin
+ * output, no path, no operator configuration value. Same constraint as the
+ * dead-man file, for the same reason.
+ *
+ * `refused_plugins` is the one field here the dead-man file deliberately does
+ * NOT carry. It is bounded by construction — a declared plugin name and one of
+ * exactly three enum values, never a string a plugin or an operator authored —
+ * which is what makes it safe on a stream a scheduler logs. The health file
+ * takes the count alone because its own contract is narrower.
  */
 export interface AdvancePayload {
   run_id: string
@@ -172,6 +180,25 @@ export interface AdvancePayload {
    * at all.
    */
   pruned: number
+  /**
+   * How many plugins a content approval declined to authorise on this advance.
+   *
+   * Always present, `0` included, for the same reason `pruned` is: a monitor
+   * has to be able to tell "nothing was refused" from "this warpline does not
+   * report refusals". Read off `advanceCounts` — the one walk the exit code and
+   * the dead-man file are both derived from — never counted again here.
+   */
+  refused: number
+  /**
+   * Which plugins were refused, and why.
+   *
+   * The count above answers "did this happen"; this answers "what do I do
+   * about it", and the two are the same advance's account so they cannot
+   * disagree. An ARRAY rather than a map, because this document goes through
+   * `JSON.stringify` and a `Map` serialises to `{}` — the field would be
+   * present, empty, and wrong on exactly the advances it exists for.
+   */
+  refused_plugins: AdvanceResult['refused_plugins']
   exit_code: 0 | 1
   /**
    * Every plugin the run loaded, in the engine's own order.
@@ -192,7 +219,14 @@ function renderHuman(payload: AdvancePayload): string {
     for (const { name, state } of payload.plugins) lines.push(`  ${name}: ${state}`)
   }
 
-  lines.push(`Gated: ${payload.gated}  Failed: ${payload.failed}  Exit: ${payload.exit_code}`)
+  // Refused sits between the two counts it belongs with. An operator watching
+  // this rendering is the same reader the `refused` count exists for, and a
+  // refusal absent from the human view is the same silence the scheduler half
+  // of this plan removes.
+  lines.push(
+    `Gated: ${payload.gated}  Refused: ${payload.refused}  Failed: ${payload.failed}  ` +
+      `Exit: ${payload.exit_code}`,
+  )
   return `${lines.join('\n')}\n`
 }
 
@@ -412,7 +446,7 @@ export async function run(
     }
 
     const exit_code = advanceExitCode(result, { strict })
-    const { gated, failed } = advanceCounts(result)
+    const { gated, failed, refused } = advanceCounts(result)
 
     // The one site anything reaches stdout from, past every refusal above it.
     process.stdout.write(
@@ -422,6 +456,13 @@ export async function run(
           status: result.status,
           gated,
           failed,
+          refused,
+          // The structured array straight off the result, so a consumer gets
+          // the reason and not only the count. No arithmetic here:
+          // `advanceExitCode` above already carries the widened `--strict`
+          // predicate, and a second count in this file is the second answer
+          // `exit-codes.ts` exists to prevent.
+          refused_plugins: result.refused_plugins,
           // Read off the result, where the prune's own return value was threaded
           // to. Counting removals a second time here would be a second answer.
           pruned: result.pruned,
