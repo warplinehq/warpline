@@ -194,11 +194,25 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
             // wildcard grant read `approved: true` while genuinely refused.
             // Both are lies, and the evaluator's own promise is that a preview
             // cannot disagree with a run by one comparison operator — this
-            // would have made it disagree by a whole column. A
-            // not-applicable rendering removes the lie but not the gap, and
-            // the preview's job is telling the operator whether the frozen
-            // batch will go out. Previewing is not firing, which is what makes
-            // this a legitimate second reader.
+            // would have made it disagree by a whole column.
+            //
+            // THE ALTERNATIVE THAT WAS REFUSED, so it is not re-litigated: a
+            // not-applicable rendering for the content class. It removes the
+            // lie but not the gap, and the preview's whole job is telling the
+            // operator whether the frozen batch will go out. A column that
+            // declines to answer the question the command exists to answer is
+            // not an improvement on answering it wrongly, it is a different way
+            // of leaving the operator to guess.
+            //
+            // **This is a CONSUMER of the record, not a second read of the
+            // authority for the fire decision.** Authority is read at exactly
+            // one call site; other readers — the end-of-run merge, the
+            // pending-gate discard's carve-out, the retention protected set —
+            // "consume the record and never decide whether to fire", and a
+            // preview is the same category as those three. Previewing is not
+            // firing. Without this sentence the call reads as a second
+            // authority read, which would make the exactly-one-call-site
+            // property false by inspection.
             approved:
               manifest.approval_class === 'content'
                 ? approvalStanding(state, name, manifests, now).standing === 'live'

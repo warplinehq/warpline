@@ -1104,6 +1104,19 @@ worth stating because everything above reads like a universal rule: it is not.
 The gate covers the effects a plugin *declares*. A plugin that performs an
 effect it did not declare is a plugin bug, and no approval state changes that.
 
+**`warpline plan`'s `approved:` column is rendered from whichever mechanism
+authorises that plugin's class**, not from this file for every plugin. A
+content-class plugin's column reads its content approval's standing (§ 10,
+`approvals`); every other plugin's reads this grant, unchanged. Rendered from
+the grant for all of them the column was wrong in both directions at once — a
+plugin with a live approval and no grant previewed as blocked while it was
+authorised, and one under a live `scopes: '*'` grant and no approval previewed
+as ready while it was refused. The preview exists to tell an operator whether a
+frozen batch will go out, so a column answering with the wrong file is a worse
+failure than the disagreement-by-one-comparison the preview is otherwise built
+to avoid. Reading the record here decides nothing: previewing is not firing, and
+the fire decision is still read at exactly one call site inside the engine.
+
 ### Who reads the grant, and who mints a capability
 
 Two invariants, and they read like a contradiction until you notice they are

@@ -17,6 +17,7 @@ import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.
 import { _setHome } from '../../lib/paths.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
 import { denialFingerprint, proposalFingerprint, runAdvance } from '../../runtime/engine.js'
+import { grantApproval } from '../../runtime/approval-gate.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
@@ -1019,5 +1020,154 @@ describe('warpline plan writes nothing, over a home that would otherwise fire', 
       approvalPath: join(home.root, '.session-approval'),
     })
     expect(await snapshotHome(home.root)).not.toEqual(before)
+  })
+})
+
+/**
+ * `plan`'s `approved:` column, rendered from the mechanism that actually
+ * authorises the plugin's class.
+ *
+ * Rendered unconditionally from the session grant — which is what it did — the
+ * column was wrong in BOTH directions for a content-class plugin, and each
+ * direction is its own kind of harm at the moment an operator is deciding
+ * whether to intervene:
+ *
+ *   - a content-class plugin with a live approval and no grant read
+ *     `approved: false` while genuinely authorised, so the operator sees a
+ *     batch they reviewed and approved reported as blocked, and goes looking
+ *     for a gate that is not there;
+ *   - one under a live `scopes: '*'` grant and no approval read
+ *     `approved: true` while genuinely refused, which is the worse of the two:
+ *     the operator walks away believing a send will go out and it will not.
+ *
+ * The session-class cases in the same two homes are what make this a BRANCH
+ * rather than a replacement. `checkApproval` keeps every other plugin, and the
+ * import stays.
+ */
+describe('plan renders the approved column from the authorising mechanism', () => {
+  const PRODUCER = 'batch-builder'
+  const CONTENT = 'batch-sender'
+  const SESSION = 'digest-sender'
+  const APPROVED_BODY = '{"batch":"the twelve invoices the operator read"}'
+
+  function producerManifest(): PluginManifest {
+    return PluginManifestSchema.parse({
+      name: PRODUCER,
+      version: '1.0.0',
+      description: 'producer',
+      autonomy_level: 'autonomous',
+      ttl_hours: 24,
+    })
+  }
+
+  /** The producer, a content-class consumer of its bytes, and a session-class sibling. */
+  async function writeTrio(): Promise<void> {
+    await writePlugin(home, PRODUCER, { min_tier: 'suspended' })
+    await writePlugin(home, CONTENT, {
+      min_tier: 'suspended',
+      side_effects: ['sends_email'],
+      approval_class: 'content',
+      dependencies: [PRODUCER],
+      ttl_hours: 0.001,
+    })
+    await writePlugin(home, SESSION, {
+      min_tier: 'suspended',
+      side_effects: ['sends_email'],
+      ttl_hours: 0.001,
+    })
+  }
+
+  const producerRun = () => ({
+    last_run_at: new Date(Date.now() - 60 * 60_000).toISOString(),
+    status: 'success',
+    last_output: { type: 'brief', format: 'json', body: APPROVED_BODY },
+  })
+
+  /** Seed the producer's Output, and an in-window approval over exactly those bytes. */
+  async function seedApproval(): Promise<void> {
+    const run = producerRun()
+    const fingerprintState = defaultEngineState()
+    fingerprintState.plugin_runs[PRODUCER] = run as never
+    await writeState(
+      home,
+      { [PRODUCER]: run },
+      {
+        approvals: {
+          [CONTENT]: {
+            plugin: CONTENT,
+            producer: PRODUCER,
+            fingerprint: proposalFingerprint(fingerprintState, PRODUCER, producerManifest()),
+            run_id: 'run-the-operator-read',
+            approved_at: new Date(Date.now() - 30 * 60_000).toISOString(),
+            not_before: null,
+            not_after: '2099-01-01T00:00',
+            zone: 'UTC',
+            effect_id: null,
+            marked_at: null,
+            confirmed_at: null,
+          },
+        },
+      },
+    )
+  }
+
+  /** The same home with no approval at all, and a blanket session grant instead. */
+  async function seedWildcardGrant(): Promise<void> {
+    await writeState(home, { [PRODUCER]: producerRun() })
+    await grantApproval('*', 4 * 60 * 60 * 1000, join(home.root, '.session-approval'))
+  }
+
+  const columnOf = (
+    model: Awaited<ReturnType<typeof buildPlanModel>>,
+    plugin: string,
+  ): boolean | undefined =>
+    [...model.due, ...model.notDue].find((e) => e.plugin === plugin)?.approved
+
+  test('a content-class plugin with a live approval and no grant renders approved: true', async () => {
+    await writeTrio()
+    await seedApproval()
+
+    const model = await buildPlanModel(Date.now())
+
+    // No grant file exists at all, so the old column read `false` here while
+    // the plugin was genuinely authorised and a real advance would have fired.
+    expect(existsSync(join(home.root, '.session-approval'))).toBe(false)
+    expect(columnOf(model, CONTENT)).toBe(true)
+  })
+
+  test('a session-class sibling in that same home is unchanged, and still reads the grant', async () => {
+    await writeTrio()
+    await seedApproval()
+
+    const model = await buildPlanModel(Date.now())
+
+    // Non-vacuity for the case above: same home, same advance, and the only
+    // difference is the class. A record written for one plugin buys the other
+    // nothing, and no grant exists, so the answer is false.
+    expect(columnOf(model, SESSION)).toBe(false)
+  })
+
+  test('a content-class plugin under a live wildcard grant and no approval renders approved: false', async () => {
+    await writeTrio()
+    await seedWildcardGrant()
+
+    const model = await buildPlanModel(Date.now())
+
+    // The dangerous direction, and the one this column existed to get right:
+    // the grant is live and covers everything, and it authorises this plugin's
+    // send exactly not at all.
+    expect(columnOf(model, CONTENT)).toBe(false)
+  })
+
+  test('a session-class sibling under that same wildcard grant renders approved: true', async () => {
+    await writeTrio()
+    await seedWildcardGrant()
+
+    const model = await buildPlanModel(Date.now())
+
+    // Non-vacuity for the case above: the grant is real, it is live, and the
+    // branch that still consults it answers true. Without this, "the content
+    // plugin reads false" would also pass over a grant file that never loaded.
+    expect(columnOf(model, SESSION)).toBe(true)
   })
 })
