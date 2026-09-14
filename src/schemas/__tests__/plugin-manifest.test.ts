@@ -241,3 +241,97 @@ describe('inputs.type and inputs.default', () => {
     expect(threw).toBe(true)
   })
 })
+
+/**
+ * `approval_class` and the cross-field rule it carries.
+ *
+ * The rule lives on the schema and not in the loader, so every reader — the
+ * advance, `plan`, `approve`, `deny` — validates under one rule. A loader-side
+ * rule would let a manifest imported by a CLI verb validate more weakly than the
+ * advance's, and the review-gate exemption would then apply to a `supervised`
+ * plugin the advance would have rejected. These cases are what pins that: they
+ * assert `.parse()` itself, which is the thing every reader calls.
+ *
+ * Each failure is asserted on its PATH and on its message naming a reason. A
+ * bare "it threw" is green on a manifest that failed for an unrelated field, and
+ * a message that says only "invalid" is not a repair instruction.
+ */
+const contentBase = {
+  ...validManifest,
+  approval_class: 'content' as const,
+  autonomy_level: 'autonomous' as const,
+  side_effects: ['sends_email'] as const,
+  dependencies: ['gsc-auth'],
+}
+
+/** The issue paths a failed `.parse()` reports, sorted for a stable compare. */
+function issuePaths(input: unknown): string[] {
+  try {
+    PluginManifestSchema.parse(input)
+  } catch (e) {
+    return (e as z.ZodError).issues.map((i) => i.path.join('.')).sort()
+  }
+  throw new Error('expected .parse() to throw, and it did not')
+}
+
+/** The messages a failed `.parse()` reports, joined so one grep covers them. */
+function issueText(input: unknown): string {
+  try {
+    PluginManifestSchema.parse(input)
+  } catch (e) {
+    return (e as z.ZodError).issues.map((i) => i.message).join('\n')
+  }
+  throw new Error('expected .parse() to throw, and it did not')
+}
+
+describe('approval_class and its cross-field rule', () => {
+  test('a manifest omitting approval_class parses and reads session', () => {
+    expect(PluginManifestSchema.parse(validManifest).approval_class).toBe('session')
+  })
+
+  test('the content base used by the cases below is itself valid', () => {
+    // Non-vacuity. Without this, every refusal below could be firing on
+    // something the base got wrong rather than on the field under test.
+    expect(PluginManifestSchema.parse(contentBase).approval_class).toBe('content')
+  })
+
+  test('an unrecognised approval_class value fails, naming the field', () => {
+    expect(issuePaths({ ...validManifest, approval_class: 'batch' })).toEqual(['approval_class'])
+  })
+
+  test('content with no declared side effect fails, naming the reason', () => {
+    const input = { ...contentBase, side_effects: [] }
+    expect(issuePaths(input)).toEqual(['side_effects'])
+    expect(issueText(input)).toContain('at least one declared side effect')
+  })
+
+  test('content with zero dependencies fails, naming the reason', () => {
+    const input = { ...contentBase, dependencies: [] }
+    expect(issuePaths(input)).toEqual(['dependencies'])
+    expect(issueText(input)).toContain('exactly one declared dependency')
+  })
+
+  test('content with two dependencies fails, naming the reason', () => {
+    const input = { ...contentBase, dependencies: ['gsc-auth', 'other'] }
+    expect(issuePaths(input)).toEqual(['dependencies'])
+    expect(issueText(input)).toContain('exactly one declared dependency')
+  })
+
+  test('content with a non-autonomous autonomy level fails, naming the reason', () => {
+    const input = { ...contentBase, autonomy_level: 'supervised' }
+    expect(issuePaths(input)).toEqual(['autonomy_level'])
+    expect(issueText(input)).toContain("requires autonomy_level 'autonomous'")
+  })
+
+  test('the rule does not fire on a session-class manifest', () => {
+    // The partition, as a parse result. A session-class plugin with no
+    // dependencies and no side effects is ordinary and must stay ordinary.
+    const parsed = PluginManifestSchema.parse({
+      ...validManifest,
+      side_effects: [],
+      dependencies: [],
+      autonomy_level: 'supervised',
+    })
+    expect(parsed.approval_class).toBe('session')
+  })
+})

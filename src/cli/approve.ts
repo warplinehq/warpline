@@ -69,6 +69,7 @@ import {
 } from '../runtime/engine.js'
 import { DEFAULT_TTL_MS, mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
+import { resolveWallClock } from '../lib/wall-clock.js'
 import {
   EngineStateInvalidError,
   readEngineState,
@@ -154,18 +155,6 @@ async function approveContent(
     throw new Error(`approve: '${consumer}' passed name validation but has no manifest`)
   }
 
-  if (manifest.approval_class !== 'content') {
-    process.stderr.write(
-      `${consumer} declares approval_class '${manifest.approval_class}', so nothing would ever ` +
-        `read a content approval written for it — it is gated by the session Grant instead. ` +
-        `Nothing was written.\n`,
-    )
-    return 1
-  }
-
-  // Guaranteed by the manifest's own cross-field rule, which is why this is a
-  // narrowing and not a check with a message of its own.
-  const producer = manifest.dependencies[0]!
   const zone = values.zone ?? DEFAULT_ZONE
 
   const statePath = engineStatePath()
@@ -187,6 +176,39 @@ async function approveContent(
       return 1
     }
 
+    // -- The class ---------------------------------------------------------
+    // Writing a record nothing would ever read is a lie about what was
+    // approved: the operator walks away believing a batch is authorised, and
+    // the plugin is gated by the session Grant exactly as before.
+    if (manifest.approval_class !== 'content') {
+      process.stderr.write(
+        `${consumer} declares approval_class '${manifest.approval_class}', so nothing would ever ` +
+          `read a content approval written for it — it is gated by the session Grant instead. ` +
+          `Approve it with 'warpline approve ${consumer}', or change its manifest. ` +
+          `Nothing was written.\n`,
+      )
+      return 1
+    }
+
+    // Guaranteed by the manifest's own cross-field rule, which the check above
+    // has now established — so this is a narrowing, not a check of its own.
+    const producer = manifest.dependencies[0]!
+
+    // -- The producer ------------------------------------------------------
+    const producerManifest = manifests.get(producer)
+    if (producerManifest === undefined) {
+      process.stderr.write(
+        `${consumer} declares '${producer}' as its dependency, but no such plugin is installed, ` +
+          `so the bytes it would ship cannot be identified. Nothing was written.\n`,
+      )
+      return 1
+    }
+
+    // This is also what closes the hole a plain index read leaves open one
+    // level down: the fingerprint's subject here is an operator-reachable
+    // producer name, a wider input than a declared dependency name is
+    // elsewhere, and the closure runs through this validation rather than
+    // through that function.
     const lastOutput = state.plugin_runs[producer]?.last_output
     if (lastOutput === undefined) {
       process.stderr.write(
@@ -197,15 +219,7 @@ async function approveContent(
       return 1
     }
 
-    const producerManifest = manifests.get(producer)
-    if (producerManifest === undefined) {
-      process.stderr.write(
-        `${consumer} declares '${producer}' as its dependency, but no such plugin is installed, ` +
-          `so the bytes it would ship cannot be identified. Nothing was written.\n`,
-      )
-      return 1
-    }
-
+    // -- The window --------------------------------------------------------
     const notAfter = values['not-after']
     if (notAfter === undefined) {
       process.stderr.write(
@@ -215,6 +229,48 @@ async function approveContent(
       return 1
     }
 
+    // The zone is checked by RESOLVING in it, never by membership in the Intl
+    // zone enumeration — that list omits zone links, so `US/Eastern` is absent
+    // from it while the host resolves it perfectly well, and a membership test
+    // would refuse zones that work. The same call also refuses a bound that is
+    // not a naked wall clock, which is one message rather than two for one
+    // mistake the operator makes in one place.
+    let closesAt: number
+    try {
+      closesAt = resolveWallClock(notAfter, zone)
+    } catch (err) {
+      process.stderr.write(
+        `Cannot read --not-after '${notAfter}' in zone '${zone}': ` +
+          `${err instanceof Error ? err.message : String(err)}\nNothing was written.\n`,
+      )
+      return 1
+    }
+
+    const notBefore = values['not-before'] ?? null
+    if (notBefore !== null) {
+      let opensAt: number
+      try {
+        opensAt = resolveWallClock(notBefore, zone)
+      } catch (err) {
+        process.stderr.write(
+          `Cannot read --not-before '${notBefore}' in zone '${zone}': ` +
+            `${err instanceof Error ? err.message : String(err)}\nNothing was written.\n`,
+        )
+        return 1
+      }
+      // A window that cannot open. Checked once both bounds RESOLVE, rather
+      // than by comparing the two strings: across a DST transition the later
+      // wall clock is not always the later instant, and a string comparison
+      // would accept a window that never opens while refusing one that does.
+      if (opensAt >= closesAt) {
+        process.stderr.write(
+          `--not-before '${notBefore}' is not before --not-after '${notAfter}' in zone '${zone}', ` +
+            `so the window would never open. Nothing was written.\n`,
+        )
+        return 1
+      }
+    }
+
     const fingerprint = proposalFingerprint(state, producer, producerManifest)
     state.approvals[consumer] = {
       plugin: consumer,
@@ -222,7 +278,7 @@ async function approveContent(
       fingerprint,
       run_id: lastOutput.run_id ?? null,
       approved_at: new Date(now).toISOString(),
-      not_before: values['not-before'] ?? null,
+      not_before: notBefore,
       not_after: notAfter,
       zone,
       effect_id: null,

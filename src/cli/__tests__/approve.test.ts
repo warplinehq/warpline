@@ -972,3 +972,270 @@ export async function handler() {
     expect(await checkApproval('render-issue', approvalPath)).toBe(true)
   })
 })
+
+/**
+ * `warpline approve --content` — the third mode, and every way it refuses.
+ *
+ * The shape of every case here is the same and it is the point: the message
+ * names a reason a human can act on, AND `state.approvals` is byte-unchanged on
+ * disk afterwards. A refusal that names its reason but leaves a half-written
+ * record is the state a gate must never be in — and this branch validates
+ * everything inside one lock before it mutates anything, exactly as the named
+ * path validates every positional before it writes a grant.
+ *
+ * `state.approvals` is seeded NON-EMPTY in each case, so "unchanged" is a byte
+ * comparison rather than an absence check. The absence check passes on a
+ * command that wrote nothing and on one that deleted the record.
+ */
+describe('warpline approve --content', () => {
+  let statePath: string
+
+  const PRODUCER = 'batch-builder'
+  const CONSUMER = 'batch-sender'
+
+  /** A pre-existing approval for a third plugin, so "unchanged" has bytes to compare. */
+  const BYSTANDER = {
+    plugin: 'someone-else',
+    producer: 'their-producer',
+    fingerprint: 'a'.repeat(64),
+    run_id: 'run-theirs',
+    approved_at: '2026-09-01T00:00:00.000Z',
+    not_before: null,
+    not_after: '2099-01-01T00:00',
+    zone: 'UTC',
+    effect_id: null,
+    marked_at: null,
+    confirmed_at: null,
+  }
+
+  async function writeContentPair(
+    overrides: Record<string, unknown> = {},
+    producerInstalled = true,
+  ): Promise<void> {
+    if (producerInstalled) {
+      const pdir = join(root, 'plugins', PRODUCER)
+      await mkdir(pdir, { recursive: true })
+      await writeFile(
+        join(pdir, 'manifest.ts'),
+        `export const manifest = ${JSON.stringify(makeManifest(PRODUCER, []))}`,
+      )
+    }
+    const cdir = join(root, 'plugins', CONSUMER)
+    await mkdir(cdir, { recursive: true })
+    await writeFile(
+      join(cdir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify({
+        ...makeManifest(CONSUMER, ['sends_email']),
+        approval_class: 'content',
+        dependencies: [PRODUCER],
+        ...overrides,
+      })}`,
+    )
+  }
+
+  /** State with the bystander approval and, optionally, a producer Output. */
+  async function seedContentState(producerRan: boolean): Promise<void> {
+    await mkdir(join(root, 'state'), { recursive: true })
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        schema_version: 1,
+        plugin_runs: producerRan
+          ? {
+              [PRODUCER]: {
+                last_run_at: new Date(Date.now() - 3_600_000).toISOString(),
+                status: 'success',
+                last_output: {
+                  type: 'brief',
+                  format: 'json',
+                  body: '{"batch":"twelve invoices"}',
+                  run_id: 'run-the-operator-read',
+                },
+              },
+            }
+          : {},
+        approvals: { 'someone-else': BYSTANDER },
+      }),
+    )
+  }
+
+  const readState = async (): Promise<{ approvals: Record<string, Record<string, unknown>> }> =>
+    JSON.parse(await readFile(statePath, 'utf-8'))
+
+  const approvalsOnDisk = async (): Promise<string> =>
+    JSON.stringify((await readState()).approvals)
+
+  beforeEach(() => {
+    statePath = join(root, 'state', 'engine-state.json')
+  })
+
+  test('C1: the happy path writes one approval and leaves the others alone', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+
+    const { code, stdout } = await capture('approve', [
+      CONSUMER,
+      '--content',
+      '--not-after',
+      '2099-01-01T00:00',
+    ])
+
+    expect(code).toBe(0)
+    expect(stdout).toContain(CONSUMER)
+    expect(stdout).toContain(PRODUCER)
+    const state = await readState()
+    expect(state.approvals[CONSUMER].producer).toBe(PRODUCER)
+    expect(state.approvals[CONSUMER].not_after).toBe('2099-01-01T00:00')
+    expect(state.approvals[CONSUMER].run_id).toBe('run-the-operator-read')
+    expect(state.approvals[CONSUMER].confirmed_at).toBeNull()
+    // No session grant was written. The content branch reaches no symbol in the
+    // grant module, and this is that claim as an outcome.
+    expect(existsSync(approvalPath)).toBe(false)
+    // The bystander is untouched: approving is a per-plugin gesture.
+    expect(state.approvals['someone-else']).toEqual(BYSTANDER)
+  })
+
+  test('C2: a producer that has never run is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(false)
+    const before = await approvalsOnDisk()
+
+    const { code, stderr } = await capture('approve', [
+      CONSUMER,
+      '--content',
+      '--not-after',
+      '2099-01-01T00:00',
+    ])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(PRODUCER)
+    expect(stderr).toContain('never produced an Output')
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C3: omitting --not-after is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    const before = await approvalsOnDisk()
+
+    const { code, stderr } = await capture('approve', [CONSUMER, '--content'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('--not-after is required')
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C4: a zone the host tzdb does not know is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    const before = await approvalsOnDisk()
+
+    const { code, stderr } = await capture('approve', [
+      CONSUMER,
+      '--content',
+      '--not-after',
+      '2099-01-01T00:00',
+      '--zone',
+      'Mars/Olympus_Mons',
+    ])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('Mars/Olympus_Mons')
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C4b: a zone LINK the Intl enumeration omits is accepted', async () => {
+    // Non-vacuity for C4, and the reason the check resolves rather than testing
+    // membership: `US/Eastern` is absent from the Intl zone list and resolves
+    // perfectly well. A membership test would refuse it.
+    await writeContentPair()
+    await seedContentState(true)
+
+    const { code } = await capture('approve', [
+      CONSUMER,
+      '--content',
+      '--not-after',
+      '2099-01-01T00:00',
+      '--zone',
+      'US/Eastern',
+    ])
+
+    expect(code).toBe(0)
+    expect((await readState()).approvals[CONSUMER].zone).toBe('US/Eastern')
+  })
+
+  test('C5: a --not-before at or after --not-after is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    const before = await approvalsOnDisk()
+
+    const { code, stderr } = await capture('approve', [
+      CONSUMER,
+      '--content',
+      '--not-after',
+      '2026-01-01T00:00',
+      '--not-before',
+      '2026-06-01T00:00',
+    ])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('never open')
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C6: a plugin not declaring the content class is refused, and nothing is written', async () => {
+    await writeContentPair({ approval_class: 'session' })
+    await seedContentState(true)
+    const before = await approvalsOnDisk()
+
+    const { code, stderr } = await capture('approve', [
+      CONSUMER,
+      '--content',
+      '--not-after',
+      '2099-01-01T00:00',
+    ])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain("approval_class 'session'")
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C7: an unknown plugin name is refused with a suggestion, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    const before = await approvalsOnDisk()
+
+    const { code, stderr } = await capture('approve', [
+      'batch-sendr',
+      '--content',
+      '--not-after',
+      '2099-01-01T00:00',
+    ])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('batch-sendr')
+    expect(stderr).toContain(CONSUMER) // the suggestion names the close match
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C8: --content mixed with a grant gesture is refused whole', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    const before = await approvalsOnDisk()
+
+    const withAll = await capture('approve', ['--content', '--all', '--not-after', '2099-01-01T00:00'])
+    expect(withAll.code).toBe(1)
+    expect(withAll.stderr).toContain('--all')
+
+    const withTtl = await capture('approve', [CONSUMER, '--content', '--ttl', '4h', '--not-after', '2099-01-01T00:00'])
+    expect(withTtl.code).toBe(1)
+    expect(withTtl.stderr).toContain('--ttl')
+
+    const two = await capture('approve', [CONSUMER, PRODUCER, '--content', '--not-after', '2099-01-01T00:00'])
+    expect(two.code).toBe(1)
+    expect(two.stderr).toContain('exactly one plugin')
+
+    expect(await approvalsOnDisk()).toBe(before)
+    expect(existsSync(approvalPath)).toBe(false)
+  })
+})
