@@ -1890,13 +1890,17 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 // session-class plugin, for a content-class one with no record
                 // on file, and for a window that has not opened. One guard, and
                 // no second test of the same fact.
-                const status = ev.refusal === undefined ? 'skipped' : 'refused'
+                // The RUN-LOG status, which has six members. Not the FSM
+                // state: `plugin_states.set(pluginName, 'skipped')` above this
+                // switch is what a refused plugin's FSM entry is, and it stays
+                // that way — R4 adds no `PluginFsmState` member.
+                const entryStatus = ev.refusal === undefined ? 'skipped' : 'refused'
                 if (ev.refusal !== undefined) {
                   refused_plugins.push({ plugin: pluginName, reason: ev.refusal })
                 }
                 plugin_entries.push({
                   plugin: pluginName,
-                  status,
+                  status: entryStatus,
                   started_at: entryStartedAt,
                   elapsed_ms: unapprovedElapsed,
                   result_summary: contentClass
@@ -1916,9 +1920,15 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 await (ev.refusal === undefined
                   ? emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
                   : emitPluginRefused(pluginName, ev.refusal, run_id, eventsPath))
+                // The FSM state, per this hook's contract — and a refusal
+                // leaves it at `skipped`. Passing the run-log status here would
+                // put a sixth value through an exported interface documented to
+                // carry the FSM's, which is the member R4 declines to add,
+                // arriving by the back door. The REASON is where the two
+                // classes differ, and it keeps one author per class.
                 onPluginEnd?.(
                   pluginName,
-                  status,
+                  'skipped',
                   unapprovedElapsed,
                   contentClass ? ev.detail : 'unapproved side effects',
                 )
