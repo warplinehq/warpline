@@ -1592,7 +1592,8 @@ as the record that was deleted. The plugin being due again is a re-run
 opportunity and not a repair: a re-run that also produces no Output leaves the
 plugin reading as having run and never produced. What IS bounded is the trigger.
 This path fires only on the two refusals above — a dependency moved, or the gate
-expired — and the delete is skipped entirely while a denial is live.
+expired — and the delete is skipped entirely while **either** a denial **or** a
+content approval is live against the plugin.
 
 **The `plugin_runs` entry is kept while a denial is live, and the denial is left
 exactly as it was.** Deleting the entry is what makes a plugin due again after
@@ -1613,11 +1614,48 @@ since a suppressed plugin can never produce a new Output — which made the deni
 permanent by name and required rewriting its `reason` to say so. Neither the
 permanence nor the rewrite is needed once the entry survives.
 
+**The entry is kept while a live content approval references the plugin, on the
+identical argument.** An approval is a standing yes to specific bytes, and those
+bytes are a `last_output`. Delete the entry that holds them and the fingerprint
+the operator's yes was bound to can never be recomputed: the record survives,
+matches nothing, and the answer becomes unhonourable — permanently, because the
+destroyed Output never returns. A gate belonging to one question would have
+silently voided the answer to another.
+
+The reference runs **both ways**, so this is a scan and not a lookup. An
+approval is keyed by the CONSUMER and the bytes belong to the PRODUCER, and the
+plugin whose gate is being discarded is protected when it is named as either.
+The producer case is the one the delete actually destroys.
+
+Only a **live** approval protects. One whose window has closed, whose bytes have
+moved, or which is already spent leaves the delete to go ahead exactly as before
+— a stale answer protects nothing, here for the same reason a superseded denial
+does not. The standing is read through the same function the gate reads it
+through; nothing here re-derives the predicate, and nothing here decides whether
+anything fires.
+
 The protection lives in `applyPendingGate` rather than in its caller,
 deliberately. `approve` refuses on a live denial before reaching that call, so
 no CLI gesture arrives here with one standing — which is precisely why a guard
 placed in the caller would protect nothing today while being the thing a second
 caller tomorrow silently depends on.
+
+`applyPendingGate` takes the plugin manifest map as a required argument for this
+reason: the approval names a producer, and that producer's manifest is what the
+fingerprint is computed over. It is required rather than defaulted because an
+absent map answers "no approval" for every record, which is the destructive
+direction.
+
+**The apply runs inside the state document's lock.** `warpline approve`'s named
+path takes that lock around its whole read-modify-write — the state read, the
+gate dispatch, and the apply loop — using the same derived lock path the
+`--content` branch uses. It wraps the loop rather than each call because
+`applyPendingGate` writes state per call, so several gated plugins are several
+read-modify-writes over one in-memory document and a lock released between them
+reopens the window. `applyPendingGate` itself takes no lock; the acquire is
+non-reentrant, so one there would nest and deadlock. Without this, a
+`warpline approve --content` landing from a second attachment between the read
+and the apply was overwritten.
 
 A **superseded** denial does not hold the entry. It is already stale, so the
 plugin becoming due again is the correct outcome and the delete goes ahead.
