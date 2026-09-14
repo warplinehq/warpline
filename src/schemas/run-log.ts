@@ -14,6 +14,28 @@
  */
 import { z } from 'zod'
 
+/**
+ * Why a content approval that exists did not authorise a fire.
+ *
+ * A closed set of exactly three, validated on parse, because this value is
+ * what an unattended scheduler switches on. An open-ended reason string would
+ * let a value the runtime did not author reach that switch, and a consumer
+ * parsing prose breaks the first time the wording changes.
+ *
+ * The three are decided in the order `indeterminate` → `outside_window` →
+ * `content_moved`, and the order is not arbitrary: an `indeterminate` mark
+ * means the runtime cannot tell whether the bytes already shipped, and that
+ * question outranks both "the window closed" and "the bytes moved", neither of
+ * which can be answered honestly while the first is open.
+ *
+ * **A spent approval is deliberately not a fourth member.** It is no live
+ * authority and no operator error — the runtime already fired those
+ * bytes, which is the instruction having been carried out. It is a state
+ * report, and there is nothing in it for a consumer to switch on.
+ */
+export const RefusalReasonSchema = z.enum(['content_moved', 'outside_window', 'indeterminate'])
+export type RefusalReason = z.infer<typeof RefusalReasonSchema>
+
 export const PluginLogEntrySchema = z.object({
   plugin: z.string(),
   /**

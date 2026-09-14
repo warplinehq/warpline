@@ -98,7 +98,7 @@ import {
 } from './engine-state-store.js'
 import type { Approval, Denial, EngineState, PendingGate, PluginRun } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs } from './run-log-store.js'
-import type { RunLog } from '../schemas/run-log.js'
+import type { RefusalReason, RunLog } from '../schemas/run-log.js'
 import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
 import {
   emitBoardEvent,
@@ -286,6 +286,21 @@ export interface AdvanceResult {
   status: 'complete' | 'partial' | 'failed' | 'interrupted'
   plugin_states: Map<string, PluginFsmState | 'skipped'>
   gated_plugins: string[]
+  /**
+   * The plugins a content approval did NOT authorise this advance, each paired
+   * with the closed-set reason its authority stopped applying.
+   *
+   * An array of pairs, and deliberately neither of the two shapes that read as
+   * shorter: a `string[]` drops the reason, which is the whole point of the
+   * field, and a record keyed by plugin name alongside a name list is two
+   * accounts of one advance. Not a `Map` either — it does not survive
+   * `JSON.stringify`, and this result is rendered by `--json` and read back
+   * out of the dead-man file.
+   *
+   * Additive, on the argument `pruned` already makes above: nothing embeds
+   * this result, and the run-log parse downstream strips unknown keys.
+   */
+  refused_plugins: Array<{ plugin: string; reason: RefusalReason }>
   run_log_path: string
   /**
    * How many run records this advance's retention prune removed. Zero on the
@@ -601,7 +616,18 @@ export type EvalResult =
    * what the invocation hands to `witnessAfterGrantRead`.
    */
   | { due: true; content?: ContentAuthority }
-  | { due: false; reason: NotDueReason; detail: string }
+  /**
+   * `refusal` is present exactly when a content approval EXISTS and does not
+   * authorise this fire — never on a session-class plugin, and never on the
+   * two standings that are state reports rather than refusals.
+   *
+   * It rides the not-due arm rather than being recomputed downstream: the
+   * orchestrator holding a reason it derived from a second `approvalStanding`
+   * call would be a second read of the authority for one fire decision, which
+   * is the thing this phase refuses by name. `detail` is the prose for the
+   * same fact; this is the machine-readable half.
+   */
+  | { due: false; reason: NotDueReason; detail: string; refusal?: RefusalReason }
 
 /** Everything `evaluatePlugin` needs that is not the plugin itself. */
 export interface EvalContext {
@@ -804,6 +830,39 @@ function contentGateDetail(g: GateInput): string {
       // Unreachable behind the predicate above; written out so the record
       // narrows and so a future arm cannot land here silently.
       return 'unapproved: content approval is live'
+  }
+}
+
+/**
+ * The machine-readable half of the arm above: which of the three refusals this
+ * standing is, or `undefined` when it is not a refusal at all.
+ *
+ * Three arms map through and four do not. `none` is the ordinary state of an
+ * unapproved batch and names no authority that lapsed; `before_window` is the
+ * operator's own instruction arriving on time; `spent` is the runtime having
+ * already fired those bytes; `live` never reaches a not-due arm at all. A
+ * scheduler switching on a reason wants the three where a yes existed and
+ * stopped applying, and a state report in that set would have it acting on
+ * news that nothing went wrong.
+ *
+ * Written out arm by arm rather than passing the standing's own tag through
+ * the schema's parser: the two vocabularies coincide today by design and the
+ * switch is what makes a fourth standing arm a compile error here instead of
+ * a silent `undefined` at the sink.
+ */
+function refusalFor(standing: ApprovalStanding): RefusalReason | undefined {
+  switch (standing.standing) {
+    case 'indeterminate':
+      return 'indeterminate'
+    case 'outside_window':
+      return 'outside_window'
+    case 'content_moved':
+      return 'content_moved'
+    case 'none':
+    case 'before_window':
+    case 'spent':
+    case 'live':
+      return undefined
   }
 }
 
@@ -1113,7 +1172,16 @@ export async function evaluatePlugin(
   // not cause them.
   for (const gate of GATES) {
     if (await gate.applies(input)) {
-      return { due: false, reason: gate.reason, detail: gate.detail(input) }
+      const detail = gate.detail(input)
+      // The reason travels on the APPROVAL entry only. A content-class plugin
+      // held by an earlier gate — still fresh, holding a failed dependency —
+      // was not refused by anything, and filing its standing as a refusal
+      // there would publish a verdict no gate reached. The standing itself is
+      // `none` for every session-class plugin, so that half needs no guard.
+      const refusal = gate.reason === 'unapproved' ? refusalFor(contentStanding) : undefined
+      return refusal === undefined
+        ? { due: false, reason: gate.reason, detail }
+        : { due: false, reason: gate.reason, detail, refusal }
     }
   }
 
@@ -1518,6 +1586,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         status: quietStatus,
         plugin_states: quietStates,
         gated_plugins: [],
+        // Nothing was evaluated, so nothing was refused. Empty because the
+        // question was never asked, which is the same honesty `pruned: 0` makes
+        // one line below.
+        refused_plugins: [],
         run_log_path: '',
         pruned: 0,
       }
@@ -1582,6 +1654,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     }
 
     const gated_plugins: string[] = []
+    /**
+     * Filled from the approval arm below, from the reason the evaluator already
+     * carried out. Nothing here re-reads the approvals record to build it.
+     */
+    const refused_plugins: AdvanceResult['refused_plugins'] = []
     /**
      * The gates parked by this advance, assembled inside the gated arm where the
      * plugin's real `SkillResult` is still in scope.
@@ -1793,6 +1870,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               // line where "still fresh" does not.
               case 'unapproved': {
                 const unapprovedElapsed = Date.now() - entryStart
+                if (ev.refusal !== undefined) {
+                  refused_plugins.push({ plugin: pluginName, reason: ev.refusal })
+                }
                 plugin_entries.push({
                   plugin: pluginName,
                   status: 'skipped',
@@ -2308,6 +2388,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       status: engineStatus,
       plugin_states,
       gated_plugins,
+      refused_plugins,
       run_log_path,
       pruned: prunedRunLogs,
     }

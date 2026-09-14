@@ -677,6 +677,34 @@ tell an unanswered question from an answered one.
 Adding a member fans out into this table and into every run log written
 afterwards, so the set is not extended casually.
 
+### Refusal reasons
+
+A content approval that exists and does not authorise a fire refuses for
+exactly one of three reasons. The set is closed and validated on parse, because
+this is the value an unattended scheduler switches on: an open-ended reason
+string would let something the runtime did not author reach that switch, and a
+consumer parsing prose breaks the first time the wording changes.
+
+| Reason | Meaning |
+|--------|---------|
+| `indeterminate` | A fire was marked and never confirmed, so the runtime cannot tell whether the bytes already shipped |
+| `outside_window` | The approval window has closed, or its zone no longer resolves on this host |
+| `content_moved` | The approved bytes are no longer what would ship |
+
+They are decided in that order, and the order is not arbitrary. An
+`indeterminate` mark outranks both of the others because neither "the window
+closed" nor "the bytes moved" can be answered honestly while the runtime does
+not know whether the fire already happened.
+
+`already_spent` is deliberately **not** among them. A spent approval is no live
+authority and no operator error — the runtime already fired those bytes, which
+is the instruction having been carried out. It is a state report, and there is
+nothing in it for a consumer to act on.
+
+An approval that has not opened yet is likewise no refusal: it is the
+operator's own instruction arriving on time, and the plugin is ordinary
+not-due.
+
 ### Output records
 
 `SkillResult.artifacts_produced` is an array of Output records — a thing the
