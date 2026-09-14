@@ -35,6 +35,30 @@ export const AutonomyLevel = z.enum(['autonomous', 'supervised', 'manual'])
 export type AutonomyLevel = z.infer<typeof AutonomyLevel>
 
 /**
+ * Which authority answers for this plugin's side effects.
+ *
+ *   session — the session Grant `warpline approve` merges. The default, and
+ *             what every manifest written before this field existed means.
+ *   content — an operator approved SPECIFIC BYTES ahead of time, and the
+ *             runtime fires them later with nobody present. The approval is
+ *             bound to a fingerprint of the single declared dependency's last
+ *             Output, so content that moves after the yes does not ship.
+ *
+ * The two are DISJOINT, not additive. A content-class plugin does not consult
+ * the session Grant at all, and a session-class plugin never reads the
+ * approvals record. A live wildcard Grant composing with a frozen batch would
+ * render the freeze decorative, which is the failure this partition refuses by
+ * construction rather than by ordering.
+ *
+ * Defaulted rather than optional, like the other closed sets here, so the
+ * addition is invisible to a manifest that declares nothing. A value outside
+ * the enum is a hard `.parse()` failure at import time, not a fallback to the
+ * default: a plugin must not run under an authority nobody declared.
+ */
+export const ApprovalClass = z.enum(['session', 'content'])
+export type ApprovalClass = z.infer<typeof ApprovalClass>
+
+/**
  * Plugin manifest schema. Every plugin in .warpline/plugins/{name}/manifest.ts
  * must export a value validated against this schema.
  *
@@ -154,6 +178,17 @@ export const PluginManifestSchema = z.object({
   /** Human oversight requirement for execution and side effects */
   autonomy_level: AutonomyLevel,
 
+  /**
+   * Which authority answers for this plugin's side effects — see
+   * `ApprovalClass` above for what the two values mean and why they are
+   * disjoint.
+   *
+   * Declaring `content` carries three cross-field requirements, enforced by the
+   * object-level rule at the bottom of this schema rather than here: a leaf
+   * refinement cannot see its siblings.
+   */
+  approval_class: ApprovalClass.default('session'),
+
   /** Side effects this plugin may produce — must be declared for supervised/manual gating */
   side_effects: z.array(SideEffectType).default([]),
 
@@ -226,5 +261,57 @@ export const PluginManifestSchema = z.object({
    */
   min_tier: z.enum(['normal', 'degraded', 'extended', 'suspended']).default('normal'),
 })
+  /**
+   * What `approval_class: 'content'` additionally requires of the manifest that
+   * declares it. The file's first object-level rule, because these are the
+   * first constraints here that read more than one field.
+   *
+   * It lives on the schema and NOT in the loader, so every reader validates
+   * under one rule. A manifest imported by `cli/approve.ts`, `cli/deny.ts` or
+   * `cli/plan.ts` would otherwise validate under a weaker rule than the advance
+   * does, and the review-gate exemption would then apply to a `supervised`
+   * plugin the advance would have rejected.
+   *
+   * A named reason per failure, in the habit `name`'s refinement above already
+   * keeps: a manifest is read by a human fixing it, and "invalid manifest" is
+   * not a repair instruction.
+   */
+  .superRefine((manifest, ctx) => {
+    if (manifest.approval_class !== 'content') return
+
+    if (manifest.side_effects.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['side_effects'],
+        message:
+          "approval_class 'content' requires at least one declared side effect — " +
+          'a content approval is permission to perform an effect, and a plugin ' +
+          'declaring none has nothing for the operator to approve',
+      })
+    }
+
+    if (manifest.dependencies.length !== 1) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['dependencies'],
+        message:
+          "approval_class 'content' requires exactly one declared dependency — " +
+          'the single dependency is what determines whose Output the fingerprint ' +
+          `covers, and ${manifest.dependencies.length} leaves that subject ambiguous`,
+      })
+    }
+
+    if (manifest.autonomy_level !== 'autonomous') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['autonomy_level'],
+        message:
+          "approval_class 'content' requires autonomy_level 'autonomous' — " +
+          'the whole point is firing approved bytes with nobody present, and a ' +
+          `plugin asking for a human at fire time ('${manifest.autonomy_level}') ` +
+          'is asking the same human the same question twice',
+      })
+    }
+  })
 
 export type PluginManifest = z.infer<typeof PluginManifestSchema>

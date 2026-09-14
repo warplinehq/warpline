@@ -58,6 +58,68 @@ export const DenialSchema = z.object({
 })
 export type Denial = z.infer<typeof DenialSchema>
 
+/**
+ * A standing "yes" bound to specific bytes: the operator read what a producer
+ * had already written, approved it, and the runtime is permitted to ship THAT
+ * and nothing else, inside a window, with nobody present.
+ *
+ * The sibling of `DenialSchema` above and deliberately not a generalisation of
+ * it. The two answer opposite questions and travel with different fields; a
+ * shared supertype would invite a reader to treat "approved" as "not denied",
+ * which it is not.
+ *
+ * `plugin` is stored as a field as well as being the record key, matching the
+ * denial's habit: the key is how the record is looked up, the field is what
+ * survives being read out of the record on its own, and it costs one string.
+ *
+ * `producer` is stored because the fingerprint's subject is the dependency, not
+ * the consumer. It is also checked against the consumer manifest's current
+ * single declared dependency at fire time: rewriting that dependency after the
+ * approval leaves the stored fingerprint matching a producer whose bytes are no
+ * longer the ones that would ship.
+ *
+ * **The window fields are opaque validated strings here.** A schema module may
+ * import only `zod` and a sibling schema module, so this file cannot resolve a
+ * wall clock in a zone and does not try. `not_before` and `not_after` are naked
+ * wall clocks — no `Z`, no offset — and `zone` is an IANA name. Whether the
+ * host's tz database knows the zone is decided at approval time in
+ * `src/cli/approve.ts`, which refuses before writing anything.
+ */
+export const ApprovalSchema = z.object({
+  /** The consumer whose side effect this authorises. */
+  plugin: z.string(),
+  /** The declared dependency whose Output the fingerprint covers. */
+  producer: z.string(),
+  /** Hex sha256 of the producer's proposal, whole and untruncated. */
+  fingerprint: z.string(),
+  /** The producer run the approved bytes came from. */
+  run_id: z.string(),
+  approved_at: z.string(),
+  /**
+   * The wall clock at which the window opens. Null means the approval instant,
+   * so an operator who wants "from now" writes nothing.
+   */
+  not_before: z.string().nullable(),
+  /**
+   * The wall clock at which the window closes. Required, with no default and no
+   * ceiling: a window that never closes is ambient authority wearing a bound.
+   */
+  not_after: z.string(),
+  /** IANA zone both bounds are read in. */
+  zone: z.string(),
+  /**
+   * The fire this approval was spent on, and the two-field mark that records
+   * it. Null until the runtime marks; nothing in this plan writes any of the
+   * three. `marked_at` set with `confirmed_at` still null is the indeterminate
+   * state — the runtime began firing and cannot prove it finished — and it is
+   * deliberately representable rather than collapsed into a single boolean.
+   */
+  effect_id: z.string().nullable().default(null),
+  marked_at: z.string().nullable().default(null),
+  confirmed_at: z.string().nullable().default(null),
+})
+export type Approval = z.infer<typeof ApprovalSchema>
+
 export const TaskAgingSchema = z.object({
   task_id: z.string(),
   first_flagged: z.string(),
@@ -311,6 +373,19 @@ export const EngineStateSchema = z.object({
    * loads and reads as none.
    */
   denials: z.record(z.string(), DenialSchema).default({}),
+  /**
+   * Live content approvals, keyed by plugin name.
+   *
+   * A record and not an array, for the reason `denials` above gives: one live
+   * approval per plugin by construction, so re-approving lands on the same key
+   * rather than accumulating, and there is no de-dupe scan to get wrong. It
+   * also makes a fleet-wide approval inexpressible — no key means every plugin,
+   * and blanket authority is precisely what a content approval is not.
+   *
+   * `.default({})` so a state document written before approvals existed still
+   * loads and reads as none.
+   */
+  approvals: z.record(z.string(), ApprovalSchema).default({}),
   task_aging: z.array(TaskAgingSchema).default([]),
   completed_tasks: z.array(CompletedTaskSchema).default([]),
   pending_gates: z.array(PendingGateSchema).default([]),
