@@ -124,3 +124,24 @@ export function lockPath(): string {
 export function lastSuccessfulAdvancePath(): string {
   return path.join(stateDir(), 'last-successful-advance')
 }
+
+/**
+ * The home's LAYOUT version — a bare integer, one line, nothing else.
+ *
+ * At the home root and never under `stateDir()`. The two format versions
+ * answer two different questions: `engine-state.json`'s `schema_version` says
+ * what shape that document is, and this says what layout the home is. Filing
+ * the layout answer inside `state/` would put it under the versioning it
+ * exists to describe, and the two would then disagree about what each covers.
+ *
+ * A missing file means version 1 — every home written before this file existed
+ * is a version 1 home, and there is nothing to migrate to make that true. An
+ * advance stamps the current version on write.
+ *
+ * Internal. This is NOT re-exported from `paths-public.ts` — like the dead-man
+ * file, it is a contract for the bytes at the path, not for a consumer
+ * importing a getter.
+ */
+export function homeVersionPath(): string {
+  return path.join(warplineHome(), 'version')
+}

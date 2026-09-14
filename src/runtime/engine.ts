@@ -100,6 +100,7 @@ import {
   readEngineState,
   writeEngineState,
 } from './engine-state-store.js'
+import { ENGINE_STATE_MAX_SCHEMA_VERSION } from '../schemas/engine-state.js'
 import type { Approval, Denial, EngineState, PendingGate, PluginRun } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs } from './run-log-store.js'
 import type { RefusalReason, RunLog } from '../schemas/run-log.js'
@@ -2607,6 +2608,18 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // 8. Write updated state (with pending_gates)
     const updatedState: EngineState & { pending_gates?: unknown[] } = {
       ...state,
+      // Migrate-on-write, and the ONLY site there is.
+      //
+      // The spread above carries `schema_version` straight through from the
+      // read, so without this line a v1 document read by a v2 build is written
+      // back as v1 and the home never advances — there was no migration site
+      // at all, only a constant that nothing stamped.
+      //
+      // Here rather than in `writeEngineState`: that helper is also how the
+      // board writes state, on four paths that never read the home version, so
+      // migration there would stamp a layout version nothing had validated.
+      // The advance is the one writer that read both versions on the way in.
+      schema_version: ENGINE_STATE_MAX_SCHEMA_VERSION,
       // `confirmed_at` is written HERE and nowhere else — the second half of
       // the two-field mark, and the reason the mark is two fields rather than
       // one. Everything about which fires are in the set, and why a `failed`
@@ -2687,6 +2700,16 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
       updatedState.approvals = mergeApprovals(disk.approvals, updatedState.approvals)
       await writeEngineState(updatedState as EngineState, stateDir)
+      // The home's layout version, stamped beside the document it describes and
+      // inside the same lock, so the two halves of the migration cannot land
+      // apart. `stateDir` is the state FILE path, so its grandparent is the home
+      // root — the same derivation the read uses, and never `warplineHome()`,
+      // which under a `stateDir` override would stamp the live operator home.
+      // The trailing newline is the format's: the reader trims exactly one.
+      await atomicWriteText(
+        join(dirname(dirname(stateDir)), 'version'),
+        `${ENGINE_STATE_MAX_SCHEMA_VERSION}\n`,
+      )
     })
 
     // 9. Write run log

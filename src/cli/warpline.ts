@@ -24,7 +24,12 @@
  * catch. `readEngineState` throws `EngineStateInvalidError` rather than
  * handing back defaults a later write would persist, and every arm that
  * touches engine state can raise it, so one catch here maps it to a message
- * and code 1 for all of them. It is duck-typed on `err.name` deliberately:
+ * and code 1 for all of them. `FormatVersionUnsupportedError` rides the same
+ * arm: `approve` and `deny` catch only the unusable-document type and rethrow
+ * everything else, precisely so a home written by a NEWER build is not
+ * reported as corrupt, and without this arm that refusal would reach the
+ * operator as a stack trace instead of as its own actionable message. It is
+ * duck-typed on `err.name` deliberately:
  * importing the error class would pull `src/runtime/engine-state-store.ts` —
  * and therefore zod — into the graph for `warpline --help`, which is exactly
  * what rule 2 above exists to prevent. Anything else re-throws unchanged.
@@ -124,7 +129,10 @@ export async function main(argv: string[]): Promise<number> {
         return 1
     }
   } catch (err: unknown) {
-    if (err instanceof Error && err.name === 'EngineStateInvalidError') {
+    if (
+      err instanceof Error &&
+      (err.name === 'EngineStateInvalidError' || err.name === 'FormatVersionUnsupportedError')
+    ) {
       // Surface the message, not a stack — the convention at plan.ts:198.
       process.stderr.write(`${err.message}\n`)
       return 1

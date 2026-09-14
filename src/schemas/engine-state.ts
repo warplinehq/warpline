@@ -337,8 +337,21 @@ export function isStubGate(gate: PendingGate): boolean {
  * loads; one above it is refused by `readStateFile` in
  * `src/runtime/engine-state-store.ts`, with a reason that says
  * the build is behind rather than that the file is broken.
+ *
+ * It is also the newest HOME layout version this build understands — the
+ * integer in `<home>/version`. One number for both deliberately: two counters
+ * that always move together are two chances to move only one of them, and
+ * there has never been a release where the document shape changed and the
+ * layout did not. If the two ever need to diverge, that is the moment to split
+ * them, and the split will be visible in the diff that needs it.
+ *
+ * **Raising this is a one-way door.** The advance stamps the current version
+ * on every document it writes, so a home an upgraded build has touched once is
+ * refused by every earlier build from then on — correctly, and with no
+ * supported rollback. Correct forward: a deprecation plus a patch version,
+ * never an unpublish (CLAUDE.md Rule 4).
  */
-export const ENGINE_STATE_MAX_SCHEMA_VERSION = 1
+export const ENGINE_STATE_MAX_SCHEMA_VERSION = 2
 
 /**
  * `.catchall(z.unknown())` is on this object so unknown top-level keys survive

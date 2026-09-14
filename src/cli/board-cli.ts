@@ -360,7 +360,10 @@ try {
       process.exit(1)
   }
 } catch (err: unknown) {
-  if (err instanceof Error && err.name === 'EngineStateInvalidError') {
+  if (
+    err instanceof Error &&
+    (err.name === 'EngineStateInvalidError' || err.name === 'FormatVersionUnsupportedError')
+  ) {
     // Surface the message, not a stack — the convention at plan.ts:198.
     console.error(err.message)
     process.exit(1)

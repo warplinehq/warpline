@@ -31,6 +31,7 @@
  * behaviour are what they were.
  */
 import { readFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 
 import { z } from 'zod'
 import { atomicWriteText } from '../lib/fs-atomic.js'
@@ -66,6 +67,103 @@ export class EngineStateInvalidError extends Error {
   }
 }
 
+/**
+ * Raised when a format version is one this build cannot proceed on: either
+ * NEWER than it understands, or not a version at all.
+ *
+ * A separate type from `EngineStateInvalidError`, and the separation is the
+ * point. `cli/deny.ts` and `cli/approve.ts` both catch that one and print
+ * *"Cannot read engine state"* — which, on a home a newer build wrote, is a
+ * false statement with the wrong remedy attached: the document is perfectly
+ * well-formed, and the operator's fix is to upgrade rather than to go looking
+ * for corruption. Both of those catches rethrow anything else, so this type
+ * travels past them to the dispatcher, which prints its message.
+ *
+ * `name` is assigned the literal in the constructor for the same reason
+ * `EngineStateInvalidError` does: `src/cli/warpline.ts` and
+ * `src/cli/board-cli.ts` catch it without importing this module, because
+ * importing it would pull zod into the graph for `warpline --help`.
+ *
+ * `kind` separates the two refusals that must not read alike. An UNREADABLE
+ * version file is not an OLDER one: treating it as older would migrate over it
+ * on the next write, destroying whatever it was trying to say.
+ */
+export class FormatVersionUnsupportedError extends Error {
+  readonly path: string
+  readonly found: string
+  readonly understood: number
+  readonly kind: 'newer' | 'unreadable'
+
+  constructor(path: string, found: string, understood: number, kind: 'newer' | 'unreadable') {
+    super(
+      kind === 'newer'
+        ? `${path}: format version ${found} is newer than this build understands ` +
+            `(highest known: ${understood}) — your build is older than this file, ` +
+            `so upgrade warpline rather than letting this build rewrite it`
+        : `${path}: format version is unreadable — expected a bare integer, found ` +
+            `${JSON.stringify(found)}. This build understands up to ${understood}. An ` +
+            `unreadable version is not an earlier one, so nothing was migrated or rewritten.`,
+    )
+    this.name = 'FormatVersionUnsupportedError'
+    this.path = path
+    this.found = found
+    this.understood = understood
+    this.kind = kind
+  }
+}
+
+/**
+ * The home layout version file's entire format: a bare integer.
+ *
+ * Anchored at both ends, so ` 2`, `2.0`, `2a` and `two` are all unreadable
+ * rather than coerced. Exactly one trailing newline is trimmed before the
+ * test, because a text file written by `echo` or by any editor has one and
+ * refusing those would make the format unwritable by hand.
+ */
+const BARE_INTEGER = /^\d+$/
+
+/**
+ * Refuse a home whose LAYOUT version this build does not understand, before
+ * anything is read from it.
+ *
+ * Before, not after, and that ordering is load-bearing: a missing
+ * `engine-state.json` returns defaults on both policies, so a check that ran
+ * after the document read would never see a fresh-but-newer home at all.
+ *
+ * The path is derived from the state path this read was handed —
+ * `<home>/state/engine-state.json` → `<home>/version` — and never from
+ * `warplineHome()`. A call to the accessor here would resolve the LIVE
+ * operator home under every caller that overrides the state path, which is the
+ * failure `lib/paths.ts` opens by describing, reached through a second door.
+ */
+async function assertHomeFormatVersion(statePath: string): Promise<void> {
+  const versionPath = join(dirname(dirname(statePath)), 'version')
+
+  let raw: string
+  try {
+    raw = await readFile(versionPath, 'utf-8')
+  } catch (err: unknown) {
+    const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined
+    // No file is not a bad file. Every home written before this file existed
+    // is a version 1 home, and the advance stamps the current version on write.
+    if (code === 'ENOENT') return
+    throw new FormatVersionUnsupportedError(
+      versionPath,
+      err instanceof Error ? err.message : String(err),
+      ENGINE_STATE_MAX_SCHEMA_VERSION,
+      'unreadable',
+    )
+  }
+
+  const trimmed = raw.endsWith('\n') ? raw.slice(0, -1) : raw
+  if (!BARE_INTEGER.test(trimmed)) {
+    throw new FormatVersionUnsupportedError(versionPath, raw, ENGINE_STATE_MAX_SCHEMA_VERSION, 'unreadable')
+  }
+  if (Number(trimmed) > ENGINE_STATE_MAX_SCHEMA_VERSION) {
+    throw new FormatVersionUnsupportedError(versionPath, trimmed, ENGINE_STATE_MAX_SCHEMA_VERSION, 'newer')
+  }
+}
+
 /** What a read does with a document it cannot validate. */
 type ReadPolicy = 'fail-closed' | 'tolerant'
 
@@ -82,6 +180,15 @@ type ReadPolicy = 'fail-closed' | 'tolerant'
  * `tolerant` returns defaults, for the read-only callers that are contracted
  * never to fail — `warpline plan` above all. It writes nothing either.
  *
+ * **One refusal is shared by both policies: a format version this build does
+ * not understand.** Defaults are an honest answer about a document we cannot
+ * READ — the preview says so and shows nothing. They are a dishonest answer
+ * about a document a NEWER build wrote, because that home is not empty; it
+ * holds state this binary is too old to see, and an approval the operator
+ * granted would render as absent. Both format versions are therefore checked
+ * here, ahead of the policy split, and `warpline plan` aborts rather than
+ * previewing a home it cannot read as a healthy empty one.
+ *
  * Nothing here copies the file aside any more. The old `{path}.corrupt` backup
  * was a write on a read path, and it only existed to preserve evidence before
  * defaults destroyed it; failing closed preserves the original in place.
@@ -95,6 +202,9 @@ async function readStateFile(
   eventsPath?: string,
   announceDiscards = true,
 ): Promise<EngineState> {
+  // The home layout version, checked before the document and on both policies.
+  await assertHomeFormatVersion(statePath)
+
   let parsed: unknown
   try {
     parsed = JSON.parse(await readFile(statePath, 'utf-8'))
@@ -115,13 +225,16 @@ async function readStateFile(
   // never heard of is a different problem from a broken document, and the
   // operator's fix is different too. Refusing it is what stops an older build
   // from round-tripping a newer file down to the fields it happens to know.
+  //
+  // Refused on BOTH policies. The tolerant path used to return
+  // `defaultEngineState()` here, which is what let `warpline plan` render a
+  // newer home as empty and healthy — the one answer worse than no answer.
   if (result.data.schema_version > ENGINE_STATE_MAX_SCHEMA_VERSION) {
-    if (policy === 'tolerant') return defaultEngineState()
-    throw new EngineStateInvalidError(
+    throw new FormatVersionUnsupportedError(
       statePath,
-      `schema_version ${result.data.schema_version} is newer than this build understands ` +
-        `(highest known: ${ENGINE_STATE_MAX_SCHEMA_VERSION}) — your build is older than this file, ` +
-        `so upgrade warpline rather than letting this build rewrite it`,
+      String(result.data.schema_version),
+      ENGINE_STATE_MAX_SCHEMA_VERSION,
+      'newer',
     )
   }
 

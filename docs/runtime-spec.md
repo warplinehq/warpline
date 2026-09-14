@@ -1218,6 +1218,9 @@ There are two reads and they behave differently on purpose.
 | Write-capable | Anything that may go on to write state — an advance, the task board | Defaults | Refuses: names the path and the reason, exits non-zero, changes nothing on disk |
 | Read-only | Commands contracted never to write, `warpline plan` above all | Defaults | Defaults |
 
+One refusal is shared by both, and it is the only one: a **format version this
+build does not understand**. See [Format versions](#format-versions) below.
+
 The write-capable read fails closed because the alternative is worse than a
 failure. Returning defaults from an unreadable document means the next write
 persists those defaults, and the operator's task history, deferrals and
@@ -1233,7 +1236,20 @@ behind in the operator's home.
 A missing file is not an unusable one. A fresh install has no state document
 and both reads return defaults, so failing closed does not break first run.
 
-### `schema_version`
+### Format versions
+
+There are two, and they answer two different questions.
+
+| Version | Where | Question it answers |
+|---------|-------|---------------------|
+| `schema_version` | a field inside `engine-state.json` | what SHAPE is this document |
+| the home layout version | `~/.warpline/version` | what LAYOUT is this home |
+
+Both are currently **2**. The layout version is stored at the home root rather
+than under `state/`, because a layout-level fact filed inside `state/` would be
+covered by the per-file versioning it exists to describe.
+
+#### `schema_version`
 
 Read tolerantly: any non-negative integer parses, so a build reading a file
 one version behind still loads it.
@@ -1247,6 +1263,62 @@ the fields it happens to understand.
 A `schema_version` that is not a non-negative integer — a fraction, a negative
 number — is not a version at all and is refused as an unreadable document, never
 treated as an older one to load tolerantly.
+
+#### `~/.warpline/version`
+
+A bare integer and nothing else. Exactly one trailing newline is trimmed before
+the format is checked, so `2` and `2\n` are the same file; ` 2`, `2.0`, `2a`
+and `two` are not versions and are refused as **unreadable**.
+
+Unreadable is a different outcome from **older**, deliberately. An unreadable
+version file is not treated as version 1 and migrated over — migrating over it
+would destroy whatever the file was trying to say, and a file the runtime
+cannot interpret is the last thing it should overwrite.
+
+**A missing file means version 1.** Every home written before this file existed
+is a version 1 home, and there is nothing to migrate to make that true.
+
+#### Refuse-newer, on both read policies
+
+A format version above the newest this build knows — either one — aborts with a
+non-zero exit and a message naming the version found and the highest version
+understood. It never degrades to defaults, and it never skips.
+
+This is the one place the read-only policy does not return defaults, and the
+asymmetry is the point. Defaults are an honest answer about a document this
+build cannot READ: the preview says so and shows nothing. They are a dishonest
+answer about a document a NEWER build wrote, because that home is not empty —
+it holds state this binary is too old to see. `warpline plan` rendering such a
+home as empty and healthy would tell an operator that an approval they granted
+does not exist.
+
+The refusal carries its own error type, separate from the unusable-document
+one. `warpline approve` and `warpline deny` report an unusable document as
+*"Cannot read engine state"*; reusing that type would have them report a
+perfectly well-formed newer home as corrupt, sending the operator to the wrong
+remedy.
+
+#### Migrate-on-write, and the backward-compatibility promise
+
+An advance stamps the current version on both files — the document's
+`schema_version` and `~/.warpline/version` — in the same locked region as the
+end-of-run state write. That is the only migration site; the board's state
+writes never stamp a version, because they never read the layout one.
+
+The promise runs one way. A build reads any format version at or below its own
+and refuses anything above it. So an older home upgrades silently, and a newer
+home stops an older build instead of being quietly rewritten down to the fields
+that build happens to know.
+
+**The consequence is a one-way door, stated plainly:** once an upgraded build
+has completed a single advance against a home, every earlier build refuses that
+home from then on. There is no supported rollback, and that is the intended
+behaviour rather than a gap. Corrections are forward only — a deprecation plus
+a patch version, never an unpublish.
+
+`~/.warpline/version`'s format is a permanent on-disk contract. It cannot be
+changed later without a third version mechanism, which is why it is the
+narrowest thing that could work.
 
 ### Unknown top-level keys
 
