@@ -16,7 +16,11 @@ import { createTestHome } from '../../runtime/__tests__/helpers/create-test-home
 import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
-import { denialFingerprint, runAdvance } from '../../runtime/engine.js'
+import { denialFingerprint, proposalFingerprint, runAdvance } from '../../runtime/engine.js'
+import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
+import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
+import type { PluginManifest } from '../../schemas/plugin-manifest.js'
+import { defaultEngineState } from '../../schemas/engine-state.js'
 import { buildPlanModel, run } from '../plan.js'
 import { main } from '../warpline.js'
 
@@ -889,5 +893,131 @@ describe('plan ≡ what a run would attempt', () => {
     expect(model.due.map((e) => e.plugin)).toEqual(['free-one'])
     expect([...attempted]).toEqual(['free-one'])
     expect(attempted.has('locked-one')).toBe(false)
+  })
+})
+
+/**
+ * `warpline plan` writes nothing at all — including no spend mark, and
+ * including no `.session-approval` file.
+ *
+ * A whole-home byte-and-mtime snapshot taken around the command, with **no
+ * exclusion list**. An exclusion list is how a snapshot test stops seeing the
+ * file that matters: name a path as "expected to change" and the test stops
+ * proving the prohibition and starts documenting an exception.
+ *
+ * The fixture is the one that would fire. A live, in-window content approval
+ * over a byte-identical producer Output is the exact input that makes a real
+ * advance take the spend mark and invoke the handler — so a preview over the
+ * same home is the case where a write could actually happen. A home with
+ * nothing approved would pass this assertion for the reason that there was
+ * never anything to write.
+ *
+ * Two prohibitions, one assertion. The mark is the new one; `.session-approval`
+ * is the standing one from `docs/doctrine.md` — nothing reachable from a run
+ * writes that file — and both are discharged here precisely because the
+ * snapshot covers the WHOLE HOME rather than the state directory.
+ *
+ * Why the whole home is the right unit rather than `engine-state.json` alone:
+ * `plan` shares `evaluatePlugin` with the run that writes the mark, and the
+ * seam that keeps the two apart is structural, not a path comparison. A write
+ * that escaped through it would not necessarily land where a narrower snapshot
+ * was looking.
+ */
+describe('warpline plan writes nothing, over a home that would otherwise fire', () => {
+  const PRODUCER = 'batch-builder'
+  const CONSUMER = 'batch-sender'
+  const APPROVED_BODY = '{"batch":"the twelve invoices the operator read"}'
+
+  /**
+   * The producer's manifest as the runtime parses it, so the fingerprint comes
+   * from the same arithmetic the gate uses rather than a hand-built lookalike.
+   */
+  function producerManifest(): PluginManifest {
+    return PluginManifestSchema.parse({
+      name: PRODUCER,
+      version: '1.0.0',
+      description: 'producer',
+      autonomy_level: 'autonomous',
+      ttl_hours: 24,
+    })
+  }
+
+  test('a live content approval previews with the home byte- and mtime-identical', async () => {
+    await writePlugin(home, PRODUCER, { min_tier: 'suspended' })
+    await writeHandler(home, PRODUCER)
+    await writePlugin(home, CONSUMER, {
+      min_tier: 'suspended',
+      side_effects: ['sends_email'],
+      approval_class: 'content',
+      dependencies: [PRODUCER],
+      // Stale on every preview, so the consumer reaches the approval gate
+      // rather than being held by freshness above it.
+      ttl_hours: 0.001,
+    })
+    await writeHandler(home, CONSUMER)
+
+    const producerRun = {
+      last_run_at: new Date(Date.now() - 60 * 60_000).toISOString(),
+      status: 'success',
+      last_output: { type: 'brief', format: 'json', body: APPROVED_BODY },
+    }
+    // The fingerprint is computed over the same shape the state document
+    // carries, through the one entry point.
+    const fingerprintState = defaultEngineState()
+    fingerprintState.plugin_runs[PRODUCER] = producerRun as never
+    await writeState(
+      home,
+      { [PRODUCER]: producerRun },
+      {
+        approvals: {
+          [CONSUMER]: {
+            plugin: CONSUMER,
+            producer: PRODUCER,
+            fingerprint: proposalFingerprint(fingerprintState, PRODUCER, producerManifest()),
+            run_id: 'run-the-operator-read',
+            approved_at: new Date(Date.now() - 30 * 60_000).toISOString(),
+            not_before: null,
+            not_after: '2099-01-01T00:00',
+            zone: 'UTC',
+            effect_id: null,
+            marked_at: null,
+            confirmed_at: null,
+          },
+        },
+      },
+    )
+
+    const before = await snapshotHome(home.root)
+    // Non-empty by construction, so the equality below cannot be green over a
+    // walk that saw nothing — the did-not-look failure this repository has
+    // logged six instances of.
+    expect(before.length).toBeGreaterThan(0)
+
+    const { code, stdout } = await capture(() => main(['plan']))
+
+    expect(code).toBe(0)
+    // The preview really did reach the consumer — otherwise the equality below
+    // would hold because nothing was evaluated.
+    expect(stdout).toContain(CONSUMER)
+    expect(await snapshotHome(home.root)).toEqual(before)
+    // Named explicitly as well, so a later reader can tell the snapshot covers
+    // it: `.session-approval` sits at the home root, inside the walk above.
+    expect(existsSync(join(home.root, '.session-approval'))).toBe(false)
+
+    // THE POSITIVE CONTROL, and it is not optional. An equality over a walk
+    // that cannot see the paths in question is green for the wrong reason —
+    // this repository's recorded failure shape. A real advance over the SAME
+    // home writes exactly what a preview must not: the spend mark into
+    // `state/engine-state.json`, a run log, an event. If the snapshot cannot
+    // tell that apart from the preview, it was never proving anything.
+    await runAdvance({
+      pluginsDir: home.pluginsDir,
+      stateDir: join(home.stateDir, 'engine-state.json'),
+      runsDir: home.runsDir,
+      eventsPath: join(home.stateDir, 'events.jsonl'),
+      preferencesPath: join(home.stateDir, 'preferences.json'),
+      approvalPath: join(home.root, '.session-approval'),
+    })
+    expect(await snapshotHome(home.root)).not.toEqual(before)
   })
 })

@@ -41,7 +41,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
@@ -281,6 +281,8 @@ interface AdvanceHooks {
    * evaluated at all.
    */
   now?: number
+  /** Preview only: nothing with a declared side effect is invoked. */
+  dryRun?: boolean
 }
 
 async function advance(hooks: AdvanceHooks = {}): Promise<Awaited<ReturnType<typeof runAdvance>>> {
@@ -434,5 +436,114 @@ describe('a content approval is marked spent before the handler runs', () => {
 
     expect(firedCount()).toBe(1)
     expect(second.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'indeterminate' }])
+  })
+
+  /**
+   * A dry run writes no mark.
+   *
+   * This is a STRUCTURAL property rather than a defended one: the mark sits
+   * below the dry-run side-effect block, which no dry run reaches for a
+   * side-effecting plugin — and `approval_class: 'content'` requires at least
+   * one declared side effect at `.parse()` time, so there is no content-class
+   * manifest that slips past it. There is no `!dryRun` guard on the mark and
+   * there should not be one; a second expression of the same fact is a second
+   * thing that can disagree.
+   *
+   * Asserted anyway, because the property is only as good as the placement
+   * staying put. Move the mark above that block and this goes red, which is the
+   * whole reason to spend a case on something the control flow already
+   * guarantees.
+   */
+  test('a dry run writes no spend mark', async () => {
+    await seedLiveApproval('returns')
+
+    await advance({ dryRun: true })
+
+    expect(firedCount()).toBe(0)
+    const record = (await readState()).approvals[CONSUMER]
+    expect(record.marked_at).toBeNull()
+    expect(record.effect_id).toBeNull()
+    expect(record.confirmed_at).toBeNull()
+  })
+})
+
+/**
+ * The mark is not reachable from `evaluatePlugin`.
+ *
+ * `evaluatePlugin` is what `warpline plan` calls, and the evaluator/orchestrator
+ * seam is what keeps a preview off every write in this runtime. The seam is
+ * structural, so it earns a structural assertion rather than a behavioural one.
+ *
+ * **This is the WEAKER of the two available checks, and the comment says so
+ * because the weakness is the thing a later reader needs to know.** The strong
+ * form is the AST closure walk in
+ * `src/__tests__/no-approval-gate-from-content.test.ts`: start at a named
+ * function, descend into every local callee, and assert the identifiers met
+ * along the way name none of a forbidden set. That walk sees a writer reached
+ * through a helper; this line-range scan does not. Its `offendingSymbols` helper
+ * is not exported, and importing a test module from another test module would
+ * re-run that file's whole suite as a side effect of the import — so reusing it
+ * costs more than it buys until someone lifts it into a shared helper, which is
+ * the right fix and is not this plan's.
+ *
+ * What carries the transitive half meanwhile is BEHAVIOURAL and lives in
+ * `src/cli/__tests__/plan.test.ts`: a whole-home byte-and-mtime snapshot around
+ * `warpline plan` over a home that would otherwise fire, with no exclusion list
+ * and with a positive control proving the snapshot can see a write. A writer
+ * reached through any depth of helper moves a byte there.
+ */
+describe('the spend mark is unreachable from the evaluator', () => {
+  const FORBIDDEN = [
+    'writeEngineState',
+    'atomicWriteText',
+    // Both spellings. The engine imports the derived state lock under an alias,
+    // so a scan for the exported name alone would be green on the alias — the
+    // shape of a guard that cannot reach the thing it was written for.
+    'withStateLockAt',
+    'lockStateDocument',
+  ] as const
+
+  /**
+   * The module-level declaration named `name`, as its own lines.
+   *
+   * Throws rather than returning empty on every failure. An enumeration that
+   * found nothing is "did not look", and reporting it as clean is perfectly
+   * green and exactly wrong — the failure class this repository has logged six
+   * instances of.
+   */
+  function bodyOf(name: string): string[] {
+    const source = readFileSync(join(import.meta.dir, '..', 'engine.ts'), 'utf-8')
+    const lines = source.split('\n')
+    const start = lines.findIndex((l) => new RegExp(`^(export )?async function ${name}\\(`).test(l))
+    if (start === -1) {
+      throw new Error(`blind: ${name} is not declared at module level in engine.ts`)
+    }
+    const end = lines.findIndex((l, i) => i > start && l === '}')
+    if (end === -1) throw new Error(`blind: ${name} has no closing brace at column 0`)
+    const body = lines.slice(start, end + 1)
+    // Non-trivial by assertion, not by hope: a one-line range names no writer
+    // for the reason that it contains nothing.
+    if (body.length < 20) throw new Error(`blind: ${name}'s extracted range is ${body.length} lines`)
+    return body
+  }
+
+  const named = (body: readonly string[]): string[] =>
+    FORBIDDEN.filter((symbol) => body.some((l) => l.includes(symbol)))
+
+  test("evaluatePlugin's own body names no writer", () => {
+    expect(named(bodyOf('evaluatePlugin'))).toEqual([])
+  })
+
+  /**
+   * The positive control. Without it the assertion above is green whenever the
+   * range extraction or the symbol match quietly stopped working, which is
+   * indistinguishable from clean at the point it matters. `markContentApprovalSpent`
+   * is the writer itself, so the same scan over it must report.
+   */
+  test('the same scan over the mark itself reports the writers it names', () => {
+    expect(named(bodyOf('markContentApprovalSpent'))).toEqual([
+      'writeEngineState',
+      'lockStateDocument',
+    ])
   })
 })
