@@ -1,0 +1,361 @@
+/**
+ * What a content approval protects, and the instant it stops protecting it.
+ *
+ * Two consumers of ONE predicate, tested together because they are the same
+ * decision seen from two sides:
+ *
+ *   - **The protected set (R15).** A frozen batch's bytes live in the
+ *     producer's run log, and ordinary retention would evict that log while the
+ *     operator's yes was still outstanding. So an approval's `run_id` joins the
+ *     set `pruneRunLogs` exempts — the second kind of held record its own
+ *     docstring anticipated, joined by the caller, with `run-log-store.ts`
+ *     unchanged.
+ *
+ *   - **The expiry sweep (OQ3, half B).** The same reference must not pin those
+ *     bytes forever. A frozen batch is recipient data, and the fourth
+ *     Prohibition forbids retaining its binding past the window with no
+ *     deletion path. So protection is unioned only for approvals whose window
+ *     is still OPEN: the moment it closes, the run falls back to ordinary
+ *     retention, and the binding itself is dropped from the record.
+ *
+ * **One `windowClosed`, two consumers, and that is the property under test.**
+ * Two independently computed window checks are two answers that can disagree
+ * about the same approval — a run released while its binding is retained, or a
+ * binding deleted while its run is still pinned. Every case below is written so
+ * that a second, drifting predicate would show up as a contradiction rather
+ * than as a pass.
+ *
+ * **The marked-unconfirmed exception is not an oversight (D-11a).** A record
+ * with `marked_at` set and `confirmed_at` null is the did-it-ship evidence for
+ * a send that may have landed. It survives the sweep, and it is safe to: it
+ * holds a fingerprint, a producer name and a pointer, never the payload — the
+ * payload went with the run log the moment the window closed.
+ *
+ * Every case drives a REAL advance against a temp home. The protected set is
+ * built inside `runAdvance` and handed to `pruneRunLogs`; asserting it at the
+ * prune's own signature would prove the parameter works and say nothing about
+ * whether the engine ever fills it.
+ *
+ * Writes only into a temp home. Nothing under the repository is touched.
+ */
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { readFile, utimes, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { runAdvance } from '../engine.js'
+import { defaultEngineState } from '../../schemas/engine-state.js'
+import type { Approval, EngineState } from '../../schemas/engine-state.js'
+import { createTestHome, type TestHome } from './helpers/create-test-home.js'
+import { _setHome } from '../../lib/paths.js'
+
+/** The consumer an approval is keyed by. It never has to exist as a plugin. */
+const CONSUMER = 'batch-sender'
+const PRODUCER = 'batch-builder'
+
+/** A wall clock far enough out that no test run reaches it. */
+const OPEN = '2099-01-01T00:00'
+/** A wall clock far enough back that no host clock skew reaches it. */
+const CLOSED = '2000-01-02T00:00'
+
+const DAY_MS = 86_400_000
+
+let home: TestHome
+let statePath: string
+let eventsPath: string
+let approvalPath: string
+
+/**
+ * One trivial plugin, so the advance has something to load and reaches its
+ * end-of-run assembly. It declares no side effects and is not the subject of
+ * any assertion here.
+ */
+async function writeFiller(): Promise<void> {
+  const dir = join(home.pluginsDir, 'filler')
+  const { mkdir } = await import('node:fs/promises')
+  await mkdir(dir, { recursive: true })
+  await writeFile(
+    join(dir, 'manifest.ts'),
+    `export const manifest = ${JSON.stringify({
+      name: 'filler',
+      version: '1.0.0',
+      description: 'filler',
+      inputs: {},
+      outputs: {},
+      capabilities: [],
+      schedule: 'on_run',
+      autonomy_level: 'autonomous',
+      side_effects: [],
+      approval_class: 'session',
+      ttl_hours: 24,
+      dependencies: [],
+      timeout_ms: 5000,
+      max_retries: 0,
+      retry_delay_ms: 10,
+      max_parallelism: 1,
+      min_tier: 'suspended',
+    })}`,
+  )
+  await writeFile(
+    join(dir, 'handler.ts'),
+    `export async function handler() {
+  return {
+    status: 'success',
+    phases_completed: ['run'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'ran',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`,
+  )
+}
+
+/** A run log old enough that ordinary retention would evict it. */
+async function writeAgedRun(id: string, ageDays = 400): Promise<void> {
+  const when = new Date(Date.now() - ageDays * DAY_MS)
+  const doc = {
+    run_id: id,
+    started_at: '2026-04-03T12:00:00Z',
+    completed_at: '2026-04-03T12:05:00Z',
+    status: 'complete',
+    resumed_from: null,
+    summary: 'an old run',
+    plugin_entries: [],
+  }
+  await writeFile(join(home.runsDir, `${id}.json`), JSON.stringify(doc))
+  await utimes(join(home.runsDir, `${id}.json`), when, when)
+  await writeFile(join(home.runsDir, `${id}.log`), 'x'.repeat(64))
+  await utimes(join(home.runsDir, `${id}.log`), when, when)
+}
+
+function approval(overrides: Partial<Approval> = {}): Approval {
+  return {
+    plugin: CONSUMER,
+    producer: PRODUCER,
+    // Never compared on any arm these cases reach: the producer's manifest is
+    // absent from the plugin root, so the standing is decided above the
+    // fingerprint. Deliberate — this file is about the WINDOW.
+    fingerprint: 'not-compared-here',
+    run_id: 'approved-run',
+    approved_at: '2026-08-29T11:00:00.000Z',
+    not_before: null,
+    not_after: OPEN,
+    zone: 'UTC',
+    effect_id: null,
+    marked_at: null,
+    confirmed_at: null,
+    ...overrides,
+  }
+}
+
+async function seedState(patch: Partial<EngineState> = {}): Promise<void> {
+  await writeFile(statePath, JSON.stringify({ ...defaultEngineState(), ...patch }))
+}
+
+const readState = async (): Promise<EngineState> =>
+  JSON.parse(await readFile(statePath, 'utf-8')) as EngineState
+
+const advance = () =>
+  runAdvance({
+    pluginsDir: home.pluginsDir,
+    stateDir: statePath,
+    runsDir: home.runsDir,
+    eventsPath,
+    approvalPath,
+  })
+
+const survives = (id: string): boolean =>
+  existsSync(join(home.runsDir, `${id}.json`)) && existsSync(join(home.runsDir, `${id}.log`))
+
+describe('what a content approval protects', () => {
+  beforeEach(async () => {
+    home = await createTestHome()
+    _setHome(home.root)
+    statePath = join(home.stateDir, 'engine-state.json')
+    eventsPath = join(home.stateDir, 'events.jsonl')
+    approvalPath = join(home.root, '.session-approval')
+    await writeFiller()
+  })
+
+  afterEach(async () => {
+    await home.cleanup()
+  })
+
+  test('a run referenced by a live approval survives a prune that would otherwise evict it', async () => {
+    await writeAgedRun('approved-run')
+    // The age-peer is what makes this an exemption rather than a prune that
+    // did nothing.
+    await writeAgedRun('peer-run')
+    await seedState({ approvals: { [CONSUMER]: approval() } })
+
+    await advance()
+
+    expect(survives('approved-run')).toBe(true)
+    expect(survives('peer-run')).toBe(false)
+  })
+
+  test('a run id referenced by both a pending gate and a live approval is protected once, not twice', async () => {
+    await writeAgedRun('shared-run')
+    await writeAgedRun('peer-run')
+    await seedState({
+      approvals: { [CONSUMER]: approval({ run_id: 'shared-run' }) },
+      pending_gates: [
+        {
+          plugin: 'filler',
+          run_id: 'shared-run',
+          created_at: new Date(Date.now() - 60_000).toISOString(),
+          payload_summary: 'parked',
+          plugin_result: {
+            status: 'success',
+            phases_completed: ['filler'],
+            phases_failed: [],
+            errors: [],
+            data_freshness: {},
+            summary: 'parked',
+            artifacts_produced: [],
+            schema_version: 2,
+          },
+          run_started_at: new Date(Date.now() - 120_000).toISOString(),
+          run_completed_at: new Date(Date.now() - 60_000).toISOString(),
+          applied_at: null,
+        },
+      ],
+    } as Partial<EngineState>)
+
+    const result = await advance()
+
+    expect(survives('shared-run')).toBe(true)
+    expect(survives('peer-run')).toBe(false)
+    // The set is a `Set`, and this is what pins that it stayed one: exactly the
+    // peer was reclaimed. A union that counted the shared id twice, or a
+    // protected set built as an array the prune de-duplicated differently,
+    // would move this integer.
+    expect(result.pruned).toBe(1)
+  })
+
+  test('with no approvals the protected set is unchanged and ordinary retention reclaims everything due', async () => {
+    // Non-vacuity for the two cases above: same fixture, same ages, no record.
+    await writeAgedRun('approved-run')
+    await writeAgedRun('peer-run')
+    await seedState()
+
+    const result = await advance()
+
+    expect(survives('approved-run')).toBe(false)
+    expect(survives('peer-run')).toBe(false)
+    expect(result.pruned).toBe(2)
+  })
+
+  test('an approval whose window has closed stops protecting its run, so ordinary retention reclaims the payload', async () => {
+    await writeAgedRun('approved-run')
+    await seedState({
+      approvals: {
+        // Marked-unconfirmed, so the record itself survives the sweep and the
+        // only thing under test is whether it still PROTECTS. Without that the
+        // record would be gone and this case would pass for two reasons at
+        // once.
+        [CONSUMER]: approval({
+          not_after: CLOSED,
+          marked_at: '2026-08-29T12:00:00.000Z',
+        }),
+      },
+    })
+
+    await advance()
+
+    expect(survives('approved-run')).toBe(false)
+  })
+})
+
+describe('when a content approval is swept', () => {
+  beforeEach(async () => {
+    home = await createTestHome()
+    _setHome(home.root)
+    statePath = join(home.stateDir, 'engine-state.json')
+    eventsPath = join(home.stateDir, 'events.jsonl')
+    approvalPath = join(home.root, '.session-approval')
+    await writeFiller()
+  })
+
+  afterEach(async () => {
+    await home.cleanup()
+  })
+
+  test('a closed window with no mark is dropped from the record at the end-of-run write', async () => {
+    await seedState({ approvals: { [CONSUMER]: approval({ not_after: CLOSED }) } })
+
+    await advance()
+
+    expect((await readState()).approvals[CONSUMER]).toBeUndefined()
+  })
+
+  test('an open window is left alone', async () => {
+    // Non-vacuity for the case above: same record, same advance, and the only
+    // difference is the bound.
+    await seedState({ approvals: { [CONSUMER]: approval() } })
+
+    await advance()
+
+    expect((await readState()).approvals[CONSUMER]).toBeDefined()
+  })
+
+  test('a closed window that is marked-unconfirmed survives, because it is the did-it-ship evidence', async () => {
+    await seedState({
+      approvals: {
+        [CONSUMER]: approval({
+          not_after: CLOSED,
+          marked_at: '2026-08-29T12:00:00.000Z',
+          effect_id: 'deadbeef',
+        }),
+      },
+    })
+
+    await advance()
+
+    const after = (await readState()).approvals[CONSUMER]
+    expect(after).toBeDefined()
+    // D-11a: never replaced by absence, and never silently resolved either. The
+    // operator settles it at the sink with the effect id, and until they do the
+    // record says exactly what the runtime knows.
+    expect(after?.marked_at).toBe('2026-08-29T12:00:00.000Z')
+    expect(after?.confirmed_at).toBeNull()
+    expect(after?.effect_id).toBe('deadbeef')
+  })
+
+  test('a closed window that is confirmed is dropped, and its state-report detail goes with it', async () => {
+    await seedState({
+      approvals: {
+        [CONSUMER]: approval({
+          not_after: CLOSED,
+          marked_at: '2026-08-29T12:00:00.000Z',
+          confirmed_at: '2026-08-29T12:00:05.000Z',
+          effect_id: 'deadbeef',
+        }),
+      },
+    })
+
+    await advance()
+
+    expect((await readState()).approvals[CONSUMER]).toBeUndefined()
+  })
+
+  test('an approval whose zone this host no longer resolves is retained, and the advance does not throw', async () => {
+    // The tzdb backstop edge, and the conservative direction is RETAIN.
+    // Deleting a recipient-bound record because the host forgot a timezone is
+    // not a deletion policy, it is data loss — and a throw escaping the window
+    // check would fail the whole advance over one unparseable record.
+    await seedState({
+      approvals: {
+        [CONSUMER]: approval({ not_after: CLOSED, zone: 'Mars/Olympus_Mons' }),
+      },
+    })
+
+    const result = await advance()
+
+    expect(result.status).not.toBe('failed')
+    expect((await readState()).approvals[CONSUMER]).toBeDefined()
+  })
+})
