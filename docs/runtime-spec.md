@@ -1292,6 +1292,15 @@ it holds state this binary is too old to see. `warpline plan` rendering such a
 home as empty and healthy would tell an operator that an approval they granted
 does not exist.
 
+**`warpline plan` aborts here too, and it is the only thing it aborts on.** The
+preview degrades around every other failure — a plugin directory that will not
+load, a state document it cannot parse — because a partial answer about a home
+it can read beats no answer. It exits `1` on a format version it does not
+understand, with the same message on stderr and nothing on stdout, so a script
+reading the exit code is not handed a plan-shaped document describing a home
+this build cannot see. That `1` is the usage-error row of the exit-code table in
+[§ 11](#11-exit-codes): the command ran nothing and wrote no plan.
+
 The refusal carries its own error type, separate from the unusable-document
 one. `warpline approve` and `warpline deny` report an unusable document as
 *"Cannot read engine state"*; reusing that type would have them report a

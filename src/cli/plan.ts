@@ -17,9 +17,20 @@
  *      and restores the previous snapshot, or a fixture-home test silently
  *      compares against live state.
  *   3. `readEngineState` is the write-capable read and THROWS on a state file
- *      it cannot validate, which a preview contracted never to fail must not
- *      do. State is read through the tolerant variant, and the indirect read
- *      inside `checkTaskLock` is covered by `withoutStateBackups`.
+ *      it cannot validate. State is read through the tolerant variant instead,
+ *      and the indirect read inside `checkTaskLock` is covered by
+ *      `withoutStateBackups`, so a document this command cannot parse degrades
+ *      the preview rather than ending it.
+ *
+ *      That is the whole of the never-fail property, and it is narrower than it
+ *      used to read. **The preview never fails on a home it can READ. It aborts
+ *      with a non-zero exit on a home format it does not UNDERSTAND** — a
+ *      `schema_version` or a `<home>/version` above the newest this build
+ *      knows. Degrading there would render a home written by a newer build as
+ *      empty and healthy, which is not a degraded answer but a false one: the
+ *      home is not empty, it holds state this binary is too old to see, and an
+ *      approval the operator granted would read as absent. Refusing is the
+ *      better answer, so the contract is conditional and says so here.
  *
  * `now` is captured exactly once, at entry, and threaded through both the
  * evaluator and the renderer, so two consecutive previews are
@@ -238,7 +249,25 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   const now = Date.now()
-  const model = await buildPlanModel(now, profile)
+
+  // The one failure this preview does not degrade around — see item 3 in the
+  // header. Duck-typed on `err.name` rather than `instanceof`, the same way
+  // `warpline.ts` and `board-cli.ts` map this error to an exit code: the class
+  // lives in a module that pulls zod, and a CLI mapping an error to a code has
+  // no business importing it. Anything else rethrows unchanged.
+  let model: PlanModel
+  try {
+    model = await buildPlanModel(now, profile)
+  } catch (err) {
+    if (err instanceof Error && err.name === 'FormatVersionUnsupportedError') {
+      // The message, not a stack: an out-of-date build is an operator-fixable
+      // state, and a trace would tell them to file a bug instead of upgrading.
+      process.stderr.write(`${err.message}\n`)
+      return 1
+    }
+    throw err
+  }
+
   const rendered = renderPlan(model, now)
 
   // A cycle produced no plan at all, so the report is a diagnostic rather than
