@@ -27,6 +27,7 @@ import { advanceCounts, advanceExitCode } from '../exit-codes.js'
 import type { AdvanceResult } from '../engine.js'
 import { grantApproval } from '../approval-gate.js'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
+import { seedContentRefusals } from './helpers/content-refusal.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
 
 const REAL_PATHS = _getPaths()
@@ -210,5 +211,98 @@ describe('advanceCounts', () => {
     const counts = advanceCounts(await advance())
 
     expect(counts).toEqual({ gated: 0, failed: 1 })
+  })
+})
+
+/**
+ * A content refusal is a gate holding for a second reason, and the code says so.
+ *
+ * The fixture is a content-class plugin whose approval window has closed. It is
+ * built by the shared helper rather than here, so the three files that need a
+ * refusal describe one standing the runtime actually reaches — see
+ * `helpers/content-refusal.ts` for why the window arm and not a drifted
+ * fingerprint.
+ *
+ * Every case drives a real `runAdvance`, as the rest of this file does. The
+ * claim is about the array the engine populates, and a hand-built result would
+ * pin the arithmetic while leaving that unproven.
+ */
+describe('a content refusal in the account of an advance', () => {
+  test('an advance whose only event is a refusal is 0, and --strict makes it 1', async () => {
+    await seedContentRefusals({ pluginsDir: ctx.pluginsDir, statePath, names: ['sender'] })
+
+    const result = await advance()
+
+    // Non-vacuous: the refusal really happened, so the 0 below is the gate
+    // holding rather than an advance that found nothing to do.
+    expect(result.refused_plugins).toEqual([{ plugin: 'sender', reason: 'outside_window' }])
+    expect(advanceCounts(result).failed).toBe(0)
+
+    // The module's own doctrine: a held approval gate is the runtime doing its
+    // job. A content refusal is the same gate holding for a different reason.
+    expect(advanceExitCode(result)).toBe(0)
+    expect(advanceExitCode(result, { strict: true })).toBe(1)
+  })
+
+  test('two refusals in one advance are counted individually, not collapsed', async () => {
+    await seedContentRefusals({
+      pluginsDir: ctx.pluginsDir,
+      statePath,
+      names: ['sender-a', 'sender-b'],
+    })
+
+    const counts = advanceCounts(await advance())
+
+    expect(counts).toEqual({ gated: 0, failed: 0, refused: 2 })
+  })
+
+  test('a refusal beside a failure is 1 without --strict — a failure still outranks', async () => {
+    await seedContentRefusals({ pluginsDir: ctx.pluginsDir, statePath, names: ['sender'] })
+    await writeUnloadablePlugin('broken')
+
+    const result = await advance()
+    const counts = advanceCounts(result)
+
+    expect(counts.refused).toBe(1)
+    expect(counts.failed).toBe(1)
+    // The existing precedence is unchanged: `failed > 0` is tested above the
+    // gated-or-refused clause, so this is 1 with the flag and without it.
+    expect(advanceExitCode(result)).toBe(1)
+    expect(advanceExitCode(result, { strict: true })).toBe(1)
+  })
+
+  test('a refusal beside a held gate is 1 under --strict — once, not twice', async () => {
+    await writePlugin('producer', {
+      autonomy_level: 'supervised',
+      side_effects: ['sends_email'],
+    })
+    await writePlugin('consumer', { dependencies: ['producer'] })
+    await seedContentRefusals({ pluginsDir: ctx.pluginsDir, statePath, names: ['sender'] })
+    await grantApproval('producer', 4 * 60 * 60 * 1000, approvalPath)
+
+    const result = await advance()
+    const counts = advanceCounts(result)
+
+    // Both events are present, which is what makes the single 1 below a
+    // statement about the predicate rather than about a fixture with one event.
+    expect(counts.gated).toBe(1)
+    expect(counts.refused).toBe(1)
+    expect(counts.failed).toBe(0)
+
+    // The predicate is gated-OR-refused, not a sum over exit codes: two reasons
+    // to report 1 still report exactly 1.
+    expect(advanceExitCode(result, { strict: true })).toBe(1)
+    expect(advanceExitCode(result)).toBe(0)
+  })
+
+  test('an advance with no refusals reports refused 0 rather than omitting the field', async () => {
+    await writePlugin('alpha')
+
+    const counts = advanceCounts(await advance())
+
+    // Always present, `0` included. A monitor has to be able to tell "nothing
+    // was refused" from "this warpline does not report refusals" — the same
+    // argument `pruned` makes about itself in the advance payload.
+    expect(counts.refused).toBe(0)
   })
 })
