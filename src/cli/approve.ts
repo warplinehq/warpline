@@ -130,6 +130,65 @@ const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
 const DEFAULT_ZONE = 'UTC'
 
 /**
+ * The two lines the approved bytes are printed between, so a reader — and a
+ * test — can tell where the plugin's text starts and where it stops.
+ */
+const BODY_BEGIN = '----- begin approved bytes -----'
+const BODY_END = '----- end approved bytes -----'
+
+/**
+ * The producer's bytes as the operator will actually read them: every control
+ * character visible, nothing removed and nothing cut short.
+ *
+ * Module-local and not a shared helper: there is exactly one caller and no
+ * second one is foreseen. The rules, in order:
+ *
+ *   1. Escape a literal backslash to two, FIRST, so an escape this function
+ *      emitted is tellable apart from a backslash the plugin authored.
+ *   2. Replace every C0 control character (U+0000 through U+001F) except LF and
+ *      TAB, plus DEL (U+007F), and every C1 control character (U+0080 through
+ *      U+009F), with a visible `\xNN` escape. ESC renders `\x1b` and BEL
+ *      renders `\x07` out of that general form rather than by a special case.
+ *      Escape, never strip: stripping removes the evidence that an attack was
+ *      attempted, and seeing what is actually in the bytes is the operator's
+ *      whole job here.
+ *   3. Never truncate, at any size. The Output schema bounds an inline body at
+ *      16 KiB, so there is no unbounded case to defend against, and cutting
+ *      would hide the tail — which is where a long batch's surprises live.
+ *   4. Leave LF and TAB alone. Line and column structure is the thing being
+ *      reviewed, and escaping it would make a multi-line batch unreadable.
+ *
+ * Rules 1 and 2 are ONE pass over the string, which is what makes "backslash
+ * first" true without a second pass re-escaping its own output.
+ *
+ * The ceiling, stated because it is real: a body may carry plain text that
+ * imitates the delimiters or the fingerprint line. Escaping cannot prevent
+ * that; it prevents REPAINTING, which is what the control characters would have
+ * done, and repainting is the difference between a forgery the operator can see
+ * and one they cannot. The fingerprint is printed before the body, so a forged
+ * copy inside it arrives after the one the runtime computed.
+ */
+function escapeForOperator(body: string): string {
+  // A character loop rather than a regex character class: the bounds below are
+  // numbers a reader can check against the four rules above, where a class of
+  // unicode escapes is a line nobody proof-reads.
+  let out = ''
+  for (const ch of body) {
+    if (ch === '\\') {
+      out += '\\\\'
+      continue
+    }
+    const code = ch.charCodeAt(0)
+    const control =
+      (code < 0x20 && ch !== '\n' && ch !== '\t') ||
+      code === 0x7f ||
+      (code >= 0x80 && code <= 0x9f)
+    out += control ? `\\x${code.toString(16).padStart(2, '0')}` : ch
+  }
+  return out
+}
+
+/**
  * Record a standing yes to the bytes one plugin's single declared dependency
  * has already produced.
  *
@@ -219,6 +278,25 @@ async function approveContent(
       return 1
     }
 
+    // -- The shape of the Output -------------------------------------------
+    // An Output declares exactly one of `body` or `path`, so an absent body is
+    // a path. Refused outright rather than resolved: approving by content means
+    // the operator read the exact bytes, and producing them would mean reading
+    // a file the runtime was never asked to read. Refusing is also how this
+    // sidesteps path traversal entirely instead of defending against it — the
+    // value is never normalised, never stat-ed and never echoed back, because a
+    // path on an operator's machine is exactly the kind of value that carries
+    // that machine's secrets into a scrollback.
+    if (lastOutput.body === undefined) {
+      process.stderr.write(
+        `${consumer} cannot be approved by content: ${producer}'s Output points at a file ` +
+          `rather than carrying its bytes inline, and a path Output is refused rather than ` +
+          `read — approving by content means you saw the exact bytes. The path is not resolved ` +
+          `and is not repeated here. Nothing was written.\n`,
+      )
+      return 1
+    }
+
     // -- The window --------------------------------------------------------
     const notAfter = values['not-after']
     if (notAfter === undefined) {
@@ -246,9 +324,13 @@ async function approveContent(
       return 1
     }
 
+    // The approval instant when no bound was typed, which is what
+    // `approvalStanding` reads for a null `not_before`. Held at this scope so
+    // the resolved pair can be printed: a zone mistake is invisible in the wall
+    // clocks the operator typed and obvious in the instants they resolve to.
     const notBefore = values['not-before'] ?? null
+    let opensAt = now
     if (notBefore !== null) {
-      let opensAt: number
       try {
         opensAt = resolveWallClock(notBefore, zone)
       } catch (err) {
@@ -287,11 +369,17 @@ async function approveContent(
     }
     await writeEngineState(state, statePath)
 
+    // Header, fingerprint, window, then the bytes — the bytes last, so nothing
+    // the plugin authored precedes the values the runtime computed.
     process.stdout.write(
       `Answering the content gate: ${consumer} may ship what ${producer} has already produced.\n` +
-        `Bound to ${fingerprint}. If those bytes move, this approval stops applying — it is not ` +
-        `renewed and nothing re-asks on your behalf.\n` +
-        `Window closes ${notAfter} ${zone}.\n`,
+        `Bound to the fingerprint on the next line, whole and untruncated:\n` +
+        `${fingerprint}\n` +
+        `Window ${notBefore ?? 'now'} to ${notAfter} read in ${zone}, which resolves to\n` +
+        `  ${new Date(opensAt).toISOString()} to ${new Date(closesAt).toISOString()}\n` +
+        `If those bytes move, this approval stops applying: it is not renewed and nothing ` +
+        `re-asks on your behalf.\n` +
+        `${BODY_BEGIN}\n${escapeForOperator(lastOutput.body)}\n${BODY_END}\n`,
     )
     return 0
   })
