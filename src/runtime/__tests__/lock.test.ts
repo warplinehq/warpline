@@ -1,7 +1,8 @@
 import { describe, it, expect, mock, beforeEach, afterEach, setSystemTime } from 'bun:test'
-import { writeFile, unlink, readFile } from 'node:fs/promises'
+import { writeFile, unlink, readFile, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { snapshotHome } from './helpers/snapshot-home.js'
 import {
   WarplineLockSchema,
   isLockStale,
@@ -535,6 +536,80 @@ describe('releaseLock', () => {
     const lockPath = tmpLock()
     await releaseLock(lockPath, '20260403T120000-deadbeef')
     expect(await readLock(lockPath)).toBeNull()
+  })
+})
+
+/**
+ * The raw machine identifier reaches no byte of the home.
+ *
+ * Built presence-first on purpose. A leak detector that only asserts absence is
+ * green when the value never resolved at all, and that blindness is what let
+ * the 0.2.0 leak ship: assert the sentinel reached its intended sink, THEN
+ * assert it reached nothing else.
+ */
+describe('the raw machine id never reaches the lock file', () => {
+  /** 32 hex with letters, so its upper- and lower-case forms differ. */
+  const SENTINEL = 'deadbeefcafef00dfeedface12345678'
+  const grouped = (hex: string): string =>
+    `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+
+  /**
+   * Every form the sentinel could plausibly be written in. The "16 raw bytes
+   * hex-encoded" IS the 32-hex string, so it is not a separate form.
+   */
+  const FORMS = [
+    SENTINEL,
+    SENTINEL.toUpperCase(),
+    grouped(SENTINEL),
+    grouped(SENTINEL).toUpperCase(),
+  ]
+
+  async function homeWithLock(): Promise<{ home: string; lockPath: string; host: string }> {
+    const home = await mkdtemp(join(tmpdir(), 'warpline-lock-leak-'))
+    const lockPath = join(home, 'state', '.lock')
+    const read = injectedReader({ 'etc-machine-id': SENTINEL })
+    const lock = await acquireLock(lockPath, 'advance', { readMachineId: read })
+    expect(typeof lock.host).toBe('string')
+    expect((lock.host as string).length).toBeGreaterThan(0)
+    return { home, lockPath, host: lock.host as string }
+  }
+
+  it('writes the derived host to the lock, and none of the sentinel', async () => {
+    const { home, lockPath, host } = await homeWithLock()
+    try {
+      // Presence, first: the sentinel path is real and the value reached the sink.
+      const text = await readFile(lockPath, 'utf-8')
+      expect(JSON.parse(text).host).toBe(host)
+      expect(host).toBe(deriveHost(injectedReader({ 'etc-machine-id': SENTINEL })) as string)
+
+      // Absence, second — over the RAW file text, so a value that leaked into
+      // an unmodelled key is caught too.
+      for (const form of FORMS) expect(text).not.toContain(form)
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves the sentinel in no file anywhere in the home', async () => {
+    const { home } = await homeWithLock()
+    try {
+      // The shared whole-home walk, with no exclusion list: the moment a path
+      // is named as expected-to-change, the check stops proving the
+      // prohibition and starts documenting an exception.
+      const entries = await snapshotHome(home)
+      expect(entries.length).toBeGreaterThan(0)
+      let scanned = 0
+      for (const entry of entries) {
+        const [rel, second] = entry.split('|')
+        if (second === 'link') continue
+        const text = await readFile(join(home, rel as string), 'utf-8')
+        for (const form of FORMS) expect(text).not.toContain(form)
+        scanned += 1
+      }
+      expect(scanned).toBeGreaterThan(0)
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
   })
 })
 
