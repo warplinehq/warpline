@@ -22,6 +22,7 @@ import { createTestHome } from '../../runtime/__tests__/helpers/create-test-home
 import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
 import { _getPaths, _setPaths } from '../../board/state-manager.js'
+import { ENGINE_STATE_MAX_SCHEMA_VERSION } from '../../schemas/engine-state.js'
 import { run } from '../plan.js'
 
 const REAL_PATHS = _getPaths()
@@ -226,5 +227,46 @@ describe('the no-failure case still exits 0', () => {
     expect(stdout).not.toContain('Load failures')
     expect(stdout).not.toContain('incomplete')
     expect(stdout).toContain('Due (2):')
+  })
+})
+
+/**
+ * The one exit contract `plan` breaks its never-fail promise for.
+ *
+ * Every other failure above degrades the preview and still prints something,
+ * because a partial answer about a home this build CAN read beats no answer.
+ * A home written by a newer build is not that: this binary cannot see what it
+ * holds, and rendering it as an empty, healthy preview tells the operator their
+ * home is empty when it is merely unreadable to them. Under content approval
+ * that is the dangerous direction — an approval they granted would read as
+ * absent. Refusing is the honest answer, and exit 0 is the one signal a script
+ * reads.
+ */
+describe('a home format this build does not understand', () => {
+  test('Test 7: a schema_version newer than this build understands exits non-zero and names both versions', async () => {
+    await writeFile(
+      join(home.stateDir, 'engine-state.json'),
+      JSON.stringify({ schema_version: 99 }),
+    )
+
+    const { code, stderr } = await capture(() => run([]))
+
+    expect(code).not.toBe(0)
+    expect(stderr).toContain('99')
+    expect(stderr).toContain(String(ENGINE_STATE_MAX_SCHEMA_VERSION))
+    // An operator-fixable state, not an internal fault — the same rule the
+    // dependency-cycle report follows.
+    expect(STACK_FRAME.test(stderr)).toBe(false)
+  })
+
+  test('Test 8: a <home>/version newer than this build understands exits non-zero and names both versions', async () => {
+    await writeFile(join(home.root, 'version'), '99')
+
+    const { code, stderr } = await capture(() => run([]))
+
+    expect(code).not.toBe(0)
+    expect(stderr).toContain('99')
+    expect(stderr).toContain(String(ENGINE_STATE_MAX_SCHEMA_VERSION))
+    expect(STACK_FRAME.test(stderr)).toBe(false)
   })
 })

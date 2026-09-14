@@ -27,7 +27,6 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  EngineStateInvalidError,
   readEngineState,
   readEngineStateReadOnly,
   writeEngineState,
@@ -56,13 +55,28 @@ describe('engine state read policy', () => {
   let stateDir: string
   let statePath: string
 
+  /**
+   * A real home layout — `<home>/state/engine-state.json` — not a flat temp
+   * directory with the document at its root.
+   *
+   * The read derives the home-root `version` file from the state path it was
+   * given, as `dirname(dirname(statePath))`. Under the old flat layout that
+   * resolved to the system temp directory, so every case in this file would
+   * have consulted `$TMPDIR/version` — a path no test owns and any other
+   * process may write. The nesting costs two lines and makes the derivation
+   * land inside the fixture.
+   */
+  let homeRoot: string
+
   beforeEach(async () => {
-    stateDir = await mkdtemp(join(tmpdir(), 'warpline-engine-state-'))
+    homeRoot = await mkdtemp(join(tmpdir(), 'warpline-engine-state-'))
+    stateDir = join(homeRoot, 'state')
+    await mkdir(stateDir, { recursive: true })
     statePath = join(stateDir, 'engine-state.json')
   })
 
   afterEach(async () => {
-    await rm(stateDir, { recursive: true, force: true })
+    await rm(homeRoot, { recursive: true, force: true })
   })
 
   /** Write a fixture and return its exact bytes, for the after-comparison. */
@@ -71,12 +85,19 @@ describe('engine state read policy', () => {
     return content
   }
 
-  /** Assert the write-capable read refused, and hand back the error to inspect. */
-  async function refusal(): Promise<EngineStateInvalidError> {
+  /**
+   * Assert the write-capable read refused, and hand back the error to inspect.
+   *
+   * Widened from `EngineStateInvalidError` because there are now two refusals
+   * with two types: an unusable document, and a format version this build does
+   * not understand. Each case below names the type it expects on `err.name`,
+   * which is how the CLIs discriminate them too.
+   */
+  async function refusal(): Promise<Error & { path?: string; reason?: string }> {
     try {
       await readEngineState(statePath)
     } catch (err) {
-      if (err instanceof EngineStateInvalidError) return err
+      if (err instanceof Error) return err
       throw err
     }
     throw new Error('expected readEngineState to refuse — it returned a state object')
@@ -108,9 +129,9 @@ describe('engine state read policy', () => {
     const err = await refusal()
     expect(err.name).toBe('EngineStateInvalidError')
     expect(err.path).toBe(statePath)
-    expect(err.reason.length).toBeGreaterThan(0)
+    expect(err.reason?.length ?? 0).toBeGreaterThan(0)
     expect(err.message).toContain(statePath)
-    expect(err.message).toContain(err.reason)
+    expect(err.message).toContain(err.reason ?? '')
     // Not the version refusal — a different failure must read differently.
     expect(err.message).not.toContain(AHEAD_MARKER)
 
@@ -122,9 +143,10 @@ describe('engine state read policy', () => {
     const before = await fixture(MALFORMED)
 
     const err = await refusal()
+    expect(err.name).toBe('EngineStateInvalidError')
     expect(err.path).toBe(statePath)
     expect(err.message).toContain(statePath)
-    expect(err.reason.length).toBeGreaterThan(0)
+    expect(err.reason?.length ?? 0).toBeGreaterThan(0)
 
     expect(await readFile(statePath, 'utf-8')).toBe(before)
     expect(await siblings()).toEqual([])
@@ -148,8 +170,33 @@ describe('engine state read policy', () => {
     const before = await fixture(VERSION_AHEAD)
 
     const err = await refusal()
+    // A distinct type, not `EngineStateInvalidError`. `cli/deny.ts` and
+    // `cli/approve.ts` both catch that one and print "Cannot read engine
+    // state", which would report a perfectly healthy newer home as corrupt and
+    // send the operator to the wrong remedy.
+    expect(err.name).toBe('FormatVersionUnsupportedError')
     expect(err.message).toContain(AHEAD_MARKER)
     expect(err.message).toContain(statePath)
+
+    expect(await readFile(statePath, 'utf-8')).toBe(before)
+    expect(await siblings()).toEqual([])
+  })
+
+  /**
+   * The tolerant read refuses this one too, and it is the only thing it
+   * refuses.
+   *
+   * A document this build cannot validate degrades a preview to defaults, which
+   * is honest — the preview cannot read it. A document written by a NEWER build
+   * is a different claim: rendering it as empty and healthy tells the operator
+   * their home holds nothing, when what it holds is state this binary is too
+   * old to see. `warpline plan` reporting an unreadable home as healthy is the
+   * failure this refusal exists to close.
+   */
+  it('refuses a schema_version above the newest known on the tolerant read too', async () => {
+    const before = await fixture(VERSION_AHEAD)
+
+    await expect(readEngineStateReadOnly(statePath)).rejects.toThrow(AHEAD_MARKER)
 
     expect(await readFile(statePath, 'utf-8')).toBe(before)
     expect(await siblings()).toEqual([])
@@ -188,11 +235,12 @@ describe('engine state read policy', () => {
 
   // ── The read-only read stays tolerant ──────────────────────────────────
 
-  it('returns defaults from the read-only read for every fixture the write-capable read refuses', async () => {
+  // `VERSION_AHEAD` is deliberately NOT in this list — it has its own case
+  // above, because it is the one refusal both policies now share.
+  it('returns defaults from the read-only read for every unusable fixture', async () => {
     for (const content of [
       SCHEMA_INVALID,
       MALFORMED,
-      VERSION_AHEAD,
       VERSION_FRACTIONAL,
       VERSION_NEGATIVE,
     ]) {
@@ -234,6 +282,92 @@ describe('engine state read policy', () => {
 
     await expect(writeEngineState(defaultEngineState(), statePath)).rejects.toThrow()
     expect(await siblings()).toEqual([])
+  })
+})
+
+/**
+ * The home-root `<home>/version` file — the second of the two format versions.
+ *
+ * The per-file `schema_version` above answers "what shape is this document";
+ * this one answers "what layout is this home". They are separate questions and
+ * they are asked of separate files on purpose: a layout-level fact stored
+ * inside `state/` would be covered by the very versioning it is meant to
+ * describe.
+ *
+ * Its format is a bare integer and nothing else. The encoding cases below are
+ * the whole contract, and the distinction they pin is between UNREADABLE and
+ * OLDER: an unreadable version file must refuse, never be treated as version 1
+ * and migrated over, because migrating over it destroys whatever it was trying
+ * to say.
+ */
+describe('the home-root format version file', () => {
+  let homeRoot: string
+  let statePath: string
+  let versionPath: string
+
+  beforeEach(async () => {
+    homeRoot = await mkdtemp(join(tmpdir(), 'warpline-home-version-'))
+    await mkdir(join(homeRoot, 'state'), { recursive: true })
+    statePath = join(homeRoot, 'state', 'engine-state.json')
+    versionPath = join(homeRoot, 'version')
+    // A valid document, so every case below fails for the version file alone.
+    await writeFile(statePath, JSON.stringify({ schema_version: 1 }), 'utf-8')
+  })
+
+  afterEach(async () => {
+    await rm(homeRoot, { recursive: true, force: true })
+  })
+
+  async function refusal(): Promise<Error> {
+    try {
+      await readEngineState(statePath)
+    } catch (err) {
+      if (err instanceof Error) return err
+      throw err
+    }
+    throw new Error('expected readEngineState to refuse — it returned a state object')
+  }
+
+  it('reads a home with no version file as version 1', async () => {
+    const state = await readEngineState(statePath)
+    expect(state.schema_version).toBe(1)
+  })
+
+  it('accepts a bare integer with a single trailing newline', async () => {
+    await writeFile(versionPath, '2\n', 'utf-8')
+
+    const state = await readEngineState(statePath)
+    expect(state.schema_version).toBe(1)
+  })
+
+  for (const [label, raw] of [
+    ['a fractional version', '2.0'],
+    ['a leading space', ' 2'],
+    ['a word', 'two'],
+    ['an empty file', ''],
+  ] as const) {
+    it(`refuses ${label} as unreadable, not as an older version`, async () => {
+      await writeFile(versionPath, raw, 'utf-8')
+
+      const err = await refusal()
+      expect(err.name).toBe('FormatVersionUnsupportedError')
+      expect(err.message).toContain('unreadable')
+      // "Unreadable" and "your build is behind" are different problems with
+      // different fixes, so they must not read the same.
+      expect(err.message).not.toContain(AHEAD_MARKER)
+    })
+  }
+
+  it('refuses a version newer than this build understands, on both read policies', async () => {
+    await writeFile(versionPath, String(ENGINE_STATE_MAX_SCHEMA_VERSION + 1), 'utf-8')
+
+    const err = await refusal()
+    expect(err.name).toBe('FormatVersionUnsupportedError')
+    expect(err.message).toContain(AHEAD_MARKER)
+    expect(err.message).toContain(String(ENGINE_STATE_MAX_SCHEMA_VERSION + 1))
+    expect(err.message).toContain(String(ENGINE_STATE_MAX_SCHEMA_VERSION))
+
+    await expect(readEngineStateReadOnly(statePath)).rejects.toThrow(AHEAD_MARKER)
   })
 })
 
