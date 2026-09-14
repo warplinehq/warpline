@@ -123,14 +123,24 @@ async function writeProducer(): Promise<void> {
   await writeFile(join(dir, 'handler.ts'), `export async function handler() {\n  return ${RESULT}\n}\n`)
 }
 
+/** How the consumer's handler behaves once it has been entered. */
+type ConsumerMode =
+  /** Return success immediately. */
+  | 'returns'
+  /** Wait on the release file, so the parent can kill it mid-invocation. */
+  | 'blocks'
+  /** Return a `SkillResult` whose status is `failed`. */
+  | 'fails'
+
 /**
  * The consumer: content class, one declared dependency, one declared effect.
  *
- * `blocks` decides whether the handler waits on the release file after writing
- * its sentinel. The sentinel is written FIRST either way, so the parent can see
- * the handler was entered before it decides to kill.
+ * The sentinel is written FIRST in every mode, before the handler does anything
+ * else, so the parent can see it was entered whatever it goes on to do — and so
+ * the `fails` mode is a send that may well have landed rather than one that
+ * demonstrably did not.
  */
-async function writeConsumer(blocks: boolean): Promise<void> {
+async function writeConsumer(mode: ConsumerMode): Promise<void> {
   const dir = join(home.pluginsDir, CONSUMER)
   await mkdir(dir, { recursive: true })
   await writeFile(
@@ -166,18 +176,35 @@ async function writeConsumer(blocks: boolean): Promise<void> {
   // the child resolves nothing of its own, and `import()` caches the module, so
   // a handler deciding anything at call time is one more thing this file cannot
   // see go wrong.
-  const block = blocks
-    ? `  while (!existsSync(${JSON.stringify(releasePath)})) {
+  const block =
+    mode === 'blocks'
+      ? `  while (!existsSync(${JSON.stringify(releasePath)})) {
     await new Promise(resolve => setTimeout(resolve, 25))
   }\n`
-    : ''
+      : ''
+  // A valid `SkillResult` whose status is `failed`. The `errors` entry is
+  // spelled out because the schema requires the shape, and a fixture the
+  // runtime rejects would record `failed` for the wrong reason.
+  const returned =
+    mode === 'fails'
+      ? `{
+    status: 'failed',
+    phases_completed: [],
+    phases_failed: ['run'],
+    errors: [{ phase: 'run', message: 'the sink answered 500', recoverable: false }],
+    data_freshness: {},
+    summary: 'the send reported a failure',
+    artifacts_produced: [],
+    schema_version: 1,
+  }`
+      : RESULT
   await writeFile(
     join(dir, 'handler.ts'),
     `import { writeFileSync, existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 export async function handler() {
   writeFileSync(${JSON.stringify(firedDir)} + '/' + randomUUID(), 'the effect fired')
-${block}  return ${RESULT}
+${block}  return ${returned}
 }
 `,
   )
@@ -232,9 +259,9 @@ function approvalFor(approvedBody: string): EngineState['approvals'][string] {
 }
 
 /** The whole fixture: both plugins, and a live approval over unmoved bytes. */
-async function seedLiveApproval(blocks: boolean): Promise<void> {
+async function seedLiveApproval(mode: ConsumerMode): Promise<void> {
   await writeProducer()
-  await writeConsumer(blocks)
+  await writeConsumer(mode)
   const state = seedState(APPROVED_BODY)
   state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
   await writeFile(statePath(), JSON.stringify(state))
@@ -242,6 +269,18 @@ async function seedLiveApproval(blocks: boolean): Promise<void> {
 
 interface AdvanceHooks {
   onPluginEnd?: (plugin: string, status: string, elapsed: number, reason?: string) => void
+  /**
+   * The injected clock, threaded into every guard's reads.
+   *
+   * An advance moments after a fire finds the consumer inside its own TTL and
+   * is held by the FRESHNESS gate — which is not the guard any case here is
+   * about and reports no reason to `onPluginEnd`. Moving the clock forward is
+   * the right lever and `force` is not: `force` would also un-freshen the
+   * PRODUCER, which is session-class under `review_gate: true`, so it would
+   * park a gate, stop the level loop, and the consumer would never be
+   * evaluated at all.
+   */
+  now?: number
 }
 
 async function advance(hooks: AdvanceHooks = {}): Promise<Awaited<ReturnType<typeof runAdvance>>> {
@@ -293,7 +332,7 @@ afterEach(async () => {
 
 describe('a content approval is marked spent before the handler runs', () => {
   test('a kill between the mark and the handler return does not re-fire', async () => {
-    await seedLiveApproval(true)
+    await seedLiveApproval('blocks')
 
     const child = spawn(process.execPath, [ENTRY, 'advance'], {
       env: { ...process.env, WARPLINE_HOME: home.root },
@@ -339,7 +378,7 @@ describe('a content approval is marked spent before the handler runs', () => {
   })
 
   test('a completed advance confirms the mark, and the next advance reports it spent', async () => {
-    await seedLiveApproval(false)
+    await seedLiveApproval('returns')
 
     await advance()
 
@@ -353,6 +392,9 @@ describe('a content approval is marked spent before the handler runs', () => {
 
     const details: string[] = []
     const second = await advance({
+      // An hour on. Past the consumer's TTL, well inside the producer's, and
+      // nowhere near the approval's 2099 window.
+      now: Date.now() + 60 * 60 * 1000,
       onPluginEnd: (plugin, _status, _elapsed, reason) => {
         if (plugin === CONSUMER && reason !== undefined) details.push(reason)
       },
@@ -364,5 +406,33 @@ describe('a content approval is marked spent before the handler runs', () => {
     expect(second.refused_plugins).toEqual([])
     expect(details).toHaveLength(1)
     expect(details[0]).toContain(`already spent at ${marked.confirmed_at}`)
+  })
+
+  /**
+   * The third post-fire state, and the one that is easy to get backwards.
+   *
+   * A handler returning `failed` leaves the record MARKED-UNCONFIRMED. The mark
+   * is not cleared: a `failed` return does not prove the sink never received the
+   * bytes — the handler had already written its sentinel before it decided it
+   * had failed — and clearing it would re-arm a send that may well have gone
+   * out. The operator resolves it at the sink with the effect id.
+   */
+  test('a handler returning failed leaves the record marked-unconfirmed', async () => {
+    await seedLiveApproval('fails')
+
+    await advance()
+
+    expect(firedCount()).toBe(1)
+    const record = (await readState()).approvals[CONSUMER]
+    expect(record.marked_at).not.toBeNull()
+    expect(record.confirmed_at).toBeNull()
+    expect(record.effect_id).toBe(
+      contentEffectId(record.plugin, record.fingerprint, record.marked_at as string),
+    )
+
+    const second = await advance({ now: Date.now() + 60 * 60 * 1000 })
+
+    expect(firedCount()).toBe(1)
+    expect(second.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'indeterminate' }])
   })
 })

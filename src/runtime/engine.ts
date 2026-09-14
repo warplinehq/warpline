@@ -119,7 +119,25 @@ import {
   emitPluginDenied,
 } from '../board/engine-events.js'
 import { readPreferences, isQuietHours } from '../lib/preferences.js'
-import { checkTaskLock as smCheckTaskLock } from '../board/state-manager.js'
+import {
+  checkTaskLock as smCheckTaskLock,
+  pathsForStateFile,
+  /**
+   * The derived state lock, imported under an alias, and the alias is not
+   * style. This file's gate counts OCCURRENCES of the imported name rather
+   * than call sites and holds them at one until 19-08 adds the end-of-run
+   * merge — the acquire is a non-reentrant `O_EXCL` file lock, so a second
+   * region nested inside the first self-deadlocks, and a bound on the name is
+   * the cheapest way to notice one appearing. Importing under the real name
+   * would spend the whole budget on this line.
+   *
+   * DERIVED, never the bare `withStateLock`: that one resolves through
+   * `activePaths()`, falls back to `defaultPaths()`, and can end up locking a
+   * path a sibling test file already deleted — a lock that reports success and
+   * protects a different home.
+   */
+  withStateLockAt as lockStateDocument,
+} from '../board/state-manager.js'
 
 // -----------------------------------------------------------------------
 // Types
@@ -869,6 +887,195 @@ function refusalFor(standing: ApprovalStanding): RefusalReason | undefined {
     case 'live':
       return undefined
   }
+}
+
+/**
+ * The per-key merge rule for the `approvals` subtree, written out as a table
+ * and implemented row for row.
+ *
+ * Three sentences of prose get implemented three ways; this table does not. The
+ * SAME table governs the end-of-run merge 19-08 adds, and both writers cite it.
+ *
+ * | key present          | in-memory state                       | result |
+ * |----------------------|---------------------------------------|--------|
+ * | on disk only         | —                                     | **keep the disk record** (another attachment approved mid-advance) |
+ * | in memory only, marked-unconfirmed | `marked_at` set, `confirmed_at` null | **keep the in-memory record** (never replaced by absence) |
+ * | in memory only, unmarked | `marked_at` null                  | **removal wins** (the operator ran `--remove`) |
+ * | both, in-memory marked | `marked_at` set                     | **in-memory wins** (the same record, progressed) |
+ * | both, in-memory unmarked | `marked_at` null                  | **disk wins** (a fresher operator write) |
+ *
+ * `marked_at !== null` is the one discriminator, which is what collapses the
+ * five rows into two loops. A record carrying `confirmed_at` also carries
+ * `marked_at`, so it is preserved by the same arm — losing did-it-ship evidence
+ * to a mid-advance removal is the repudiation this rule exists to prevent.
+ */
+function mergeApprovals(
+  disk: EngineState['approvals'],
+  memory: EngineState['approvals'],
+): EngineState['approvals'] {
+  // Rows 1 and 5: the disk record is the floor.
+  const merged: EngineState['approvals'] = { ...disk }
+  // Rows 2 and 4: a marked in-memory record wins over disk and over absence.
+  // Row 3 is what this loop does NOT do — an unmarked in-memory record is
+  // skipped, so a removal that landed on disk stays removed.
+  for (const [plugin, record] of Object.entries(memory)) {
+    if (record.marked_at !== null) merged[plugin] = record
+  }
+  return merged
+}
+
+/**
+ * Mark a content approval spent BEFORE its handler is invoked.
+ *
+ * The only mark-before-effect in this tree besides the run lock. `applied_at`,
+ * `plugin_runs` and both example ledgers are mark-after-effect, so without this
+ * a crash mid-send is indistinguishable from a send that never happened and the
+ * next advance fires again.
+ *
+ * **Serialisation.** One `O_EXCL` mechanism with a polling acquire serialises
+ * two content-class siblings inside one level's `Promise.all` AND another
+ * attachment's concurrent `approve --content`. Accepted cost: up to the state
+ * manager's 10 s lock timeout per contention, and N sequential round-trips for
+ * N content plugins in one level — a shape no shipped fleet has today.
+ * **Held per mark, never around the level loop**, which would deadlock: the
+ * mark sits inside the fan-out and the end-of-run merge sits after it.
+ *
+ * **What it persists.** Only the `approvals` subtree, merged onto a fresh read,
+ * with the rest of that fresh document untouched. It deliberately does NOT
+ * flush the advance's in-memory `state`: `runAdvance` mutates `plugin_runs`
+ * throughout the level loop and persists once at the end, and flushing mid-run
+ * would make `plugin_runs` durable for a run that has not returned — re-arming
+ * the freshness latch for a plugin still in flight, which is the class of
+ * misreport the dueness check refuses to create.
+ *
+ * **The stale-authority window, failed closed.** The gate evaluated the
+ * approval without the lock. If, by the time the lock is held and the document
+ * re-read, the record is gone or its fingerprint differs, the authority the
+ * gate decided on is no longer the authority on disk; if it is already marked,
+ * something else is mid-fire on it. Either way: no mark, no invoke, a refusal.
+ * This is the mark's own PRECONDITION, in the same shape the run lock's
+ * `O_EXCL` acquire is a precondition — not a second read of the authority for
+ * the fire decision, which was already made and is not revisited.
+ *
+ * The BATCH alternative — one pre-fan-out write for every content plugin — is
+ * recorded here so it is rejected rather than rediscovered. It is feasible:
+ * `topoSort` puts a declared dependency at a strictly earlier level, so a
+ * consumer's producer `last_output` is settled before its own level begins. It
+ * is refused because it requires deciding the fire question outside the gate
+ * chain and again inside it — two answers to a question that is read at exactly
+ * one call site.
+ *
+ * **The durability ceiling, stated once and honestly.** `fs-atomic.ts` provides
+ * rename atomicity, NOT power-loss durability — it has no `fsync`. The
+ * guarantee here is against PROCESS CRASH. The outcome is not durable until the
+ * single end-of-run write, so a crash after a successful send but before that
+ * write also reads `indeterminate` on the next advance. That is the
+ * conservative and correct reading — the runtime genuinely does not know — and
+ * the effect id is the remedy: the operator resolves it at the sink.
+ *
+ * @returns the refusal to report, or undefined when the mark was taken.
+ */
+async function markContentApprovalSpent(
+  state: EngineState,
+  statePath: string,
+  eventsPath: string | undefined,
+  plugin: string,
+  authority: ContentAuthority,
+): Promise<RefusalReason | undefined> {
+  // The lock that guards THIS document, derived from the path this advance
+  // actually writes rather than from the state manager's module globals.
+  return lockStateDocument(pathsForStateFile(statePath).lockPath, async () => {
+    // Inside the lock, and it has to be: a read outside it is a read of a
+    // document another writer may replace before the write lands.
+    // `announceDiscards: false` because the top-of-advance read already
+    // announced anything discardable — a second notice mid-run is the same news
+    // twice.
+    const disk = await readEngineState(statePath, { eventsPath, announceDiscards: false })
+    // Own-property, never a bare index: on a plain-object record `approvals`
+    // answers `toString` with an inherited member rather than with absence.
+    const record = Object.hasOwn(disk.approvals, plugin) ? disk.approvals[plugin] : undefined
+
+    if (record === undefined || record.fingerprint !== authority.fingerprint) return 'content_moved'
+    if (record.marked_at !== null) return 'indeterminate'
+
+    // `marked_at` IS the fire instant, and the identity is load-bearing: it is
+    // what makes the effect id RECOMPUTABLE from the stored record, so a reader
+    // holding `(plugin, fingerprint, marked_at)` can check an id they were
+    // handed. It is not a promise that a retry regenerates one — a retry reads
+    // the stored id.
+    //
+    // `confirmed_at` is untouched here. One timestamp cannot express both
+    // post-fire states: written before the handler it makes every successful
+    // send read indeterminate forever, turning a content-approved plugin into a
+    // one-shot; written after, it silently loses the crash case.
+    const marked: Approval = {
+      ...record,
+      marked_at: authority.fire_instant,
+      effect_id: authority.effect_id,
+    }
+    // The in-memory record, replaced rather than mutated field by field, so the
+    // end-of-run write carries the mark without a second merge there. The disk
+    // copy is the base because it may hold a fresher operator write of the
+    // fields this mark does not touch.
+    state.approvals[plugin] = marked
+
+    await writeEngineState(
+      { ...disk, approvals: mergeApprovals(disk.approvals, state.approvals) },
+      statePath,
+    )
+    return undefined
+  })
+}
+
+/**
+ * The operator string for a mark that could not be taken.
+ *
+ * Interpolation is closed by construction, on `contentGateDetail`'s rule: a
+ * declared plugin name, a closed enum value and a runtime-derived hex
+ * fingerprint. Never the window bounds, never the zone, never the record's
+ * `producer`, and never anything read out of `last_output` — these strings
+ * reach the run log and are read and shared.
+ *
+ * A separate author from `contentGateDetail` because this is a separate FACT.
+ * That function narrates what the GATE decided; this narrates the mark's own
+ * precondition failing between the gate and the handler, which is a window the
+ * gate never saw.
+ */
+function markRefusalDetail(reason: RefusalReason, plugin: string, fingerprint: string): string {
+  return reason === 'indeterminate'
+    ? `refused (indeterminate): the content approval for '${plugin}' was already marked spent ` +
+        'before this fire could mark it, so the runtime cannot tell whether that fire completed'
+    : `refused (content_moved): the approved content moved between the gate and the spend mark — ` +
+        `the fingerprint the gate decided on (${fingerprint}) is no longer the one on file`
+}
+
+/**
+ * Stamp `confirmed_at` on every record this advance marked and whose handler
+ * then returned without failing. The ONE place that field is written.
+ *
+ * A handler returning `failed` is deliberately absent: its record stays
+ * marked-unconfirmed and the mark is NOT cleared. FREEZE-06 forbids a re-fire,
+ * and a `failed` return does not prove the sink never received the bytes — the
+ * operator resolves it at the sink with the effect id.
+ *
+ * The marked-record guard is not belt and braces: a confirmation stamped on a
+ * record nothing marked would claim a fire the document has no account of.
+ */
+function confirmContentMarks(
+  approvals: EngineState['approvals'],
+  confirmed: ReadonlySet<string>,
+): EngineState['approvals'] {
+  if (confirmed.size === 0) return approvals
+  // One instant for the whole advance, so two fires in one run cannot disagree
+  // about when the run that confirmed them ended.
+  const instant = new Date().toISOString()
+  const out: EngineState['approvals'] = { ...approvals }
+  for (const plugin of confirmed) {
+    const record = out[plugin]
+    if (record === undefined || record.marked_at === null) continue
+    out[plugin] = { ...record, confirmed_at: instant }
+  }
+  return out
 }
 
 function failedDependencies(manifest: PluginManifest, ctx: EvalContext): string[] {
@@ -1673,6 +1880,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
      */
     const refused_plugins: AdvanceResult['refused_plugins'] = []
     /**
+     * The content-authorised fires this advance MARKED and whose handler then
+     * returned without failing. Read once, at the end-of-run assembly, which is
+     * where `confirmed_at` is written and the only place it is.
+     */
+    const confirmedContentFires = new Set<string>()
+    /**
      * The gates parked by this advance, assembled inside the gated arm where the
      * plugin's real `SkillResult` is still in scope.
      */
@@ -1954,6 +2167,57 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
           // -- Set FSM to running --
           plugin_states.set(pluginName, 'running')
+
+          // -- The spend mark ------------------------------------------------
+          // Below the dry-run block above — which no dry run reaches for a
+          // side-effecting plugin, and `approval_class: 'content'` requires at
+          // least one declared side effect at `.parse()` time, so no
+          // content-class manifest slips past it — and above `invokePlugin`.
+          // Above `onPluginStart` and `emitPluginStarted` as well, so a
+          // fail-closed refusal never publishes a start that did not happen.
+          //
+          // It fires only when the widened due arm carries a content
+          // authority, so nothing happens for any other plugin. The whole
+          // rationale — serialisation, the merge rule, the stale-authority
+          // window and the durability ceiling — is on
+          // `markContentApprovalSpent`, in one copy.
+          if (ev.content !== undefined) {
+            const markRefusal = await markContentApprovalSpent(
+              state,
+              stateDir,
+              eventsPath,
+              pluginName,
+              ev.content,
+            )
+            if (markRefusal !== undefined) {
+              // The FSM state, not the run-log status: a refusal leaves it at
+              // `skipped`, exactly as the approval gate's own refusal arm does.
+              plugin_states.set(pluginName, 'skipped')
+              const markElapsed = Date.now() - entryStart
+              const markDetail = markRefusalDetail(
+                markRefusal,
+                pluginName,
+                ev.content.fingerprint,
+              )
+              refused_plugins.push({ plugin: pluginName, reason: markRefusal })
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'refused',
+                started_at: entryStartedAt,
+                elapsed_ms: markElapsed,
+                result_summary: markDetail,
+                reason: markRefusal,
+                retried: false,
+              })
+              // The emitter authors its own summary from the plugin name and
+              // the closed enum value; `markDetail` is deliberately not passed.
+              // One persisted string, one author.
+              await emitPluginRefused(pluginName, markRefusal, run_id, eventsPath)
+              onPluginEnd?.(pluginName, 'skipped', markElapsed, markDetail)
+              return
+            }
+          }
+
           onPluginStart?.(pluginName)
           await emitPluginStarted(pluginName, run_id, eventsPath)
 
@@ -2191,6 +2455,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // -- Autonomous: completed or failed --
           const finalStatus = result.status === 'failed' ? 'failed' : 'completed'
           plugin_states.set(pluginName, finalStatus)
+          // A content-authorised fire whose handler RETURNED. Recorded here and
+          // stamped at the end-of-run write; `failed` is excluded deliberately,
+          // which leaves its record marked-unconfirmed rather than clearing the
+          // mark — see `confirmContentMarks`.
+          if (finalStatus === 'completed' && ev.content !== undefined) {
+            confirmedContentFires.add(pluginName)
+          }
           const autonomousElapsed = Date.now() - entryStart
           plugin_entries.push({
             plugin: pluginName,
@@ -2314,6 +2585,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // 8. Write updated state (with pending_gates)
     const updatedState: EngineState & { pending_gates?: unknown[] } = {
       ...state,
+      // `confirmed_at` is written HERE and nowhere else — the second half of
+      // the two-field mark, and the reason the mark is two fields rather than
+      // one. Everything about which fires are in the set, and why a `failed`
+      // return is not, is on `confirmContentMarks`.
+      approvals: confirmContentMarks(state.approvals, confirmedContentFires),
       last_run_id: run_id,
       last_run_at: new Date().toISOString(),
     }

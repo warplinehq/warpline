@@ -1709,6 +1709,52 @@ A lapsed window does not auto-approve, does not extend and does not degrade to
 an ordinary send. It stops applying, and the operator is the only one who can
 write another.
 
+#### The spend mark
+
+`effect_id`, `marked_at` and `confirmed_at` are written by the ADVANCE and by
+nothing else. No operator command sets any of the three.
+
+`marked_at` and `effect_id` are written together, **before the handler is
+invoked** — the only mark-before-effect in the runtime besides the run lock.
+`marked_at` IS the instant the fire was decided on, which is what makes the
+effect id recomputable: a reader holding `(plugin, fingerprint, marked_at)` can
+check an id they were handed, without the runtime having to promise that a retry
+regenerates one. `confirmed_at` is written at the single end-of-run state write
+and nowhere else.
+
+Two fields rather than one, because one timestamp cannot express both post-fire
+states. Written before the handler, a single field makes every successful send
+read as unfinished forever and turns a content-approved plugin into a one-shot;
+written after, it loses the crash case entirely. The three states and their
+predicates:
+
+| state | predicate | what the next advance does |
+|---|---|---|
+| not yet fired | `marked_at` null | fires, if the window and the fingerprint still agree |
+| indeterminate | `marked_at` set, `confirmed_at` null | refuses with `indeterminate` — never fires |
+| spent | `confirmed_at` set | ordinary not-due, naming the instant it fired |
+
+A handler that returns `failed` leaves the record **indeterminate**, not
+un-marked. The mark is not cleared on that path: a failed return does not prove
+the sink never received the bytes, and clearing it would re-arm a send that may
+already have gone out.
+
+The mark is taken under the state document's own lock, with the document re-read
+inside it, so two content-class plugins in one execution level and a concurrent
+`warpline approve --content` are serialised by one mechanism. The write persists
+only the `approvals` subtree merged onto that fresh read — never the advance's
+in-flight `plugin_runs`, which are not durable until the run returns. If the
+record has gone, its fingerprint has moved, or it is already marked by the time
+the lock is held, the fire is refused rather than taken: no mark, no invocation.
+
+**The durability ceiling, stated rather than claimed away.** The guarantee is
+against **process crash**, not power loss: the state document is written with
+rename atomicity and no `fsync`. The outcome is also not durable until the
+end-of-run write, so a crash after a successful send but before that write reads
+`indeterminate` on the next advance too. That is the conservative and correct
+reading — the runtime genuinely does not know — and the effect id is the remedy:
+the operator resolves it at the sink rather than guessing here.
+
 #### Writing and withdrawing one (`warpline approve --content`)
 
 `warpline approve <plugin> --content --not-after <wall> [--not-before <wall>]
