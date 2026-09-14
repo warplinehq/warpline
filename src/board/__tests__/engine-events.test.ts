@@ -572,3 +572,48 @@ describe('gate-discard prose stays tied to the constant it quotes', () => {
     expect(line).toContain(`${hours} hours`)
   })
 })
+
+/**
+ * A content refusal on the board.
+ *
+ * NOT `emitPluginSkipped`. `emitPluginDenied`'s header records what filing a
+ * denial as a skip cost: it put a denial in the same board bucket as "no Grant"
+ * and "still fresh", so the two logs disagreed about the same advance. A
+ * refusal is the same shape of news one step over — a yes whose conditions
+ * stopped holding — and filing it as a skip would lose it the same way.
+ */
+describe('emitPluginRefused', () => {
+  test('writes one info notice whose sub-type is the first metadata key', async () => {
+    const { emitPluginRefused } = await import('../engine-events.js')
+    await emitPluginRefused('sender', 'content_moved', 'run-1', eventsPath)
+
+    const events = await readEvents(eventsPath)
+    expect(events).toHaveLength(1)
+    const e = events[0]!
+    expect(e['type']).toBe('notice')
+    expect(e['severity']).toBe('info')
+    expect(e['summary']).toBe('sender: refused — content_moved')
+    expect(e['run_id']).toBe('run-1')
+    // The discriminator FIRST, as the three emitters next door write it — a
+    // reader matching on it should not have to parse the whole object to
+    // find out what kind of notice this is.
+    expect(Object.keys(JSON.parse(String(e['metadata_json'])))[0]).toBe('event')
+    expect(JSON.parse(String(e['metadata_json']))).toEqual({
+      event: 'plugin_refused',
+      plugin: 'sender',
+      run_id: 'run-1',
+      reason: 'content_moved',
+    })
+  })
+
+  /**
+   * The Board is frozen through v0.3 and no phase may add an event type. The
+   * reason is worth restating: growing the enum raises NO compile error, while
+   * `VISIBLE_TYPES` is a hand-maintained Set — so a new member would be
+   * silently dropped from every board view and the refusal would be invisible.
+   */
+  test('the board event enum still has exactly nine members', async () => {
+    const { BoardEventSchema } = await import('../../schemas/board.js')
+    expect(BoardEventSchema.shape.type.options).toHaveLength(9)
+  })
+})

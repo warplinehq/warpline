@@ -50,6 +50,7 @@ import { defaultEngineState } from '../../schemas/engine-state.js'
 import type { EngineState } from '../../schemas/engine-state.js'
 import type { OutputRecord } from '../../schemas/skill-result.js'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
+import { _setHome } from '../../lib/paths.js'
 
 /** The bytes the operator reads and approves. */
 const APPROVED_BODY = '{"batch":"the twelve invoices the operator read"}'
@@ -263,6 +264,10 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  // Restored unconditionally. The override is process-global and the state
+  // helpers resolve through it, so a home left pointing at a removed temp dir
+  // leaks into whatever file bun runs next.
+  _setHome(null)
   await rm(sentinel, { force: true })
   await home.cleanup()
 })
@@ -785,5 +790,115 @@ describe('a content refusal carries a machine-readable reason', () => {
 
     expect(result.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'content_moved' }])
     expect(existsSync(sentinel)).toBe(false)
+  })
+})
+
+/**
+ * A sentinel planted in the approved bytes reaches the operator's terminal and
+ * nothing else.
+ *
+ * The approved content is recipient-bound data sitting one interpolation away
+ * from four strings that are read and shared: the run log's `result_summary`,
+ * the board event's summary, its `metadata_json`, and the gate `detail` that
+ * `warpline plan` renders. This repository has twice paid for an
+ * operator-configured value arriving in a result summary.
+ *
+ * **The four are asserted as exact equality, not `toContain`.** A leak appended
+ * to an otherwise correct sentence is invisible to a substring match, which is
+ * the reason `engine.ts` states in print at the detail-string docstring.
+ *
+ * The positive half is not decoration: without it every absence assertion below
+ * is equally green on a sentinel the fixture never produced, which is this
+ * repository's recorded failure — a guard running green while the thing it
+ * exists to catch sits outside its reach.
+ */
+describe('a content refusal leaks none of the approved bytes', () => {
+  /** Distinctive, and alnum-plus-hyphen so the operator escaping cannot alter it. */
+  const LEAK = 'SENTINELb7f3donotleak'
+  const LEAKY_APPROVED = `{"batch":"${LEAK} the twelve invoices the operator read"}`
+  const LEAKY_DRIFTED = LEAKY_APPROVED.replace('twelve', 'thirteen')
+
+  /** The `approve --content` stdout for the fixture, with the home overridden. */
+  async function approveByContent(): Promise<string> {
+    const realOut = process.stdout.write
+    let stdout = ''
+    process.stdout.write = ((chunk: string) => {
+      stdout += chunk
+      return true
+    }) as typeof process.stdout.write
+    try {
+      const { run } = await import('../../cli/approve.js')
+      const code = await run([CONSUMER, '--content', '--not-after', FAR_FUTURE])
+      expect(code).toBe(0)
+    } finally {
+      process.stdout.write = realOut
+    }
+    return stdout
+  }
+
+  test('the sentinel reaches the terminal and no persisted string', async () => {
+    _setHome(home.root)
+    await writeTracerPair()
+    await writeState(seedState(LEAKY_APPROVED))
+
+    // The operator reads the bytes and says yes to them. The record the CLI
+    // writes is the authority every assertion below is about.
+    const approvalStdout = await approveByContent()
+
+    // Then the batch moves under the approval, with the sentinel still in it.
+    const drifted = await readState()
+    drifted.plugin_runs[PRODUCER]!.last_output = outputOf(LEAKY_DRIFTED)
+    await writeState(drifted)
+
+    const result = await advance()
+    const after = await readState()
+    const fingerprint = after.approvals[CONSUMER]!.fingerprint
+    const expectedDetail =
+      `unapproved: the approved content has moved — the fingerprint on file ` +
+      `(${fingerprint}) is no longer what would ship`
+
+    // -- the sentinel is reachable, which is what makes the absences below mean
+    //    something --
+    expect(approvalStdout).toContain(LEAK)
+    expect(existsSync(sentinel)).toBe(false)
+
+    // -- 1. the run-log entry --
+    const runLog = JSON.parse(await readFile(result.run_log_path, 'utf-8')) as {
+      plugin_entries: { plugin: string; status: string; reason?: string; result_summary: string }[]
+    }
+    const entry = runLog.plugin_entries.find((e) => e.plugin === CONSUMER)!
+    expect(entry.status).toBe('refused')
+    expect(entry.reason).toBe('content_moved')
+    expect(entry.result_summary).toBe(expectedDetail)
+
+    // -- 2 and 3. the board event and its metadata --
+    const events = (await readFile(join(home.runsDir, 'events.jsonl'), 'utf-8'))
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+    const refusal = events.find(
+      (e) => e['type'] === 'notice' && String(e['metadata_json']).includes('plugin_refused'),
+    )!
+    expect(refusal['summary']).toBe(`${CONSUMER}: refused — content_moved`)
+    expect(refusal['metadata_json']).toBe(
+      JSON.stringify({
+        event: 'plugin_refused',
+        plugin: CONSUMER,
+        run_id: result.run_id,
+        reason: 'content_moved',
+      }),
+    )
+
+    // -- 4. the gate detail `warpline plan` renders --
+    const manifest = consumerManifestFor(PRODUCER)
+    const ev = await evaluatePlugin(CONSUMER, manifest, evalCtxFor(after, manifest), Date.now())
+    expect(ev.due).toBe(false)
+    if (ev.due) throw new Error('unreachable')
+    expect(ev.detail).toBe(expectedDetail)
+
+    // -- and the record on disk, which an operator shares when they paste a
+    //    state document into a bug report --
+    expect(JSON.stringify(after.approvals)).not.toContain(LEAK)
   })
 })
