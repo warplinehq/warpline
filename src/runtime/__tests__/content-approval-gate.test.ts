@@ -254,12 +254,11 @@ function consumerManifestFor(producer: string): PluginManifest {
 }
 
 beforeEach(async () => {
-  // review_gate false for now. The shipped default is true, and under it an
-  // `autonomous` plugin is promoted to `supervised` after invocation and parks
-  // a gate — which would stop the level loop behind the very send this file is
-  // proving. Task 3 adds the exemption that makes the default safe and flips
-  // this fixture back to it.
-  home = await createTestHome({ preferences: { review_gate: false } })
+  // The SHIPPED default, not the helper's test-friendly one. Everything in this
+  // file is proven under `review_gate: true`, which is what an operator
+  // actually runs — a fixture that disabled the review gate would prove the
+  // send works in a configuration nobody has.
+  home = await createTestHome({ preferences: { review_gate: true } })
   sentinel = join(tmpdir(), `warpline-content-sentinel-${randomUUID()}`)
 })
 
@@ -402,6 +401,75 @@ describe('a content approval fires the approved bytes and nothing else', () => {
         Date.now(),
       ).standing,
     ).toBe('content_moved')
+  })
+})
+
+/**
+ * The review gate promotes an `autonomous` plugin to `supervised` after
+ * invocation, and a parked gate stops the level loop. Left unexempted, a
+ * content-approved sender would fire, park, and halt everything behind it on
+ * every advance — for a review the operator already performed when they read
+ * the bytes.
+ *
+ * The exemption is SCOPED, and the third case is what proves that rather than
+ * asserting it: an ordinary `autonomous` plugin in the same home is still
+ * promoted. Without it these cases are equally green on a blanket disable.
+ */
+describe('the review gate and the content class', () => {
+  async function fireUnderGate(reviewGate: boolean): Promise<EngineState> {
+    // The preferences file is read once per advance, and `beforeEach` already
+    // built a home — so this replaces it rather than shadowing it, and removes
+    // the first one so nothing is left under tmpdir.
+    await home.cleanup()
+    home = await createTestHome({ preferences: { review_gate: reviewGate } })
+    await writeTracerPair()
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
+    await writeState(state)
+
+    expect((await readState()).pending_gates).toHaveLength(0)
+    await advance()
+    return await readState()
+  }
+
+  test('a content-approved send fires under review_gate: true and parks no gate', async () => {
+    const after = await fireUnderGate(true)
+
+    expect(existsSync(sentinel)).toBe(true)
+    expect(after.pending_gates).toHaveLength(0)
+  })
+
+  test('the outcome with the review gate turned off is identical', async () => {
+    const after = await fireUnderGate(false)
+
+    expect(existsSync(sentinel)).toBe(true)
+    expect(after.pending_gates).toHaveLength(0)
+  })
+
+  test('an ordinary autonomous plugin in the same advance is still promoted', async () => {
+    const PLAIN = 'plain-autonomous'
+    await writePlugin(PRODUCER, {})
+    await writePlugin(CONSUMER, {
+      dependencies: [PRODUCER],
+      sideEffects: ['sends_email'],
+      approvalClass: 'content',
+      sends: true,
+    })
+    // Same level as the consumer, so both are evaluated in one pass and the
+    // exemption is observed as a DIFFERENCE between two plugins rather than as
+    // a fact about a home.
+    await writePlugin(PLAIN, { dependencies: [PRODUCER] })
+
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
+    await writeState(state)
+
+    await advance()
+
+    const after = await readState()
+    expect(existsSync(sentinel)).toBe(true)
+    expect(after.pending_gates).toHaveLength(1)
+    expect(after.pending_gates[0]!.plugin).toBe(PLAIN)
   })
 })
 

@@ -1087,6 +1087,31 @@ package that witness can of course be constructed by hand; this runtime does
 not sandbox its handlers, and nothing here claims otherwise. What is bought is
 that the question cannot be skipped, not that the answer cannot be written.
 
+### The review gate, and why the content class is exempt
+
+`review_gate` is an operator preference, `true` by default. On that default the
+engine treats every `autonomous` plugin as `supervised` AFTER invocation: it
+runs, its result is parked in `pending_gates`, it is recorded `gated`, and the
+advance stops after its level. This is independent of the side-effect gate
+above — it applies whether or not the plugin declares any side effect.
+
+**A plugin declaring `approval_class: 'content'` is not promoted.** One conjunct
+on the promotion condition, and nothing else about it changes: every other
+plugin behaves exactly as before, `review_gate: false` included.
+
+The argument is that a content approval IS the review. The operator read the
+exact bytes and said yes before they shipped, rather than being shown the result
+after. Promoting a content-class plugin would ask the same person the same
+question twice — and because a parked gate stops the level loop, a plugin doing
+what it was approved to do would fire, park, and halt the rest of the fleet
+behind itself on every single advance.
+
+What makes the exemption safe rather than a hole is the manifest's own
+cross-field rule (§ 1): a content-class manifest is validated
+`autonomy_level: 'autonomous'` at `.parse()` time, and an invalid manifest is a
+hard stop at import. So the exemption cannot be reached by a `supervised` plugin
+— a manifest declaring both does not load at all.
+
 ### Merge semantics (`warpline approve`)
 
 Grants are **additive by default.** An operator typing `approve b` after

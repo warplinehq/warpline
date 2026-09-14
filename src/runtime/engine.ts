@@ -1917,8 +1917,24 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
           // -- Supervised: gate (unless dry-run) --
           // review_gate forces autonomous plugins to be treated as supervised
+          //
+          // EXCEPT a content-class plugin, and the exemption is not a
+          // convenience. A content approval IS the review — the operator read
+          // the exact bytes and said yes before they shipped, rather than after
+          // — so promoting one asks the same human the same question twice.
+          // And because a parked gate stops the level loop below, a plugin that
+          // fires on an approval and then parks would halt the fleet behind
+          // itself on every advance, for a review that already happened.
+          //
+          // What makes it safe to exempt is the manifest's own cross-field
+          // rule: a content-class manifest is validated `autonomous` at
+          // `.parse()` time, which is a hard stop at import. So this arm cannot
+          // be reached by a `supervised` plugin sneaking past the review gate —
+          // such a manifest does not load at all.
           const effectiveAutonomy =
-            reviewGateActive && manifest.autonomy_level === 'autonomous'
+            reviewGateActive &&
+            manifest.autonomy_level === 'autonomous' &&
+            manifest.approval_class !== 'content'
               ? 'supervised'
               : manifest.autonomy_level
           if (effectiveAutonomy === 'supervised') {
