@@ -647,3 +647,143 @@ describe('the content-authority decision', () => {
     expect(approvalStanding(state, 'toString', new Map(), Date.now()).standing).toBe('none')
   })
 })
+
+/**
+ * Every refusal reason, in the order the three are decided.
+ *
+ * Written out by hand rather than read off the schema's own member array: a
+ * list derived from the source asserts the implementation against itself,
+ * which is the one thing this block exists not to do. The discipline is
+ * `gate-order.test.ts:38-48`, copied deliberately.
+ *
+ * `19-SPEC.md:125` names the three in a different sequence, but that line is a
+ * list of the enum's members and its trailing clause reads loosely as a
+ * precedence claim. Two other places state the real order — the Acceptance
+ * Criteria and Interview Log round 5 — and it is the defensible one: an
+ * `indeterminate` mark means the runtime cannot tell whether the bytes already
+ * shipped, and that question outranks both "the window closed" and "the bytes
+ * moved", neither of which can be answered honestly while the first is open.
+ */
+const DECLARED_REFUSAL_ORDER = ['indeterminate', 'outside_window', 'content_moved']
+
+describe('a content refusal carries a machine-readable reason', () => {
+  /**
+   * The consumer's verdict over a state the caller has already shaped, reduced
+   * to the one field these cases are about.
+   *
+   * Asserting `unapproved` on the way through is what keeps a case honest: a
+   * fixture that drifted into `fresh` or `dependency_failed` would report
+   * `undefined` here and look like a deliberate no-refusal case.
+   */
+  async function refusalOver(state: EngineState): Promise<string | undefined> {
+    const manifest = consumerManifestFor(PRODUCER)
+    const result = await evaluatePlugin(CONSUMER, manifest, evalCtxFor(state, manifest), Date.now())
+
+    expect(result.due).toBe(false)
+    if (result.due) throw new Error('unreachable')
+    expect(result.reason).toBe('unapproved')
+    return result.refusal
+  }
+
+  /** A record carrying a mark, a lapsed bound AND drifted bytes. */
+  function markedLapsedAndDrifted(): EngineState {
+    const state = seedState(DRIFTED_BODY)
+    state.approvals[CONSUMER] = {
+      ...approvalFor(APPROVED_BODY),
+      not_after: '2020-01-01T00:00',
+      marked_at: '2026-09-14T11:00:00.000Z',
+    }
+    return state
+  }
+
+  /** The same, one condition removed. */
+  function lapsedAndDrifted(): EngineState {
+    const state = seedState(DRIFTED_BODY)
+    state.approvals[CONSUMER] = { ...approvalFor(APPROVED_BODY), not_after: '2020-01-01T00:00' }
+    return state
+  }
+
+  /** And one more removed: the bytes moved and nothing else did. */
+  function driftedOnly(): EngineState {
+    const state = seedState(DRIFTED_BODY)
+    state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
+    return state
+  }
+
+  test('a marked, lapsed and drifted record reports indeterminate', async () => {
+    expect(await refusalOver(markedLapsedAndDrifted())).toBe('indeterminate')
+  })
+
+  test('a lapsed and drifted record reports outside_window', async () => {
+    expect(await refusalOver(lapsedAndDrifted())).toBe('outside_window')
+  })
+
+  test('a drifted record alone reports content_moved', async () => {
+    expect(await refusalOver(driftedOnly())).toBe('content_moved')
+  })
+
+  /**
+   * The order asserted a second time, as a sequence rather than as three
+   * independent facts. Each state below drops exactly one condition from the
+   * one above it, so the three verdicts walk the precedence from the top down
+   * and must land on the hand-written list in the same sequence.
+   */
+  test('the three cases reproduce the declared order', async () => {
+    const observed: (string | undefined)[] = [
+      await refusalOver(markedLapsedAndDrifted()),
+      await refusalOver(lapsedAndDrifted()),
+      await refusalOver(driftedOnly()),
+    ]
+
+    expect(observed).toEqual(DECLARED_REFUSAL_ORDER)
+  })
+
+  /**
+   * A spent approval is a STATE REPORT and not a refusal: the runtime already
+   * fired these bytes, which is the operator's instruction having been carried
+   * out rather than anything having gone wrong. So it is ordinary not-due and
+   * there is nothing for a scheduler to switch on.
+   */
+  test('a spent approval is ordinary not-due with no refusal', async () => {
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = {
+      ...approvalFor(APPROVED_BODY),
+      marked_at: '2026-09-14T11:00:00.000Z',
+      confirmed_at: '2026-09-14T11:00:01.000Z',
+    }
+
+    expect(await refusalOver(state)).toBeUndefined()
+  })
+
+  /**
+   * The same for a window that has not opened: the operator's own instruction
+   * arriving on time. A refusal here would tell them they did something wrong.
+   */
+  test('a window that has not opened is ordinary not-due with no refusal', async () => {
+    const state = seedState(APPROVED_BODY)
+    const soon = new Date(Date.now() + 60 * 60 * 1000)
+    state.approvals[CONSUMER] = {
+      ...approvalFor(APPROVED_BODY),
+      not_before: soon.toISOString().slice(0, 16),
+    }
+
+    expect(await refusalOver(state)).toBeUndefined()
+  })
+
+  /**
+   * The pair leaves the advance structured, one entry per refused plugin.
+   * Never a bare `string[]`, which drops the reason, and never a parallel
+   * record keyed by plugin, which is two accounts of one advance.
+   */
+  test('the advance reports the refused plugin and its reason', async () => {
+    await writeTracerPair()
+    const state = seedState(DRIFTED_BODY)
+    state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
+    await writeState(state)
+
+    const result = await advance()
+
+    expect(result.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'content_moved' }])
+    expect(existsSync(sentinel)).toBe(false)
+  })
+})
