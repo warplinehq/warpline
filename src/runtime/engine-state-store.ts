@@ -279,14 +279,22 @@ export async function withoutStateBackups<T>(fn: () => Promise<T>): Promise<T> {
  *
  * Serialising concurrent writers is a separate, partly-closed problem.
  * `cli/deny.ts` now takes `withStateLock` around its read-modify-write, and
- * `board/state-manager.ts` always did. `engine.ts` does not: `runAdvance`
- * reads at the top and writes at the end, so its window spans plugin
+ * `board/state-manager.ts` always did. `runAdvance` still reads the whole
+ * document at the top and writes it at the end, so its window spans plugin
  * execution, and holding the lock across that would block the board for the
  * length of a run. Closing it means applying the advance's changes as deltas
- * onto a fresh read inside the lock — tracked in #25.
+ * onto a fresh read inside the lock — tracked in #25, and still open for
+ * `plugin_runs`, `pending_gates` and `last_run_id`.
  *
- * `cli/approve.ts` is NOT a writer of this document. It reads it, and writes
- * only the grant file via `mergeGrant`. It was named here in error.
+ * `approvals` is the ONE subtree that window no longer spans. Both of
+ * `engine.ts`'s writes — the mid-run spend mark and the end-of-run write —
+ * re-read this document inside the state lock and merge that subtree per key,
+ * because `approvals` is the only part of it another ATTACHMENT writes.
+ *
+ * `cli/approve.ts` IS a writer of this document: `--content` records the
+ * approval and `--content --remove` withdraws it, both inside the same derived
+ * lock. It writes the grant file via `mergeGrant` too, which is what its other
+ * two modes do and all this paragraph used to say.
  *
  * The lock still cannot move down into here: `board/state-manager.ts` calls
  * this from inside `withStateLock`, which is a non-reentrant `O_EXCL` file

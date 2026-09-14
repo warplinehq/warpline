@@ -2215,17 +2215,29 @@ first.
 
 **The run lock serialises advance against advance, and nothing more.** It does
 not close issue #25. An advance reads the engine state document at the top and
-writes it at the end, a window that spans plugin execution, and it takes no state
-lock over that window — holding one there would block the board for the length of
-a run. Closing #25 means applying the advance's changes as deltas onto a fresh
-read taken inside the state lock, which this runtime does not do and which is
-tracked as future work rather than implied here to be done.
+writes it at the end, a window that spans plugin execution, and it holds no state
+lock across that window — holding one there would block the board for the length
+of a run. Closing #25 means applying the advance's changes as deltas onto a fresh
+read taken inside the state lock, which this runtime does not do for
+`plugin_runs`, `pending_gates` or `last_run_id`, and which is tracked as future
+work rather than implied here to be done.
+
+**`approvals` is the one subtree that window no longer spans.** Both of the
+advance's writes to it — the spend mark taken before a content-approved handler
+runs, and the single end-of-run write — take the state lock, re-read the document
+inside it, and merge that subtree per key. The two regions are sequential and
+never nested. `approvals` gets this and the rest of the document does not because
+it is the only part another attachment writes: one home can be attached from
+several machines, so a `warpline approve --content` lands at an instant the
+advance cannot predict.
 
 **Which file each writer writes, since this has been recorded wrongly before.**
 The `deny` verb and the board write the engine state document, under the state
-lock. The `approve` verb does not write that document at all: it reads it, and
-writes the session-approval file — `.session-approval` at the root of the home.
-The run lock guards neither of them.
+lock. So does `approve --content`, which records the approval, and `approve
+--content --remove`, which withdraws it — both under the same lock. `approve`'s
+other modes write the session-approval file instead, `.session-approval` at the
+root of the home, and write no state document at all. The run lock guards none
+of them.
 
 ## 13. The dead-man file
 

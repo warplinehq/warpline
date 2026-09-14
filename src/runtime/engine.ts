@@ -123,20 +123,20 @@ import {
   checkTaskLock as smCheckTaskLock,
   pathsForStateFile,
   /**
-   * The derived state lock, imported under an alias, and the alias is not
-   * style. This file's gate counts OCCURRENCES of the imported name rather
-   * than call sites and holds them at one until 19-08 adds the end-of-run
-   * merge — the acquire is a non-reentrant `O_EXCL` file lock, so a second
-   * region nested inside the first self-deadlocks, and a bound on the name is
-   * the cheapest way to notice one appearing. Importing under the real name
-   * would spend the whole budget on this line.
-   *
    * DERIVED, never the bare `withStateLock`: that one resolves through
    * `activePaths()`, falls back to `defaultPaths()`, and can end up locking a
    * path a sibling test file already deleted — a lock that reports success and
    * protects a different home.
+   *
+   * Used through `lockStateDocument` below and nowhere else. This file's gate
+   * counts OCCURRENCES of this name rather than call sites and holds them at
+   * two: this line and the one call inside that wrapper. The bound is not
+   * style — the acquire is a non-reentrant `O_EXCL` file lock, so a second
+   * region nested inside the first self-deadlocks for the full 10 s ceiling and
+   * then throws, and a bound on the name is the cheapest way to notice one
+   * appearing.
    */
-  withStateLockAt as lockStateDocument,
+  withStateLockAt,
 } from '../board/state-manager.js'
 
 // -----------------------------------------------------------------------
@@ -890,11 +890,33 @@ function refusalFor(standing: ApprovalStanding): RefusalReason | undefined {
 }
 
 /**
+ * Hold the lock beside a NAMED state document, for the length of one
+ * read-modify-write.
+ *
+ * Two regions in this file take it — the mid-run spend mark and the end-of-run
+ * write — and they derive the path identically because they derive it HERE. A
+ * lock path spelled out at two call sites is two chances for one of them to
+ * lock a file it is not writing, which is a lock that reports success and
+ * protects nothing.
+ *
+ * **Strictly sequential, never nested.** The mark's region is released inside
+ * the level fan-out, long before the end-of-run write begins. The imported lock
+ * is a non-reentrant `O_EXCL` file lock: a nested acquire would block for the
+ * state manager's full 10 s ceiling and then throw. Its name is spelled once on
+ * the import and once on the call below, and nowhere in prose, because the gate
+ * on it counts occurrences of the word.
+ */
+function lockStateDocument<T>(statePath: string, fn: () => Promise<T>): Promise<T> {
+  return withStateLockAt(pathsForStateFile(statePath).lockPath, fn)
+}
+
+/**
  * The per-key merge rule for the `approvals` subtree, written out as a table
  * and implemented row for row.
  *
  * Three sentences of prose get implemented three ways; this table does not. The
- * SAME table governs the end-of-run merge 19-08 adds, and both writers cite it.
+ * SAME table governs the end-of-run merge at the tail of `runAdvance`, and both
+ * writers cite it rather than restating it.
  *
  * | key present          | in-memory state                       | result |
  * |----------------------|---------------------------------------|--------|
@@ -984,7 +1006,7 @@ async function markContentApprovalSpent(
 ): Promise<RefusalReason | undefined> {
   // The lock that guards THIS document, derived from the path this advance
   // actually writes rather than from the state manager's module globals.
-  return lockStateDocument(pathsForStateFile(statePath).lockPath, async () => {
+  return lockStateDocument(statePath, async () => {
     // Inside the lock, and it has to be: a read outside it is a read of a
     // document another writer may replace before the write lands.
     // `announceDiscards: false` because the top-of-advance read already
@@ -2637,7 +2659,35 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       ...parked_gates,
     ]
 
-    await writeEngineState(updatedState as EngineState, stateDir)
+    // The single end-of-run write, and the second of this file's two locked
+    // regions — sequential with the spend mark's, never nested (see
+    // `lockStateDocument`).
+    //
+    // Everything except `approvals` is still the advance's own in-memory state,
+    // spread above: this closes the read-modify-write window of #25 for that ONE
+    // subtree and leaves the general case — `plugin_runs`, `pending_gates`,
+    // `last_run_id` — open, which is where `engine-state-store.ts` files it.
+    // Widening it here would be a second control-flow change wearing the same
+    // commit.
+    //
+    // `approvals` is the subtree that needs it because it is the only one
+    // another ATTACHMENT writes. One home can be attached from several machines,
+    // so an `approve --content` lands at an instant this process cannot predict,
+    // and the window it lands in is as wide as the run — hours, in the shape
+    // this runtime is built for. The rule applied per key is the five-row table
+    // on `mergeApprovals`, the same one the mid-run mark implements; two prose
+    // statements of one rule is how two writers come to disagree.
+    //
+    // The re-read is INSIDE the lock, and it has to be: a read outside it is a
+    // read of a document a concurrent writer may replace before this write
+    // lands, which would reintroduce the window one layer down.
+    // `announceDiscards: false` because the top-of-advance read already
+    // announced anything discardable.
+    await lockStateDocument(stateDir, async () => {
+      const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
+      updatedState.approvals = mergeApprovals(disk.approvals, updatedState.approvals)
+      await writeEngineState(updatedState as EngineState, stateDir)
+    })
 
     // 9. Write run log
     const completed_at = new Date().toISOString()
