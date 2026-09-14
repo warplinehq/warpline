@@ -23,6 +23,32 @@ export type WarplineLock = z.infer<typeof WarplineLockSchema>
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000
 
 /**
+ * The links of the host-identity chain, in the order they are consulted.
+ *
+ * Never the machine's operator-facing name: that is operator-chosen, routinely
+ * duplicated across a fleet, and changes without the machine changing.
+ */
+export const MACHINE_ID_CHAIN = ['etc-machine-id', 'dbus-machine-id', 'ioreg-platform-uuid'] as const
+
+export type MachineIdSource = (typeof MACHINE_ID_CHAIN)[number]
+
+/**
+ * One link of the chain, read.
+ *
+ * Injectable because the chain CANNOT be exercised end to end anywhere: links
+ * one and two are absent on macOS and link three is absent on Linux CI. Probing
+ * the real host would leave the `null` arm untested wherever the chain happens
+ * to succeed, and the success arm untested wherever it fails — and the `null`
+ * arm is the one whose correctness matters most.
+ */
+export type MachineIdReader = (source: MachineIdSource) => string | null
+
+export function deriveHost(read: MachineIdReader = () => null): string | null {
+  void read
+  return null
+}
+
+/**
  * Every function below takes its lock path as a REQUIRED first parameter.
  *
  * There used to be a module-load-time constant here holding `lockPath()`,

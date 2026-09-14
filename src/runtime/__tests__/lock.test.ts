@@ -10,8 +10,9 @@ import {
   releaseLock,
   readLock,
   generateRunId,
+  deriveHost,
 } from '../lock.js'
-import type { WarplineLock } from '../lock.js'
+import type { WarplineLock, MachineIdReader, MachineIdSource } from '../lock.js'
 
 const NOW = new Date('2026-04-03T12:00:00Z')
 
@@ -26,6 +27,82 @@ afterEach(() => {
 function tmpLock(): string {
   return join(tmpdir(), `warpline-lock-test-${Date.now()}-${Math.random().toString(36).slice(2)}.lock`)
 }
+
+/**
+ * A machine-id reader that answers from a fixture, recording what it was asked.
+ *
+ * Every host case below goes through one of these rather than probing the host
+ * the suite happens to run on. Links one and two are absent on macOS and link
+ * three is absent on Linux CI, so a probing test exercises a different arm in
+ * each environment and leaves the other untested in both — including the `null`
+ * arm, which is the one that must never compare equal to itself.
+ */
+function injectedReader(answers: Partial<Record<MachineIdSource, string | null>>): MachineIdReader & {
+  asked: MachineIdSource[]
+} {
+  const asked: MachineIdSource[] = []
+  const read = ((source: MachineIdSource) => {
+    asked.push(source)
+    return answers[source] ?? null
+  }) as MachineIdReader & { asked: MachineIdSource[] }
+  read.asked = asked
+  return read
+}
+
+/** 32 hex, with letters, so the upper- and lower-case forms differ. */
+const MACHINE_A = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+const MACHINE_B = '0f9e8d7c6b5a49382716f5e4d3c2b1a0'
+
+describe('deriveHost', () => {
+  it('returns a hex string that is neither the machine id nor a substring of it', () => {
+    const host = deriveHost(injectedReader({ 'etc-machine-id': MACHINE_A }))
+    expect(typeof host).toBe('string')
+    expect(host).toMatch(/^[0-9a-f]{64}$/)
+    expect(host).not.toBe(MACHINE_A)
+    expect(MACHINE_A).not.toContain(host as string)
+    expect(host as string).not.toContain(MACHINE_A)
+  })
+
+  it('is pure — the same injected id derives the identical host twice', () => {
+    const first = deriveHost(injectedReader({ 'etc-machine-id': MACHINE_A }))
+    const second = deriveHost(injectedReader({ 'etc-machine-id': MACHINE_A }))
+    expect(first).toBe(second)
+    expect(first).not.toBeNull()
+  })
+
+  it('derives different hosts from different machine ids', () => {
+    const a = deriveHost(injectedReader({ 'etc-machine-id': MACHINE_A }))
+    const b = deriveHost(injectedReader({ 'etc-machine-id': MACHINE_B }))
+    expect(a).not.toBe(b)
+  })
+
+  it('returns null when every link of the chain fails', () => {
+    expect(deriveHost(injectedReader({}))).toBeNull()
+  })
+
+  it('consults the links in order, stopping at the first that answers', () => {
+    const read = injectedReader({ 'etc-machine-id': MACHINE_A, 'dbus-machine-id': MACHINE_B })
+    deriveHost(read)
+    expect(read.asked).toEqual(['etc-machine-id'])
+
+    const fallen = injectedReader({ 'ioreg-platform-uuid': 'EB54B014-8EC8-5BE7-8FD4-B1219A5FE5BA' })
+    expect(deriveHost(fallen)).not.toBeNull()
+    expect(fallen.asked).toEqual(['etc-machine-id', 'dbus-machine-id', 'ioreg-platform-uuid'])
+  })
+
+  it('falls through an unparseable value rather than deriving from it', () => {
+    for (const junk of ['', '   ', 'not-hex-at-all-not-hex-at-all-xx', 'a1b2c3']) {
+      const read = injectedReader({ 'etc-machine-id': junk, 'dbus-machine-id': MACHINE_B })
+      expect(deriveHost(read)).toBe(deriveHost(injectedReader({ 'etc-machine-id': MACHINE_B })))
+      expect(read.asked).toEqual(['etc-machine-id', 'dbus-machine-id'])
+    }
+  })
+
+  it('never consults the machine name', async () => {
+    const src = await readFile(join(import.meta.dir, '..', 'lock.ts'), 'utf-8')
+    expect(src).not.toMatch(/hostname\s*\(|os\.hostname/)
+  })
+})
 
 describe('WarplineLockSchema', () => {
   it('parses a valid lock', () => {
