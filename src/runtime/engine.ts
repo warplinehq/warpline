@@ -203,7 +203,12 @@ export interface AdvanceOptions {
    * and not a getter, because a getter lets two reads inside one advance
    * disagree, which is the disagreement the seam exists to remove.
    *
-   * It reaches `evaluatePlugin` and nothing else. `entryStart` stays a live
+   * It reaches `evaluatePlugin`, and through `approvalNow` it reaches the two
+   * `windowClosed` consumers — the retention protected set near the top of the
+   * advance and the approval expiry sweep at the end-of-run assembly. Those two
+   * read one captured value rather than the option directly, which is what stops
+   * protection and deletion disagreeing about an instant as well as about a
+   * rule. Nothing else reads it. `entryStart` stays a live
    * `Date.now()` and remains the `elapsed_ms` baseline for every row in the run
    * log — freezing that to an injected past instant would make each duration a
    * large positive number describing time that did not pass. It is deliberately
@@ -1959,6 +1964,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // a computed value: this runs before the level loop and the sweep runs
     // after it. `approvalNow` is what keeps them from disagreeing about the
     // instant as well as about the rule — one clock read, both readers.
+    //
+    // **This is a CONSUMER of the record, not a second read of the authority
+    // for the fire decision.** R2's Acceptance names this set among the readers
+    // that "consume the record and never decide whether to fire", beside R8's
+    // merge and R11's carve-out. A protected set admits nothing; the widest
+    // thing it can do is keep a file on disk.
     //
     // `run_id` is nullable: an Output that carried none came from a run the
     // store cannot name, and null protects nothing rather than protecting
