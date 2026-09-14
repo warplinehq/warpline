@@ -35,7 +35,14 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
-import { runAdvance, proposalFingerprint } from '../engine.js'
+import {
+  runAdvance,
+  proposalFingerprint,
+  approvalStanding,
+  contentEffectId,
+  evaluatePlugin,
+} from '../engine.js'
+import type { EvalContext } from '../engine.js'
 import { mergeGrant } from '../approval-gate.js'
 import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
@@ -61,6 +68,18 @@ const outputOf = (body: string): OutputRecord => ({
 let home: TestHome
 let sentinel: string
 
+/** The one `SkillResult` every fixture handler returns. */
+const RESULT = `{
+    status: 'success',
+    phases_completed: ['run'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'ran',
+    artifacts_produced: [],
+    schema_version: 1,
+  }`
+
 /** A wall clock far enough out that no test run reaches it. */
 const FAR_FUTURE = '2099-01-01T00:00'
 const ZONE = 'UTC'
@@ -70,6 +89,13 @@ interface PluginSpec {
   readonly sideEffects?: string[]
   readonly approvalClass?: 'session' | 'content'
   readonly autonomy?: 'autonomous' | 'supervised' | 'manual'
+  /**
+   * Whether this plugin's handler writes the sentinel. Off by default, so a
+   * fixture plugin that merely has to EXIST cannot write the file the
+   * assertions read and make a negative case pass or fail for a reason that has
+   * nothing to do with the gate.
+   */
+  readonly sends?: boolean
 }
 
 async function writePlugin(name: string, spec: PluginSpec): Promise<void> {
@@ -92,29 +118,23 @@ async function writePlugin(name: string, spec: PluginSpec): Promise<void> {
     max_parallelism: 1,
   }
   await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
-  // The sentinel path is baked in as a literal rather than read from the
-  // environment: `import()` caches the module, and a handler that resolves its
-  // own target at call time is one more thing that can be wrong in a way this
-  // file cannot see.
-  await writeFile(
-    join(dir, 'handler.ts'),
-    `
-import { writeFileSync } from 'node:fs'
+
+  // The sentinel path is baked into the handler as a literal rather than read
+  // from the environment: `import()` caches the module, so a handler resolving
+  // its own target at call time is one more thing that can be wrong in a way
+  // this file cannot see.
+  const body = spec.sends
+    ? `import { writeFileSync } from 'node:fs'
 export async function handler() {
   writeFileSync(${JSON.stringify(sentinel)}, 'the effect fired')
-  return {
-    status: 'success',
-    phases_completed: ['send'],
-    phases_failed: [],
-    errors: [],
-    data_freshness: {},
-    summary: 'sent',
-    artifacts_produced: [],
-    schema_version: 1,
-  }
+  return ${RESULT}
 }
-`,
-  )
+`
+    : `export async function handler() {
+  return ${RESULT}
+}
+`
+  await writeFile(join(dir, 'handler.ts'), body)
 }
 
 const statePath = (): string => join(home.stateDir, 'engine-state.json')
@@ -179,13 +199,57 @@ function approvalFor(approvedBody: string): EngineState['approvals'][string] {
   }
 }
 
-async function advance(): Promise<Awaited<ReturnType<typeof runAdvance>>> {
+async function advance(now?: number): Promise<Awaited<ReturnType<typeof runAdvance>>> {
   return runAdvance({
     pluginsDir: home.pluginsDir,
     stateDir: statePath(),
     runsDir: home.runsDir,
     eventsPath: join(home.runsDir, 'events.jsonl'),
     approvalPath: join(home.root, '.session-approval'),
+    now,
+  })
+}
+
+async function readState(): Promise<EngineState> {
+  return JSON.parse(await readFile(statePath(), 'utf-8')) as EngineState
+}
+
+/** The producer and the consumer, in the shape every case below wants them. */
+async function writeTracerPair(): Promise<void> {
+  await writePlugin(PRODUCER, {})
+  await writePlugin(CONSUMER, {
+    dependencies: [PRODUCER],
+    sideEffects: ['sends_email'],
+    approvalClass: 'content',
+    sends: true,
+  })
+}
+
+/** An `EvalContext` over the fixture, for the cases that assert the decision. */
+function evalCtxFor(state: EngineState, consumerManifest: PluginManifest): EvalContext {
+  return {
+    currentTier: 'normal',
+    force: false,
+    state,
+    approvalPath: join(home.root, '.session-approval'),
+    manifests: new Map([
+      [PRODUCER, producerManifest()],
+      [CONSUMER, consumerManifest],
+    ]),
+  }
+}
+
+/** The consumer's manifest as the runtime parses it. */
+function consumerManifestFor(producer: string): PluginManifest {
+  return PluginManifestSchema.parse({
+    name: CONSUMER,
+    version: '1.0.0',
+    description: 'consumer',
+    autonomy_level: 'autonomous',
+    side_effects: ['sends_email'],
+    approval_class: 'content',
+    dependencies: [producer],
+    ttl_hours: 24,
   })
 }
 
@@ -211,12 +275,7 @@ describe('a content approval fires the approved bytes and nothing else', () => {
    * moved, so the operator's yes no longer answers what would ship.
    */
   test('a drifted batch does not fire, even under a live wildcard session grant', async () => {
-    await writePlugin(PRODUCER, {})
-    await writePlugin(CONSUMER, {
-      dependencies: [PRODUCER],
-      sideEffects: ['sends_email'],
-      approvalClass: 'content',
-    })
+    await writeTracerPair()
 
     const state = seedState(DRIFTED_BODY)
     state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
@@ -235,12 +294,7 @@ describe('a content approval fires the approved bytes and nothing else', () => {
    * the content path rather than about a missing fixture.
    */
   test('a byte-identical batch fires under the approval alone, with no session grant', async () => {
-    await writePlugin(PRODUCER, {})
-    await writePlugin(CONSUMER, {
-      dependencies: [PRODUCER],
-      sideEffects: ['sends_email'],
-      approvalClass: 'content',
-    })
+    await writeTracerPair()
 
     const state = seedState(APPROVED_BODY)
     state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
@@ -250,5 +304,209 @@ describe('a content approval fires the approved bytes and nothing else', () => {
 
     expect(existsSync(sentinel)).toBe(true)
     expect(await readFile(sentinel, 'utf-8')).toBe('the effect fired')
+  })
+
+  /**
+   * The wildcard grant would admit any session-class plugin declaring these
+   * effects. A content-class plugin with nothing on file is not admitted by it,
+   * which is the disjointness stated as an outcome rather than as a comment.
+   */
+  test('a content-class plugin with no approval on file does not fire under a wildcard grant', async () => {
+    await writeTracerPair()
+    await writeState(seedState(APPROVED_BODY))
+    await mergeGrant('*', { now: Date.now() }, join(home.root, '.session-approval'))
+
+    await advance()
+
+    expect(existsSync(sentinel)).toBe(false)
+  })
+
+  /**
+   * The mirror image, and it is what makes the case above a statement about the
+   * class rather than about the record: a SESSION-class plugin is unaffected by
+   * an approvals entry, whether or not one is there. The record is not consulted
+   * for it at all, so the wildcard grant alone decides — and here there is none.
+   */
+  test('the approvals record buys a session-class plugin nothing', async () => {
+    await writePlugin(PRODUCER, {})
+    await writePlugin(CONSUMER, {
+      dependencies: [PRODUCER],
+      sideEffects: ['sends_email'],
+      approvalClass: 'session',
+      sends: true,
+    })
+
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
+    await writeState(state)
+
+    await advance()
+
+    expect(existsSync(sentinel)).toBe(false)
+  })
+
+  /**
+   * A lapsed window does not fire, and — the half worth asserting — it does not
+   * quietly extend itself or re-approve. The record on disk after the advance is
+   * byte-identical to the one before it.
+   */
+  test('a lapsed window does not fire, does not extend and does not re-approve', async () => {
+    await writeTracerPair()
+
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = { ...approvalFor(APPROVED_BODY), not_after: '2020-01-01T00:00' }
+    await writeState(state)
+    const before = JSON.stringify((await readState()).approvals)
+
+    await advance()
+
+    expect(existsSync(sentinel)).toBe(false)
+    expect(JSON.stringify((await readState()).approvals)).toBe(before)
+  })
+
+  /**
+   * Approve against X, then rewrite the consumer's single declared dependency to
+   * Y. X's Output has not moved and the stored fingerprint still matches it — so
+   * a fingerprint comparison alone reads `live` and ships Y's bytes, which no
+   * human reviewed. The producer-identity conjunct is the only thing between
+   * that edit and an unreviewed send.
+   */
+  test('rewriting the declared dependency after approval does not fire', async () => {
+    const OTHER = 'other-builder'
+    await writePlugin(PRODUCER, {})
+    await writePlugin(OTHER, {})
+    await writePlugin(CONSUMER, {
+      dependencies: [OTHER],
+      sideEffects: ['sends_email'],
+      approvalClass: 'content',
+      sends: true,
+    })
+
+    const state = seedState(APPROVED_BODY)
+    // The record still names the producer the operator read, and its Output is
+    // untouched — the drift is in the manifest, not in the bytes.
+    state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
+    await writeState(state)
+
+    await advance()
+
+    expect(existsSync(sentinel)).toBe(false)
+    expect(
+      approvalStanding(
+        await readState(),
+        CONSUMER,
+        new Map([
+          [PRODUCER, producerManifest()],
+          [CONSUMER, consumerManifestFor(OTHER)],
+        ]),
+        Date.now(),
+      ).standing,
+    ).toBe('content_moved')
+  })
+})
+
+describe('the content-authority decision', () => {
+  /**
+   * Before the opening bound is ORDINARY not-due. It is the operator's own
+   * instruction arriving on time, so the gate reports the window and nothing
+   * stronger — a refusal here would tell them they did something wrong.
+   */
+  test('before not_before is ordinary not-due, naming the window', async () => {
+    const state = seedState(APPROVED_BODY)
+    const soon = new Date(Date.now() + 60 * 60 * 1000)
+    state.approvals[CONSUMER] = {
+      ...approvalFor(APPROVED_BODY),
+      not_before: soon.toISOString().slice(0, 16),
+    }
+
+    const manifest = consumerManifestFor(PRODUCER)
+    const result = await evaluatePlugin(CONSUMER, manifest, evalCtxFor(state, manifest), Date.now())
+
+    expect(result.due).toBe(false)
+    if (result.due) throw new Error('unreachable')
+    expect(result.reason).toBe('unapproved')
+    expect(result.detail).toContain('has not opened yet')
+  })
+
+  /**
+   * Determinism, narrowed to what is actually claimed: the CONTENT-AUTHORITY
+   * decision is a pure function of `(state, manifest, now)`. Not the advance
+   * result, whose `run_id`, `started_at` and `completed_at` are unseeded clock
+   * reads by design.
+   */
+  test('two evaluations at one injected instant produce an identical authority', async () => {
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
+
+    const manifest = consumerManifestFor(PRODUCER)
+    const ctx = evalCtxFor(state, manifest)
+    const now = Date.parse('2026-09-14T12:00:00.000Z')
+
+    const first = await evaluatePlugin(CONSUMER, manifest, ctx, now)
+    const second = await evaluatePlugin(CONSUMER, manifest, ctx, now)
+
+    expect(first.due).toBe(true)
+    if (!first.due || !second.due) throw new Error('unreachable')
+    expect(first.content).toBeDefined()
+    expect(first.content).toEqual(second.content!)
+    expect(first.content!.effect_id).toBe(
+      contentEffectId(CONSUMER, first.content!.fingerprint, first.content!.fire_instant),
+    )
+  })
+
+  /**
+   * The backstop edge. A host tz database that no longer knows the zone must
+   * land on a refusal, never on a fire and never on a throw — a throw here would
+   * reach `plan`, which is contracted never to fail.
+   */
+  test('a zone the host cannot resolve refuses rather than throwing', () => {
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = { ...approvalFor(APPROVED_BODY), zone: 'Mars/Olympus_Mons' }
+
+    const standing = approvalStanding(
+      state,
+      CONSUMER,
+      new Map([
+        [PRODUCER, producerManifest()],
+        [CONSUMER, consumerManifestFor(PRODUCER)],
+      ]),
+      Date.now(),
+    )
+
+    expect(standing.standing).toBe('outside_window')
+  })
+
+  /**
+   * The two state reports. Neither is the operator having done something wrong,
+   * and neither fires.
+   */
+  test('a spent approval reports spent and a marked-but-unconfirmed one reports indeterminate', () => {
+    const state = seedState(APPROVED_BODY)
+    const manifests = new Map([
+      [PRODUCER, producerManifest()],
+      [CONSUMER, consumerManifestFor(PRODUCER)],
+    ])
+
+    state.approvals[CONSUMER] = {
+      ...approvalFor(APPROVED_BODY),
+      marked_at: '2026-09-14T11:00:00.000Z',
+      confirmed_at: '2026-09-14T11:00:01.000Z',
+    }
+    expect(approvalStanding(state, CONSUMER, manifests, Date.now()).standing).toBe('spent')
+
+    state.approvals[CONSUMER] = {
+      ...approvalFor(APPROVED_BODY),
+      marked_at: '2026-09-14T11:00:00.000Z',
+    }
+    expect(approvalStanding(state, CONSUMER, manifests, Date.now()).standing).toBe('indeterminate')
+  })
+
+  /**
+   * The lookup is an own-property one. A bare index answers `toString` with an
+   * inherited function, and an existence test believes it.
+   */
+  test('an inherited key is absent, not present', () => {
+    const state = seedState(APPROVED_BODY)
+    expect(approvalStanding(state, 'toString', new Map(), Date.now()).standing).toBe('none')
   })
 })

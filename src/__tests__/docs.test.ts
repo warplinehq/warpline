@@ -1172,12 +1172,16 @@ describe('hand-written manifest prose', () => {
   })
 
   // The contract-stability section counts the closed enums by hand. That count
-  // is prose no schema change can update, so adding a fifth closed set without
-  // touching it leaves the document confidently wrong.
-  test('the contract-stability closed-set count includes inputs[].type', () => {
+  // is prose no schema change can update, so adding a closed set without
+  // touching it leaves the document confidently wrong. The count moves WITH the
+  // document, which is the whole mechanism: a phase adding a closed enum has to
+  // come here and say so, and the stale-value assertions below are what stop it
+  // being edited in one direction only.
+  test('the contract-stability closed-set count includes inputs[].type and approval_class', () => {
     const doc = read('docs/runtime-spec.md')
     expect(doc.toLowerCase()).not.toContain('four sets are closed')
-    expect(doc.toLowerCase()).toContain('five sets are closed')
+    expect(doc.toLowerCase()).not.toContain('five sets are closed')
+    expect(doc.toLowerCase()).toContain('six sets are closed')
   })
 
   // `plugin-authoring.md` is the only place an author is told where `args` come

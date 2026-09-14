@@ -74,7 +74,15 @@ describe('supersededNote reaches the unapproved detail', () => {
     const result = await evaluatePlugin(
       'x',
       manifest,
-      { currentTier: 'normal', force: false, state, approvalPath: noGrantPath },
+      {
+        currentTier: 'normal',
+        force: false,
+        state,
+        approvalPath: noGrantPath,
+        // Session class, so the evaluator never reaches the approvals record and
+        // an empty map is the honest fixture rather than a stub.
+        manifests: new Map([['x', manifest]]),
+      },
       Date.parse('2026-09-08T00:00:00.000Z'),
     )
 
@@ -104,7 +112,15 @@ describe('supersededNote reaches the unapproved detail', () => {
     const result = await evaluatePlugin(
       'x',
       manifest,
-      { currentTier: 'normal', force: false, state, approvalPath: noGrantPath },
+      {
+        currentTier: 'normal',
+        force: false,
+        state,
+        approvalPath: noGrantPath,
+        // Session class, so the evaluator never reaches the approvals record and
+        // an empty map is the honest fixture rather than a stub.
+        manifests: new Map([['x', manifest]]),
+      },
       Date.parse('2026-09-08T00:00:00.000Z'),
     )
 

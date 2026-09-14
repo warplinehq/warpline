@@ -76,9 +76,35 @@ export type DependencyRun = Pick<PluginRun, 'status' | 'last_output'>
  * The not-granted arm is closed at the two production cases: a run started by
  * hand, which reads no Grant at all, and a plugin declaring no side effects,
  * which needs none.
+ *
+ * **The third arm describes the other authority**, the one where an operator
+ * approved specific bytes ahead of time and the runtime is firing them with
+ * nobody present. This type is the generalised statement of "what authority did
+ * the runtime hold when it minted this context"; the scope arm is now the
+ * variant that describes a SESSION grant, and it is unchanged for every reader.
+ *
+ * It carries `granted: true`, and that is load-bearing rather than cosmetic.
+ * `mintContext` withholds every effect-keyed member on `!witness.granted` with
+ * a push onto the withheld list and a `continue` — a list, not a throw — so an
+ * arm shaped `granted: false` carrying a content reason would make the
+ * content-approved sender mint nothing and fail SILENTLY, which is the worst
+ * available outcome for a plugin whose whole job is to perform the effect.
+ *
+ * It carries no `scope`, and that is load-bearing too. `scope` is contracted as
+ * the scope the Grant was READ for, and on this arm no Grant was read. A scope
+ * here would be a fabricated answer to a question nobody asked.
+ *
+ * Discriminated on the presence of `via`, not on `granted`: both granted arms
+ * answer `true`, which is exactly the point.
  */
 export type CapabilityGrantWitness =
   | { readonly granted: true; readonly scope: string }
+  | {
+      readonly granted: true
+      readonly via: 'content-approval'
+      readonly fingerprint: string
+      readonly effectId: string
+    }
   | { readonly granted: false; readonly reason: 'manual-run' | 'no-declared-side-effects' }
 
 /**

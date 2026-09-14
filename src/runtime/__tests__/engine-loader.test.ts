@@ -211,6 +211,7 @@ function makeCtx(overrides: Partial<EvalContext> = {}): EvalContext {
     force: false,
     state: defaultEngineState(),
     approvalPath: join(root, 'no-such-approval'),
+    manifests: new Map(),
     ...overrides,
   }
 }
@@ -391,6 +392,7 @@ describe('evaluatePlugin agrees with the run it was extracted from', () => {
       force: false,
       state: preState,
       approvalPath: join(root, 'no-such-approval'),
+      manifests: new Map(manifests.map((m) => [m.name, m])),
     }
     const now = Date.now()
 

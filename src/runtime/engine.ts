@@ -31,6 +31,7 @@ import {
   warplineHome,
 } from '../lib/paths.js'
 import { atomicWriteText } from '../lib/fs-atomic.js'
+import { resolveWallClock } from '../lib/wall-clock.js'
 import { advanceCounts } from './exit-codes.js'
 import { acquireLock, releaseLock } from './lock.js'
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
@@ -59,13 +60,30 @@ import type { CapabilityGrantWitness, DependencyRun } from './capabilities.js'
  * It is a named function rather than the ternary it replaced because a ternary
  * inlined at the call site cannot be told apart from its own opposite: with no
  * gated member registered, swapping the two arms was green across the entire
- * suite. `grant-witness.test.ts` covers both arms and asserts this file
+ * suite. `grant-witness.test.ts` covers all three arms and asserts this file
  * carries no inline literal that could drift from them.
+ *
+ * **The content arm is produced HERE and nowhere else**, for the same reason.
+ * A literal at the invocation site would be a witness nobody computed — the
+ * exact fabrication the paragraph above says no guard in this repository
+ * catches. `content` is the authority the dueness check already decided, passed
+ * forward rather than asked about again; when it is present the plugin reached
+ * the invocation on approved bytes and no scope was ever read, which is why the
+ * arm carries no scope to report.
  */
 export function witnessAfterGrantRead(
   pluginName: string,
   declaredSideEffects: PluginManifest['side_effects'],
+  content?: ContentAuthority,
 ): CapabilityGrantWitness {
+  if (content !== undefined) {
+    return {
+      granted: true,
+      via: 'content-approval',
+      fingerprint: content.fingerprint,
+      effectId: content.effect_id,
+    }
+  }
   return declaredSideEffects.length === 0
     ? { granted: false, reason: 'no-declared-side-effects' }
     : { granted: true, scope: pluginName }
@@ -78,7 +96,7 @@ import {
   readEngineState,
   writeEngineState,
 } from './engine-state-store.js'
-import type { Denial, EngineState, PendingGate, PluginRun } from '../schemas/engine-state.js'
+import type { Approval, Denial, EngineState, PendingGate, PluginRun } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs } from './run-log-store.js'
 import type { RunLog } from '../schemas/run-log.js'
 import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
@@ -154,6 +172,24 @@ export const RUN_PROFILES = Object.keys(PROFILE_ALLOWED_SCHEDULES) as RunProfile
 export interface AdvanceOptions {
   dryRun?: boolean
   force?: boolean
+  /**
+   * The instant the DUE-NESS decision is made against, epoch milliseconds.
+   *
+   * Epoch ms and not a `Date`, matching every clock seam already in this tree;
+   * and not a getter, because a getter lets two reads inside one advance
+   * disagree, which is the disagreement the seam exists to remove.
+   *
+   * It reaches `evaluatePlugin` and nothing else. `entryStart` stays a live
+   * `Date.now()` and remains the `elapsed_ms` baseline for every row in the run
+   * log — freezing that to an injected past instant would make each duration a
+   * large positive number describing time that did not pass. It is deliberately
+   * NOT threaded into `run_id`, `started_at` or either `completed_at`: those are
+   * four unseeded clock reads, and a seeded `run_id` collides with itself, which
+   * collides the run-log filenames with it.
+   *
+   * With nothing injected the split is byte-identical to a run without it.
+   */
+  now?: number
   /**
    * Headless run profile. When set, the engine filters plugins by
    * schedule tier and treats the run as non-interactive (see RunProfile).
@@ -405,6 +441,141 @@ export function denialStanding(
     : { standing: 'superseded', denial }
 }
 
+// -----------------------------------------------------------------------
+// Content approvals — what a "yes to these exact bytes" is bound to
+// -----------------------------------------------------------------------
+
+/**
+ * The identity of one content-authorised fire.
+ *
+ * `sha256` over the consumer, the fingerprint that authorised it and the
+ * instant it fires. Key order in the hashed object is fixed by the literal, as
+ * it is in `denialFingerprint` above, which is what makes this stable without a
+ * canonical-JSON dependency.
+ *
+ * State the claim precisely, because the overclaim is easy and wrong: the id is
+ * RECOMPUTABLE by anyone holding the stored `(plugin, fingerprint,
+ * fire_instant)` triple. It is not a value a retried advance regenerates — a
+ * retry READS the stored id. Recomputability is what lets a reader check an id
+ * they were handed; it is not a promise that two separate advances produce one.
+ */
+export function contentEffectId(
+  plugin: string,
+  fingerprint: string,
+  fireInstant: string,
+): string {
+  return sha256(JSON.stringify({ plugin, fingerprint, fire_instant: fireInstant }))
+}
+
+/**
+ * Where a plugin stands with the approvals record — the sibling of
+ * `DenialStanding` above, and deliberately not a generalisation of it.
+ *
+ * Generalising the two would cost the three existing `denialStanding` callers
+ * something for a shape none of them wants, and it would invite a reader to
+ * treat "approved" as "not denied". They answer opposite questions over
+ * different records and they stay apart.
+ *
+ * Seven arms, and two of them are not refusals. `spent` and `indeterminate` are
+ * STATE REPORTS: the runtime already fired, or began firing and cannot prove it
+ * finished, and neither is the operator having done something wrong. The other
+ * five order as the refusal precedence: nothing recorded, then the two marks,
+ * then the window, then the content.
+ *
+ * `approval` is the record itself, never a copy. The mid-run mark mutates
+ * `state.approvals` through this reference; a clone would leave it writing to
+ * an object nobody reads.
+ */
+export type ApprovalStanding =
+  | { standing: 'none' }
+  | { standing: 'spent'; approval: Approval }
+  | { standing: 'indeterminate'; approval: Approval }
+  | { standing: 'outside_window'; approval: Approval }
+  | { standing: 'before_window'; approval: Approval }
+  | { standing: 'content_moved'; approval: Approval }
+  | { standing: 'live'; approval: Approval }
+
+/**
+ * THE one place that answers "may this plugin's approved bytes fire right now?"
+ *
+ * The manifest map is a parameter and not something the caller resolves first,
+ * because the fingerprint's subject is the PRODUCER — whose name is on the
+ * record, which the caller has not read yet. Asking the caller to hand in the
+ * producer's manifest would require it to read the record to find out which
+ * manifest to hand in.
+ *
+ * @param now - epoch ms, injected. Every window comparison here reads it and
+ *   nothing else, so two evaluations at one instant cannot disagree.
+ */
+export function approvalStanding(
+  state: EngineState,
+  plugin: string,
+  manifests: ReadonlyMap<string, PluginManifest>,
+  now: number,
+): ApprovalStanding {
+  // Own-property, as the denial lookup is: a bare index answers `toString` with
+  // an inherited member rather than with the absence that is the truth.
+  const approval = Object.hasOwn(state.approvals, plugin) ? state.approvals[plugin] : undefined
+  if (approval === undefined) return { standing: 'none' }
+
+  if (approval.confirmed_at !== null) return { standing: 'spent', approval }
+  if (approval.marked_at !== null) return { standing: 'indeterminate', approval }
+
+  // Both bounds inside the try. A host tz database that no longer knows the
+  // zone is the backstop edge, and the conservative direction is refusal: a
+  // throw escaping here would reach `evaluatePlugin`, and `plan` — which is
+  // contracted never to fail — would crash on a preview.
+  let opensAt: number
+  let closesAt: number
+  try {
+    closesAt = resolveWallClock(approval.not_after, approval.zone)
+    opensAt =
+      approval.not_before === null
+        ? Date.parse(approval.approved_at)
+        : resolveWallClock(approval.not_before, approval.zone)
+  } catch {
+    return { standing: 'outside_window', approval }
+  }
+
+  if (now >= closesAt) return { standing: 'outside_window', approval }
+  if (now < opensAt) return { standing: 'before_window', approval }
+
+  // The producer's manifest is what the fingerprint is computed over. Absent
+  // from the map, the runtime cannot confirm the bytes are the ones approved,
+  // and not-confirmable is refusal rather than a fire.
+  const producerManifest = manifests.get(approval.producer)
+  if (producerManifest === undefined) return { standing: 'content_moved', approval }
+
+  // The producer-identity conjunct closes the one drift path a fingerprint
+  // comparison cannot see. At fire time the handler reads the LAST OUTPUT of
+  // `manifest.dependencies[0]`. Rewrite that dependency from X to Y after
+  // approving and the record still names X, X's Output has not moved, the
+  // fingerprint still matches — and Y's bytes ship, which no human reviewed.
+  const consumerManifest = manifests.get(plugin)
+  if (consumerManifest?.dependencies[0] !== approval.producer) {
+    return { standing: 'content_moved', approval }
+  }
+
+  return approval.fingerprint === proposalFingerprint(state, approval.producer, producerManifest)
+    ? { standing: 'live', approval }
+    : { standing: 'content_moved', approval }
+}
+
+/**
+ * What a content-authorised fire carries forward to the invocation.
+ *
+ * A pure function of `(state, manifest, now)`: the fingerprint comes from the
+ * one entry point, and `fire_instant` is derived from the same `now` the window
+ * was resolved against. That is what makes two advances at one injected instant
+ * produce an identical decision rather than a nearly identical one.
+ */
+export interface ContentAuthority {
+  producer: string
+  fingerprint: string
+  effect_id: string
+  fire_instant: string
+}
+
 /**
  * Why a plugin is not due. Structured codes, not display copy: the
  * run-log prose these guards used to inline is a run-log concern, and a
@@ -423,7 +594,13 @@ export type NotDueReason =
   | 'unapproved'
 
 export type EvalResult =
-  | { due: true }
+  /**
+   * `content` is present exactly when the plugin is due on an operator's
+   * content approval rather than on a session grant. It is built from the one
+   * standing the scan already computed, never from a second read, and it is
+   * what the invocation hands to `witnessAfterGrantRead`.
+   */
+  | { due: true; content?: ContentAuthority }
   | { due: false; reason: NotDueReason; detail: string }
 
 /** Everything `evaluatePlugin` needs that is not the plugin itself. */
@@ -449,6 +626,17 @@ export interface EvalContext {
   state: EngineState
   /** Already-resolved session approval path — the evaluator does no path defaulting. */
   approvalPath: string
+  /**
+   * Every manifest this run or preview loaded, by name.
+   *
+   * REQUIRED, not optional, and the compiler finding every construction site is
+   * the point. A content approval names a PRODUCER, and the fingerprint is
+   * computed over that producer's manifest — so a context missing the map would
+   * leave the producer silently unresolvable and the standing silently wrong,
+   * in the conservative direction but for the wrong reason. Optional would make
+   * that a runtime surprise instead of a compile error.
+   */
+  manifests: ReadonlyMap<string, PluginManifest>
   /**
    * Plugins an EARLIER LEVEL of this same preview already found due.
    *
@@ -491,6 +679,17 @@ interface GateInput {
    * chain that travels between two entries.
    */
   supersededNote: string
+  /**
+   * Where this plugin stands with the approvals record, for a plugin whose
+   * declared class consults it, and `none` for every other plugin.
+   *
+   * Stashed here rather than read inside the entry, on the rule the docstring
+   * above states: both the content predicate and the content detail read it,
+   * and an entry recomputing it would be free to disagree with itself one line
+   * later. It carries the ONE read forward; it does not add one. A second read
+   * of the authority is the thing this phase refuses by name.
+   */
+  contentStanding: ApprovalStanding
 }
 
 /**
@@ -534,6 +733,64 @@ export interface Gate {
  * predicate and the detail, so a filtered dependency cannot be dropped from one
  * and named in the other.
  */
+/**
+ * The content class's half of the approval entry, as a NAMED module-level
+ * function rather than a ternary inside the entry's arrow.
+ *
+ * Not style. The structural guard that pins "the fire decision is reached
+ * through exactly one predicate for every approval class" roots its closure
+ * walk at named function declarations. Inlined, the legitimate session-grant
+ * read and this branch would share one function body, and the
+ * function-granularity assertion would be unstatable — the guard would have no
+ * root to stand on and no way to say so.
+ *
+ * The entry APPLIES — the plugin is not due — on everything that is not `live`.
+ * `none` included: a plugin declaring the content class with no record has no
+ * authority at all, which is the ordinary state of an unapproved batch.
+ */
+function contentGateApplies(g: GateInput): boolean {
+  return g.contentStanding.standing !== 'live'
+}
+
+/**
+ * The prose for the arm above, one line per standing.
+ *
+ * **Interpolation is closed by construction.** Declared plugin names, closed
+ * enum values, and runtime-derived closed-form values — a hex fingerprint, a
+ * hex effect id, an ISO instant the runtime produced. Never the approved bytes
+ * and never anything read out of `last_output`. These strings reach the run
+ * log's summary, the board event and the preview, all of which are read and
+ * shared, and this repository has twice paid for an operator-configured value
+ * arriving in a result summary.
+ */
+function contentGateDetail(g: GateInput): string {
+  const s = g.contentStanding
+  switch (s.standing) {
+    case 'none':
+      return `unapproved: no content approval on file for '${g.plugin}'`
+    case 'spent':
+      return `unapproved: the content approval was already spent at ${s.approval.confirmed_at}`
+    case 'indeterminate':
+      return (
+        `unapproved: a content fire was marked at ${s.approval.marked_at} and never confirmed, ` +
+        'so the runtime cannot tell whether it completed'
+      )
+    case 'before_window':
+      return `unapproved: the content approval window has not opened yet (${s.approval.not_before ?? s.approval.approved_at} ${s.approval.zone})`
+    case 'outside_window':
+      return `unapproved: the content approval window closed at ${s.approval.not_after} ${s.approval.zone}`
+    case 'content_moved':
+      return (
+        `unapproved: the approved content has moved — the approval covers ` +
+        `'${s.approval.producer}' at ${s.approval.fingerprint}, which is no longer what would ship`
+      )
+    case 'live':
+      // Unreachable behind the predicate above; written out so the record
+      // narrows and so a future arm cannot land here silently.
+      return 'unapproved: content approval is live'
+  }
+}
+
 function failedDependencies(manifest: PluginManifest, ctx: EvalContext): string[] {
   return manifest.dependencies.filter(
     (d) => ctx.state.plugin_runs[d]?.status === 'failed' && !ctx.dueAtEarlierLevel?.has(d),
@@ -720,11 +977,26 @@ export const GATES: readonly Gate[] = [
 
   // -- Side-effect approval gate ---------------------------------
   // The last gate before invocation on a real run. Nothing goes after it.
+  //
+  // ONE entry, two authorities, and the branch on the declared class sits ABOVE
+  // the grant read rather than beside it. That ordering is the whole mitigation:
+  // a content-class plugin does not consult the session grant AT ALL, so a live
+  // wildcard cannot compose additively with a frozen batch and render the freeze
+  // decorative. The two classes are disjoint by construction here, not merely
+  // ordered — which is a stronger property than "both are checked", and the only
+  // one that survives someone adding a grant later.
+  //
+  // A second ENTRY was the refused alternative. The chain's contract is that a
+  // gate only moves a plugin from due to not-due; two entries answering one
+  // question would be two places authority is read, free to disagree.
   {
     reason: 'unapproved',
-    applies: async ({ plugin, manifest, ctx, now }) =>
-      manifest.side_effects.length > 0 &&
-      !(await checkApproval(plugin, ctx.approvalPath, { now })),
+    applies: async (g) => {
+      const { plugin, manifest, ctx, now } = g
+      if (manifest.side_effects.length === 0) return false
+      if (manifest.approval_class === 'content') return contentGateApplies(g)
+      return !(await checkApproval(plugin, ctx.approvalPath, { now }))
+    },
     // No `skipped` in this string, for the reason the `dependency_failed` arm
     // above spells out at length: the detail has a second author downstream.
     // `emitPluginSkipped` formats `${plugin}: skipped — ${reason}`, so the old
@@ -741,8 +1013,10 @@ export const GATES: readonly Gate[] = [
     // wrote both, so the two cannot drift apart unnoticed. Editing either string
     // alone reddens there, which is why they are read in one assertion block
     // rather than two files apart.
-    detail: ({ supersededNote }) =>
-      `${supersededNote}unapproved: side effects require session approval`,
+    detail: (g) =>
+      g.manifest.approval_class === 'content'
+        ? `${g.supersededNote}${contentGateDetail(g)}`
+        : `${g.supersededNote}unapproved: side effects require session approval`,
   },
 ]
 
@@ -779,6 +1053,16 @@ export async function evaluatePlugin(
 ): Promise<EvalResult> {
   const standing = denialStanding(ctx.state, pluginName, manifest)
 
+  // The ONE read of the content authority, here beside the denial read and for
+  // the same reason the block below states: two entries consume it. A
+  // `session`-class plugin never reaches this call at all, which is what makes
+  // "the approvals record for a non-content-class plugin is never consulted"
+  // true by construction rather than by inspection.
+  const contentStanding: ApprovalStanding =
+    manifest.approval_class === 'content'
+      ? approvalStanding(ctx.state, pluginName, ctx.manifests, now)
+      : { standing: 'none' }
+
   /**
    * The cross-entry values, resolved before the scan starts.
    *
@@ -800,6 +1084,7 @@ export async function evaluatePlugin(
     now,
     freshness: isPluginFresh(pluginName, manifest, ctx.state, { force: ctx.force, now }),
     standing,
+    contentStanding,
     supersededNote:
       standing.standing === 'superseded'
         ? `previously denied ${standing.denial.denied_at} ('${standing.denial.reason}') — the ` +
@@ -813,6 +1098,30 @@ export async function evaluatePlugin(
   for (const gate of GATES) {
     if (await gate.applies(input)) {
       return { due: false, reason: gate.reason, detail: gate.detail(input) }
+    }
+  }
+
+  // A content-class plugin that fires is this FALL-THROUGH, never an admit. No
+  // entry above returned false-and-therefore-due on its behalf, which is what
+  // keeps the chain's contract — a gate only ever moves a plugin from due to
+  // not-due — true across the addition.
+  //
+  // The authority triple is built from the ONE standing local above. Every
+  // component is a pure function of `(state, manifest, now)`: the fingerprint
+  // comes from the single entry point, and `fire_instant` is derived from the
+  // same `now` the window was resolved against — so two evaluations at one
+  // instant produce the same verdict, the same fingerprint and the same id.
+  if (contentStanding.standing === 'live') {
+    const fireInstant = new Date(now).toISOString()
+    const fingerprint = contentStanding.approval.fingerprint
+    return {
+      due: true,
+      content: {
+        producer: contentStanding.approval.producer,
+        fingerprint,
+        effect_id: contentEffectId(pluginName, fingerprint, fireInstant),
+        fire_instant: fireInstant,
+      },
     }
   }
 
@@ -1284,6 +1593,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       force,
       state,
       approvalPath: approvalPath ?? sessionApprovalPath(),
+      // The map this advance already loaded. A content approval names a
+      // producer, and the fingerprint is computed over that producer's
+      // manifest.
+      manifests: plugins,
     }
 
     // 7. Execute each level
@@ -1301,7 +1614,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // Every guard predicate now lives in evaluatePlugin; every write below
           // stays on this side of the seam, keyed off the returned reason.
           // `entryStart` is the single clock read threaded in as `now`.
-          const ev = await evaluatePlugin(pluginName, manifest, evalCtx, entryStart)
+          const ev = await evaluatePlugin(pluginName, manifest, evalCtx, options.now ?? entryStart)
 
           // -- Dry-run side-effect block -----------------------
           // Run-only, so it is deliberately outside the evaluator. In
@@ -1501,7 +1814,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // that is sound, and why the arms are what they are, is on
             // `witnessAfterGrantRead` — one copy, because two copies of an
             // argument drift and the copy that drifts is the one nobody reads.
-            const witness = witnessAfterGrantRead(pluginName, manifest.side_effects)
+            const witness = witnessAfterGrantRead(pluginName, manifest.side_effects, ev.content)
 
             // What each DECLARED dependency last produced and how its last run
             // ended, projected HERE and not from the state read at the top of the

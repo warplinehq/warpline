@@ -17,10 +17,21 @@
  * on the next advance: annoying, not dangerous. The command prints which of the
  * two it did, in both branches, so the operator never has to infer it.
  *
- * **The gate-apply branch reaches no symbol in `approval-gate.ts`.** That is
- * what makes "an outcome review mints no side-effect authority" true by
- * structure rather than by test. Keep it that way: an import added here for
- * convenience would quietly turn a structural guarantee back into a hope.
+ * There is a THIRD mode, `--content`, and it answers neither of those two: it
+ * records a standing yes to SPECIFIC BYTES a producer has already written, so a
+ * later unattended advance may ship exactly those and nothing else. It writes
+ * no grant and applies no parked result. Like the pair above it is refused
+ * whole when mixed with either — there is no half-answer that is not a lie
+ * about one of the three.
+ *
+ * **The gate-apply branch reaches no symbol in `approval-gate.ts`, and so does
+ * the content branch.** That is what makes "an outcome review mints no
+ * side-effect authority" — and "a content approval mints no session
+ * authority" — true by structure rather than by test. Neither branch reaches
+ * `mergeGrant`, the default TTL or the grant ceiling. Keep it that way: an
+ * import added here for convenience would quietly turn a structural guarantee
+ * back into a hope. `--content` is likewise NOT a second breadth gesture:
+ * blanket approval stays reachable only through `--all`.
  *
  * The order of operations in `run()` is the security property, not an
  * implementation detail. Everything that can refuse the command runs BEFORE
@@ -54,13 +65,18 @@ import {
   denialStanding,
   findPendingGate,
   loadPluginManifests,
+  proposalFingerprint,
 } from '../runtime/engine.js'
 import { DEFAULT_TTL_MS, mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
+import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import {
   EngineStateInvalidError,
   readEngineState,
   readEngineStateReadOnly,
+  writeEngineState,
 } from '../runtime/engine-state-store.js'
+import type { EngineState } from '../schemas/engine-state.js'
+import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { engineStatePath, pluginsDir, sessionApprovalPath } from '../lib/paths.js'
 import { suggest } from './suggest.js'
 
@@ -73,6 +89,7 @@ const DEFAULT_TTL_H = DEFAULT_TTL_MS / (60 * 60 * 1000)
 
 const USAGE = `Usage: warpline approve <plugin>... [options]
        warpline approve --all [options]
+       warpline approve <plugin> --content --not-after <wall> [options]
 
 Answers whichever gate is waiting. If the plugin has a parked result awaiting
 review, that result is recorded — nothing is re-run and no grant is written.
@@ -84,6 +101,14 @@ Options:
   --ttl <dur>  Requested lifetime, e.g. 30m, 4h, 3d. Default ${DEFAULT_TTL_H}h.
   --replace    Overwrite the current scope list instead of adding to it.
   --long       Permit an expiry past ${CEILING_H}h from the first grant.
+
+Content approval (one plugin, declaring approval_class: 'content'):
+  --content         Approve the bytes its single dependency has already
+                    produced, so a later unattended advance ships exactly
+                    those. Writes no session grant.
+  --not-after <w>   REQUIRED. Wall clock the window closes, YYYY-MM-DDTHH:mm.
+  --not-before <w>  Wall clock the window opens. Default: now.
+  --zone <iana>     IANA zone both bounds are read in. Default: UTC.
 `
 
 const MINUTE = 60 * 1000
@@ -100,8 +125,133 @@ function parseDuration(input: string): number | null {
 
 const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? '' : 's'}`
 
+/** The zone the bounds are read in when the operator names none. */
+const DEFAULT_ZONE = 'UTC'
+
+/**
+ * Record a standing yes to the bytes one plugin's single declared dependency
+ * has already produced.
+ *
+ * Everything that can refuse runs INSIDE the lock and BEFORE any mutation of
+ * `state.approvals`, so a refused command leaves the document byte-unchanged.
+ * That ordering is the security property here exactly as it is in `run()`
+ * above, and it is why the read is inside the lock rather than beside it: this
+ * rewrites the whole state document, and an advance completing between a read
+ * outside and the write would be erased by a command that only meant to record
+ * an approval.
+ */
+async function approveContent(
+  consumer: string,
+  values: { 'not-after'?: string; 'not-before'?: string; zone?: string },
+  manifests: Map<string, PluginManifest>,
+  now: number,
+): Promise<number> {
+  const manifest = manifests.get(consumer)
+  if (manifest === undefined) {
+    // Unreachable: every positional was checked against `manifests` before this
+    // call. Written out so the record narrows rather than silently continuing
+    // on a broken invariant.
+    throw new Error(`approve: '${consumer}' passed name validation but has no manifest`)
+  }
+
+  if (manifest.approval_class !== 'content') {
+    process.stderr.write(
+      `${consumer} declares approval_class '${manifest.approval_class}', so nothing would ever ` +
+        `read a content approval written for it — it is gated by the session Grant instead. ` +
+        `Nothing was written.\n`,
+    )
+    return 1
+  }
+
+  // Guaranteed by the manifest's own cross-field rule, which is why this is a
+  // narrowing and not a check with a message of its own.
+  const producer = manifest.dependencies[0]!
+  const zone = values.zone ?? DEFAULT_ZONE
+
+  const statePath = engineStatePath()
+  // The lock that guards THIS document, not whatever the state manager's module
+  // paths happen to point at — a bare `withStateLock` resolves through
+  // `activePaths()` and can lock a directory a sibling test file deleted while
+  // reporting success.
+  const lockPath = pathsForStateFile(statePath).lockPath
+
+  return await withStateLockAt(lockPath, async () => {
+    let state: EngineState
+    try {
+      state = await readEngineState(statePath)
+    } catch (err) {
+      if (!(err instanceof EngineStateInvalidError)) throw err
+      process.stderr.write(
+        `Cannot read engine state: ${err.reason}\nNothing was approved.\n`,
+      )
+      return 1
+    }
+
+    const lastOutput = state.plugin_runs[producer]?.last_output
+    if (lastOutput === undefined) {
+      process.stderr.write(
+        `${producer} has never produced an Output, so there are no bytes to approve. ` +
+          `Run it first — a content approval is a yes to something that already exists, not a ` +
+          `standing permission for whatever it produces next. Nothing was written.\n`,
+      )
+      return 1
+    }
+
+    const producerManifest = manifests.get(producer)
+    if (producerManifest === undefined) {
+      process.stderr.write(
+        `${consumer} declares '${producer}' as its dependency, but no such plugin is installed, ` +
+          `so the bytes it would ship cannot be identified. Nothing was written.\n`,
+      )
+      return 1
+    }
+
+    const notAfter = values['not-after']
+    if (notAfter === undefined) {
+      process.stderr.write(
+        `--not-after is required: a content approval must say when it stops being true. ` +
+          `A window that never closes is ambient authority wearing a bound. Nothing was written.\n`,
+      )
+      return 1
+    }
+
+    const fingerprint = proposalFingerprint(state, producer, producerManifest)
+    state.approvals[consumer] = {
+      plugin: consumer,
+      producer,
+      fingerprint,
+      run_id: lastOutput.run_id ?? null,
+      approved_at: new Date(now).toISOString(),
+      not_before: values['not-before'] ?? null,
+      not_after: notAfter,
+      zone,
+      effect_id: null,
+      marked_at: null,
+      confirmed_at: null,
+    }
+    await writeEngineState(state, statePath)
+
+    process.stdout.write(
+      `Answering the content gate: ${consumer} may ship what ${producer} has already produced.\n` +
+        `Bound to ${fingerprint}. If those bytes move, this approval stops applying — it is not ` +
+        `renewed and nothing re-asks on your behalf.\n` +
+        `Window closes ${notAfter} ${zone}.\n`,
+    )
+    return 0
+  })
+}
+
 export async function run(argv: string[]): Promise<number> {
-  let values: { all?: boolean; ttl?: string; replace?: boolean; long?: boolean }
+  let values: {
+    all?: boolean
+    ttl?: string
+    replace?: boolean
+    long?: boolean
+    content?: boolean
+    'not-after'?: string
+    'not-before'?: string
+    zone?: string
+  }
   let positionals: string[]
   try {
     // strict: true buys unknown-flag rejection, and a missing or dash-leading
@@ -113,6 +263,10 @@ export async function run(argv: string[]): Promise<number> {
         ttl: { type: 'string' },
         replace: { type: 'boolean' },
         long: { type: 'boolean' },
+        content: { type: 'boolean' },
+        'not-after': { type: 'string' },
+        'not-before': { type: 'string' },
+        zone: { type: 'string' },
       },
       allowPositionals: true,
       strict: true,
@@ -127,6 +281,35 @@ export async function run(argv: string[]): Promise<number> {
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`)
     return 1
+  }
+
+  // The third mode is refused WHOLE when mixed, on the same argument the pair
+  // below already makes: there is no half-answer that is not a lie about one of
+  // the modes. A content approval writes no grant, so a grant clock alongside it
+  // would be an unanswerable request rather than an ignorable one.
+  if (values.content) {
+    const mixed = [
+      values.all ? '--all' : null,
+      values.ttl !== undefined ? '--ttl' : null,
+      values.replace ? '--replace' : null,
+      values.long ? '--long' : null,
+    ].filter((f): f is string => f !== null)
+    if (mixed.length > 0) {
+      process.stderr.write(
+        `--content approves specific bytes and writes no session grant, so ${mixed.join(', ')} ` +
+          `${mixed.length === 1 ? 'has' : 'have'} nothing to act on. Nothing was written — ` +
+          `run the two gestures separately.\n`,
+      )
+      return 1
+    }
+    if (positionals.length !== 1) {
+      process.stderr.write(
+        `--content approves one plugin's frozen batch, and it names exactly one plugin ` +
+          `(got ${positionals.length}). A content approval is bound to one producer's bytes, ` +
+          `so there is no breadth gesture here — blanket approval stays --all.\n`,
+      )
+      return 1
+    }
   }
 
   if (values.all && positionals.length > 0) {
@@ -179,6 +362,13 @@ export async function run(argv: string[]): Promise<number> {
 
   const now = Date.now()
   const approvalPath = sessionApprovalPath()
+
+  // -- Content approval: a standing yes to bytes that already exist ---------
+  // Reaches no symbol in `approval-gate.ts`, writes no grant, applies no parked
+  // result, and returns before the gate-first dispatch below ever runs.
+  if (values.content) {
+    return await approveContent(positionals[0]!, values, manifests, now)
+  }
 
   // -- Gate-first dispatch -------------------------------------------------
   // The write-capable read, on purpose: this command may go on to write. On an

@@ -64,6 +64,39 @@ If your handler calls out to any external system — even read-only HTTP —
 declare `external_api`. Undeclared side effects are the one unforgivable
 plugin bug: they bypass the entire human-approval model.
 
+#### `approval_class` — which authority answers for your side effects
+
+Optional, `'session'` by default, and the default is what you want unless your
+plugin ships bytes somebody has to read first. Two values:
+
+- **`'session'`** — the session Grant. An operator runs `warpline approve`, and
+  every side-effecting plugin they named may run for that window. This is what
+  every manifest written before the field existed means, and nothing about it
+  has changed.
+- **`'content'`** — an operator approved SPECIFIC BYTES ahead of time, with
+  `warpline approve <plugin> --content --not-after <when>`. A later advance may
+  ship exactly those bytes, unattended, and nothing else. If the bytes move by
+  one byte, the approval stops applying and your plugin is skipped.
+
+The two are disjoint. A `'content'` plugin does not consult the session Grant at
+all, so a wildcard `warpline approve --all` will not make it run — and that is
+the point, not a gap: an approval bound to content that a blanket grant could
+override would not be an approval of the content.
+
+Declaring `'content'` puts three requirements on the rest of your manifest, all
+checked at `.parse()` time so a manifest cannot half-declare it:
+
+| Requirement | Why |
+|---|---|
+| `side_effects` is non-empty | A content approval is permission to perform an effect. A plugin declaring none has nothing for the operator to approve. |
+| `dependencies` has exactly one entry | That single dependency is whose Output the approval's fingerprint covers. Zero leaves no subject; two leave it ambiguous, and an ambiguous subject is an approval of nothing in particular. |
+| `autonomy_level` is `'autonomous'` | The content approval IS the review, done before the bytes shipped. Asking for a human again at fire time asks the same person the same question twice — and a plugin that pauses for review on every advance stops the fleet behind itself. |
+
+Choose `'content'` when a human needs to read the actual payload before it goes
+out — a batch of invoices, a digest, a filing. Choose `'session'` for everything
+else, including anything whose payload is only known at fire time: there is
+nothing to approve in advance, so the content class has nothing to bind to.
+
 ### handler.ts
 
 ```typescript

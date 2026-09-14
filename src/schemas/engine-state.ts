@@ -92,8 +92,17 @@ export const ApprovalSchema = z.object({
   producer: z.string(),
   /** Hex sha256 of the producer's proposal, whole and untruncated. */
   fingerprint: z.string(),
-  /** The producer run the approved bytes came from. */
-  run_id: z.string(),
+  /**
+   * The producer run the approved bytes came from — the reference a retention
+   * carve-out protects, so the log behind an approval is not pruned out from
+   * under it.
+   *
+   * Nullable, because `OutputRecord.run_id` is optional: an Output that carries
+   * none came from a run the store cannot name, and null says exactly that. An
+   * empty string here would read as a real id and protect nothing, silently,
+   * which is the failure mode a protected reference exists to avoid.
+   */
+  run_id: z.string().nullable(),
   approved_at: z.string(),
   /**
    * The wall clock at which the window opens. Null means the approval instant,

@@ -51,6 +51,7 @@ drift from the code. Edit the schema, not the table.
 | `capabilities` | string[] | no | `[]` |
 | `schedule` | `on_run` \| `daily` \| `weekly` \| `manual` | no | `"on_run"` |
 | `autonomy_level` | `autonomous` \| `supervised` \| `manual` | yes | — |
+| `approval_class` | `session` \| `content` | no | `"session"` |
 | `side_effects` | (`sends_email` \| `creates_issue` \| `writes_db` \| `external_api` \| `modifies_file`)[] | no | `[]` |
 | `secrets` | string[] | no | `[]` |
 | `ttl_hours` | number | yes | — |
@@ -265,10 +266,10 @@ reading a manifest written for a newer one ignores what it does not know.
 
 Removing or narrowing something is the case that can break you, and what limits
 it is a convention that already exists rather than a promise invented here:
-closed enums stay closed. Five sets are closed — the side-effect type, the
-autonomy level, the schedule, the minimum tier and `inputs[].type` — and an
-addition to any of them fans out into exhaustive switches and into this
-document, which is why they are not extended casually.
+closed enums stay closed. Six sets are closed — the side-effect type, the
+autonomy level, the schedule, the minimum tier, `inputs[].type` and the approval
+class — and an addition to any of them fans out into exhaustive switches and into
+this document, which is why they are not extended casually.
 
 The side-effect type is closed at five — `sends_email`, `creates_issue`,
 `writes_db`, `external_api` and `modifies_file` — and one of those five is not
@@ -1063,6 +1064,20 @@ convention. A test in this repository asserts set equality over every non-test
 source file that names the mint, so a third one reddens on the day it lands,
 and a lost one reddens too.
 
+**A content-class plugin does not consult this grant at all.** A manifest
+declaring `approval_class: 'content'` (§ 1) is answered by its own approval
+record in § 10 and by nothing else — the runtime branches on the declared class
+ABOVE the grant read, so the grant is not even consulted. That is what keeps a
+live `scopes: '*'` grant from composing additively with an approved batch and
+rendering the approval decorative. Disjointness is a stronger property than
+ordering, and it is the one being claimed here.
+
+A content-approved plugin also declares `autonomy_level: 'autonomous'`, and that
+is doctrine rather than a convenience: a content approval IS the review,
+performed before the bytes shipped rather than after. A plugin asking for a
+human at fire time as well would ask the same human the same question twice.
+The manifest schema enforces it at parse time, so the two cannot come apart.
+
 A caller that reads no grant at all — `warpline run`, which starts a plugin by
 hand — says so explicitly rather than by omission. It passes the witness arm
 naming a manual run, and receives only the members that need no approval. The
@@ -1558,6 +1573,70 @@ A run that produces no Output no longer moves the fingerprint. It leaves
 `last_output` as it was (§ `last_output`), so a denial recorded against a real
 proposal stays bound to it across a producer's failed run, rather than being
 superseded by the empty-set hash the same plugin would otherwise fall back to.
+
+### `approvals`
+
+Live content approvals, keyed by plugin name. Each one is a standing yes to
+SPECIFIC BYTES a producer has already written: the operator read them, approved
+them, and a later unattended advance may ship exactly those and nothing else.
+
+A record and not an array, for the reason `denials` gives one section up. One
+live approval per plugin by construction, so re-approving lands on the same key
+rather than accumulating, and there is no de-dupe scan to get wrong. It also
+makes a fleet-wide approval inexpressible — no key means every plugin, and
+blanket authority is precisely what a content approval is not. A document
+written before approvals existed loads and reads as none.
+
+An approval applies only to a plugin whose manifest declares
+`approval_class: 'content'`. For every other plugin the record is not consulted
+at all, and the session grant of § 9 decides. The two are disjoint, not
+additive.
+
+The fields:
+
+- `plugin` — the consumer whose side effect this authorises. Stored as a field
+  as well as being the key, on the same argument `denials` makes: the key is how
+  the record is looked up, the field is what survives being read out of the
+  record on its own.
+- `producer` — the declared dependency whose Output the fingerprint covers. It
+  is checked against the consumer manifest's current single declared dependency
+  at fire time, not merely recorded: rewriting that dependency after approving
+  leaves the stored fingerprint matching a producer whose bytes are no longer the
+  ones that would ship.
+- `fingerprint` — hex sha256 of the producer's proposal, whole and untruncated,
+  produced by the same entry point a denial uses. If those bytes move, the
+  approval stops applying; it is not renewed and nothing re-asks.
+- `run_id` — the producer run the approved bytes came from, and the reference a
+  retention carve-out protects so the log behind an approval is not pruned out
+  from under it. Nullable, because an Output may carry no run id: null says the
+  run cannot be named, where an empty string would read as a real id and protect
+  nothing.
+- `approved_at` — ISO instant the approval was recorded.
+- `not_before` — the wall clock the window opens, or null meaning the approval
+  instant.
+- `not_after` — the wall clock the window closes. Required, with no default and
+  no ceiling: a window that never closes is ambient authority wearing a bound.
+- `zone` — the IANA zone both bounds are read in.
+- `effect_id` — the identity of the fire this approval was spent on. Null until
+  the runtime marks.
+- `marked_at` / `confirmed_at` — the two-field mark. `marked_at` set with
+  `confirmed_at` still null is the indeterminate state: the runtime began firing
+  and cannot prove it finished. It is deliberately representable rather than
+  collapsed into one boolean, because "we do not know" is a different answer from
+  "it did not happen".
+
+`not_before` and `not_after` are naked wall clocks — `YYYY-MM-DDTHH:mm[:ss]`,
+no trailing `Z` and no numeric offset — resolved against `zone` at fire time,
+not at approval time. The host tz database is read live and no snapshot is
+pinned, so a tzdb update between approval and fire changes the resolved instant;
+pinning would make the runtime wrong about the world. A zone the host cannot
+resolve is refused when the approval is written, and if it becomes unresolvable
+afterwards the window reads as closed rather than open — the conservative
+direction, never a fire and never a throw.
+
+A lapsed window does not auto-approve, does not extend and does not degrade to
+an ordinary send. It stops applying, and the operator is the only one who can
+write another.
 
 ### `last_output`
 

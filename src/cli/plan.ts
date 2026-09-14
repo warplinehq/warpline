@@ -38,6 +38,7 @@ import {
   loadPluginManifests,
   topoSort,
   evaluatePlugin,
+  approvalStanding,
   RUN_PROFILES,
 } from '../runtime/engine.js'
 import type { EvalContext, RunProfile } from '../runtime/engine.js'
@@ -133,6 +134,9 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
     currentTier: computeTier(state.last_interaction_at, now),
     force: false,
     state,
+    // The map this preview already loaded, so the evaluator can resolve a
+    // content approval's producer exactly as a run would.
+    manifests,
     approvalPath,
   }
 
@@ -172,7 +176,22 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
             level,
             // Manifest declaration order, never re-sorted.
             sideEffects: [...manifest.side_effects],
-            approved: await checkApproval(name, approvalPath, { now }),
+            // Whichever authority actually answers for this plugin, and no
+            // other. Rendered unconditionally from the session grant, a
+            // content-class plugin with a live approval and no grant read
+            // `approved: false` while genuinely authorised, and one under a
+            // wildcard grant read `approved: true` while genuinely refused.
+            // Both are lies, and the evaluator's own promise is that a preview
+            // cannot disagree with a run by one comparison operator — this
+            // would have made it disagree by a whole column. A
+            // not-applicable rendering removes the lie but not the gap, and
+            // the preview's job is telling the operator whether the frozen
+            // batch will go out. Previewing is not firing, which is what makes
+            // this a legitimate second reader.
+            approved:
+              manifest.approval_class === 'content'
+                ? approvalStanding(state, name, manifests, now).standing === 'live'
+                : await checkApproval(name, approvalPath, { now }),
           }
           if (evaluation.due) {
             due.push(entry)

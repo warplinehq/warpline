@@ -17,6 +17,17 @@ diataxis: reference
 > saying yes. The Board moves *where* that yes is said — from a terminal to a
 > browser on the same machine — and nothing else. It never moves the yes off
 > the machine. See [why-the-gate-holds.md](why-the-gate-holds.md).
+>
+> **Since content approval, the yes has two shapes, and the sentence above
+> needed correcting rather than merely extending.** It read as though every yes
+> is said at the moment the effect fires. One of them is not. A plugin declaring
+> `approval_class: 'content'` is approved in advance, against a fingerprint of
+> the exact bytes its single dependency has already produced, inside a window the
+> operator names — and the effect then fires on a later advance with nobody
+> present. The human still said yes to that specific payload, and said it on this
+> machine; what moved is *when*, not *where* and not *whether*. Neither shape
+> leaves the machine, and a content approval that no longer matches the bytes
+> stops applying rather than degrading to an ordinary send.
 
 ## 1. Who it is for
 
