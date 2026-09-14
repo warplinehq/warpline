@@ -28,6 +28,7 @@ import { dirname } from 'node:path'
 import { atomicWriteText } from '../lib/fs-atomic.js'
 import { eventsJsonlPath } from '../lib/paths.js'
 import type { BoardEvent } from '../schemas/board.js'
+import type { RefusalReason } from '../schemas/run-log.js'
 
 /**
  * Why a parked gate stopped existing. Every discard is one of these, and every
@@ -288,6 +289,42 @@ export const emitPluginDenied = (
     makeEvent('notice', plugin, `${plugin}: denied — ${reason}`, runId, {
       severity: 'info',
       metadata_json: JSON.stringify({ event: 'plugin_denied', plugin, run_id: runId, reason }),
+    }),
+    eventsPath,
+  )
+
+/**
+ * Emit a notice that a content approval did not authorise a plugin's fire.
+ *
+ * NOT `emitPluginSkipped`, on the argument `emitPluginDenied` above makes one
+ * step over: the run log distinguishes `refused` from `skipped` so an authority
+ * that lapsed cannot be read as one that was never asked for, and filing the
+ * event as a skip would put it in the same board bucket as "no Grant" and
+ * "still fresh" — so the two logs would disagree about the same advance.
+ *
+ * Rides `type: 'notice'` with a `metadata_json` discriminator for the reason
+ * `emitGateInvalidated` states above, and because the Board is frozen through
+ * v0.3: no phase may add an event type.
+ *
+ * Severity `info`, matching `emitPluginDenied` — a refusal is the gate working,
+ * not a failure. The operator said yes to bytes that have since moved, and the
+ * runtime declining to ship different ones is the guarantee holding.
+ *
+ * **The summary is authored HERE, from the plugin name and the closed enum
+ * value only.** This emitter never receives the gate's `detail` and never
+ * interpolates it: one persisted string, one author. Two authors for one fact
+ * is how the runtime came to say `skipped` twice in two different wordings.
+ */
+export const emitPluginRefused = (
+  plugin: string,
+  reason: RefusalReason,
+  runId: string | null,
+  eventsPath?: string,
+): Promise<void> =>
+  emitBoardEvent(
+    makeEvent('notice', plugin, `${plugin}: refused — ${reason}`, runId, {
+      severity: 'info',
+      metadata_json: JSON.stringify({ event: 'plugin_refused', plugin, run_id: runId, reason }),
     }),
     eventsPath,
   )

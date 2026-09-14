@@ -321,11 +321,17 @@ set, so a new member would be silently dropped from every board view. Any
 | `denial_recorded` | the operator ran `warpline deny` and a denial was written |
 | | A `deny` against a live parked gate emits BOTH: `denial_recorded` for the answer, and `gate_invalidated` with `reason: denied` for the result it dequeued. They are separate events because they are separate facts — a reader tracking parked work must not have to infer the discard from the denial. |
 | `plugin_denied` | an advance skipped a plugin because a live denial answered it |
+| `plugin_refused` | an advance did not fire a plugin because the content approval it was waiting on stopped applying (`metadata_json.reason` distinguishes: `indeterminate`, `outside_window`, `content_moved`) |
 
 `plugin_denied` is a `notice`, not a `plugin_result` skip. The run log
 distinguishes `denied` from `skipped` so an answered question cannot be read as
 an unanswered one, and the event log has to carry the same distinction or the
-two disagree about the same advance. `attempt_failed` also rides `notice`, with
+two disagree about the same advance. `plugin_refused` is a `notice` for the
+same reason one step over: the run log's `refused` tells an authority that
+lapsed from one that was never asked for, and a skip event would lose that
+distinction on the board. Its summary interpolates the plugin name and the
+closed reason value only — never the approved bytes and never the gate's own
+detail string, so one persisted string keeps one author. `attempt_failed` also rides `notice`, with
 its sub-type in `summary` rather than in `metadata_json`.
 
 ## 6. Guardrails (implemented today)

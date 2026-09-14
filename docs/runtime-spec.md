@@ -715,6 +715,14 @@ An approval that has not opened yet is likewise no refusal: it is the
 operator's own instruction arriving on time, and the plugin is ordinary
 not-due.
 
+A refusal also reaches the board, as a `notice` carrying
+`metadata_json.event = "plugin_refused"` and the same closed `reason`. It is
+not filed as a skip: the run log's `refused` exists to tell an authority that
+lapsed from one that was never asked for, and a skip event would lose that
+distinction one log over. The event's summary is built from the plugin name and
+the reason value alone — never from the approved bytes, and never from the
+gate's own detail string, so each persisted string keeps exactly one author.
+
 ### Output records
 
 `SkillResult.artifacts_produced` is an array of Output records — a thing the

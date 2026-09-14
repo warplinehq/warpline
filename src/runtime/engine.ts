@@ -108,6 +108,7 @@ import {
   emitPluginStarted,
   emitPluginCompleted,
   emitPluginFailed,
+  emitPluginRefused,
   emitPluginSkipped,
   emitPluginGated,
   emitGateInvalidated,
@@ -1904,7 +1905,17 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                   reason: ev.refusal,
                   retried: false,
                 })
-                await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+                // The non-refusal cases keep the skip: no record on file, and a
+                // window that has not opened, genuinely ARE skips. Only an
+                // authority that existed and stopped applying is news of a
+                // different kind.
+                //
+                // The emitter authors its own summary from the plugin name and
+                // the closed enum value. `ev.detail` is deliberately not passed:
+                // one persisted string, one author.
+                await (ev.refusal === undefined
+                  ? emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+                  : emitPluginRefused(pluginName, ev.refusal, run_id, eventsPath))
                 onPluginEnd?.(
                   pluginName,
                   status,
