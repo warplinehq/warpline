@@ -22,17 +22,22 @@ import { z } from 'zod'
  * runtime did not author reach that switch, and a consumer parsing prose
  * breaks the first time the wording changes.
  *
- * Two decision points, and the members belong to one or the other. THREE are
- * decided by the gate, in the order `indeterminate` → `outside_window` →
- * `content_moved`, and that order is not arbitrary: an `indeterminate` mark
- * means the runtime cannot tell whether the bytes already shipped, and that
- * question outranks both "the window closed" and "the bytes moved", neither of
- * which can be answered honestly while the first is open. TWO —
- * `mark_unavailable` and `mark_uncertain` — are decided later, at the spend
- * mark, after the gate has already said fire, so they sit outside that order
- * rather than anywhere within it. They report the mark's OWN I/O failing:
+ * Two decision points, and they are not a partition of the members. The GATE
+ * can produce three: `indeterminate`, `outside_window` and `content_moved`, in
+ * that order, and the order is not arbitrary. An `indeterminate` mark means the
+ * runtime cannot tell whether the bytes already shipped, and that question
+ * outranks both "the window closed" and "the bytes moved", neither of which can
+ * be answered honestly while the first is open.
+ *
+ * The SPEND MARK, reached only after the gate has said fire, can produce four.
+ * `content_moved` and `indeterminate` come back here too, because the mark
+ * re-reads the record under the lock and the record may have moved or been
+ * marked since the gate read it. `mark_unavailable` and `mark_uncertain` come
+ * only from here, and they report the mark's OWN I/O failing:
  * `mark_unavailable` when nothing was written, `mark_uncertain` when the write
- * failed mid-flight and whether it landed is unknown.
+ * failed and whether it landed is unknown. `outside_window` is the one member
+ * the mark cannot produce. So a `content_moved` or an `indeterminate` does not
+ * tell a consumer which point refused. `result_summary` does, in prose.
  *
  * **A spent approval is deliberately not a member.** It is no live
  * authority and no operator error — the runtime already fired those
@@ -70,9 +75,10 @@ export const PluginLogEntrySchema = z.object({
   result_summary: z.string(),
   /**
    * Why a content approval did not authorise this fire, populated only on a
-   * `refused` entry. Three of the members say the gate found the authority no
-   * longer applied; the other two say the spend mark's own I/O failed after
-   * the gate had said fire.
+   * `refused` entry. Three of the members say the authority no longer applied,
+   * found either by the gate or by the spend mark's re-read under the lock.
+   * The other two say the spend mark's own I/O failed after the gate had said
+   * fire, and only the mark produces them.
    *
    * The closed set is what lets a scheduler switch on the cause without
    * parsing `result_summary`'s prose, which is written for an operator and is

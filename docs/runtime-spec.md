@@ -690,31 +690,38 @@ afterwards, so the set is not extended casually.
 ### Refusal reasons
 
 A content approval that exists and does not authorise a fire refuses for
-exactly one of five reasons: three decided by the gate, and two decided later at
-the spend mark. The set is closed and validated on parse, because this is the
-value an unattended scheduler switches on: an open-ended reason string would let
-something the runtime did not author reach that switch, and a consumer parsing
-prose breaks the first time the wording changes.
+exactly one of five reasons. Two points can refuse. The gate can produce three
+of them, and the spend mark, reached later, can produce four. They overlap, so
+the "Decided by" column below is not a partition. The set is closed and
+validated on parse, because this is the value an unattended scheduler switches
+on: an open-ended reason string would let something the runtime did not author
+reach that switch, and a consumer parsing prose breaks the first time the
+wording changes.
 
 | Reason | Decided by | Meaning |
 |--------|------------|---------|
-| `indeterminate` | the gate | A fire was marked and never confirmed, so the runtime cannot tell whether the bytes already shipped |
+| `indeterminate` | the gate, or the spend mark | A fire was marked and never confirmed, so the runtime cannot tell whether the bytes already shipped |
 | `outside_window` | the gate | The approval window has closed, its zone no longer resolves on this host, or its approval instant cannot be parsed |
-| `content_moved` | the gate | The approved bytes are no longer what would ship |
+| `content_moved` | the gate, or the spend mark | The approved bytes are no longer what would ship |
 | `mark_unavailable` | the spend mark | The mark could not be attempted at all — the state document could not be locked or could not be read — so nothing was written and nothing was sent |
 | `mark_uncertain` | the spend mark | The mark's own write failed, so whether it landed is unknown; nothing was sent either way |
 
-The first three are decided in that order, and the order is not arbitrary. An
-`indeterminate` mark outranks both of the others because neither "the window
-closed" nor "the bytes moved" can be answered honestly while the runtime does
-not know whether the fire already happened.
+At the gate the first three are decided in that order, and the order is not
+arbitrary. An `indeterminate` mark outranks both of the others because neither
+"the window closed" nor "the bytes moved" can be answered honestly while the
+runtime does not know whether the fire already happened.
 
-**That precedence covers the three gate-time reasons and nothing else.** The two
-mark reasons are decided at a second point, after the gate has already said
-fire, so they are not slotted anywhere into that order — a mark reason and a
-gate reason are never candidates for the same decision. `mark_unavailable` and
-`mark_uncertain` are two members rather than one because they leave the operator
-in different places: after `mark_unavailable` the record on disk is untouched
+**That precedence covers the gate and nothing else.** The spend mark is a
+second decision, taken after the gate has already said fire, and a refusal from
+one is never a candidate for the other's decision. The mark re-reads the record
+under the state document's lock as its own precondition, so it can answer
+`content_moved` when the record has gone or its fingerprint moved since the gate
+read it, and `indeterminate` when something else has marked it since. It checks
+`content_moved` first. A consumer holding either of those two reasons cannot
+tell from the reason alone which point refused; the entry's `result_summary`
+says so in prose. `outside_window` is the one reason the mark never produces.
+`mark_unavailable` and `mark_uncertain` come only from the mark, and they are
+two members rather than one because they leave the operator in different places: after `mark_unavailable` the record on disk is untouched
 and the next advance retries cleanly, while after `mark_uncertain` the record
 may be marked and the next advance may refuse with `indeterminate`. Neither maps
 onto `indeterminate` itself, which means the runtime cannot tell whether the
