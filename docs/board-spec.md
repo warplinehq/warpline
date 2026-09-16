@@ -331,7 +331,10 @@ same reason one step over: the run log's `refused` tells an authority that
 lapsed from one that was never asked for, and a skip event would lose that
 distinction on the board. Its summary interpolates the plugin name and the
 closed reason value only — never the approved bytes and never the gate's own
-detail string, so one persisted string keeps one author. `attempt_failed` also rides `notice`, with
+detail string, so one persisted string keeps one author. It is also written
+best-effort. An advance that cannot append it still writes its run log, and the
+run log's `refused` entry is the record to trust when the two disagree.
+`attempt_failed` also rides `notice`, with
 its sub-type in `summary` rather than in `metadata_json`.
 
 ## 6. Guardrails (implemented today)

@@ -2381,9 +2381,17 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 // The emitter authors its own summary from the plugin name and
                 // the closed enum value. `ev.detail` is deliberately not passed:
                 // one persisted string, one author.
-                await (ev.refusal === undefined
-                  ? emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
-                  : emitPluginRefused(pluginName, ev.refusal, run_id, eventsPath))
+                //
+                // The refusal emit is best-effort, as the mark arm's is below.
+                // This arm sits in no try, so a rejecting append would end the
+                // advance above the run-log write, and the run log is the
+                // artifact a refusal exists to produce. The skip emit keeps the
+                // behaviour every other plugin-result emit in this loop has.
+                if (ev.refusal === undefined) {
+                  await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
+                } else {
+                  await emitPluginRefused(pluginName, ev.refusal, run_id, eventsPath).catch(() => {})
+                }
                 // The FSM state, per this hook's contract — and a refusal
                 // leaves it at `skipped`. Passing the run-log status here would
                 // put a sixth value through an exported interface documented to
@@ -2451,7 +2459,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               // The emitter authors its own summary from the plugin name and
               // the closed enum value; `markDetail` is deliberately not passed.
               // One persisted string, one author.
-              await emitPluginRefused(pluginName, markRefusal, run_id, eventsPath)
+              //
+              // Best-effort. This arm sits in no try, and the likeliest cause
+              // of a failed mark, a full or read-only disk under the home, is
+              // also what would fail this append. An event log that cannot be
+              // written must not cost the run log, which is the artifact the
+              // refusal exists to produce.
+              await emitPluginRefused(pluginName, markRefusal, run_id, eventsPath).catch(() => {})
               onPluginEnd?.(pluginName, 'skipped', markElapsed, markDetail)
               return
             }
