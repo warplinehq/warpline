@@ -85,7 +85,14 @@ export async function seedContentRefusals(opts: {
         // Near zero so the plugin is always stale and therefore due. A fresh
         // plugin is skipped above the approval gate and refused by nothing.
         ttl_hours: 0.001,
-        dependencies: [],
+        // The ONE dependency the content class requires, and it is not an
+        // arbitrary one: `expiredContentApproval` already records
+        // `${name}-producer` as the approval's producer, so this names the same
+        // plugin the seeded record binds to. The fixture was declaring none,
+        // which the schema refuses — a content approval covers exactly one
+        // producer's Output, and zero dependencies leaves that subject
+        // ambiguous. It went unnoticed while the loader cast instead of parsed.
+        dependencies: [`${name}-producer`],
         timeout_ms: 5000,
         max_parallelism: 1,
       })}`,

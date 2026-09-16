@@ -39,7 +39,7 @@ import { advanceCounts } from './exit-codes.js'
 import type { AdvanceOutcome } from './exit-codes.js'
 import { acquireLock, releaseLock } from './lock.js'
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
-import type { PluginManifest } from '../schemas/plugin-manifest.js'
+import { PluginManifestSchema, type PluginManifest } from '../schemas/plugin-manifest.js'
 import { invokePlugin } from './invoke-plugin.js'
 import type { CapabilityGrantWitness, DependencyRun } from './capabilities.js'
 
@@ -2984,6 +2984,30 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
  * broken, so the unit is tested against the message and the end-to-end path is
  * proven under real Node in scripts/verify-tarball.sh.
  */
+/**
+ * Manifest validation issues, as a path and a code.
+ *
+ * Zod's own `issue.message` is deliberately NOT passed through, for the same
+ * reason `lib/plugin-config.ts` refuses it: it is upstream prose that can begin
+ * quoting the received value in any minor release, and this string is rendered
+ * by `warpline plan`, which operators read and paste. A manifest is
+ * hand-written, so the value it received is author input.
+ */
+function describeManifestIssues(error: {
+  issues: readonly { code: string; path: PropertyKey[] }[]
+}): string {
+  const seen = new Set<string>()
+  for (const issue of error.issues) {
+    const key = issue.path.map(String).join('.')
+    seen.add(
+      key
+        ? `manifest field '${key}' is not valid (${issue.code})`
+        : `manifest is not a valid plugin manifest object (${issue.code})`,
+    )
+  }
+  return [...seen].join('; ')
+}
+
 export function explainLoadFailure(message: string, pluginsDir: string): string {
   if (!message.includes('Cannot use import statement outside a module')) return message
 
@@ -3107,7 +3131,24 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
         // import() needs a file:// URL, not a bare absolute path.
         const mod = await import(pathToFileURL(manifestPath).href)
         if (mod.manifest) {
-          plugins.set(entry, mod.manifest as PluginManifest)
+          // A manifest is UNTRUSTED INPUT. `manifest.ts` is hand-written, and
+          // the cast that used to stand here meant every invariant the schema
+          // states was decorative at runtime — the schema described a shape
+          // nothing checked. The content approval class made that load-bearing:
+          // `approval_class` and `dependencies` together decide whether the
+          // bytes a human reviewed are the bytes that fire, and three call
+          // sites assert those invariants as a hard stop rather than test for
+          // them. So the loader validates instead of asserting.
+          //
+          // An invalid manifest is a LOAD FAILURE, which is the fail-closed
+          // outcome: the plugin never enters the map, so nothing runs it and
+          // `plan` exits 1 naming the directory.
+          const parsed = PluginManifestSchema.safeParse(mod.manifest)
+          if (!parsed.success) {
+            failures.push({ plugin: entry, error: describeManifestIssues(parsed.error) })
+            return
+          }
+          plugins.set(entry, parsed.data)
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)

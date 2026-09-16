@@ -122,7 +122,19 @@ export async function createTwoAdvanceHome(): Promise<TwoAdvanceHome> {
         version: '1.0.0',
         description: `${name} two-advance fixture`,
         inputs: {},
-        outputs: opts.outputs ?? {},
+        // `type` is filled in where a caller omitted it. Every caller writes
+        // `{ brief: {} }` — they are declaring THAT an output exists, because
+        // the arm under test is dependency status or output aliasing, and none
+        // of them names a type or asserts on one. The loader validates
+        // manifests, so a spec without `type` is now a load failure; leaving it
+        // to each call site would put an irrelevant literal in fifteen places
+        // and let the next fixture reintroduce the same invalid manifest.
+        outputs: Object.fromEntries(
+          Object.entries(opts.outputs ?? {}).map(([key, spec]) => [
+            key,
+            { type: 'json', ...(spec as Record<string, unknown>) },
+          ]),
+        ),
         capabilities: [],
         schedule: 'on_run',
         autonomy_level: 'autonomous',

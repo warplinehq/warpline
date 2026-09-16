@@ -81,6 +81,120 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
+/**
+ * A manifest that imports cleanly but is not a valid plugin manifest. Distinct
+ * from `writeBrokenPlugin`, which fails at import: this one reaches the schema.
+ */
+async function writeInvalidPlugin(name: string, manifest: unknown): Promise<void> {
+  const dir = join(pluginsDir, name)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+}
+
+/**
+ * The loader VALIDATES; it does not assert.
+ *
+ * It used to cast — `mod.manifest as PluginManifest` — so every invariant the
+ * schema states was decorative at runtime and a manifest that imported cleanly
+ * entered the map whatever its shape. The content approval class made that
+ * load-bearing: `approval_class` and `dependencies` together decide whether the
+ * bytes a human reviewed are the bytes that fire, and three call sites assert
+ * those invariants as a hard stop rather than testing for them.
+ *
+ * Each case below is an invalid manifest that the CAST accepted. They are the
+ * demonstration that the guard reaches what it claims to, not a restatement of
+ * the schema's own unit tests.
+ */
+describe('loadPluginManifests — a manifest is validated, not asserted', () => {
+  test('a content-class manifest with TWO dependencies is a load failure, not a live plugin', async () => {
+    // The exploit this guard exists to close. `approve` binds the approval to
+    // `dependencies[0]` and `approvalStanding` compares only that one, but
+    // `dependencyRuns` projects EVERY declared dependency to the handler — so a
+    // second dependency's Output ships unattended, reviewed by nobody, while
+    // the approval record still reads `live`.
+    await writeValidPlugin('fx-good')
+    await writeInvalidPlugin(
+      'fx-two-deps',
+      makeManifest('fx-two-deps', {
+        approval_class: 'content',
+        dependencies: ['producer-a', 'producer-b'],
+      }),
+    )
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(manifests.has('fx-two-deps')).toBe(false)
+    expect(manifests.has('fx-good')).toBe(true)
+    expect(failures.map((f) => f.plugin)).toEqual(['fx-two-deps'])
+    expect(failures[0]!.error).toContain('dependencies')
+  })
+
+  test('a content-class manifest with NO dependency is a load failure', async () => {
+    await writeInvalidPlugin(
+      'fx-no-deps',
+      makeManifest('fx-no-deps', { approval_class: 'content', dependencies: [] }),
+    )
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(manifests.has('fx-no-deps')).toBe(false)
+    expect(failures.map((f) => f.plugin)).toEqual(['fx-no-deps'])
+  })
+
+  test('a missing required field is a load failure naming the field path', async () => {
+    // `ttl_hours` deliberately, not `side_effects`: the latter carries
+    // `.default([])`, so omitting it is VALID and a test built on it would
+    // assert the schema's shape wrongly rather than the loader's behaviour.
+    const { ttl_hours: _omitted, ...withoutTtl } = makeManifest('fx-partial')
+    await writeInvalidPlugin('fx-partial', withoutTtl)
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(manifests.has('fx-partial')).toBe(false)
+    expect(failures[0]!.error).toContain('ttl_hours')
+  })
+
+  test('an output spec without a type is a load failure', async () => {
+    await writeInvalidPlugin(
+      'fx-typeless-output',
+      { ...makeManifest('fx-typeless-output'), outputs: { brief: {} } },
+    )
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(manifests.has('fx-typeless-output')).toBe(false)
+    expect(failures[0]!.error).toContain('outputs.brief.type')
+  })
+
+  test('the failure text carries no value the manifest author supplied', async () => {
+    // Load failures render in `warpline plan`, which operators read and paste.
+    // Zod's own `issue.message` is not passed through precisely because it is
+    // upstream prose that may begin quoting the received value in any minor
+    // release — and a manifest is hand-written, so that value is author input.
+    const secret = 'do-not-echo-this-particular-string'
+    await writeInvalidPlugin('fx-echo', {
+      ...makeManifest('fx-echo'),
+      side_effects: [secret],
+      outputs: { brief: { type: secret, description: secret } },
+      approval_class: secret,
+    })
+
+    const { failures } = await loadPluginManifests(pluginsDir)
+
+    expect(failures).toHaveLength(1)
+    expect(failures[0]!.error).not.toContain(secret)
+  })
+
+  test('a valid manifest still loads, and loads as the PARSED value', async () => {
+    await writeValidPlugin('fx-fine')
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(failures).toEqual([])
+    expect(manifests.get('fx-fine')!.name).toBe('fx-fine')
+  })
+})
+
 describe('loadPluginManifests — per-plugin load failures', () => {
   test('Test 1: a broken manifest is reported in failures with a non-empty error', async () => {
     await writeValidPlugin('fx-good')

@@ -993,7 +993,28 @@ directory whose `manifest.ts` cannot be imported is absent from `manifests` and
 present in `failures` as `{ plugin, error }`, where `plugin` is the directory
 name (a broken manifest has no trustworthy `name` field) and `error` is the
 thrown `Error.message` — no stack trace. A directory whose name is a member of
-`Object.prototype` fails the same way, without being imported at all. `failures` is sorted by `plugin` inside
+`Object.prototype` fails the same way, without being imported at all.
+
+A manifest that imports cleanly is then **validated against
+`PluginManifestSchema`**, and one that does not satisfy it is a load failure of
+the same shape — absent from `manifests`, present in `failures`. The loader
+validates rather than asserts: it previously cast the imported value, which made
+every invariant the schema states decorative at runtime. That is load-bearing
+for the content approval class, whose `approval_class` and `dependencies` fields
+together decide whether the bytes a human reviewed are the bytes that fire — a
+content-class manifest declaring two dependencies would bind its approval to the
+first while shipping the second's unreviewed Output to the handler. Refusing the
+manifest at load is the fail-closed outcome: the plugin never enters the map, so
+nothing runs it, and `warpline plan` exits 1 naming the directory.
+
+The failure text for an invalid manifest names the field path and the issue
+code. It deliberately does **not** carry Zod's own `issue.message`, for the
+reason `lib/plugin-config.ts` gives: that message is upstream prose which may
+begin quoting the received value in any minor release, and a manifest is
+hand-written, so the received value is author input — while this string is
+rendered by `warpline plan`, which operators read and share.
+
+`failures` is sorted by `plugin` inside
 the loader, so alphabetical ordering is a property of the data rather than of
 whichever surface renders it, and it stays an array in every case.
 
