@@ -468,6 +468,122 @@ describe('a content approval is marked spent before the handler runs', () => {
 })
 
 /**
+ * The mark's OWN I/O failing is a named refusal, not an uncaught throw.
+ *
+ * The gate has already said fire by the time the mark runs, so a mark that
+ * cannot read the state document is a second decision point with its own
+ * answer. Before this case the read threw straight out of the level's
+ * `Promise.all` and ended the advance above the run-log write: a fleet where a
+ * sibling had already fired, with no artifact saying so. `mark_unavailable` is
+ * the answer for the class where nothing was written.
+ *
+ * **What makes the document unreadable is planted BETWEEN the levels, not
+ * before the advance.** Corrupting it up front would be caught by the
+ * top-of-advance read instead, which is a different guard and already has its
+ * own coverage. The producer's `onPluginEnd` is the only hook that fires
+ * between the two levels, which is why the producer has to actually run here.
+ *
+ * **The leak guard is in reach of a real leak, and a positive control says so.**
+ * `EngineStateInvalidError`'s message carries the state path AND the parser's
+ * quotation of the document's own first token, so the sentinel below genuinely
+ * travels as far as any `catch` that reads its error. A refusal string that
+ * interpolated the error would carry it into the run log and `events.jsonl`,
+ * where the assertions can see it.
+ */
+describe("the spend mark's own I/O failing is a refusal, not a dead advance", () => {
+  /**
+   * The FIRST token of the corrupt body, and the position is load-bearing: the
+   * engine's `JSON.parse` failure quotes the offending identifier and nothing
+   * else, so a sentinel buried later in the body would never reach the error
+   * message and the assertions below would be green over nothing.
+   */
+  const SENTINEL = 'WARPLINE_STATE_DOCUMENT_LEAK_SENTINEL'
+  const CORRUPT = `${SENTINEL} is not a state document`
+
+  /**
+   * The operator string the engine authors for this reason, spelled out rather
+   * than rebuilt from the same pieces the engine uses. A test that recomputes
+   * the string it is checking agrees with the implementation by construction.
+   */
+  const MARK_UNAVAILABLE_SUMMARY =
+    `refused (mark_unavailable): the spend mark for '${CONSUMER}' could not be taken — the state ` +
+    'document could not be locked or read, so nothing was marked and nothing was sent'
+
+  test('the parse failure genuinely carries the sentinel (the guard is in reach)', () => {
+    expect(() => JSON.parse(CORRUPT)).toThrow(new RegExp(SENTINEL))
+  })
+
+  test('a mark whose read throws refuses with mark_unavailable and the run log is still written', async () => {
+    await seedLiveApproval('returns')
+    // OFF for this case only, and the exemption it costs is not one this case
+    // relies on: a content-class plugin is exempt from the review gate by
+    // construction, and the three cases above prove the mark under the shipped
+    // `review_gate: true`. It is off here because the PRODUCER is session-class
+    // and would otherwise be promoted to supervised, park a gate, and stop the
+    // level loop before the sender is ever evaluated — taking the only hook
+    // that fires between the two levels with it.
+    await writeFile(join(home.stateDir, 'preferences.json'), JSON.stringify({ review_gate: false }))
+
+    /** The seeded document, saved before it is broken and put back afterwards. */
+    let saved = ''
+    /** What `onPluginEnd` was told about the sender. */
+    const details: string[] = []
+
+    const result = await advance({
+      // 25 hours on: past the producer's 24 h TTL so it is due and runs, and
+      // nowhere near the approval's 2099 window.
+      now: Date.now() + 25 * 60 * 60 * 1000,
+      // Synchronous and not awaited, so `node:fs`'s sync writers and not the
+      // promise API — a write this hook only STARTS is a write the mark may
+      // reach before it lands.
+      onPluginEnd: (plugin, _status, _elapsed, reason) => {
+        if (plugin === PRODUCER) {
+          saved = readFileSync(statePath(), 'utf-8')
+          writeFileSync(statePath(), CORRUPT)
+        }
+        if (plugin === CONSUMER) {
+          // Restored before the end-of-run write, which is NOT in this plan's
+          // scope: an unreadable document there still kills the advance, and
+          // leaving it broken would prove that instead of proving the mark.
+          writeFileSync(statePath(), saved)
+          if (reason !== undefined) details.push(reason)
+        }
+      },
+    })
+
+    // The handler never ran. FIRST, because it is the whole claim.
+    expect(firedCount()).toBe(0)
+    expect(result.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'mark_unavailable' }])
+    expect(details).toEqual([MARK_UNAVAILABLE_SUMMARY])
+
+    // The advance resolved and wrote its run log, which is the continuation
+    // this case exists for: the throw used to end it above this write.
+    const runLogText = readFileSync(result.run_log_path, 'utf-8')
+    const runLog = JSON.parse(runLogText) as {
+      plugin_entries: { plugin: string; status: string; reason?: string; result_summary: string }[]
+    }
+    const senderEntry = runLog.plugin_entries.find((e) => e.plugin === CONSUMER)
+    expect(senderEntry?.status).toBe('refused')
+    expect(senderEntry?.reason).toBe('mark_unavailable')
+    // `toBe` and not `toContain`: an appended error message fails this.
+    expect(senderEntry?.result_summary).toBe(MARK_UNAVAILABLE_SUMMARY)
+    // The level below still ran and is on the record, so "the loop continued"
+    // is read off the artifact rather than inferred from the absence of a throw.
+    expect(runLog.plugin_entries.find((e) => e.plugin === PRODUCER)?.status).toBe('completed')
+
+    // Neither persisted stream carries the document's own bytes.
+    expect(runLogText).not.toContain(SENTINEL)
+    expect(readFileSync(join(home.runsDir, 'events.jsonl'), 'utf-8')).not.toContain(SENTINEL)
+
+    // Nothing was marked: the write is below the read that threw.
+    const record = (await readState()).approvals[CONSUMER]
+    expect(record.marked_at).toBeNull()
+    expect(record.effect_id).toBeNull()
+    expect(record.confirmed_at).toBeNull()
+  })
+})
+
+/**
  * The mark is not reachable from `evaluatePlugin`.
  *
  * `evaluatePlugin` is what `warpline plan` calls, and the evaluator/orchestrator
