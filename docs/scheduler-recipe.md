@@ -416,11 +416,16 @@ Five things a scheduler operator should read there rather than infer:
   edit a unit's command line.
 
 - **A held approval gate exits `0`, and so does a content refusal.** A plugin
-  waiting on a human is the runtime doing its job, not a fault; a plugin whose
-  content approval no longer authorises the fire is the same gate holding for a
-  different reason. If either is itself what you want paged about, `warpline
-  advance --strict` promotes both to `1` and changes none of the other `1`
-  cases. An advance with one of each is still a single `1`.
+  waiting on a human is the runtime doing its job, not a fault. A content
+  refusal for `indeterminate`, `outside_window` or `content_moved` is the same
+  gate holding for a different reason. A refusal for `mark_unavailable` or
+  `mark_uncertain` is not: the runtime could not record the send in its own
+  state, so it did not send. Those exit `0` too. A storage fault bad enough to
+  matter usually fails the rest of the advance and exits `75`, but not always,
+  and `runtime-spec.md` § 11 says which case stays quiet. If any of these is what
+  you want paged about, `warpline advance --strict` promotes them all to `1`
+  and changes none of the other `1` cases. An advance with a gate and a
+  refusal is still a single `1`.
 
   Watch `refused` even when you do not run `--strict`. A fleet can refuse every
   send on every advance indefinitely with `failed` and `gated` both at `0`

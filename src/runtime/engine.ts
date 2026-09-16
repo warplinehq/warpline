@@ -2947,6 +2947,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // it over disk. The sweep then drops it only if its window has ALSO closed,
     // and a record confirmed inside this advance is a record whose window was
     // open when the fire was authorised.
+    //
+    // **No `catch` around this write, and that is load-bearing.** A spend mark
+    // that failed on storage (`mark_unavailable`, `mark_uncertain`) exits `0`
+    // on its own, and that decision in `exit-codes.ts` is safe only because a
+    // full disk, a read-only home or an unbreakable lock that failed the mark
+    // fails this write too, and the advance exits non-zero. Wrap this in a
+    // `catch` and those faults go quiet: revisit `advanceExitCode` first.
     await lockStateDocument(stateDir, async () => {
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
       updatedState.approvals = sweepExpiredApprovals(

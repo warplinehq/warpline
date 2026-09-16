@@ -2246,15 +2246,32 @@ Two consequences worth stating plainly:
 it where a gate waiting on a human is itself the thing you want paged about — a
 fleet that is supposed to be running fully autonomously, for instance.
 
-A content refusal is `0` on its own. A content approval that no longer
-authorises the fire — the window closed, the approved bytes moved, a marked fire
-never confirmed (§ 5) — is the same gate holding for a different reason, and a
-held gate is the runtime doing its job. Without `--strict` the code says so, and
-the count is what tells you it happened: `warpline advance --json` carries
-`refused` and the structured reason for each refusal, and the dead-man file
-(§ 13) carries the count. That pair is deliberate. A fleet can refuse every send
-on every advance for a week, and nothing about the exit code alone would
-distinguish that from a fleet with nothing to do.
+A content refusal is `0` on its own, for all five reasons in § 5. Three of them
+say the approval stopped applying: `indeterminate` (a marked fire was never
+confirmed), `outside_window` (the window closed) and `content_moved` (the
+approved bytes moved). That is the same gate holding for a different reason, and
+a held gate is the runtime doing its job. The other two, `mark_unavailable` and
+`mark_uncertain`, are not the gate holding. They are the spend mark's own
+state-document I/O failing, and they exit `0` too.
+
+That second half is a decision, and it is safe only because of what surrounds
+the mark. A full disk, a read-only home or a lock that cannot be broken fails
+the mark and then fails the advance's end-of-run state write the same way, so
+the advance exits `75`. A state document too corrupt to read fails the next
+advance's first read with `75`. A lock that was only busy leaves nothing marked
+and nothing sent, and the next tick retries and fires, which is the right
+outcome. One case stays quiet and leaves stuck state: a mark write that fails
+after its rename landed. That advance exits `0`, and the next one refuses with
+`indeterminate`, which no operator gesture resolves today (§ 10). If the
+end-of-run write ever stops failing the advance on a storage fault, this
+decision has to be made again.
+
+Without `--strict` the code says `0`, and the count is what tells you a refusal
+happened: `warpline advance --json` carries `refused` and the structured reason
+for each refusal, and the dead-man file (§ 13) carries the count. That pair is
+deliberate. A fleet can refuse every send on every advance for a week, and
+nothing about the exit code alone would distinguish that from a fleet with
+nothing to do.
 
 `--strict` changes none of the `1` cases. A plugin failure is `1` with it or
 without it, and a plugin root that loaded no manifests is `1` with it or without

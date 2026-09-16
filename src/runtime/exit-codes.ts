@@ -87,11 +87,38 @@ export function advanceCounts(result: AdvanceOutcome): AdvanceCounts {
  * changes none of the `1` cases: a plugin failure and a zero-manifest root are
  * `1` with it or without it.
  *
- * A refusal on its own is `0`, for the reason stated at the top of this file: a
- * held approval gate is the runtime doing its job, and a content refusal is the
- * same gate holding because the bytes a human approved are no longer the bytes
- * that would ship. Reporting it as a failure trains an operator to ignore the
- * code. Reporting it as nothing is the other failure — an unattended fleet can
+ * A refusal on its own is `0`. For `indeterminate`, `outside_window` and
+ * `content_moved` that is the reason stated at the top of this file: a held
+ * approval gate is the runtime doing its job, and these three are the same gate
+ * holding, because the authority a human gave no longer covers what would ship.
+ * Reporting it as a failure trains an operator to ignore the code.
+ *
+ * `mark_unavailable` and `mark_uncertain` are NOT the gate holding. They are the
+ * spend mark's own state-document I/O failing, and they exit `0` as well. That
+ * is a decision, and it is safe only because of the advance around the mark,
+ * never because of anything this function reads:
+ *
+ * - The end-of-run locked write in `runAdvance` (lock, read, write the state
+ *   document) sits in no `try` that catches. A full disk or a read-only home that
+ *   failed the mark fails that write too, and the advance exits `75`.
+ * - The top-of-run read sits in no catching `try` either, so a state document
+ *   too corrupt to read fails the next advance with `75`.
+ * - A lock the mark could not take because it cannot be broken at all fails the
+ *   end-of-run acquire the same way, `75`.
+ * - A lock that was only busy exits `0` with nothing marked and nothing sent,
+ *   and the next tick retries and fires. That is the right outcome.
+ *
+ * One case stays quiet and leaves stuck state: a write that throws AFTER its
+ * rename landed. That advance exits `0`, and the next one refuses with
+ * `indeterminate`, which no operator gesture resolves today. It shows through
+ * `refused`, `--json`, the dead-man file and `--strict`, and nowhere louder.
+ *
+ * **This decision is coupled to that end-of-run write.** If anyone ever wraps it
+ * in a `catch`, storage faults stop failing the advance, both mark reasons
+ * become quiet `0`s, and this has to be decided again. The same warning sits on
+ * the write itself.
+ *
+ * Reporting a refusal as nothing is the other failure — an unattended fleet can
  * refuse every send for a week while every monitor reads healthy — which is why
  * the count reaches `--json` and the dead-man file whatever this returns, and
  * why `--strict` covers it.
