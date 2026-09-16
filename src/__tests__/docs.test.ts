@@ -263,53 +263,107 @@ describe('generated manifest table', () => {
 })
 
 /**
- * Every refusal reason has a row in the spec's reason table.
+ * Every place a document enumerates the refusal set names all of it.
  *
  * This is the project's Rule 1 coupling written as a test rather than left to a
  * reviewer noticing: a change to the refusal set MUST update the matching
- * document in the same commit. The set is closed and validated on parse because
- * it is what an unattended scheduler switches on, so a member with no entry in
- * the spec is a closed set carrying an undocumented case — the reader holding
- * the document cannot learn what their own runtime may hand them. That gap was
- * found here by a verification pass reading the two artifacts side by side,
- * which is the slowest possible detector and one that only runs after the fact.
+ * documents in the same commit. The set is closed and validated on parse because
+ * it is what an unattended scheduler switches on, so a document that lists three
+ * of five members teaches that reader a closed set with holes in it.
+ *
+ * The first version of this guard checked one document for one row shape, and
+ * the same commit left three other enumerations naming three of five. It ran
+ * green because those enumerations sat outside its reach. So the guard now
+ * names each enumeration by an anchor line, slices exactly that region and
+ * nothing around it, and requires every member inside the slice. A whole-document
+ * substring check is not enough: `skipped` and `refused` are also row keys in
+ * unrelated tables, so a member could read as documented from the wrong table.
+ *
+ * A new enumeration of the set in any document is a new entry here. That is the
+ * part no test can do for you.
  *
  * Iterated from `RefusalReasonSchema.options`, never from an array written out
- * beside it. A parallel literal is the second list that drifts, and a guard
- * that drifts with the thing it guards is not guarding it.
+ * beside it. A parallel literal is the second list that drifts, and a guard that
+ * drifts with the thing it guards is not guarding it.
  */
-describe('the closed refusal set is documented where a reader looks for it', () => {
-  const SPEC = 'docs/runtime-spec.md'
+describe('the closed refusal set is enumerated in full wherever a document enumerates it', () => {
+  interface Enumeration {
+    doc: string
+    /** Matched against each line with its indent removed. Must hit exactly once. */
+    anchor: string
+    /** `line` is the anchor line alone; `block` runs to the next blank line. */
+    extent: 'line' | 'block'
+    /** `row` wants a table row keyed on the member; `code` wants it in backticks. */
+    form: 'row' | 'code'
+  }
+
+  const ENUMERATIONS: readonly Enumeration[] = [
+    { doc: 'docs/runtime-spec.md', anchor: '| Reason | Decided by | Meaning |', extent: 'block', form: 'row' },
+    { doc: 'docs/runtime-spec.md', anchor: 'A content refusal is `0` on its own', extent: 'block', form: 'code' },
+    { doc: 'docs/runtime-spec.md', anchor: '| `refused` | integer |', extent: 'line', form: 'code' },
+    { doc: 'docs/runtime-spec.md', anchor: 'Read `refused` on its own terms.', extent: 'block', form: 'code' },
+    {
+      doc: 'docs/scheduler-recipe.md',
+      anchor: '- **A held approval gate exits `0`, and so does a content refusal.**',
+      extent: 'block',
+      form: 'code',
+    },
+    { doc: 'docs/scheduler-recipe.md', anchor: '| Exits `0` every tick', extent: 'line', form: 'code' },
+    { doc: 'docs/board-spec.md', anchor: '| `plugin_refused` |', extent: 'line', form: 'code' },
+  ]
 
   /**
-   * The members with no table ROW in `doc`.
+   * The enumeration's own text and nothing around it.
    *
-   * The row form and not a bare substring, the same idiom the manifest-field
-   * check above uses. Every reason is also named in the surrounding prose of
-   * § 5 and § 10, so a plain `includes(member)` stays green after the row it
-   * was written to check has been deleted — a check that cannot fail for the
-   * reason it exists.
+   * Throws on every shape where the slice cannot be trusted: an anchor that is
+   * gone or duplicated, and a block that never ends. Each of those is "could not
+   * look", and a slice quietly taken from the wrong place still contains text.
    */
-  const undocumented = (doc: string, members: readonly string[]): string[] =>
-    members.filter((m) => !doc.includes(`| \`${m}\` |`))
+  function sliceOf(text: string, e: Enumeration): string {
+    const lines = text.split('\n')
+    const hits = lines.flatMap((l, i) => (l.trimStart().startsWith(e.anchor) ? [i] : []))
+    if (hits.length !== 1) {
+      throw new Error(`blind: ${e.doc} has ${hits.length} lines starting ${e.anchor}, expected exactly 1`)
+    }
+    const start = hits[0]!
+    if (e.extent === 'line') return lines[start]!
+    const end = lines.findIndex((l, i) => i > start && l.trim() === '')
+    if (end === -1) throw new Error(`blind: the block at ${e.anchor} in ${e.doc} never ends`)
+    return lines.slice(start, end).join('\n')
+  }
 
-  test('every RefusalReason member has a row in the runtime-spec reason table', () => {
-    const members = RefusalReasonSchema.options
+  const missingFrom = (slice: string, form: Enumeration['form'], members: readonly string[]): string[] =>
+    members.filter((m) => !slice.includes(form === 'row' ? `| \`${m}\` |` : `\`${m}\``))
+
+  const members = RefusalReasonSchema.options
+
+  test('the refusal set is not empty', () => {
     // An iteration over nothing is perfectly green and exactly wrong.
-    if (members.length === 0) throw new Error('blind: RefusalReasonSchema.options is empty')
-    const doc = read(SPEC)
+    expect(members.length).toBeGreaterThan(0)
+  })
 
-    expect(
-      undocumented(doc, members).map(
-        (m) =>
-          `${SPEC}: no \`| \\\`${m}\\\` |\` row in the § 5 refusal-reason table. A RefusalReason a scheduler can switch on with no entry in the spec is a closed set with an undocumented case — add the row in this commit, not the next one.`,
-      ),
-    ).toEqual([])
+  for (const e of ENUMERATIONS) {
+    test(`${e.doc}: the enumeration at "${e.anchor}" names every RefusalReason`, () => {
+      const slice = sliceOf(read(e.doc), e)
+      expect(
+        missingFrom(slice, e.form, members).map(
+          (m) =>
+            `${e.doc}: the enumeration at "${e.anchor}" does not name \`${m}\`. A reader holding this document cannot learn that their runtime may hand them that reason. Name it in this commit, not the next one.`,
+        ),
+      ).toEqual([])
 
-    // The positive control, in the same body as the clean assertion. Without it
-    // the expectation above is green whenever the document read or the row
-    // match stopped working, which is indistinguishable from documented.
-    expect(undocumented(doc, ['mark_indecipherable'])).toEqual(['mark_indecipherable'])
+      // The positive controls, in the same body as the clean assertion. Without
+      // them the expectation above is green whenever the slice or the match
+      // stopped working, which is indistinguishable from documented. The second
+      // runs the same matcher over the REAL slice with one real member removed.
+      expect(missingFrom(slice, e.form, ['mark_indecipherable'])).toEqual(['mark_indecipherable'])
+      const needle = e.form === 'row' ? '| `mark_uncertain` |' : '`mark_uncertain`'
+      expect(missingFrom(slice.replaceAll(needle, ''), e.form, members)).toContain('mark_uncertain')
+    })
+  }
+
+  test('a vanished anchor throws rather than reporting clean', () => {
+    expect(() => sliceOf('nothing here\n', ENUMERATIONS[0]!)).toThrow(/blind/)
   })
 })
 

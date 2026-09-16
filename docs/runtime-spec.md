@@ -2550,7 +2550,7 @@ file's own age.
 | `skipped_reason` | string \| null | `null` when the advance ran. `"quiet_hours"` when it returned early because a quiet window was active. |
 | `gated` | integer | How many plugins are holding at an approval gate. |
 | `failed` | integer | How many plugins ended failed, manifests that would not load included. |
-| `refused` | integer | How many plugins a content approval declined to authorise — the window closed, the approved bytes moved, or a marked fire was never confirmed (§ 5). The **count only**: the reasons are plugin-derived and reach a reader through `warpline advance --json`, never through this file. |
+| `refused` | integer | How many plugins holding a content approval were not fired: the approval stopped applying (`indeterminate`, `outside_window`, `content_moved`), or the spend mark's own state I/O failed and nothing was sent (`mark_unavailable`, `mark_uncertain`) (§ 5). The **count only**: the reasons are plugin-derived and reach a reader through `warpline advance --json`, never through this file. |
 | `pruned` | integer | How many run records this advance's retention prune removed. Always `0` on a skipped advance, which returns above the prune. |
 
 Those eight keys are the whole document, and `dead-man.test.ts` enumerates them
@@ -2633,14 +2633,17 @@ should test them:
    manifest that would not import.
 4. **Waiting.** `gated` or `refused` is greater than zero and `failed` is zero.
    Plugins are holding — at a session approval gate, or on a content approval
-   that no longer authorises the fire. Whether that pages you is your call — it
+   the runtime declined to fire. Whether that pages you is your call — it
    is the same distinction `warpline advance --strict` makes at the exit code,
    and it covers both fields for the same reason.
 
    Read `refused` on its own terms. A non-zero `gated` usually means a human has
    not answered yet; a non-zero `refused` means a human already did, and the
-   answer stopped applying — the window closed, or the approved bytes moved. A
-   fleet that refuses every send on every advance for a week is a fleet doing
+   send still did not happen. Either the answer stopped applying (a marked fire
+   never confirmed, `indeterminate`; the window closed, `outside_window`; the
+   approved bytes moved, `content_moved`), or the runtime could not record the
+   send in its own state and so did not make it (`mark_unavailable`,
+   `mark_uncertain`). A fleet that refuses every send on every advance for a week is a fleet doing
    nothing, and `failed` and `gated` both stay `0` throughout. This field is the
    only thing in the document that shows it. `warpline advance --json` carries
    the reason for each refusal; this file carries the count.
