@@ -1989,6 +1989,19 @@ un-marked. The mark is not cleared on that path: a failed return does not prove
 the sink never received the bytes, and clearing it would re-arm a send that may
 already have gone out.
 
+Every other handler status confirms the spend: `success`, `partial` and
+`skipped`. `partial` confirms because some bytes went out and cannot be unsent.
+`skipped` confirms too, and that includes a `[needs-llm]` handoff that shipped
+nothing, so a handoff consumes the content approval and the operator
+re-approves to fire again. This is deliberate. The mark is taken before the
+handler runs, so leaving `skipped` unconfirmed would not leave the approval
+live. It would leave the record marked and unconfirmed, which is
+`indeterminate`, the same as `failed`: a refusal on every later advance, a trip
+to the sink to look for bytes the runtime knows never left, and no gesture that
+clears it. Handing the approval back would mean clearing the mark on the
+handler's word that nothing shipped, which is the trust refused for `failed`
+above.
+
 The mark is taken under the state document's own lock, with the document re-read
 inside it, so two content-class plugins in one execution level and a concurrent
 `warpline approve --content` are serialised by one mechanism. The write persists

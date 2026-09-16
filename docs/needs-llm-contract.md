@@ -118,6 +118,11 @@ that an orchestrating Claude session runs. The loop:
    is judgment; SENDING it is a side effect — the draft lands somewhere a
    `sends_email`-declaring plugin (or a human) picks up under approval.
 
+A plugin with `approval_class: 'content'` that returns a handoff spends its
+content approval, even though it shipped nothing. The operator re-approves before
+it can fire again. `runtime-spec.md` § 10 says why that is the safer of the two
+choices.
+
 ## Why the plugin does not call the model itself
 
 That is a doctrine question, not a contract detail: see

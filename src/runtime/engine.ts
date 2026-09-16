@@ -1263,6 +1263,11 @@ function markRefusalDetail(reason: MarkRefusal, plugin: string, fingerprint: str
  * and a `failed` return does not prove the sink never received the bytes — the
  * operator resolves it at the sink with the effect id.
  *
+ * Every other handler status is in `confirmed`: `success`, `partial` and
+ * `skipped`, the last including a [needs-llm] handoff that shipped nothing. So a
+ * handoff spends the approval and the operator re-approves. The rationale, and
+ * why excluding `skipped` would be worse, is at the call site that fills the set.
+ *
  * The marked-record guard is not belt and braces: a confirmation stamped on a
  * record nothing marked would claim a fire the document has no account of.
  */
@@ -2715,6 +2720,18 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // stamped at the end-of-run write; `failed` is excluded deliberately,
           // which leaves its record marked-unconfirmed rather than clearing the
           // mark — see `confirmContentMarks`.
+          //
+          // `success`, `partial` AND `skipped` all confirm, so all three spend
+          // the approval. `skipped` includes the [needs-llm] handoff, which
+          // shipped nothing, and the operator re-approves to fire again. That is
+          // deliberate. The mark was taken before the handler ran, so leaving
+          // `skipped` out of this set would not leave the approval live. It
+          // would leave the record marked-unconfirmed, which reads
+          // `indeterminate`, like `failed`, and sends the operator to check a
+          // sink for bytes the runtime knows never left, with no gesture that
+          // clears it. Restoring a live approval would mean clearing the mark
+          // on the handler's word that nothing shipped, which is the trust
+          // refused for `failed`. That is a new design, not an edit here.
           if (finalStatus === 'completed' && ev.content !== undefined) {
             confirmedContentFires.add(pluginName)
           }
