@@ -699,7 +699,7 @@ prose breaks the first time the wording changes.
 | Reason | Decided by | Meaning |
 |--------|------------|---------|
 | `indeterminate` | the gate | A fire was marked and never confirmed, so the runtime cannot tell whether the bytes already shipped |
-| `outside_window` | the gate | The approval window has closed, or its zone no longer resolves on this host |
+| `outside_window` | the gate | The approval window has closed, its zone no longer resolves on this host, or its approval instant cannot be parsed |
 | `content_moved` | the gate | The approved bytes are no longer what would ship |
 | `mark_unavailable` | the spend mark | The mark could not be attempted at all — the state document could not be locked or could not be read — so nothing was written and nothing was sent |
 | `mark_uncertain` | the spend mark | The mark's own write failed, so whether it landed is unknown; nothing was sent either way |

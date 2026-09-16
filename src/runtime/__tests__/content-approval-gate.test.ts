@@ -630,6 +630,28 @@ describe('the content-authority decision', () => {
   })
 
   /**
+   * The other fail-open edge. With no `not_before`, the window opens at
+   * `approved_at`, and `Date.parse` answers an unreadable one with NaN. Every
+   * comparison against NaN is false, so without a guard the window reads open.
+   */
+  test('an approved_at that cannot be parsed refuses rather than opening the window', () => {
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = { ...approvalFor(APPROVED_BODY), approved_at: 'not-an-instant' }
+
+    const standing = approvalStanding(
+      state,
+      CONSUMER,
+      new Map([
+        [PRODUCER, producerManifest()],
+        [CONSUMER, consumerManifestFor(PRODUCER)],
+      ]),
+      Date.now(),
+    )
+
+    expect(standing.standing).toBe('outside_window')
+  })
+
+  /**
    * The two state reports. Neither is the operator having done something wrong,
    * and neither fires.
    */

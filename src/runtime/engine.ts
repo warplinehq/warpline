@@ -580,6 +580,11 @@ export function approvalStanding(
   } catch {
     return { standing: 'outside_window', approval }
   }
+  // `approved_at` is a plain string, and `Date.parse` answers an unreadable one
+  // with NaN rather than a throw. `now < NaN` is false, so left alone it reads
+  // as an OPEN window. An unreadable approval instant is an unreadable window,
+  // and that fails closed exactly as the zone arm above does.
+  if (Number.isNaN(opensAt)) return { standing: 'outside_window', approval }
 
   if (now >= closesAt) return { standing: 'outside_window', approval }
   if (now < opensAt) return { standing: 'before_window', approval }
