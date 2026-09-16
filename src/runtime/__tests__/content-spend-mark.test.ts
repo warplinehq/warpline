@@ -584,6 +584,34 @@ describe("the spend mark's own I/O failing is a refusal, not a dead advance", ()
 })
 
 /**
+ * The module-level declaration named `name`, as its own lines.
+ *
+ * Module scope rather than inside one `describe`, because two suites below read
+ * the same extraction and a second copy of this is a second thing that can
+ * disagree about what a function body is.
+ *
+ * Throws rather than returning empty on every failure. An enumeration that
+ * found nothing is "did not look", and reporting it as clean is perfectly
+ * green and exactly wrong — the failure class this repository has logged six
+ * instances of.
+ */
+function bodyOf(name: string): string[] {
+  const source = readFileSync(join(import.meta.dir, '..', 'engine.ts'), 'utf-8')
+  const lines = source.split('\n')
+  const start = lines.findIndex((l) => new RegExp(`^(export )?async function ${name}\\(`).test(l))
+  if (start === -1) {
+    throw new Error(`blind: ${name} is not declared at module level in engine.ts`)
+  }
+  const end = lines.findIndex((l, i) => i > start && l === '}')
+  if (end === -1) throw new Error(`blind: ${name} has no closing brace at column 0`)
+  const body = lines.slice(start, end + 1)
+  // Non-trivial by assertion, not by hope: a one-line range names no writer
+  // for the reason that it contains nothing.
+  if (body.length < 20) throw new Error(`blind: ${name}'s extracted range is ${body.length} lines`)
+  return body
+}
+
+/**
  * The mark is not reachable from `evaluatePlugin`.
  *
  * `evaluatePlugin` is what `warpline plan` calls, and the evaluator/orchestrator
@@ -619,30 +647,6 @@ describe('the spend mark is unreachable from the evaluator', () => {
     'lockStateDocument',
   ] as const
 
-  /**
-   * The module-level declaration named `name`, as its own lines.
-   *
-   * Throws rather than returning empty on every failure. An enumeration that
-   * found nothing is "did not look", and reporting it as clean is perfectly
-   * green and exactly wrong — the failure class this repository has logged six
-   * instances of.
-   */
-  function bodyOf(name: string): string[] {
-    const source = readFileSync(join(import.meta.dir, '..', 'engine.ts'), 'utf-8')
-    const lines = source.split('\n')
-    const start = lines.findIndex((l) => new RegExp(`^(export )?async function ${name}\\(`).test(l))
-    if (start === -1) {
-      throw new Error(`blind: ${name} is not declared at module level in engine.ts`)
-    }
-    const end = lines.findIndex((l, i) => i > start && l === '}')
-    if (end === -1) throw new Error(`blind: ${name} has no closing brace at column 0`)
-    const body = lines.slice(start, end + 1)
-    // Non-trivial by assertion, not by hope: a one-line range names no writer
-    // for the reason that it contains nothing.
-    if (body.length < 20) throw new Error(`blind: ${name}'s extracted range is ${body.length} lines`)
-    return body
-  }
-
   const named = (body: readonly string[]): string[] =>
     FORBIDDEN.filter((symbol) => body.some((l) => l.includes(symbol)))
 
@@ -661,5 +665,135 @@ describe('the spend mark is unreachable from the evaluator', () => {
       'writeEngineState',
       'lockStateDocument',
     ])
+  })
+})
+
+/**
+ * The write arm and its rollback are still WRITTEN.
+ *
+ * This is a source assertion rather than a behavioural one, and the reason is a
+ * limit rather than a preference. `mark_uncertain` is returned only when
+ * `writeEngineState` throws with the lock already held and the read already
+ * done, and no in-process lever reaches that window:
+ *
+ * - `pathsForStateFile` puts `.state.lock` in the state document's own
+ *   directory, so every permission change that would break the write breaks the
+ *   `O_EXCL` lock acquire first — which lands in the OUTER arm and answers
+ *   `mark_unavailable`, a different case that already has behavioural coverage
+ *   above.
+ * - `atomicWriteText`'s temp name carries `Math.random()`, so no pre-created
+ *   path and no pre-made read-only file can single the write out either.
+ *
+ * So the arm is verified here by source assertion, and by `tsc` through
+ * `markRefusalDetail`'s exhaustive `switch` over `MarkRefusal` — removing an arm
+ * there makes `bun run typecheck` print an `error TS` line. Both are WEAKER than
+ * a behavioural case: they assert the arm is present, never that it behaves. The
+ * arm's meaning is carried by `docs/runtime-spec.md` § 5's reason table and
+ * § 10's crash semantics. What this stops is a refactor deleting the rollback
+ * with the whole suite green, which is worth having precisely because nothing
+ * else would notice.
+ *
+ * Every enumeration below throws rather than returning empty, and the green
+ * assertion is paired with a control over a DOCTORED copy of the real body. A
+ * scan whose window arithmetic quietly stopped matching reads identical to a
+ * clean one, which is the failure class this repository has logged six
+ * instances of.
+ */
+describe('the write arm and its rollback are still written', () => {
+  /** Lines to read past the inner `catch` for its rollback and its return. */
+  const INNER_WINDOW = 4
+  /** Lines to read past the outer `catch` for its return. */
+  const OUTER_WINDOW = 3
+
+  /**
+   * The offenders in a `markContentApprovalSpent` body, or an empty list.
+   *
+   * PURE and taking lines, so the control below runs this exact code over a
+   * modified copy of the REAL body — a hand-written fake would agree with the
+   * checker by construction and prove nothing about either.
+   *
+   * Throws on every shape where the scan cannot see what it was written for: a
+   * body naming no writer, a body holding fewer than two `catch` lines, a body
+   * whose catches all sit above the write, and a body where the inner and outer
+   * catch resolve to the same line. Each of those is "could not look", and
+   * returning an empty offender list for one would be perfectly green.
+   */
+  function offendersIn(body: readonly string[]): string[] {
+    const writeAt = body.findIndex((l) => l.includes('writeEngineState'))
+    if (writeAt === -1) {
+      throw new Error('blind: markContentApprovalSpent names no writeEngineState')
+    }
+    const catches = body.flatMap((l, i) => (l.includes('catch') ? [i] : []))
+    if (catches.length < 2) {
+      throw new Error(
+        `blind: markContentApprovalSpent holds ${catches.length} lines naming catch, expected the outer and the inner arm`,
+      )
+    }
+    const inner = catches.find((i) => i > writeAt)
+    if (inner === undefined) {
+      throw new Error('blind: no catch below the writeEngineState line — the write is not guarded')
+    }
+    const outer = catches[catches.length - 1]!
+    if (outer === inner) {
+      throw new Error('blind: the inner and outer arm resolve to the same catch line')
+    }
+
+    const offenders: string[] = []
+    const innerLines = body.slice(inner + 1, inner + 1 + INNER_WINDOW)
+    if (!innerLines.some((l) => l.includes('mark_uncertain'))) {
+      offenders.push(
+        "the catch around writeEngineState no longer returns 'mark_uncertain' — a write that may have landed would report as some other case, and the operator would be told a state the runtime does not know",
+      )
+    }
+    // `=[^=]` and not a bare `=`, so a future `===` comparison cannot pass for
+    // the assignment. The identical assignment further up the body — the one
+    // that PLACES the mark — sits well outside this window.
+    if (!innerLines.some((l) => /state\.approvals\[plugin\]\s*=[^=]/.test(l))) {
+      offenders.push(
+        'the catch around writeEngineState no longer restores state.approvals[plugin] — left marked, the end-of-run merge promotes a mark nothing observed land, turning a recoverable retry into a permanent indeterminate',
+      )
+    }
+    const outerLines = body.slice(outer + 1, outer + 1 + OUTER_WINDOW)
+    if (!outerLines.some((l) => l.includes('mark_unavailable'))) {
+      offenders.push(
+        "the outermost catch no longer returns 'mark_unavailable' — the arm that means nothing was written would answer with something else",
+      )
+    }
+    return offenders
+  }
+
+  /**
+   * The body with the single line naming `symbol` removed.
+   *
+   * Exactly one, asserted: doctoring a body where the symbol appears twice would
+   * leave the other copy in place and the control would be green over an input
+   * it never actually damaged — a positive control that is itself blind.
+   */
+  function without(body: readonly string[], symbol: string): string[] {
+    const hits = body.flatMap((l, i) => (l.includes(symbol) ? [i] : []))
+    if (hits.length !== 1) {
+      throw new Error(`blind control: ${hits.length} lines name ${symbol}, expected exactly 1`)
+    }
+    return body.filter((_, i) => i !== hits[0])
+  }
+
+  test('the shipped body names the arm, the rollback and the outer refusal', () => {
+    expect(offendersIn(bodyOf('markContentApprovalSpent'))).toEqual([])
+  })
+
+  /**
+   * The positive control, and the only thing that makes the assertion above
+   * mean anything. Remove the one line naming `mark_uncertain` from the real
+   * body and the same function must report — otherwise a green result is
+   * indistinguishable from a scan that stopped looking.
+   */
+  test('the same checker reports a body whose mark_uncertain line was removed', () => {
+    const doctored = without(bodyOf('markContentApprovalSpent'), 'mark_uncertain')
+    expect(offendersIn(doctored)).not.toEqual([])
+  })
+
+  test('a body naming no writer throws rather than reporting clean', () => {
+    const doctored = without(bodyOf('markContentApprovalSpent'), 'writeEngineState')
+    expect(() => offendersIn(doctored)).toThrow(/blind/)
   })
 })
