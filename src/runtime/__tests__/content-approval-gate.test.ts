@@ -823,6 +823,12 @@ describe('a content refusal carries a machine-readable reason', () => {
 
     expect(result.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'content_moved' }])
     expect(existsSync(sentinel)).toBe(false)
+
+    // A refusal adds no state of its own. The consumer reads `skipped`, the
+    // same as any other not-due plugin. The `has` check comes first, because
+    // a missing entry would fail `toBe` with an unhelpful `undefined`.
+    expect(result.plugin_states.has(CONSUMER)).toBe(true)
+    expect(result.plugin_states.get(CONSUMER)).toBe('skipped')
   })
 })
 
