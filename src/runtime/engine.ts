@@ -864,8 +864,11 @@ function contentGateApplies(g: GateInput): boolean {
  * operator-configured value arriving in a result summary.
  *
  * The cost is that a refusal says WHICH bound failed rather than what it was.
- * That is the right way round: the operator can read their own record back with
- * `warpline plan`, and cannot take back a value that has already been shared.
+ * That is the right way round, even though no command prints a content window
+ * back today: `warpline plan` renders only whether an approval exists, so the
+ * record is readable only in `<home>/state/engine-state.json`. That is a gap in
+ * read-back, not a reason to interpolate. A value that has already been shared
+ * cannot be taken back.
  */
 function contentGateDetail(g: GateInput): string {
   const s = g.contentStanding
@@ -881,9 +884,9 @@ function contentGateDetail(g: GateInput): string {
       )
     // The window bounds and the zone are OPERATOR-TYPED strings that arrived on
     // a command line and were stored verbatim, so neither may be interpolated
-    // here however harmless it looks — the operator can read their own window
-    // back with `warpline plan`, and these strings go somewhere they cannot
-    // take it back from.
+    // here however harmless it looks. No command prints the window back, so
+    // the operator reads it in `<home>/state/engine-state.json`, and these
+    // strings go somewhere they cannot take it back from.
     case 'before_window':
       return 'unapproved: the content approval window has not opened yet'
     case 'outside_window':
