@@ -321,7 +321,7 @@ set, so a new member would be silently dropped from every board view. Any
 | `denial_recorded` | the operator ran `warpline deny` and a denial was written |
 | | A `deny` against a live parked gate emits BOTH: `denial_recorded` for the answer, and `gate_invalidated` with `reason: denied` for the result it dequeued. They are separate events because they are separate facts — a reader tracking parked work must not have to infer the discard from the denial. |
 | `plugin_denied` | an advance skipped a plugin because a live denial answered it |
-| `plugin_refused` | an advance did not fire a plugin because the content approval it was waiting on stopped applying (`metadata_json.reason` distinguishes: `indeterminate`, `outside_window`, `content_moved`) |
+| `plugin_refused` | an advance did not fire a plugin because the content approval it was waiting on stopped applying (`metadata_json.reason` distinguishes: `indeterminate`, `outside_window`, `content_moved`, `mark_unavailable`, `mark_uncertain`) |
 
 `plugin_denied` is a `notice`, not a `plugin_result` skip. The run log
 distinguishes `denied` from `skipped` so an answered question cannot be read as

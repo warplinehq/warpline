@@ -17,23 +17,35 @@ import { z } from 'zod'
 /**
  * Why a content approval that exists did not authorise a fire.
  *
- * A closed set of exactly three, validated on parse, because this value is
- * what an unattended scheduler switches on. An open-ended reason string would
- * let a value the runtime did not author reach that switch, and a consumer
- * parsing prose breaks the first time the wording changes.
+ * A closed set, validated on parse, because this value is what an unattended
+ * scheduler switches on. An open-ended reason string would let a value the
+ * runtime did not author reach that switch, and a consumer parsing prose
+ * breaks the first time the wording changes.
  *
- * The three are decided in the order `indeterminate` → `outside_window` →
- * `content_moved`, and the order is not arbitrary: an `indeterminate` mark
+ * Two decision points, and the members belong to one or the other. THREE are
+ * decided by the gate, in the order `indeterminate` → `outside_window` →
+ * `content_moved`, and that order is not arbitrary: an `indeterminate` mark
  * means the runtime cannot tell whether the bytes already shipped, and that
  * question outranks both "the window closed" and "the bytes moved", neither of
- * which can be answered honestly while the first is open.
+ * which can be answered honestly while the first is open. TWO —
+ * `mark_unavailable` and `mark_uncertain` — are decided later, at the spend
+ * mark, after the gate has already said fire, so they sit outside that order
+ * rather than anywhere within it. They report the mark's OWN I/O failing:
+ * `mark_unavailable` when nothing was written, `mark_uncertain` when the write
+ * failed mid-flight and whether it landed is unknown.
  *
- * **A spent approval is deliberately not a fourth member.** It is no live
+ * **A spent approval is deliberately not a member.** It is no live
  * authority and no operator error — the runtime already fired those
  * bytes, which is the instruction having been carried out. It is a state
  * report, and there is nothing in it for a consumer to switch on.
  */
-export const RefusalReasonSchema = z.enum(['content_moved', 'outside_window', 'indeterminate'])
+export const RefusalReasonSchema = z.enum([
+  'content_moved',
+  'outside_window',
+  'indeterminate',
+  'mark_unavailable',
+  'mark_uncertain',
+])
 export type RefusalReason = z.infer<typeof RefusalReasonSchema>
 
 export const PluginLogEntrySchema = z.object({
@@ -57,8 +69,10 @@ export const PluginLogEntrySchema = z.object({
   elapsed_ms: z.number().int(),
   result_summary: z.string(),
   /**
-   * Which of the three ways a content approval stopped applying, populated
-   * only on a `refused` entry.
+   * Why a content approval did not authorise this fire, populated only on a
+   * `refused` entry. Three of the members say the gate found the authority no
+   * longer applied; the other two say the spend mark's own I/O failed after
+   * the gate had said fire.
    *
    * The closed set is what lets a scheduler switch on the cause without
    * parsing `result_summary`'s prose, which is written for an operator and is

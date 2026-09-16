@@ -690,21 +690,42 @@ afterwards, so the set is not extended casually.
 ### Refusal reasons
 
 A content approval that exists and does not authorise a fire refuses for
-exactly one of three reasons. The set is closed and validated on parse, because
-this is the value an unattended scheduler switches on: an open-ended reason
-string would let something the runtime did not author reach that switch, and a
-consumer parsing prose breaks the first time the wording changes.
+exactly one of five reasons: three decided by the gate, and two decided later at
+the spend mark. The set is closed and validated on parse, because this is the
+value an unattended scheduler switches on: an open-ended reason string would let
+something the runtime did not author reach that switch, and a consumer parsing
+prose breaks the first time the wording changes.
 
-| Reason | Meaning |
-|--------|---------|
-| `indeterminate` | A fire was marked and never confirmed, so the runtime cannot tell whether the bytes already shipped |
-| `outside_window` | The approval window has closed, or its zone no longer resolves on this host |
-| `content_moved` | The approved bytes are no longer what would ship |
+| Reason | Decided by | Meaning |
+|--------|------------|---------|
+| `indeterminate` | the gate | A fire was marked and never confirmed, so the runtime cannot tell whether the bytes already shipped |
+| `outside_window` | the gate | The approval window has closed, or its zone no longer resolves on this host |
+| `content_moved` | the gate | The approved bytes are no longer what would ship |
+| `mark_unavailable` | the spend mark | The mark could not be attempted at all — the state document could not be locked or could not be read — so nothing was written and nothing was sent |
+| `mark_uncertain` | the spend mark | The mark's own write failed, so whether it landed is unknown; nothing was sent either way |
 
-They are decided in that order, and the order is not arbitrary. An
+The first three are decided in that order, and the order is not arbitrary. An
 `indeterminate` mark outranks both of the others because neither "the window
 closed" nor "the bytes moved" can be answered honestly while the runtime does
 not know whether the fire already happened.
+
+**That precedence covers the three gate-time reasons and nothing else.** The two
+mark reasons are decided at a second point, after the gate has already said
+fire, so they are not slotted anywhere into that order — a mark reason and a
+gate reason are never candidates for the same decision. `mark_unavailable` and
+`mark_uncertain` are two members rather than one because they leave the operator
+in different places: after `mark_unavailable` the record on disk is untouched
+and the next advance retries cleanly, while after `mark_uncertain` the record
+may be marked and the next advance may refuse with `indeterminate`. Neither maps
+onto `indeterminate` itself, which means the runtime cannot tell whether the
+BYTES SHIPPED — on both mark reasons they definitely did not, because the
+handler is never invoked.
+
+The underlying I/O error is deliberately not carried into the refusal string.
+Its message embeds the state document's path and the parser's quotation of the
+document's own bytes, and these strings reach the run log, the JSONL rows and
+the board. The diagnostic is deferred rather than lost: the next advance's
+top-of-run read raises the same error to stderr with a non-zero exit.
 
 `already_spent` is deliberately **not** among them. A spent approval is no live
 authority and no operator error — the runtime already fired those bytes, which
@@ -1976,6 +1997,25 @@ end-of-run write, so a crash after a successful send but before that write reads
 `indeterminate` on the next advance too. That is the conservative and correct
 reading — the runtime genuinely does not know — and the effect id is the remedy:
 the operator resolves it at the sink rather than guessing here.
+
+**When the mark's own I/O fails.** The mark sits between a gate that has already
+said fire and a handler that has not been invoked, so its own failure is a
+refusal with a reason of its own rather than an error that ends the advance. On
+either arm there is **no mark and no invocation**: the level loop continues, and
+the advance still writes its run log, its JSONL rows and its dead-man file, with
+the refused plugin carried on all of them. The two arms are split by where the
+failure happened, not by which error class arrived. A lock that could not be
+acquired or a document that could not be read is `mark_unavailable`, because
+both sit above the write and nothing can have been written. A write that threw
+is `mark_uncertain`, because the rename may have landed.
+
+On the `mark_uncertain` arm the in-memory record is restored to the value it
+held before the mark, which puts it on the **unmarked in-memory** row of the
+merge table this section already cites — the row where the disk wins. The disk
+then decides: a write that landed reads `indeterminate` on the next advance, and
+one that did not is retried and fires. Left marked instead, the end-of-run merge
+would promote a mark this process never observed land, which is the runtime
+asserting a fact it does not have.
 
 #### Writing and withdrawing one (`warpline approve --content`)
 

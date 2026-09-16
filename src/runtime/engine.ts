@@ -1094,51 +1094,98 @@ async function markContentApprovalSpent(
   eventsPath: string | undefined,
   plugin: string,
   authority: ContentAuthority,
-): Promise<RefusalReason | undefined> {
-  // The lock that guards THIS document, derived from the path this advance
-  // actually writes rather than from the state manager's module globals.
-  return lockStateDocument(statePath, async () => {
-    // Inside the lock, and it has to be: a read outside it is a read of a
-    // document another writer may replace before the write lands.
-    // `announceDiscards: false` because the top-of-advance read already
-    // announced anything discardable — a second notice mid-run is the same news
-    // twice.
-    const disk = await readEngineState(statePath, { eventsPath, announceDiscards: false })
-    // Own-property, never a bare index: on a plain-object record `approvals`
-    // answers `toString` with an inherited member rather than with absence.
-    const record = Object.hasOwn(disk.approvals, plugin) ? disk.approvals[plugin] : undefined
+): Promise<MarkRefusal | undefined> {
+  // The partition is by CALL SITE, never by an `instanceof` taxonomy: the
+  // question is not which error class arrived, it is whether the write had been
+  // reached when it did. The outer arm covers the acquire and the read, both of
+  // which sit ABOVE the write, so nothing can have been written when it is
+  // reached — and the release cannot throw, because it swallows its own error.
+  // The inner arm covers the write alone, where the rename may have landed.
+  // An error bound to a name here would be an error something could
+  // interpolate: the read's message carries the state path and the parser's
+  // quotation of the document's own bytes, which is the leak this file has
+  // already paid for. The diagnostic is deferred, not lost — the next advance's
+  // top-of-run read raises the same error with a non-zero exit.
+  try {
+    // The lock that guards THIS document, derived from the path this advance
+    // actually writes rather than from the state manager's module globals.
+    // `await` and not a bare return: an un-awaited promise rejects OUTSIDE this
+    // `try`, which would leave the partition wrapped around nothing.
+    return await lockStateDocument(statePath, async () => {
+      // Inside the lock, and it has to be: a read outside it is a read of a
+      // document another writer may replace before the write lands.
+      // `announceDiscards: false` because the top-of-advance read already
+      // announced anything discardable — a second notice mid-run is the same news
+      // twice.
+      const disk = await readEngineState(statePath, { eventsPath, announceDiscards: false })
+      // Own-property, never a bare index: on a plain-object record `approvals`
+      // answers `toString` with an inherited member rather than with absence.
+      const record = Object.hasOwn(disk.approvals, plugin) ? disk.approvals[plugin] : undefined
 
-    if (record === undefined || record.fingerprint !== authority.fingerprint) return 'content_moved'
-    if (record.marked_at !== null) return 'indeterminate'
+      if (record === undefined || record.fingerprint !== authority.fingerprint) return 'content_moved'
+      if (record.marked_at !== null) return 'indeterminate'
 
-    // `marked_at` IS the fire instant, and the identity is load-bearing: it is
-    // what makes the effect id RECOMPUTABLE from the stored record, so a reader
-    // holding `(plugin, fingerprint, marked_at)` can check an id they were
-    // handed. It is not a promise that a retry regenerates one — a retry reads
-    // the stored id.
-    //
-    // `confirmed_at` is untouched here. One timestamp cannot express both
-    // post-fire states: written before the handler it makes every successful
-    // send read indeterminate forever, turning a content-approved plugin into a
-    // one-shot; written after, it silently loses the crash case.
-    const marked: Approval = {
-      ...record,
-      marked_at: authority.fire_instant,
-      effect_id: authority.effect_id,
-    }
-    // The in-memory record, replaced rather than mutated field by field, so the
-    // end-of-run write carries the mark without a second merge there. The disk
-    // copy is the base because it may hold a fresher operator write of the
-    // fields this mark does not touch.
-    state.approvals[plugin] = marked
+      // `marked_at` IS the fire instant, and the identity is load-bearing: it is
+      // what makes the effect id RECOMPUTABLE from the stored record, so a reader
+      // holding `(plugin, fingerprint, marked_at)` can check an id they were
+      // handed. It is not a promise that a retry regenerates one — a retry reads
+      // the stored id.
+      //
+      // `confirmed_at` is untouched here. One timestamp cannot express both
+      // post-fire states: written before the handler it makes every successful
+      // send read indeterminate forever, turning a content-approved plugin into a
+      // one-shot; written after, it silently loses the crash case.
+      const marked: Approval = {
+        ...record,
+        marked_at: authority.fire_instant,
+        effect_id: authority.effect_id,
+      }
+      // Captured before the assignment below, because it is what the rollback
+      // puts back. It is defined by construction: the gate read this same
+      // in-memory record to produce the authority that brought us here.
+      const beforeMark = state.approvals[plugin]
+      // The in-memory record, replaced rather than mutated field by field, so the
+      // end-of-run write carries the mark without a second merge there. The disk
+      // copy is the base because it may hold a fresher operator write of the
+      // fields this mark does not touch.
+      state.approvals[plugin] = marked
 
-    await writeEngineState(
-      { ...disk, approvals: mergeApprovals(disk.approvals, state.approvals) },
-      statePath,
-    )
-    return undefined
-  })
+      try {
+        await writeEngineState(
+          { ...disk, approvals: mergeApprovals(disk.approvals, state.approvals) },
+          statePath,
+        )
+      } catch {
+        // The claim is withdrawn, because this process cannot back it. Left
+        // marked, `mergeApprovals`'s marked-in-memory row would promote a mark
+        // to the end-of-run write that may never have landed — the runtime
+        // inventing a fact, and turning a recoverable retry into a permanent
+        // `indeterminate` with no operator gesture to resolve it. Restored, the
+        // record sits on the unmarked-in-memory row where DISK WINS, and the
+        // disk decides: a write that landed reads `indeterminate` next advance,
+        // one that did not retries and fires.
+        state.approvals[plugin] = beforeMark
+        // Returned rather than rethrown, so the lock releases on the normal
+        // path and the outer arm — which means "nothing was written" — is not
+        // reached by the one case where something may have been.
+        return 'mark_uncertain'
+      }
+      return undefined
+    })
+  } catch {
+    return 'mark_unavailable'
+  }
 }
+
+/**
+ * The four `RefusalReason` members a spend mark can produce.
+ *
+ * `outside_window` is the one it cannot: a closed window is decided by the gate,
+ * which never says fire on one, so the mark is never reached with it. Narrowing
+ * the parameter is what lets the `switch` below be exhaustive over what can
+ * actually arrive rather than carrying an arm for a value that cannot.
+ */
+type MarkRefusal = Exclude<RefusalReason, 'outside_window'>
 
 /**
  * The operator string for a mark that could not be taken.
@@ -1154,12 +1201,32 @@ async function markContentApprovalSpent(
  * precondition failing between the gate and the handler, which is a window the
  * gate never saw.
  */
-function markRefusalDetail(reason: RefusalReason, plugin: string, fingerprint: string): string {
-  return reason === 'indeterminate'
-    ? `refused (indeterminate): the content approval for '${plugin}' was already marked spent ` +
+function markRefusalDetail(reason: MarkRefusal, plugin: string, fingerprint: string): string {
+  switch (reason) {
+    case 'indeterminate':
+      return (
+        `refused (indeterminate): the content approval for '${plugin}' was already marked spent ` +
         'before this fire could mark it, so the runtime cannot tell whether that fire completed'
-    : `refused (content_moved): the approved content moved between the gate and the spend mark — ` +
+      )
+    case 'content_moved':
+      return (
+        `refused (content_moved): the approved content moved between the gate and the spend mark — ` +
         `the fingerprint the gate decided on (${fingerprint}) is no longer the one on file`
+      )
+    case 'mark_unavailable':
+      return (
+        `refused (mark_unavailable): the spend mark for '${plugin}' could not be taken — the state ` +
+        'document could not be locked or read, so nothing was marked and nothing was sent'
+      )
+    case 'mark_uncertain':
+      return (
+        `refused (mark_uncertain): the spend mark for '${plugin}' failed while writing, so nothing ` +
+        'was sent and whether the mark landed is unknown — the next advance may refuse with ' +
+        'indeterminate'
+      )
+    default:
+      return assertNever(reason)
+  }
 }
 
 /**
