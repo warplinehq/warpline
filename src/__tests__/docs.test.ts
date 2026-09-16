@@ -34,6 +34,7 @@ import { renderPlan } from '../cli/plan-render.js'
 import { _setHome } from '../lib/paths.js'
 import { DEFAULT_TTL_MS, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { PluginManifestSchema } from '../schemas/plugin-manifest.js'
+import { RefusalReasonSchema } from '../schemas/run-log.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf8')
@@ -258,6 +259,57 @@ describe('generated manifest table', () => {
     const doc = read('docs/runtime-spec.md')
     const missing = Object.keys(PluginManifestSchema.shape).filter((f) => !doc.includes(`| \`${f}\` |`))
     expect(missing).toEqual([])
+  })
+})
+
+/**
+ * Every refusal reason has a row in the spec's reason table.
+ *
+ * This is the project's Rule 1 coupling written as a test rather than left to a
+ * reviewer noticing: a change to the refusal set MUST update the matching
+ * document in the same commit. The set is closed and validated on parse because
+ * it is what an unattended scheduler switches on, so a member with no entry in
+ * the spec is a closed set carrying an undocumented case — the reader holding
+ * the document cannot learn what their own runtime may hand them. That gap was
+ * found here by a verification pass reading the two artifacts side by side,
+ * which is the slowest possible detector and one that only runs after the fact.
+ *
+ * Iterated from `RefusalReasonSchema.options`, never from an array written out
+ * beside it. A parallel literal is the second list that drifts, and a guard
+ * that drifts with the thing it guards is not guarding it.
+ */
+describe('the closed refusal set is documented where a reader looks for it', () => {
+  const SPEC = 'docs/runtime-spec.md'
+
+  /**
+   * The members with no table ROW in `doc`.
+   *
+   * The row form and not a bare substring, the same idiom the manifest-field
+   * check above uses. Every reason is also named in the surrounding prose of
+   * § 5 and § 10, so a plain `includes(member)` stays green after the row it
+   * was written to check has been deleted — a check that cannot fail for the
+   * reason it exists.
+   */
+  const undocumented = (doc: string, members: readonly string[]): string[] =>
+    members.filter((m) => !doc.includes(`| \`${m}\` |`))
+
+  test('every RefusalReason member has a row in the runtime-spec reason table', () => {
+    const members = RefusalReasonSchema.options
+    // An iteration over nothing is perfectly green and exactly wrong.
+    if (members.length === 0) throw new Error('blind: RefusalReasonSchema.options is empty')
+    const doc = read(SPEC)
+
+    expect(
+      undocumented(doc, members).map(
+        (m) =>
+          `${SPEC}: no \`| \\\`${m}\\\` |\` row in the § 5 refusal-reason table. A RefusalReason a scheduler can switch on with no entry in the spec is a closed set with an undocumented case — add the row in this commit, not the next one.`,
+      ),
+    ).toEqual([])
+
+    // The positive control, in the same body as the clean assertion. Without it
+    // the expectation above is green whenever the document read or the row
+    // match stopped working, which is indistinguishable from documented.
+    expect(undocumented(doc, ['mark_indecipherable'])).toEqual(['mark_indecipherable'])
   })
 })
 
