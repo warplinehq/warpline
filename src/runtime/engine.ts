@@ -1146,8 +1146,12 @@ async function markContentApprovalSpent(
         effect_id: authority.effect_id,
       }
       // Captured before the assignment below, because it is what the rollback
-      // puts back. It is defined by construction: the gate read this same
-      // in-memory record to produce the authority that brought us here.
+      // puts back. Own-property, as at every other read of this record: the
+      // gate found this key to produce the authority that brought us here, but
+      // "present by construction" is an assumption, and absence has to be put
+      // back as absence. An own key holding `undefined` is not absent, and
+      // every end-of-run reader of this record dereferences it.
+      const hadRecord = Object.hasOwn(state.approvals, plugin)
       const beforeMark = state.approvals[plugin]
       // The in-memory record, replaced rather than mutated field by field, so the
       // end-of-run write carries the mark without a second merge there. The disk
@@ -1175,7 +1179,8 @@ async function markContentApprovalSpent(
           statePath,
         )
       } catch {
-        state.approvals[plugin] = beforeMark
+        if (hadRecord) state.approvals[plugin] = beforeMark
+        else delete state.approvals[plugin]
         return 'mark_uncertain'
       }
       return undefined
