@@ -1150,24 +1150,27 @@ async function markContentApprovalSpent(
       // fields this mark does not touch.
       state.approvals[plugin] = marked
 
+      // Below, the write's own failure withdraws the claim above it, because
+      // this process cannot back it. Left marked, `mergeApprovals`'s
+      // marked-in-memory row would promote a mark to the end-of-run write that
+      // may never have landed — the runtime inventing a fact, and turning a
+      // recoverable retry into a permanent `indeterminate` with no operator
+      // gesture to resolve it. Restored, the record sits on the
+      // unmarked-in-memory row where DISK WINS: a write that landed reads
+      // `indeterminate` next advance, one that did not retries and fires. The
+      // value is RETURNED and not rethrown, so the lock releases on the normal
+      // path and the outer arm — which means "nothing was written" — is not
+      // reached by the one case where something may have been. The rationale
+      // sits HERE rather than inside the arm below, because the rollback and
+      // the return are read by a source scan that looks a few lines past the
+      // guard: prose wedged between them pushes the return out of its window.
       try {
         await writeEngineState(
           { ...disk, approvals: mergeApprovals(disk.approvals, state.approvals) },
           statePath,
         )
       } catch {
-        // The claim is withdrawn, because this process cannot back it. Left
-        // marked, `mergeApprovals`'s marked-in-memory row would promote a mark
-        // to the end-of-run write that may never have landed — the runtime
-        // inventing a fact, and turning a recoverable retry into a permanent
-        // `indeterminate` with no operator gesture to resolve it. Restored, the
-        // record sits on the unmarked-in-memory row where DISK WINS, and the
-        // disk decides: a write that landed reads `indeterminate` next advance,
-        // one that did not retries and fires.
         state.approvals[plugin] = beforeMark
-        // Returned rather than rethrown, so the lock releases on the normal
-        // path and the outer arm — which means "nothing was written" — is not
-        // reached by the one case where something may have been.
         return 'mark_uncertain'
       }
       return undefined
