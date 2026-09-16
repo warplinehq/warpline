@@ -1102,10 +1102,12 @@ async function markContentApprovalSpent(
 ): Promise<MarkRefusal | undefined> {
   // The partition is by CALL SITE, never by an `instanceof` taxonomy: the
   // question is not which error class arrived, it is whether the write had been
-  // reached when it did. The outer arm covers the acquire and the read, both of
-  // which sit ABOVE the write, so nothing can have been written when it is
-  // reached — and the release cannot throw, because it swallows its own error.
-  // The inner arm covers the write alone, where the rename may have landed.
+  // reached when it did. The outer arm covers the acquire, the read and the
+  // building of the payload, all of which sit ABOVE the write, so nothing can
+  // have been written when it is reached — and the release cannot throw,
+  // because it swallows its own error. The inner arm covers the write call
+  // alone, where the rename may have landed. That includes the write's own
+  // pre-rename steps, which is the conservative direction.
   // An error bound to a name here would be an error something could
   // interpolate: the read's message carries the state path and the parser's
   // quotation of the document's own bytes, which is the leak this file has
@@ -1145,6 +1147,16 @@ async function markContentApprovalSpent(
         marked_at: authority.fire_instant,
         effect_id: authority.effect_id,
       }
+      // The payload is built HERE, above the in-memory assignment and outside
+      // the write's own guard, so the inner arm below means what it says: the
+      // write was reached. A throw while building it reaches the outer arm,
+      // which is the true answer, because nothing has been written and nothing
+      // in memory has changed yet. The merge sees the mark through a copy
+      // rather than through `state`, so that path has nothing to roll back.
+      const payload: EngineState = {
+        ...disk,
+        approvals: mergeApprovals(disk.approvals, { ...state.approvals, [plugin]: marked }),
+      }
       // Captured before the assignment below, because it is what the rollback
       // puts back. Own-property, as at every other read of this record: the
       // gate found this key to produce the authority that brought us here, but
@@ -1174,10 +1186,7 @@ async function markContentApprovalSpent(
       // the return are read by a source scan that looks a few lines past the
       // guard: prose wedged between them pushes the return out of its window.
       try {
-        await writeEngineState(
-          { ...disk, approvals: mergeApprovals(disk.approvals, state.approvals) },
-          statePath,
-        )
+        await writeEngineState(payload, statePath)
       } catch {
         if (hadRecord) state.approvals[plugin] = beforeMark
         else delete state.approvals[plugin]
