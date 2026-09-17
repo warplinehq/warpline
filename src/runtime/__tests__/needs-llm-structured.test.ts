@@ -15,8 +15,8 @@
  * Fixture plugins live under `tmpdir()` and are removed in an `afterEach`;
  * `eventsPath` is redirected so no fixture event reaches live state.
  */
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -24,6 +24,7 @@ import { invokePlugin, deriveRunStatus } from '../invoke-plugin.js'
 import { skillHandoff } from '../result-builders.js'
 import { SkillResultSchema } from '../../schemas/skill-result.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
+import * as engineEvents from '../../board/engine-events.js'
 
 const MANIFEST: PluginManifest = {
   name: 'handoff-plugin',
@@ -36,6 +37,8 @@ const MANIFEST: PluginManifest = {
   schedule: 'on_run',
   autonomy_level: 'autonomous',
   approval_class: 'session',
+  // Declared, so the classifier cases below are the declared rows.
+  llm_handoff: true,
   side_effects: [],
   ttl_hours: 24,
   dependencies: [],
@@ -51,13 +54,21 @@ const BUILDER_PATH = fileURLToPath(new URL('../result-builders.ts', import.meta.
 let tmpDir: string
 let eventsPath: string
 
-/** Write a fixture plugin whose handler returns `resultLiteral` verbatim. */
-async function writeHandoffPlugin(name: string, resultLiteral: string): Promise<void> {
+/**
+ * Write a fixture plugin whose handler returns `resultLiteral` verbatim.
+ * `manifestOverride` is merged over the declared `MANIFEST`, which is how the
+ * undeclared cases below take the declaration away.
+ */
+async function writeHandoffPlugin(
+  name: string,
+  resultLiteral: string,
+  manifestOverride?: Partial<PluginManifest>,
+): Promise<void> {
   const pluginDir = join(tmpDir, name)
   await mkdir(pluginDir, { recursive: true })
   await writeFile(
     join(pluginDir, 'manifest.ts'),
-    `export const manifest = ${JSON.stringify({ ...MANIFEST, name })}`,
+    `export const manifest = ${JSON.stringify({ ...MANIFEST, name, ...manifestOverride })}`,
   )
   await writeFile(
     join(pluginDir, 'handler.ts'),
@@ -272,5 +283,189 @@ describe('the builder emits both arms', () => {
     expect(deriveRunStatus(inv)).toBe('delegated')
     expect(inv.result.needs_llm?.context_path).toBe('state/entries.json')
     expect(inv.result.summary.startsWith('[needs-llm] ')).toBe(true)
+  })
+})
+
+/** The two handoff arms, as the classifier cases above write them. */
+const FIELD_ONLY = `{ status: 'skipped', summary: 'triage 3 entries', needs_llm: { task: 'Triage 3 entries', context_path: 'state/entries.json' }, ${REST} }`
+const PREFIX_ONLY = `{ status: 'skipped', summary: '[needs-llm] Triage 3 entries. Context: state/entries.json', ${REST} }`
+const BOTH_ARMS = `{ status: 'skipped', summary: '[needs-llm] Triage 3 entries. Context: state/entries.json', needs_llm: { task: 'Triage 3 entries', context_path: 'state/entries.json' }, ${REST} }`
+
+const refusalMessage = (name: string) =>
+  `Plugin '${name}' returned a [needs-llm] handoff but its manifest does not declare llm_handoff: true`
+
+describe('an undeclared handoff is refused', () => {
+  let emitAttemptFailedSpy: ReturnType<typeof spyOn<typeof engineEvents, 'emitAttemptFailed'>>
+
+  beforeEach(async () => {
+    emitAttemptFailedSpy = spyOn(engineEvents, 'emitAttemptFailed')
+    emitAttemptFailedSpy.mockImplementation(async () => {})
+    const undeclared = { llm_handoff: false, max_retries: 3 }
+    await writeHandoffPlugin('undeclared-field-only', FIELD_ONLY, undeclared)
+    await writeHandoffPlugin('undeclared-prefix-only', PREFIX_ONLY, undeclared)
+    // The manifest is used as exported, so a string is not the boolean.
+    await writeHandoffPlugin('undeclared-string-true', FIELD_ONLY, {
+      llm_handoff: 'true' as unknown as boolean,
+      max_retries: 3,
+    })
+  })
+
+  afterEach(() => {
+    emitAttemptFailedSpy.mockRestore()
+  })
+
+  for (const name of ['undeclared-field-only', 'undeclared-prefix-only', 'undeclared-string-true']) {
+    test(`${name} fails once, is not retried, and publishes nothing`, async () => {
+      const runsDir = join(tmpDir, 'runs')
+      const runId = crypto.randomUUID()
+      const inv = await invokePlugin(
+        name,
+        {},
+        { pluginsDir: tmpDir, eventsPath, runsDir, persistArtifact: true, runId },
+        { granted: false, reason: 'manual-run' },
+      )
+
+      expect(inv.result.status).toBe('failed')
+      expect(inv.attempts).toHaveLength(1)
+      expect(inv.attempts[0]?.status).toBe('failed')
+      expect(inv.attempts[0]?.error).toContain('llm_handoff')
+      expect(inv.attempt_count).toBe(1)
+      expect(inv.retried).toBe(false)
+      expect(inv.result.errors[0]).toMatchObject({ code: 'parse_error', retryable: false })
+      expect(inv.result.errors[0]?.message).toBe(refusalMessage(name))
+      // A fresh result: nothing the handler wrote survives into it.
+      expect(inv.result.summary).toBe(`${name}: undeclared handoff`)
+      expect(inv.result.needs_llm).toBeUndefined()
+      expect(inv.result.artifacts_produced).toEqual([])
+      expect(inv.final_error).toContain('llm_handoff')
+      expect(deriveRunStatus(inv)).toBe('failed')
+
+      const artifact = JSON.parse(await readFile(join(runsDir, `${runId}.json`), 'utf-8')) as {
+        status: string
+      }
+      expect(artifact.status).toBe('failed')
+
+      expect(emitAttemptFailedSpy).not.toHaveBeenCalled()
+    })
+  }
+})
+
+describe('the refusal reads only what isHandoff reads', () => {
+  const g = globalThis as { __warplineTestAbort?: AbortController }
+  const undeclared = { llm_handoff: false }
+
+  /** Aborts the test's controller three microtasks after the handler returns its handoff. */
+  const abortingHandoff = (reason: string) =>
+    `(queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => globalThis.__warplineTestAbort.abort(${JSON.stringify(reason)})))), ${BOTH_ARMS})`
+
+  beforeEach(async () => {
+    await writeHandoffPlugin(
+      'undeclared-success',
+      `{ status: 'success', summary: 'triaged 3 entries', needs_llm: { task: 'Triage 3 entries', context_path: 'state/entries.json' }, ${REST} }`,
+      undeclared,
+    )
+    await writeHandoffPlugin(
+      'undeclared-plain-skip',
+      `{ status: 'skipped', summary: 'nothing to do', ${REST} }`,
+      undeclared,
+    )
+    await writeHandoffPlugin('undeclared-null', 'null', undeclared)
+    await writeHandoffPlugin('undeclared-then-cancelled', abortingHandoff('cancelled'), undeclared)
+    await writeHandoffPlugin('undeclared-then-timeout', abortingHandoff('timeout'), undeclared)
+  })
+
+  afterEach(() => {
+    delete g.__warplineTestAbort
+  })
+
+  test('a success carrying the field is a success, and is not refused', async () => {
+    const inv = await invokePlugin('undeclared-success', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
+
+    expect(inv.result.status).toBe('success')
+    expect(inv.result.errors).toEqual([])
+    expect(inv.result.summary).toBe('triaged 3 entries')
+    expect(deriveRunStatus(inv)).toBe('success')
+  })
+
+  test('a skip with neither arm fails as it always did, unrewritten', async () => {
+    const inv = await invokePlugin('undeclared-plain-skip', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
+
+    expect(inv.result.status).toBe('skipped')
+    expect(inv.result.summary).toBe('nothing to do')
+    expect(inv.attempts[0]?.status).toBe('failed')
+    expect(deriveRunStatus(inv)).toBe('failed')
+    for (const e of inv.result.errors) expect(e.message).not.toContain('llm_handoff')
+  })
+
+  test('a null result fails as invalid output, not as a refusal', async () => {
+    const inv = await invokePlugin('undeclared-null', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
+
+    expect(inv.result.status).toBe('failed')
+    expect(inv.result.errors[0]?.code).toBe('parse_error')
+    expect(inv.result.errors[0]?.message).toContain('invalid SkillResult')
+    expect(inv.result.errors[0]?.message).not.toContain('llm_handoff')
+    expect(deriveRunStatus({ cancelled: false, timed_out: false, result: null })).toBe('failed')
+  })
+
+  test('a cancel after the handoff returned takes the status, and the body carries the refusal', async () => {
+    const ctl = new AbortController()
+    g.__warplineTestAbort = ctl
+    const inv = await invokePlugin(
+      'undeclared-then-cancelled',
+      {},
+      { pluginsDir: tmpDir, eventsPath, signal: ctl.signal },
+      { granted: false, reason: 'manual-run' },
+    )
+
+    // The precondition first: if the abort lands somewhere else, say so.
+    expect(inv.cancelled).toBe(true)
+    expect(inv.attempts[0]?.status).toBe('cancelled')
+    expect(deriveRunStatus(inv)).toBe('cancelled')
+    expect(inv.result.summary).toBe('undeclared-then-cancelled: undeclared handoff')
+  })
+
+  test('a timeout after the handoff returned takes the status, and the body carries the refusal', async () => {
+    const ctl = new AbortController()
+    g.__warplineTestAbort = ctl
+    const inv = await invokePlugin(
+      'undeclared-then-timeout',
+      {},
+      { pluginsDir: tmpDir, eventsPath, signal: ctl.signal },
+      { granted: false, reason: 'manual-run' },
+    )
+
+    expect(inv.timed_out).toBe(true)
+    expect(inv.attempts[0]?.status).toBe('timeout')
+    expect(deriveRunStatus(inv)).toBe('timeout')
+    expect(inv.result.summary).toBe('undeclared-then-timeout: undeclared handoff')
+  })
+})
+
+describe('a declared plugin behaves as it always did', () => {
+  beforeEach(async () => {
+    await writeHandoffPlugin(
+      'declared-success',
+      `{ status: 'success', summary: 'triaged 3 entries', needs_llm: { task: 'Triage 3 entries', context_path: 'state/entries.json' }, ${REST} }`,
+    )
+    await writeHandoffPlugin(
+      'declared-failed',
+      `{ status: 'failed', summary: 'declined', phases_completed: [], phases_failed: [], errors: [{ code: 'dependency_unavailable', message: 'declined', impact: 'HIGH', retryable: false }], data_freshness: {}, artifacts_produced: [] }`,
+    )
+  })
+
+  test('a success carrying the field is a success', async () => {
+    const inv = await invokePlugin('declared-success', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
+
+    expect(inv.result.status).toBe('success')
+    expect(deriveRunStatus(inv)).toBe('success')
+  })
+
+  test('a failed result keeps its own error', async () => {
+    const inv = await invokePlugin('declared-failed', {}, { pluginsDir: tmpDir, eventsPath }, { granted: false, reason: 'manual-run' })
+
+    expect(inv.result.status).toBe('failed')
+    expect(deriveRunStatus(inv)).toBe('failed')
+    expect(inv.result.errors[0]?.code).toBe('dependency_unavailable')
+    expect(inv.result.errors[0]?.message).not.toContain('llm_handoff')
   })
 })

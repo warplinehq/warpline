@@ -38,6 +38,7 @@ export const manifest = PluginManifestSchema.parse({
   description: 'Fan one draft out to every configured channel with its own call to action, no more often than the configured cadence, and hand the per-channel rewrite off',
   autonomy_level: 'autonomous',
   side_effects: [],
+  llm_handoff: true,
   ttl_hours: 6,
   schedule: 'daily',
   inputs: {

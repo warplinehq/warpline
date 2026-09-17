@@ -34,9 +34,12 @@ Write the payload to a file under the home and name that.
 Three rules, all enforced or honoured by the runtime:
 
 1. **`status: 'skipped'` + a summary starting with `[needs-llm]`** marks the
-   result as a successful *handoff*, not a failure. The runtime maps it to the
+   result as a successful *handoff*, not a failure, from a plugin whose
+   manifest declares `llm_handoff: true`. The runtime maps it to the
    `delegated` run status, so dashboards and anomaly checks do not paint it
-   red.
+   red. A handoff from a plugin that does not declare the field is refused:
+   the run is recorded `failed` with an error naming `llm_handoff`, and it is
+   never retried.
 2. **Never retried.** Retry logic acts on `retryable: true` failures; a
    delegated handoff is terminal for the plugin. Re-running the plugin later
    (TTL) re-derives the handoff if the work is still outstanding.
@@ -85,7 +88,9 @@ be bounded by the home and not by the plugin.
 The runtime classifies a handoff on **either** arm — one predicate,
 `isHandoff` in `invoke-plugin.ts`, reads the field or the prefix. `status:
 'skipped'` is still required by both: the field alone does not turn a
-successful result into a delegated one.
+successful result into a delegated one. Either arm is `delegated` only when the
+plugin's manifest declares `llm_handoff: true`; from any other plugin it is
+refused and recorded `failed`.
 
 **Both arms are emitted together**, and `skillHandoff` from
 `warpline/unstable-result` is what emits them. It sets `needs_llm` and prefixes
@@ -118,10 +123,12 @@ that an orchestrating Claude session runs. The loop:
    is judgment; SENDING it is a side effect — the draft lands somewhere a
    `sends_email`-declaring plugin (or a human) picks up under approval.
 
-A plugin with `approval_class: 'content'` that returns a handoff spends its
-content approval, even though it shipped nothing. The operator re-approves before
-it can fire again. `runtime-spec.md` § 10 says why that is the safer of the two
-choices.
+A plugin with `approval_class: 'content'` that returns a declared handoff
+spends its content approval, even though it shipped nothing. The operator
+re-approves before it can fire again. `runtime-spec.md` § 10 says why that is
+the safer of the two choices. An undeclared handoff is refused, which makes it a
+failed fire, so the approval is left indeterminate, as `runtime-spec.md` § 10
+describes. Declaring `llm_handoff: true` is the fix.
 
 ## Why the plugin does not call the model itself
 

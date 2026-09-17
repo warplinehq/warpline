@@ -145,9 +145,11 @@ Rules the runtime holds you to:
 - **Forward the `AbortSignal`.** Handlers that ignore it still get cut off by
   the runtime's `Promise.race`, but orphaned I/O keeps running — a residual
   DoS you should not add to.
-- **Judgment work exits via `[needs-llm]`**, not via an API call: return
-  `status: 'skipped'` with a `[needs-llm] ...` summary. The runtime records it
-  as `delegated` and never retries it.
+- **Judgment work exits via `[needs-llm]`**, not via an API call: declare
+  `llm_handoff: true` in your manifest, and return `status: 'skipped'` with a
+  `[needs-llm] ...` summary. The runtime records it as `delegated` only then,
+  and never retries it. A handoff from a plugin that does not declare the field
+  is refused and recorded `failed`.
 
 ### Where args come from
 

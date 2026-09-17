@@ -27,6 +27,10 @@
  * need a plugin to be dependency-failed AND something else at the same time.
  * Both are pre-advance inputs the fixture already had no way to express, and
  * both default to exactly what the fixture did before them.
+ *
+ * `llmHandoff` was added when a handoff started needing a declaration. It
+ * defaults to what a manifest that never heard of the field means, which is
+ * undeclared, so a fixture that hands off has to say so.
  */
 import { mkdir, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -63,6 +67,12 @@ export interface TwoAdvanceHome {
        * cares what a handler did must not declare one by accident.
        */
       sideEffects?: string[]
+      /**
+       * Whether the manifest declares `llm_handoff`. False by default, because
+       * that is what a manifest that never heard of the field means, and a
+       * handing-off fixture must say so explicitly or the runtime refuses it.
+       */
+      llmHandoff?: boolean
       handlerBody: string
     },
   ): Promise<void>
@@ -89,7 +99,7 @@ export interface TwoAdvanceHome {
    * not silently move every plugin behind the `min_tier` gate.
    */
   seedState(extra: Record<string, unknown>): Promise<void>
-  advance(): Promise<{ run_log_path: string }>
+  advance(): Promise<{ run_log_path: string; run_id: string }>
   /** One plugin's row in a persisted run log, or `null` when it did not run. */
   entryFor(runLogPath: string, plugin: string): Promise<RunLogEntry | null>
   /** One plugin's persisted `plugin_runs` entry, straight from the state file. */
@@ -139,6 +149,7 @@ export async function createTwoAdvanceHome(): Promise<TwoAdvanceHome> {
         schedule: 'on_run',
         autonomy_level: 'autonomous',
         side_effects: opts.sideEffects ?? [],
+        llm_handoff: opts.llmHandoff ?? false,
         // Near-zero, so the second advance finds every plugin due again. A TTL
         // that held them fresh would make every arm pass for a reason that has
         // nothing to do with what is under test.

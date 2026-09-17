@@ -53,6 +53,7 @@ drift from the code. Edit the schema, not the table.
 | `autonomy_level` | `autonomous` \| `supervised` \| `manual` | yes | — |
 | `approval_class` | `session` \| `content` | no | `"session"` |
 | `side_effects` | (`sends_email` \| `creates_issue` \| `writes_db` \| `external_api` \| `modifies_file`)[] | no | `[]` |
+| `llm_handoff` | boolean | no | `false` |
 | `secrets` | string[] | no | `[]` |
 | `ttl_hours` | number | yes | — |
 | `dependencies` | string[] | no | `[]` |
@@ -70,6 +71,13 @@ invalidates an existing plugin. `name` may not be a member of
 `Object.prototype` — `__proto__`, `constructor`, `toString`, `valueOf` and the
 rest are refused. The set is derived from the prototype, not listed, so it
 cannot go stale.
+
+`llm_handoff` declares that the handler MAY return a `[needs-llm]` handoff. It
+is permission, not a promise: a declaring plugin that returns `success` records
+`success`. A handoff from a plugin that does not declare it is refused, and the
+run is recorded `failed` with an error naming the field (see § 3). The
+free-text `capabilities` array never counts as this declaration, whatever it
+holds.
 
 **The key in the plain-object `plugin_runs` and `denials` records is the plugin
 DIRECTORY name, not `manifest.name`,** and it carries the same refusal at the
@@ -264,6 +272,12 @@ immediately above — every field with a default is optional in a manifest file,
 so a new one cannot invalidate a manifest that already validates. An older build
 reading a manifest written for a newer one ignores what it does not know.
 
+`llm_handoff` is the one addition that is not safe for every existing plugin. A
+manifest that validated still validates, but a plugin that hands off without
+declaring the field is now refused, so its runs record `failed` where they used
+to record `delegated`. That is a breaking change under the pre-1.0 promise,
+taken deliberately, and the fix is one manifest line: `llm_handoff: true`.
+
 Removing or narrowing something is the case that can break you, and what limits
 it is a convention that already exists rather than a promise invented here:
 closed enums stay closed. Six sets are closed — the side-effect type, the
@@ -404,8 +418,9 @@ Timeout vs. retry interaction:
 | handler throws                       | `failed`    | `false`                   | `false`     |
 | per-attempt timeout trips            | `failed`    | `false`                   | `true`      |
 | external `controller.abort()`        | `cancelled` | `false`                   | `false`     |
-| handler returns `skipped` + `[needs-llm]` summary prefix | `delegated` | `false` | `false`     |
-| handler returns `skipped` + a `needs_llm` field          | `delegated` | `false` | `false`     |
+| handler returns `skipped` + `[needs-llm]` summary prefix, from a plugin declaring `llm_handoff: true` | `delegated` | `false` | `false` |
+| handler returns `skipped` + a `needs_llm` field, from a plugin declaring `llm_handoff: true`          | `delegated` | `false` | `false` |
+| handler returns either handoff, from a plugin that does not declare `llm_handoff`                    | `failed`    | `false` | `false` |
 
 `delegated` (2026-08-19): a `[needs-llm]` handoff is a successful dispatch to a
 companion LLM skill, not a failure. `deriveRunStatus()` in `invoke-plugin.ts` is
@@ -418,6 +433,25 @@ structured `needs_llm` field or the `[needs-llm]` summary prefix, and both rows
 still require `skipped`. A result carrying both arms is classified once. See
 [needs-llm-contract.md](needs-llm-contract.md) for the field's shape and for
 why the prefix arm is emitted alongside it rather than replaced by it.
+
+A handoff from a plugin whose manifest does not declare `llm_handoff: true` is
+refused. The refusal happens at one site, in the retry loop, where that
+predicate meets the manifest bit, and it runs before either classifier. The
+manifest there is the module as exported, so any value other than the boolean
+`true` counts as undeclared. The handler's result is replaced by a fresh one:
+`status: 'failed'`, `phases_failed` naming the plugin, `summary`
+`<name>: undeclared handoff`, and an empty `artifacts_produced`, so the
+plugin's prior `last_output` carries forward and nothing the handler wrote is
+published. `errors[0]` is a `parse_error` with `retryable: false` and the
+message `Plugin '<name>' returned a [needs-llm] handoff but its manifest does
+not declare llm_handoff: true`. The refusal is never retried, so the run has
+one attempt and emits no `attempt_failed` notice. Timeout and cancellation
+still take precedence at the status level: an attempt aborted after the
+handler returned reports `timeout` or `cancelled`, while its result body
+carries the refusal. Under the default preferences (`review_gate: true`), or
+for a plugin with `autonomy_level: 'supervised'`, the refused result is parked
+like any other failed result, so the plugin entry and `plugin_runs` read
+`gated`, with the refusal in the summary. It is never `delegated`.
 
 ### Attempt status
 
@@ -435,7 +469,10 @@ dispatch failed.
 Both levels now classify a handoff through one shared predicate, so the run and
 its attempts cannot disagree. A `delegated` attempt also carries `error: null`
 and contributes no `final_error`, even when the handoff result populates
-`errors[]`: the dispatch succeeded, so there is no failure to attribute.
+`errors[]`: the dispatch succeeded, so there is no failure to attribute. A
+handoff from a plugin that does not declare `llm_handoff` is rewritten before
+either level classifies it, so both read `failed`, and the attempt's `error`
+carries the refusal message.
 
 Consumers should treat the set as open and not assume four members. The
 persisted artifact types this field as a plain string for that reason.
@@ -569,6 +606,12 @@ Cancelled runs persist with `status: 'cancelled'` and partial attempts. The
 transcript is where whatever the handler emitted before the abort would go,
 once there is one.
 
+A run whose plugin returned a `[needs-llm]` handoff without declaring
+`llm_handoff: true` persists with `status: 'failed'`, one attempt, and a
+`final_error` naming the field. It never persists as `delegated`, so nothing
+that selects run artifacts by the `delegated` status picks it up. § 3
+describes the refusal.
+
 A `RunArtifact` also carries an optional `plugin_entries`, kept only for
 backward compatibility with an older combined engine-run shape. Nothing writes
 it. The `plugin_entries` an advance fills belongs to the run log below, and the
@@ -657,7 +700,7 @@ set is closed — an unlisted value fails validation rather than being dropped.
 | Status | Meaning |
 |--------|---------|
 | `completed` | The handler ran and returned a result the engine accepted |
-| `failed` | The handler threw, returned a failed result, or the plugin's manifest never loaded |
+| `failed` | The handler threw, returned a failed result, returned a `[needs-llm]` handoff its manifest does not declare (`llm_handoff`), or the plugin's manifest never loaded |
 | `skipped` | The plugin was not due — fresh, filtered, locked, without a session Grant, or holding a declared dependency whose last run failed |
 | `gated` | Supervised: the handler ran and its result was parked pending a human answer |
 | `denied` | A human answered no, and the answer still applies to what is being proposed |
@@ -1458,8 +1501,9 @@ advance, so its side effects fired again — every advance, for the whole grant
 window, on one approval.
 
 `skipped` records a run whose handler returned `skipped` — in practice every
-dispatched `[needs-llm]` handoff, since that is the only path producing one
-today. The plugin's own terminal status is written through unnarrowed, so a
+dispatched handoff from a plugin declaring `llm_handoff: true`, since that is
+the only path producing one today. A handoff from a plugin that does not
+declare it is refused and records `failed`. The plugin's own terminal status is written through unnarrowed, so a
 handoff is not folded into `success`: a consumer reading `lastRun` beside a
 carried-forward `last_output` would otherwise be told "produced, and its latest
 run is healthy" about a plugin that handed its work to an LLM and produced
@@ -2001,6 +2045,10 @@ to the sink to look for bytes the runtime knows never left, and no gesture that
 clears it. Handing the approval back would mean clearing the mark on the
 handler's word that nothing shipped, which is the trust refused for `failed`
 above.
+
+A handoff from a content-class plugin that does not declare `llm_handoff`
+reaches this rule already rewritten to `failed`, so it leaves the record
+indeterminate like any other failed return. Declaring the field is the fix.
 
 The mark is taken under the state document's own lock, with the document re-read
 inside it, so two content-class plugins in one execution level and a concurrent

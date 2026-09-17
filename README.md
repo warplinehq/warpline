@@ -200,8 +200,8 @@ const result = await runAdvance()
 Read the full doctrine: [docs/doctrine.md](docs/doctrine.md).
 
 Nowhere in this repo. That's the point. Plugins that reach a judgment step
-return a `[needs-llm]` handoff (mapped to the `delegated` run status, never
-retried). An orchestrating Claude Code session consumes those handoffs via
+return a `[needs-llm]` handoff (declared in the manifest as `llm_handoff: true`,
+mapped to the `delegated` run status, never retried). An orchestrating Claude Code session consumes those handoffs via
 companion skills, and a template lives in
 [skills/needs-llm-template/](https://github.com/warplinehq/warpline/tree/main/skills/needs-llm-template).
 That directory is deliberately not shipped in the package, so the link is

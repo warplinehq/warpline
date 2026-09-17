@@ -417,6 +417,63 @@ describe('runPlugin — --input key=value', () => {
  * printing into it is the one thing that can make it otherwise, and that is
  * what is asserted here rather than inferred from the other verb's test.
  */
+describe('runPlugin — an undeclared handoff', () => {
+  // Its own temp home, never the tracked fixture tree. Each manifest is a plain
+  // object with no `llm_handoff` key, which is the unparsed-manifest path the
+  // runtime has to treat as undeclared.
+  let handoffHome: string
+
+  const RESULTS: Record<string, string> = {
+    'undeclared-field': `{ status: 'skipped', phases_completed: [], phases_failed: [], errors: [], data_freshness: {}, summary: 'triage 3 entries', needs_llm: { task: 'Triage 3 entries', context_path: 'state/entries.json' }, artifacts_produced: [], schema_version: 1 }`,
+    'undeclared-prefix': `{ status: 'skipped', phases_completed: [], phases_failed: [], errors: [], data_freshness: {}, summary: '[needs-llm] Triage 3 entries. Context: state/entries.json', artifacts_produced: [], schema_version: 1 }`,
+  }
+
+  beforeAll(() => {
+    handoffHome = mkdtempSync(join(tmpdir(), 'warpline-run-handoff-'))
+    for (const [name, result] of Object.entries(RESULTS)) {
+      const dir = join(handoffHome, 'plugins', name)
+      mkdirSync(dir, { recursive: true })
+      const manifest = {
+        name,
+        version: '1.0.0',
+        description: `fixture ${name}`,
+        inputs: {},
+        outputs: {},
+        capabilities: [],
+        schedule: 'on_run',
+        autonomy_level: 'autonomous',
+        side_effects: [],
+        ttl_hours: 24,
+        dependencies: [],
+        timeout_ms: 5000,
+        max_retries: 3,
+        retry_delay_ms: 10,
+        max_parallelism: 1,
+        min_tier: 'normal',
+      }
+      writeFileSync(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}\n`)
+      writeFileSync(join(dir, 'handler.ts'), `export async function handler() {\n  return ${result}\n}\n`)
+    }
+    _setHome(handoffHome)
+  })
+
+  afterAll(() => {
+    _setHome(home)
+    rmSync(handoffHome, { recursive: true, force: true })
+  })
+
+  for (const name of Object.keys(RESULTS)) {
+    test(`${name} is refused once, and reported through ok/error`, async () => {
+      const { payload, code } = await runPlugin([name, 'run'])
+
+      expect(code).toBe(0)
+      expect(payload.ok).toBe(false)
+      expect(payload.error).toContain('llm_handoff')
+      expect(payload.attempt_count).toBe(1)
+    })
+  }
+})
+
 describe('runPlugin — a handler cannot reach stdout', () => {
   let noisyHome: string
 

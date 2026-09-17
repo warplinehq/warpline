@@ -331,6 +331,7 @@ async function writeHandoffPlugin(name: string, secretKey: string): Promise<void
     schedule: 'on_run',
     autonomy_level: 'autonomous',
     side_effects: [],
+    llm_handoff: true,
     ttl_hours: 24,
     dependencies: [],
     timeout_ms: 5000,

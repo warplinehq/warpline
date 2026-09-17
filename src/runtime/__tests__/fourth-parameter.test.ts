@@ -57,6 +57,7 @@ const MANIFEST: PluginManifest = {
   schedule: 'on_run',
   autonomy_level: 'autonomous',
   approval_class: 'session',
+  llm_handoff: false,
   side_effects: [],
   ttl_hours: 24,
   dependencies: [],

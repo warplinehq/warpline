@@ -193,6 +193,23 @@ export const PluginManifestSchema = z.object({
   side_effects: z.array(SideEffectType).default([]),
 
   /**
+   * Whether this plugin's handler may return a `[needs-llm]` handoff.
+   *
+   * A declaration of permission, not a promise. A plugin that declares it MAY
+   * hand off; it does not have to, so a declaring plugin that returns `success`
+   * records `success`. A handoff from a plugin that does not declare it is
+   * refused: the run is recorded `failed`, with an error naming this field, and
+   * it is never retried.
+   *
+   * Defaulted rather than optional, so a manifest that declares nothing reads
+   * `false`, and an existing plugin that never hands off is unaffected.
+   *
+   * This is not `capabilities` above. That array is free-text informational
+   * tags, and nothing reads an entry in it as this declaration.
+   */
+  llm_handoff: z.boolean().default(false),
+
+  /**
    * Environment variable keys this plugin requires to do its work.
    *
    * Names only. **Warpline holds no credential value.** The names are resolved

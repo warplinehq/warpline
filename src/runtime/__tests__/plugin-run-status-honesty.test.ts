@@ -8,7 +8,7 @@
  * outside the engine read the field. `lastRun` published it, and both specs
  * describe a vocabulary the writer could not produce.
  *
- *   1. A `skipped` result — every dispatched `[needs-llm]` handoff — was
+ *   1. A `skipped` result — every dispatched declared handoff — was
  *      folded to `'success'` by the autonomous write's `else` arm.
  *      `PluginRunSchema` has always admitted `'skipped'`; only the mapping
  *      refused to emit it. A consumer following the shipped four-state table
@@ -36,9 +36,14 @@
  * Arm 1 is untouched, and it doubles as a negative case for that gate: a
  * `[needs-llm]` handoff records `skipped`, which does not arm it, so the
  * consumer runs and reads the status exactly as before.
+ *
+ * A handoff counts as dispatched only from a plugin whose manifest declares
+ * `llm_handoff: true`. The undeclared cases below are the other side of that:
+ * the runtime refuses the handoff, so the run is recorded `failed`, it
+ * publishes no Output, and the gate stops the consumer.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { _setHome } from '../../lib/paths.js'
 import { createTwoAdvanceHome, type TwoAdvanceHome } from './helpers/two-advance-home.js'
@@ -76,9 +81,17 @@ export async function handler(manifest, args, signal, capabilities) {
     return entry ? (JSON.parse(entry.result_summary) as { ran: unknown }) : null
   }
 
-  test('a [needs-llm] handoff is recorded as skipped, not as success', async () => {
-    // Produces on advance 1; hands off on advance 2 once the marker exists.
-    const handoffProducer = `
+  /**
+   * Produces on advance 1; hands off on advance 2 once the marker exists.
+   * `prefix` is the older summary-prefix arm, `field` the structured one.
+   */
+  function handoffProducer(arm: 'prefix' | 'field'): string {
+    const handoff =
+      arm === 'prefix'
+        ? `summary: '[needs-llm] summarise the brief',`
+        : `summary: 'summarise the brief',
+      needs_llm: { task: 'Summarise the brief', context_path: 'state/brief.json' },`
+    return `
 import { existsSync } from 'node:fs'
 export async function handler(manifest, args, signal, capabilities) {
   if (existsSync(${JSON.stringify(home.marker)})) {
@@ -88,7 +101,7 @@ export async function handler(manifest, args, signal, capabilities) {
       phases_failed: [],
       errors: [],
       data_freshness: {},
-      summary: '[needs-llm] summarise the brief',
+      ${handoff}
       artifacts_produced: [],
       schema_version: 1,
     }
@@ -105,7 +118,14 @@ export async function handler(manifest, args, signal, capabilities) {
   }
 }
 `
-    await home.writePlugin('prod', { outputs: { brief: {} }, handlerBody: handoffProducer })
+  }
+
+  test('a [needs-llm] handoff is recorded as skipped, not as success', async () => {
+    await home.writePlugin('prod', {
+      outputs: { brief: {} },
+      llmHandoff: true,
+      handlerBody: handoffProducer('prefix'),
+    })
     await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: consumer })
 
     await home.advance()
@@ -122,6 +142,45 @@ export async function handler(manifest, args, signal, capabilities) {
     // one: 'success' beside a carried record reads as "produced, and healthy".
     expect(entry.last_output).toMatchObject({ type: 'brief', body: '{"advance":1}' })
   })
+
+  for (const arm of ['field', 'prefix'] as const) {
+    test(`an undeclared ${arm} handoff is recorded as failed, and the prior output carries forward`, async () => {
+      // No `llmHandoff`: the manifest says nothing, which is undeclared.
+      await home.writePlugin('prod', { outputs: { brief: {} }, handlerBody: handoffProducer(arm) })
+      await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: consumer })
+
+      await home.advance()
+      await home.setMarker()
+      const r2 = await home.advance()
+
+      const prodEntry = await home.entryFor(r2.run_log_path, 'prod')
+      expect(prodEntry).not.toBeNull()
+      expect(prodEntry!.status).toBe('failed')
+      expect(prodEntry!.result_summary).toBe('prod: undeclared handoff')
+
+      const entry = (await home.persistedRun('prod')) as Record<string, unknown>
+      expect(entry.status).toBe('failed')
+      // The refusal publishes no Output, so advance 1's record carries forward.
+      expect(entry.last_output).toMatchObject({ type: 'brief', body: '{"advance":1}' })
+
+      const events = (await readFile(home.eventsPath, 'utf-8'))
+        .split('\n')
+        .filter((line) => line.trim() !== '')
+        .map((line) => JSON.parse(line) as { type: string; source: string; run_id: string | null; summary: string })
+        .filter((e) => e.source === 'prod' && e.run_id === r2.run_id)
+      const errors = events.filter((e) => e.type === 'error')
+      expect(errors).toHaveLength(1)
+      expect(errors[0]!.summary).toBe('prod: prod: undeclared handoff')
+      expect(
+        events.filter((e) => e.type === 'plugin_result').map((e) => e.summary),
+      ).toEqual(['prod: started'])
+
+      // A refused run is a failed run, so the dependency gate stops the consumer.
+      const consumerEntry = await home.entryFor(r2.run_log_path, 'consumer')
+      expect(consumerEntry).not.toBeNull()
+      expect(consumerEntry!.status).toBe('skipped')
+    })
+  }
 
   test('a run whose invocation threw records that run, not the one before it', async () => {
     await home.writePlugin('prod', {

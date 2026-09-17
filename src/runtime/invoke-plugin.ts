@@ -67,6 +67,9 @@ export interface AttemptRecord {
    * ended in a `[needs-llm]` handoff dispatched successfully, so calling it
    * `failed` misreports it to anyone reading `attempts[]` directly. Both
    * levels classify through `isHandoff`, so they cannot drift apart.
+   * `delegated` means a handoff from a plugin that declares `llm_handoff:
+   * true`; an undeclared one is rewritten to `failed` before either level
+   * classifies it.
    */
   status: 'success' | 'failed' | 'cancelled' | 'timeout' | 'delegated'
   /** First error message from the attempt, or null on success */
@@ -213,7 +216,10 @@ export interface InvokePluginOptions {
  * this package and outside `bun test`'s reach, and it reads the summary string.
  * Dropping the prefix would move the same disagreement one layer out, where
  * nothing here can see it. A `skipped` status is still required by both arms:
- * the field alone must not make a successful result delegated.
+ * the field alone must not make a successful result delegated. *
+ * It never reads the manifest. The manifest's `llm_handoff` bit composes with
+ * it at exactly one site, the refusal in the retry loop, which rewrites an
+ * undeclared handoff to a failed result before either classifier runs.
  */
 function isHandoff(result: SkillResult | null): boolean {
   if (result?.status !== 'skipped') return false
@@ -230,6 +236,9 @@ function isHandoff(result: SkillResult | null): boolean {
  * made a watcher treat every handoff a delegating plugin made as critical.
  * A plain non-needs-llm `skipped` still maps to `failed` — no persisted-run
  * path produces one today; widen deliberately if one appears.
+ *
+ * An undeclared handoff reaches this function already rewritten by the retry
+ * loop's refusal, so it maps to `failed`.
  */
 export function deriveRunStatus(inv: {
   cancelled: boolean
@@ -766,7 +775,7 @@ export async function invokePlugin(
     // and so echoes received values — those values are already redacted,
     // because they are what the parse was handed.
     const parsed = SkillResultSchema.safeParse(scrubSecrets(rawResult, Object.values(secrets.values)))
-    const thisResult: SkillResult = stampOutputs(
+    let thisResult: SkillResult = stampOutputs(
       parsed.success
         ? parsed.data
         : {
@@ -786,6 +795,33 @@ export async function invokePlugin(
           },
       runId,
     )
+
+    // -- Refuse an undeclared handoff --
+    // The one place the manifest's `llm_handoff` bit meets `isHandoff`. The
+    // manifest here is the unparsed module export, so anything other than the
+    // boolean `true` (absent, `'true'`, `1`) counts as undeclared and fails
+    // closed. The replacement is a fresh literal and never a spread of the
+    // handler's result: a spread would carry its Outputs to dependents and its
+    // own text into every log. `retryable: false` means one attempt, and the
+    // `skipped → break` and retry gate below need no change to honour it.
+    if (isHandoff(thisResult) && manifest.llm_handoff !== true) {
+      thisResult = {
+        status: 'failed',
+        phases_completed: [],
+        phases_failed: [pluginName],
+        errors: [
+          makeSkillError(
+            'parse_error',
+            `Plugin '${pluginName}' returned a [needs-llm] handoff but its manifest does not declare llm_handoff: true`,
+            { retryable: false },
+          ),
+        ],
+        data_freshness: {},
+        summary: `${pluginName}: undeclared handoff`,
+        artifacts_produced: [],
+        schema_version: 1,
+      }
+    }
 
     const elapsed = Date.now() - attemptStart
     const firstError = thisResult.errors?.[0]?.message ?? null

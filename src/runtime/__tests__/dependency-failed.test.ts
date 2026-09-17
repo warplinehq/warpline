@@ -280,6 +280,7 @@ export async function handler(manifest, args, signal, capabilities) {
   test('a dependency that handed its work to an LLM does not gate its consumer', async () => {
     await home.writePlugin('prod', {
       outputs: { brief: {} },
+      llmHandoff: true,
       handlerBody: producerReturning('skipped', '[needs-llm] summarise the brief'),
     })
     await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: CONSUMER })

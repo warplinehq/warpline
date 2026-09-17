@@ -30,6 +30,7 @@ function makeManifest(name: string, overrides: Partial<PluginManifest> = {}): Pl
     schedule: 'on_run',
     autonomy_level: 'autonomous',
     approval_class: 'session',
+    llm_handoff: false,
     side_effects: [],
     ttl_hours: 24,
     dependencies: [],

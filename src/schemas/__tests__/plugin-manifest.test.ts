@@ -335,3 +335,18 @@ describe('approval_class and its cross-field rule', () => {
     expect(parsed.approval_class).toBe('session')
   })
 })
+
+describe('llm_handoff', () => {
+  test('a manifest omitting llm_handoff parses and reads false', () => {
+    expect(PluginManifestSchema.parse(validManifest).llm_handoff).toBe(false)
+  })
+
+  test('a non-boolean llm_handoff fails, naming the field', () => {
+    expect(issuePaths({ ...validManifest, llm_handoff: 'yes' })).toEqual(['llm_handoff'])
+  })
+
+  test('an llm_required capability tag is not the declaration', () => {
+    const parsed = PluginManifestSchema.parse({ ...validManifest, capabilities: ['llm_required'] })
+    expect(parsed.llm_handoff).toBe(false)
+  })
+})

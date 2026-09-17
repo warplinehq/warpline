@@ -34,6 +34,7 @@ export const manifest = PluginManifestSchema.parse({
   description: 'Hand off drafting under the voice rules, blocklist and frontmatter schema an adopter keeps in three configured files',
   autonomy_level: 'autonomous',
   side_effects: [],
+  llm_handoff: true,
   ttl_hours: 24,
   schedule: 'daily',
   inputs: {

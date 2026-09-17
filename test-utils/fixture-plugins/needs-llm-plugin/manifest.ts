@@ -5,6 +5,7 @@ export const manifest = PluginManifestSchema.parse({
   version: '1.0.0',
   description: 'Fixture: hands off to an LLM skill and carries a non-fatal error.',
   autonomy_level: 'autonomous',
+  llm_handoff: true,
   ttl_hours: 1,
   timeout_ms: 5_000,
   max_retries: 2,

@@ -31,6 +31,7 @@ export const manifest = PluginManifestSchema.parse({
   description: 'Hand off new feed entries to an LLM skill for per-entry triage judgment',
   autonomy_level: 'autonomous',
   side_effects: [],
+  llm_handoff: true,
   ttl_hours: 6,
   schedule: 'on_run',
   dependencies: ['feed-monitor'],
