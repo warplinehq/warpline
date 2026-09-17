@@ -35,6 +35,12 @@ export interface PlanEntry {
   sideEffects: string[]
   /** Live approval state for this plugin, from `checkApproval`. */
   approved: boolean
+  /**
+   * Present and `true` only when the manifest declares `llm_handoff: true`,
+   * absent otherwise. It means the plugin MAY hand judgment to the LLM, not
+   * that this run will.
+   */
+  llmHandoff?: boolean
 }
 
 /**
@@ -53,6 +59,12 @@ export interface NotDueEntry {
   detail: string
   sideEffects: string[]
   approved: boolean
+  /**
+   * Present and `true` only when the manifest declares `llm_handoff: true`,
+   * absent otherwise. It means the plugin MAY hand judgment to the LLM, not
+   * that this run will.
+   */
+  llmHandoff?: boolean
 }
 
 /** The live session grant, as read (never written) from the approval file. */
@@ -80,6 +92,12 @@ export type { LoadFailure }
 
 const INDENT = '  '
 const SUB_INDENT = '    '
+
+/**
+ * "may" is deliberate: a declaring plugin can still return `success`, and a
+ * preview must never over-state what a run will do.
+ */
+const HANDOFF_LINE = `${SUB_INDENT}llm_handoff: may hand judgment to the LLM ([needs-llm])`
 
 /** A grant this close to expiry earns a warning: the run may outlive it. */
 const EXPIRES_SOON_MINUTES = 10
@@ -187,6 +205,8 @@ export function renderPlan(model: PlanModel, now: number): string {
     lines.push('')
     for (const entry of [...model.due].sort(byLevelThenName)) {
       lines.push(`${INDENT}${entry.plugin} (level ${entry.level})`)
+      // Before the zero-effects branch, which ends the entry early.
+      if (entry.llmHandoff === true) lines.push(HANDOFF_LINE)
       if (entry.sideEffects.length === 0) {
         lines.push(`${SUB_INDENT}(no declared side effects)`)
         continue
@@ -209,6 +229,7 @@ export function renderPlan(model: PlanModel, now: number): string {
   lines.push('')
   for (const entry of [...model.notDue].sort(byLevelThenName)) {
     lines.push(`${INDENT}${entry.plugin} — ${entry.detail}`)
+    if (entry.llmHandoff === true) lines.push(HANDOFF_LINE)
     // Only the gate-blocked skip lists its effects: for every other reason
     // the effects are irrelevant noise, and this section is a summary.
     if (entry.reason === 'unapproved') lines.push(...sideEffectLines(entry))

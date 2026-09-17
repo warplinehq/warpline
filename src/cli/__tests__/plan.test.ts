@@ -237,6 +237,32 @@ describe('buildPlanModel', () => {
     expect(model.notDue.find((e) => e.plugin === 'gated-one')?.approved).toBe(false)
   })
 
+  test('a declared handoff marks the entry in both sections, and only a declared one', async () => {
+    await writePlugin(home, 'hands-off-due', { llm_handoff: true })
+    await writePlugin(home, 'hands-off-fresh', { llm_handoff: true })
+    await writePlugin(home, 'plain')
+    await writeState(home, {
+      'hands-off-fresh': {
+        last_run_at: new Date(Date.now() - 60_000).toISOString(),
+        status: 'success',
+      },
+    })
+
+    const model = await buildPlanModel(Date.now())
+
+    const dueEntry = model.due.find((e) => e.plugin === 'hands-off-due')
+    expect(dueEntry?.llmHandoff).toBe(true)
+
+    const freshEntry = model.notDue.find((e) => e.plugin === 'hands-off-fresh')
+    expect(freshEntry?.reason).toBe('fresh')
+    expect(freshEntry?.llmHandoff).toBe(true)
+
+    // No key at all, not `false`: a non-declaring entry is shaped as it always was.
+    const plainEntry = [...model.due, ...model.notDue].find((e) => e.plugin === 'plain')
+    expect(plainEntry).toBeDefined()
+    expect(Object.hasOwn(plainEntry!, 'llmHandoff')).toBe(false)
+  })
+
   test('Test 3: --profile weekly narrows the due set and bypasses supervised plugins', async () => {
     await writePlugin(home, 'weekly-one', { schedule: 'weekly' })
     await writePlugin(home, 'manual-schedule', { schedule: 'manual' })

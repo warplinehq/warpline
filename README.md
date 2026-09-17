@@ -36,18 +36,21 @@ Plugins: /tmp/warpline-demo/plugins
 Due (7):
 
   announce-fanout (level 0)
+    llm_handoff: may hand judgment to the LLM ([needs-llm])
     (no declared side effects)
   anomaly-watch (level 0)
     (no declared side effects)
   derived-summary (level 0)
     (no declared side effects)
   draft-writer (level 0)
+    llm_handoff: may hand judgment to the LLM ([needs-llm])
     (no declared side effects)
   metrics-rollup (level 0)
     (no declared side effects)
   daily-digest (level 1)
     (no declared side effects)
   feed-triage (level 1)
+    llm_handoff: may hand judgment to the LLM ([needs-llm])
     (no declared side effects)
 
 Not due (5):

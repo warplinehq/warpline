@@ -187,6 +187,9 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
             level,
             // Manifest declaration order, never re-sorted.
             sideEffects: [...manifest.side_effects],
+            // Set only when declared, so a non-declaring entry and its render
+            // are byte-identical to before.
+            ...(manifest.llm_handoff === true ? { llmHandoff: true } : {}),
             // Whichever authority actually answers for this plugin, and no
             // other. Rendered unconditionally from the session grant, a
             // content-class plugin with a live approval and no grant read

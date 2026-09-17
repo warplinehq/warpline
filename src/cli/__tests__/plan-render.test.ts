@@ -285,3 +285,97 @@ describe('renderPlan', () => {
     expect(out).toContain('    modifies_file: ✓ approved')
   })
 })
+
+describe('renderPlan — the declared handoff line', () => {
+  const HANDOFF = '    llm_handoff: may hand judgment to the LLM ([needs-llm])'
+
+  test('a due entry with side effects shows the line under its plugin, above the first effect', () => {
+    const out = renderPlan(
+      makeModel({
+        due: [due({ sideEffects: ['external_api'], approved: true, llmHandoff: true })],
+      }),
+      NOW,
+    )
+
+    const at = out.indexOf(HANDOFF)
+    expect(at).toBeGreaterThan(out.indexOf('  feed-monitor (level 0)'))
+    expect(at).toBeLessThan(out.indexOf('    external_api:'))
+  })
+
+  test('a due entry with no side effects still shows the line, above the no-effects line', () => {
+    const out = renderPlan(makeModel({ due: [due({ llmHandoff: true })] }), NOW)
+
+    // The zero-effects branch ends the entry early, so the line must come first.
+    expect(out).toContain(
+      ['  feed-monitor (level 0)', HANDOFF, '    (no declared side effects)'].join('\n'),
+    )
+  })
+
+  test('a not-due entry shows the line directly under its reason', () => {
+    const out = renderPlan(makeModel({ notDue: [notDue({ llmHandoff: true })] }), NOW)
+
+    expect(out).toContain(
+      ['  github-poll — within TTL (24h) — last run 12m ago', HANDOFF].join('\n'),
+    )
+  })
+
+  test('a gate-blocked not-due entry shows the line between its reason and its effects', () => {
+    const out = renderPlan(
+      makeModel({
+        notDue: [
+          notDue({
+            llmHandoff: true,
+            reason: 'unapproved',
+            detail: 'unapproved: side effects require session approval',
+            sideEffects: ['sends_email'],
+          }),
+        ],
+      }),
+      NOW,
+    )
+
+    const reason = out.indexOf('  github-poll — unapproved: side effects require session approval')
+    const line = out.indexOf(HANDOFF)
+    const effect = out.indexOf('    sends_email: ⚠ unapproved — would be SKIPPED this run')
+    expect(reason).toBeGreaterThan(-1)
+    expect(line).toBeGreaterThan(reason)
+    expect(effect).toBeGreaterThan(line)
+  })
+
+  test('an entry that omits the field or sets it false renders exactly as before', () => {
+    const shaped = (llmHandoff?: boolean) =>
+      makeModel({
+        due: [
+          due({ sideEffects: ['external_api'], ...(llmHandoff === undefined ? {} : { llmHandoff }) }),
+          due({ plugin: 'quiet', ...(llmHandoff === undefined ? {} : { llmHandoff }) }),
+        ],
+        notDue: [
+          notDue({ ...(llmHandoff === undefined ? {} : { llmHandoff }) }),
+          notDue({
+            plugin: 'blocked',
+            reason: 'unapproved',
+            detail: 'unapproved: side effects require session approval',
+            sideEffects: ['sends_email'],
+            ...(llmHandoff === undefined ? {} : { llmHandoff }),
+          }),
+        ],
+      })
+
+    const omitted = renderPlan(shaped(), NOW)
+    const off = renderPlan(shaped(false), NOW)
+    expect(off).toBe(omitted)
+    expect(omitted).not.toContain('llm_handoff')
+  })
+
+  test('a declaring model keeps both shape rules: no escape byte, and byte-identical renders', () => {
+    const model = makeModel({
+      due: [due({ sideEffects: ['external_api'], llmHandoff: true })],
+      notDue: [notDue({ llmHandoff: true })],
+    })
+
+    const first = renderPlan(model, NOW)
+    expect(renderPlan(model, NOW)).toBe(first)
+    expect(first).toContain(HANDOFF)
+    expect(first).not.toContain('\x1b')
+  })
+})
