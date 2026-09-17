@@ -46,8 +46,15 @@ These operations require reasoning, creativity, or context that code cannot prov
 
 ## Enforcement
 
-- Plugin manifests declare capabilities. Deterministic plugins MUST NOT spawn Claude.
-- The engine validates: a plugin with `autonomy_level: 'autonomous'` and no LLM capability runs without Claude.
+- A plugin that hands judgment work to the LLM declares it in its manifest,
+  with `llm_handoff: true`. The free-text `capabilities` list is informational
+  and the runtime never reads it. Deterministic plugins MUST NOT spawn Claude.
+- The runtime enforces the handoff half. A plugin that returns a `[needs-llm]`
+  handoff without the declaration is refused: its run is recorded `failed` with
+  an error naming the field, and it is never retried. The other half, that a
+  plugin never calls a model inline, is convention. The runtime cannot see a
+  model call inside a handler that returns `success`, so review, and reading
+  the plugins you run, are what hold it.
 - Plugin review checklist: "Could this be a pure function?" If yes, it must be.
 
 ## Grey Areas
@@ -114,6 +121,42 @@ hold is never something you have to infer.
 
 Format and exact merge rules: `docs/runtime-spec.md` § 9.
 
+## The ledger: legible before it runs
+
+The run is legible before it happens, and the judgment work is legible before
+it is picked up. Two surfaces carry that, at two moments:
+
+| Surface | Moment | Shows |
+|---|---|---|
+| `warpline plan` | before the run | which plugins are due, in what order, their declared side effects and whether a grant covers them, and which plugins may hand judgment to the LLM |
+| the `[needs-llm]` handoff | after the run, before an LLM picks it up | one task sentence plus a pre-resolved context payload |
+
+Side-Effect Approval above rests on the first surface. Deciding once, with the
+whole due-set in view, is possible only because the due-set is printed first.
+
+These are enforced, not intended:
+
+- `warpline plan` and an advance can disagree "in one direction only"
+  ([runtime-spec.md](runtime-spec.md), § 10 `plugin_runs`). A preview may show
+  a plugin due that the advance then skips. It never leaves out a plugin the
+  advance runs, because a human approves side effects on the strength of what
+  the preview showed. Pinned by `plan.test.ts` Test 2b.
+- On the board, "What it will do is shown before the verb": no approve control
+  renders without the plugin's declared side effects
+  ([board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)).
+- The plugin pre-resolves everything computable before it hands off, so the
+  LLM gets a decision to make and not a scavenger hunt
+  ([needs-llm-contract.md](needs-llm-contract.md), rule 3).
+
+The plan shows both halves. It lists side effects and their approval state,
+and, under a plugin declaring `llm_handoff: true`, a line saying that plugin
+may hand judgment to the LLM. The declaration is enforced: a handoff from a
+plugin that did not declare it is refused.
+
+The limit is what the ledger can see. It shows what a plugin declares and what
+the runtime refuses. It cannot show a model call made inline inside a handler,
+so "no inline model" stays convention, held by review.
+
 ## Why the plugin hands off instead of calling a model
 
 - **The seam narrows the prompt-injection blast radius.** Plugins process
@@ -138,9 +181,12 @@ Format and exact merge rules: `docs/runtime-spec.md` § 9.
   quietly stops meaning anything.
 - **Auditability** — deterministic plugins produce identical output for
   identical input; the judgment work is quarantined where it can be reviewed.
-- **The boundary stays inspectable** — a plugin with no `llm_required`
-  capability cannot quietly grow a model dependency; the handoff is visible in
-  every run artifact.
+- **The boundary stays inspectable** — a plugin that hands off says so in its
+  manifest (`llm_handoff: true`), and `warpline plan` prints that declaration
+  before anything runs. A handoff from a plugin that did not declare it is
+  refused. A model call inside a handler stays invisible to the runtime, so
+  "no inline model" is a review convention, not a check. The handoff itself is
+  visible in every run artifact.
 - **The consumer is whoever you have.** The contract names a status and a
   payload path. Anything that reads them can consume the handoff: an
   interactive Claude Code session, a headless invocation under cron, an

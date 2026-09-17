@@ -10,7 +10,8 @@ diataxis: how-to
 Read [doctrine.md](doctrine.md). Then answer one question honestly:
 **could this be a pure function over fetched data?** If yes, it is a
 deterministic plugin. If part of it needs judgment, split it — deterministic
-plugin + `[needs-llm]` handoff ([needs-llm-contract.md](needs-llm-contract.md)).
+plugin + `[needs-llm]` handoff, declared with `llm_handoff: true`
+([needs-llm-contract.md](needs-llm-contract.md)).
 "A plugin that calls a model to format data" is a defect, not a plugin.
 
 ## Anatomy
@@ -32,6 +33,7 @@ export const manifest = PluginManifestSchema.parse({
   description: 'One line, present tense, says what it checks or produces',
   autonomy_level: 'autonomous', // autonomous | supervised | manual
   side_effects: [],             // sends_email | creates_issue | writes_db | external_api | modifies_file
+  llm_handoff: false,           // true if the handler may return a [needs-llm] handoff
   ttl_hours: 6,                 // engine skips re-runs while the last success is fresher than this
   schedule: 'on_run',           // on_run | daily | weekly | manual
   timeout_ms: 30_000,           // per-attempt budget; a timeout is fatal, never retried
@@ -96,6 +98,22 @@ Choose `'content'` when a human needs to read the actual payload before it goes
 out — a batch of invoices, a digest, a filing. Choose `'session'` for everything
 else, including anything whose payload is only known at fire time: there is
 nothing to approve in advance, so the content class has nothing to bind to.
+
+#### `llm_handoff` — whether your plugin may hand judgment to the LLM
+
+Optional, `false` by default, and the default is right for a plugin that
+decides everything itself. Set it to `true` when your handler may return
+`skillHandoff(...)`, or any other `[needs-llm]` result.
+
+It means *may*, not *will*: a declaring plugin that returns `skillOk(...)` on a
+given run records `success`, exactly as before. Forget it, and a handoff is
+refused. The run is recorded `failed`, the error names `llm_handoff`, and it
+is never retried, so the plugin keeps failing on every run until the manifest
+says what the handler does. The free-text `capabilities` list does not count.
+
+`warpline plan` shows the declaration as a line under your plugin, so an
+operator sees before the run that it may hand work to the LLM. The full rule
+is in [needs-llm-contract.md](needs-llm-contract.md#declaring-the-handoff).
 
 ### handler.ts
 
@@ -677,6 +695,7 @@ one case needs longer.
 
 - [ ] Could any part be a pure function it isn't? (doctrine review)
 - [ ] Every external touch declared in `side_effects`?
+- [ ] Hands off to the LLM? Manifest declares `llm_handoff: true`.
 - [ ] Every environment variable you read declared in `secrets`?
 - [ ] Args validated, failures returned as typed errors?
 - [ ] `signal` forwarded to real I/O?

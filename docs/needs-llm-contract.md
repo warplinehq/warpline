@@ -101,6 +101,39 @@ is a change to the skill and to this document, and is deliberately not done
 here. Until it is, a result that carried only the field would be one the runtime
 calls `delegated` and the scanner never picks up.
 
+## Declaring the handoff
+
+A plugin that may return a handoff declares it in its manifest:
+
+```typescript
+export const manifest = PluginManifestSchema.parse({
+  name: 'feed-triage',
+  // ...
+  llm_handoff: true,
+})
+```
+
+The field is `false` by default, and it means *may*: a declaring plugin that
+returns `success` records `success`. The free-text `capabilities` list never
+counts as the declaration, whatever it holds. `skillHandoff` builds the result
+but declares nothing, because the manifest does. Rule 1 above is where the
+declaration enters the contract.
+
+A handoff from a plugin that does not declare the field is refused. The run is
+recorded `failed`, `errors[0]` is a `parse_error` naming `llm_handoff`, and it
+carries `retryable: false`, so it is never retried. It is never `delegated`
+either, so the scanner never sees it. Under `review_gate: true`, or for a
+`supervised` plugin, the refused result is parked like any failed result and
+reads `gated`, with the refusal in its summary. The exact refusal is in
+[runtime-spec.md](runtime-spec.md) § 3.
+
+The declaration is also the pre-run half of the contract. `warpline plan`
+prints it under the plugin, before anything runs:
+
+```
+    llm_handoff: may hand judgment to the LLM ([needs-llm])
+```
+
 ## Who consumes the handoff
 
 A **companion skill** — a Claude Code skill (see `skills/needs-llm-template/`)
