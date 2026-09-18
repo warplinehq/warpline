@@ -1246,6 +1246,13 @@ async function markContentApprovalSpent(
       const record = Object.hasOwn(disk.approvals, plugin) ? disk.approvals[plugin] : undefined
 
       if (record === undefined || record.fingerprint !== authority.fingerprint) return 'content_moved'
+      // This re-read is the precondition's view of the document, and the
+      // fingerprint it compares cannot see erasure: the stored hash keeps it
+      // equal. An end-of-run write that erased this producer's content after
+      // the gate read it is possible, for example when this advance's run lock
+      // expires by its TTL while a second advance runs. So the erasure itself
+      // is checked, before any mark is written.
+      if (disk.plugin_runs[record.producer]?.last_output?.erased_at !== undefined) return 'content_moved'
       if (record.marked_at !== null) return 'indeterminate'
 
       // `marked_at` IS the fire instant, and the identity is load-bearing: it is

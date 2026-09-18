@@ -760,8 +760,9 @@ runtime does not know whether the fire already happened.
 second decision, taken after the gate has already said fire, and a refusal from
 one is never a candidate for the other's decision. The mark re-reads the record
 under the state document's lock as its own precondition, so it can answer
-`content_moved` when the record has gone or its fingerprint moved since the gate
-read it, and `indeterminate` when something else has marked it since. It checks
+`content_moved` when the record has gone, its fingerprint moved, or the
+producer's Output was erased since the gate read it, and `indeterminate` when
+something else has marked it since. It checks
 `content_moved` first. A consumer holding either of those two reasons cannot
 tell from the reason alone which point refused; the entry's `result_summary`
 says so in prose. `outside_window` is the one reason the mark never produces.

@@ -796,4 +796,28 @@ describe('the write arm and its rollback are still written', () => {
     const doctored = without(bodyOf('markContentApprovalSpent'), 'writeEngineState')
     expect(() => offendersIn(doctored)).toThrow(/blind/)
   })
+
+  /**
+   * The weaker, structural form, as its neighbours are. The mark is not
+   * exported, and staging the cross-advance race that erases the content
+   * between the gate and the mark is not worth its fixture. What it pins: the
+   * precondition refuses erased content, after the fingerprint compare (which
+   * cannot see erasure) and before the mark check.
+   */
+  test("the mark refuses content_moved when the producer's content was erased under it", () => {
+    const code = bodyOf('markContentApprovalSpent').filter((l) => !/^\s*(\/\/|\*)/.test(l))
+    const fingerprintAt = code.findIndex((l) =>
+      /record\.fingerprint !== authority\.fingerprint\)\s*return 'content_moved'/.test(l),
+    )
+    const erasedHits = code.flatMap((l, i) =>
+      /erased_at !== undefined\)\s*return 'content_moved'/.test(l) ? [i] : [],
+    )
+    const indeterminateAt = code.findIndex((l) => /return 'indeterminate'/.test(l))
+
+    expect(fingerprintAt).toBeGreaterThanOrEqual(0)
+    expect(indeterminateAt).toBeGreaterThanOrEqual(0)
+    expect(erasedHits).toHaveLength(1)
+    expect(erasedHits[0]!).toBeGreaterThan(fingerprintAt)
+    expect(erasedHits[0]!).toBeLessThan(indeterminateAt)
+  })
 })
