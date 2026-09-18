@@ -566,6 +566,44 @@ export function approvalStanding(
   manifests: ReadonlyMap<string, PluginManifest>,
   now: number,
 ): ApprovalStanding {
+  const binding = bindingStanding(state, plugin, manifests, now)
+  // The binding can hold over content that is gone. The fingerprint does not
+  // move when content is erased, on purpose: the stored hash keeps it equal, so
+  // the compare in `bindingStanding` cannot see erasure. And a live binding can
+  // sit over erased content: the producer re-produced byte-identical content
+  // under a later run, and an approval naming that later run closed, which
+  // released it. The answer is `content_moved`, because the bytes this
+  // approval names are no longer there to ship.
+  //
+  // Only a `live` answer is turned, so every earlier refusal, `outside_window`
+  // included, keeps its precedence. The arm is here and not in
+  // `bindingStanding` because the pending-gate discard's carve-out must keep
+  // reading the binding itself.
+  if (
+    binding.standing === 'live' &&
+    state.plugin_runs[binding.approval.producer]?.last_output?.erased_at !== undefined
+  ) {
+    return { standing: 'content_moved', approval: binding.approval }
+  }
+  return binding
+}
+
+/**
+ * Does the operator's binding hold: marks, window, producer identity,
+ * fingerprint?
+ *
+ * This is the check both the gate and the pending-gate discard read. The gate
+ * reads it through `approvalStanding`, which adds one more question on top;
+ * the discard's carve-out reads it directly. It deliberately does not ask
+ * whether the bound content is still held: a binding over erased content still
+ * holds, and still protects the entry that holds the erased record.
+ */
+function bindingStanding(
+  state: EngineState,
+  plugin: string,
+  manifests: ReadonlyMap<string, PluginManifest>,
+  now: number,
+): ApprovalStanding {
   // Own-property, as the denial lookup is: a bare index answers `toString` with
   // an inherited member rather than with the absence that is the truth.
   const approval = Object.hasOwn(state.approvals, plugin) ? state.approvals[plugin] : undefined
@@ -3494,7 +3532,7 @@ export function findPendingGate(state: EngineState, plugin: string): PendingGate
  *
  * `opts.manifests` is required rather than optional, and the whole `opts`
  * default is gone with it. The discard's carve-out below asks
- * `approvalStanding` whether an outstanding content approval is bound to this
+ * `bindingStanding` whether an outstanding content approval is bound to this
  * plugin's bytes, and that question cannot be answered from `manifest` alone —
  * the record names a PRODUCER, whose manifest is what the fingerprint is
  * computed over. A defaulted empty map would answer "no approval" for every
@@ -3613,13 +3651,17 @@ export async function applyPendingGate(
     // is read at exactly one call site, and it is not this one. Nothing here
     // admits anything; every path out of it is a skipped delete.
     //
-    // `approvalStanding` rather than a hand-rolled window-and-fingerprint
-    // predicate, for the reason the denial lookup is a function too: a
-    // re-derived predicate is a second answer that can disagree with the first.
+    // `bindingStanding`, the function the gate's own read is built on, rather
+    // than a hand-rolled window-and-fingerprint predicate, for the reason the
+    // denial lookup is a function too: a re-derived predicate is a second
+    // answer that can disagree with the first. The gate refuses a binding over
+    // erased content, but this carve-out still protects it: the binding holds,
+    // and deleting the entry would turn an erased Output into one never
+    // produced.
     const approvalHolds = Object.entries(state.approvals).some(
       ([consumer, approval]) =>
         (consumer === gate.plugin || approval.producer === gate.plugin) &&
-        approvalStanding(state, consumer, opts.manifests, now).standing === 'live',
+        bindingStanding(state, consumer, opts.manifests, now).standing === 'live',
     )
 
     state.pending_gates = state.pending_gates.filter((g) => g !== gate)

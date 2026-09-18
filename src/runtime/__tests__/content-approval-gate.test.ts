@@ -34,7 +34,7 @@ import { mkdir, writeFile, readFile, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   runAdvance,
   proposalFingerprint,
@@ -48,7 +48,7 @@ import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 import { defaultEngineState } from '../../schemas/engine-state.js'
 import type { EngineState } from '../../schemas/engine-state.js'
-import type { OutputRecord } from '../../schemas/skill-result.js'
+import type { OutputRecord, StoredOutputRecord } from '../../schemas/skill-result.js'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
 
@@ -64,6 +64,17 @@ const outputOf = (body: string): OutputRecord => ({
   type: 'brief',
   format: 'json',
   body,
+})
+
+/**
+ * The same Output after the runtime erased its content: no `body`, the erasure
+ * stamped, and the hash of what it held kept so the fingerprint does not move.
+ */
+const erasedOf = (body: string): StoredOutputRecord => ({
+  type: 'brief',
+  format: 'json',
+  erased_at: '2026-09-15T00:00:00.000Z',
+  body_sha256: createHash('sha256').update(body, 'utf8').digest('hex'),
 })
 
 let home: TestHome
@@ -677,6 +688,32 @@ describe('the content-authority decision', () => {
   })
 
   /**
+   * Erasure is invisible to the fingerprint on purpose: the stored hash keeps
+   * it equal, so a denial stays bound. That means the compare cannot be what
+   * refuses here. Both preconditions are asserted first, so a fixture whose
+   * fingerprint had moved would fail loudly instead of passing for the wrong
+   * reason.
+   */
+  test('an approval over erased content refuses content_moved though the fingerprint still matches', () => {
+    const state = seedState(APPROVED_BODY)
+    const approval = approvalFor(APPROVED_BODY)
+    state.approvals[CONSUMER] = approval
+    const manifests = new Map([
+      [PRODUCER, producerManifest()],
+      [CONSUMER, consumerManifestFor(PRODUCER)],
+    ])
+    expect(approvalStanding(state, CONSUMER, manifests, Date.now()).standing).toBe('live')
+
+    state.plugin_runs[PRODUCER] = {
+      ...state.plugin_runs[PRODUCER]!,
+      last_output: erasedOf(APPROVED_BODY),
+    }
+    expect(proposalFingerprint(state, PRODUCER, producerManifest())).toBe(approval.fingerprint)
+
+    expect(approvalStanding(state, CONSUMER, manifests, Date.now()).standing).toBe('content_moved')
+  })
+
+  /**
    * The lookup is an own-property one. A bare index answers `toString` with an
    * inherited function, and an existence test believes it.
    */
@@ -747,6 +784,31 @@ describe('a content refusal carries a machine-readable reason', () => {
     state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
     return state
   }
+
+  /**
+   * The bytes are gone and nothing else moved. The fingerprint still matches,
+   * so this is the erased arm and not the compare.
+   */
+  function erasedOnly(): EngineState {
+    const state = seedState(APPROVED_BODY)
+    state.plugin_runs[PRODUCER] = {
+      ...state.plugin_runs[PRODUCER]!,
+      last_output: erasedOf(APPROVED_BODY),
+    }
+    state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
+    return state
+  }
+
+  test('an erased Output alone reports content_moved', async () => {
+    expect(await refusalOver(erasedOnly())).toBe('content_moved')
+  })
+
+  /** The erased arm reads only a live binding, so a closed window keeps precedence. */
+  test('an erased Output past its window still reports outside_window', async () => {
+    const state = erasedOnly()
+    state.approvals[CONSUMER] = { ...state.approvals[CONSUMER]!, not_after: '2020-01-01T00:00' }
+    expect(await refusalOver(state)).toBe('outside_window')
+  })
 
   test('a marked, lapsed and drifted record reports indeterminate', async () => {
     expect(await refusalOver(markedLapsedAndDrifted())).toBe('indeterminate')

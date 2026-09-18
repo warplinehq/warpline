@@ -12,6 +12,7 @@ import { mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createHash } from 'node:crypto'
 import { _setHome, sessionApprovalPath } from '../../lib/paths.js'
 import { checkApproval, mergeGrant, MAX_GRANT_WINDOW_MS } from '../../runtime/approval-gate.js'
 import { invokePlugin } from '../../runtime/invoke-plugin.js'
@@ -876,6 +877,58 @@ export async function handler() {
     ).toBe('live')
 
     // The GATE is still discarded — that half is unchanged, exactly as in 19.
+    expect(state.pending_gates).toEqual([])
+  })
+
+  test('19c2: a discard keeps plugin_runs while a binding holds over erased content, and the gate still refuses it', async () => {
+    // 19c's case with the content erased. The binding still holds: the stored
+    // hash keeps the fingerprint equal, so the entry is kept. The gate still
+    // refuses to fire, because there are no bytes to ship. Deleting the entry
+    // here would make the producer read as never having produced.
+    const body = 'the batch the operator read, inline this time'
+    const bodied = {
+      type: 'brief',
+      format: 'markdown' as const,
+      body,
+      run_id: 'run-a',
+      produced_at: '2026-08-29T10:00:00.000Z',
+    }
+    const { body: _dropped, ...rest } = bodied
+    const erased = {
+      ...rest,
+      erased_at: '2026-09-15T00:00:00.000Z',
+      body_sha256: createHash('sha256').update(body, 'utf8').digest('hex'),
+    }
+
+    const fingerprint = denialFingerprint('gated-writer', ['sends_email'], [bodied])
+    // Precondition: erasure did not move the fingerprint, so the binding holds
+    // and only the erased arm can refuse.
+    expect(denialFingerprint('gated-writer', ['sends_email'], [erased])).toBe(fingerprint)
+
+    const seed = liveApprovalSeed('gated-writer')
+    const state = await expireThroughApply(
+      'gated-writer',
+      {
+        pluginRuns: {
+          'gated-writer': { ...seed.pluginRuns['gated-writer'], last_output: erased },
+        },
+        approvals: {
+          [CONSUMER]: { ...(seed.approvals[CONSUMER] as object), fingerprint },
+        },
+      },
+      approvalManifests('gated-writer'),
+    )
+
+    expect(state.plugin_runs['gated-writer']).toBeDefined()
+    expect(state.plugin_runs['gated-writer'].last_output).toEqual(erased)
+
+    const { approvalStanding } = await import('../../runtime/engine.js')
+    expect(
+      approvalStanding(state as never, CONSUMER, approvalManifests('gated-writer'), Date.now())
+        .standing,
+    ).toBe('content_moved')
+
+    expect(state.approvals[CONSUMER]).toBeDefined()
     expect(state.pending_gates).toEqual([])
   })
 

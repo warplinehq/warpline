@@ -747,7 +747,7 @@ wording changes.
 |--------|------------|---------|
 | `indeterminate` | the gate, or the spend mark | A fire was marked and never confirmed, so the runtime cannot tell whether the bytes already shipped |
 | `outside_window` | the gate | The approval window has closed, its zone no longer resolves on this host, or its approval instant cannot be parsed |
-| `content_moved` | the gate, or the spend mark | The approved bytes are no longer what would ship |
+| `content_moved` | the gate, or the spend mark | The approved bytes are no longer what would ship, or the producer's Output that held them has been erased (§ 10, `last_output`) |
 | `mark_unavailable` | the spend mark | The mark could not be attempted at all — the state document could not be locked or could not be read — so nothing was written and nothing was sent |
 | `mark_uncertain` | the spend mark | The mark's own write failed, so whether it landed is unknown; nothing was sent either way |
 
@@ -1738,9 +1738,12 @@ The producer case is the one the delete actually destroys.
 Only a **live** approval protects. One whose window has closed, whose bytes have
 moved, or which is already spent leaves the delete to go ahead exactly as before
 — a stale answer protects nothing, here for the same reason a superseded denial
-does not. The standing is read through the same function the gate reads it
-through; nothing here re-derives the predicate, and nothing here decides whether
-anything fires.
+does not. A binding that still holds over erased content does protect the
+entry, although the gate refuses to fire it (`content_moved`): deleting the
+entry would make the producer read as never having produced (§ 10,
+`last_output`). The carve-out reads the binding through the function the gate's
+own read is built on, so nothing re-derives the predicate, and nothing here
+decides whether anything fires.
 
 The protection lives in `applyPendingGate` rather than in its caller,
 deliberately. `approve` refuses on a live denial before reaching that call, so
@@ -1935,7 +1938,11 @@ The fields:
   ones that would ship.
 - `fingerprint` — hex sha256 of the producer's proposal, whole and untruncated,
   produced by the same entry point a denial uses. If those bytes move, the
-  approval stops applying; it is not renewed and nothing re-asks.
+  approval stops applying; it is not renewed and nothing re-asks. The
+  fingerprint does not move when the producer's content is erased (the stored
+  `body_sha256` keeps it equal, see `denials`), so the gate reads `erased_at`
+  itself, and an approval over erased content refuses with `content_moved`
+  rather than firing on a record with no bytes.
 - `run_id` — the producer run the approved bytes came from, and the reference a
   retention carve-out protects so the log behind an approval is not pruned out
   from under it. Nullable, because an Output may carry no run id: null says the
