@@ -99,7 +99,8 @@ export interface TwoAdvanceHome {
    * not silently move every plugin behind the `min_tier` gate.
    */
   seedState(extra: Record<string, unknown>): Promise<void>
-  advance(): Promise<{ run_log_path: string; run_id: string }>
+  /** `now` is passed to `runAdvance` only when given. */
+  advance(now?: number): Promise<{ run_log_path: string; run_id: string }>
   /** One plugin's row in a persisted run log, or `null` when it did not run. */
   entryFor(runLogPath: string, plugin: string): Promise<RunLogEntry | null>
   /** One plugin's persisted `plugin_runs` entry, straight from the state file. */
@@ -234,7 +235,7 @@ export async function handler(manifest, args, signal, capabilities) {
       )
     },
 
-    async advance() {
+    async advance(now) {
       const { runAdvance } = await import('../../engine.js')
       return runAdvance({
         pluginsDir,
@@ -246,6 +247,7 @@ export async function handler(manifest, args, signal, capabilities) {
         // reads a home this fixture does not own makes that a fact about the
         // ambient environment instead of a fact about the fixture.
         approvalPath: join(ctx.root, '.session-approval'),
+        ...(now === undefined ? {} : { now }),
       })
     },
 

@@ -1989,15 +1989,23 @@ This is the last of three steps in one deletion policy. All three read the
    the moment its window closes (§ 6), so the ordinary prune reclaims that log.
    It holds a summary of the run, not the content.
 2. **The content is erased.** The end-of-run write erases the content of every
-   Output that a closed approval for that producer names by `run_id`, once no
-   open approval names that `run_id`: `body` is deleted, and `erased_at` and
-   `body_sha256` are stamped. The record stays (§ `last_output`).
+   Output that a closed approval for that producer binds, once no open approval
+   still binds it: `body` is deleted, and `erased_at` and `body_sha256` are
+   stamped. The record stays (§ `last_output`). An approval binds an Output
+   when it names the Output's `run_id`. An unmarked approval for that producer
+   also binds it when its `fingerprint` equals the one the Output's bytes
+   produce, because the gate decides authority by fingerprint: a producer that
+   re-produced byte-identical content under a later run leaves an approval
+   naming the earlier run `live`, and erasing under it would void that yes. A
+   marked approval binds by `run_id` only, since it can never be `live` again.
+   The fingerprint needs the producer's manifest, so a producer that is not
+   installed is bound by `run_id` only.
 3. **The binding is swept.** This removes what is left of the approval — a
    fingerprint, a producer name, a run id and some timestamps — once there is
    nothing for it to bind to.
 
 Sharing one predicate and one instant is what stops a run being released while
-its binding is retained, content being erased while an open window still names
+its binding is retained, content being erased while an open window still binds
 it, or the reverse of either.
 
 The one exception:
@@ -2007,6 +2015,14 @@ The one exception:
 | `marked_at` null | dropped |
 | `marked_at` set, `confirmed_at` null | **kept** — this is the did-it-ship evidence |
 | `confirmed_at` set | dropped |
+| still names a `last_output` that keeps its body | **kept** — its erasure was deferred |
+
+The last row is the one that is not an exception to deletion. When an open
+approval still binds the content a closed one named, the erasure leaves the body
+and the sweep keeps the closed binding, so the content still has a binding to
+release it once the holder closes. It is dropped on the first sweep after its
+content is erased or replaced by the producer's next Output. Until then the gate
+reports it `outside_window`, which is true.
 
 A marked-unconfirmed record is never replaced by absence. It is the runtime's
 account of a fire it began and cannot prove it finished, and deleting it would
@@ -2225,7 +2241,7 @@ about which run they describe.
 unambiguous; reading an empty object means guessing whether the plugin produced
 nothing or the writer failed.
 
-**Erased, not absent.** Once the last approval window naming its run has closed,
+**Erased, not absent.** Once the last approval window binding it has closed,
 the content is erased and the record kept: `body` is gone, and `erased_at` and
 `body_sha256` are set (§ `approvals`, "Expiry and deletion"). So
 `capabilities.dependencies.lastOutput` still returns the record, and `null`

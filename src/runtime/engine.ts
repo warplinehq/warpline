@@ -569,11 +569,12 @@ export function approvalStanding(
   const binding = bindingStanding(state, plugin, manifests, now)
   // The binding can hold over content that is gone. The fingerprint does not
   // move when content is erased, on purpose: the stored hash keeps it equal, so
-  // the compare in `bindingStanding` cannot see erasure. And a live binding can
-  // sit over erased content: the producer re-produced byte-identical content
-  // under a later run, and an approval naming that later run closed, which
-  // released it. The answer is `content_moved`, because the bytes this
-  // approval names are no longer there to ship.
+  // the compare in `bindingStanding` cannot see erasure. The erasure itself
+  // holds content any open, unmarked binding still matches by fingerprint, so
+  // it does not void a live yes. A binding can still meet erased content: the
+  // producer's manifest was absent when the erasure ran, so no fingerprint
+  // could hold it, and was installed again later. The answer is `content_moved`,
+  // because the bytes this approval names are no longer there to ship.
   //
   // Only a `live` answer is turned, so every earlier refusal, `outside_window`
   // included, keeps its precedence. The arm is here and not in
@@ -1073,6 +1074,12 @@ function mergeApprovals(
  * rule; what it keeps is the fingerprint and the effect id, never the bytes.
  * The operator resolves it at the sink with the effect id.
  *
+ * **A closed binding whose content erasure was deferred is kept too.** When an
+ * open approval still holds the content it named, `eraseReleasedContent` leaves
+ * the body, and this keeps the closed binding until the holder closes, so the
+ * content still has a binding to release it then. It goes on the sweep after
+ * its content is erased or replaced by the producer's next Output.
+ *
  * A CONFIRMED record past its window is dropped, which means the state report
  * naming a spent approval stops being rendered once the window closes. Said out
  * loud here so it reads as a decision rather than as a surprise.
@@ -1087,12 +1094,19 @@ function mergeApprovals(
  */
 function sweepExpiredApprovals(
   approvals: EngineState['approvals'],
+  pluginRuns: EngineState['plugin_runs'],
   now: number,
 ): EngineState['approvals'] {
   const kept: EngineState['approvals'] = {}
   for (const [plugin, record] of Object.entries(approvals)) {
     const markedUnconfirmed = record.marked_at !== null && record.confirmed_at === null
-    if (!windowClosed(record, now) || markedUnconfirmed) kept[plugin] = record
+    // A closed binding whose content erasure was deferred. The erasure ran just
+    // before this, so a closed binding still naming a `last_output` that keeps
+    // its body is one an open approval held. Dropping it would leave nothing to
+    // erase that content when the holder closes.
+    const out = pluginRuns[record.producer]?.last_output
+    const deferred = out?.body !== undefined && out.run_id === record.run_id
+    if (!windowClosed(record, now) || markedUnconfirmed || deferred) kept[plugin] = record
   }
   return kept
 }
@@ -1106,14 +1120,30 @@ function sweepExpiredApprovals(
  * producer, so a reader can still tell "produced, content erased" from "never
  * produced". The binding that named the run is swept by the next call.
  *
- * **When.** Only when a closed approval for THIS producer names the record's
- * `run_id`, and no open approval names it at all. The open check ignores the
- * producer on purpose: any window still open over that run holds the content,
- * which matches the run ids the prune protects.
+ * **When.** Only when a closed approval for THIS producer binds the record, and
+ * no open approval still binds it. An approval binds the record when it names
+ * its `run_id`, or, for an unmarked approval of this producer, when its
+ * fingerprint equals the one these bytes produce. The second arm matters
+ * because the gate decides authority by fingerprint, not by run: a producer
+ * that re-produced byte-identical content under a later run leaves an approval
+ * naming the earlier run `live`, and erasing under it would void that yes. The
+ * open check on `run_id` ignores the producer on purpose: any window still open
+ * over that run holds the content, which matches the run ids the prune
+ * protects. A marked approval binds by `run_id` only, because it can never be
+ * `live` again, and a marked-unconfirmed one is kept for good, where a
+ * fingerprint arm would erase the same bytes every time they were produced.
+ * The fingerprint arm needs the producer's manifest, and without one the
+ * binding is not `live` either, so only the `run_id` arm applies.
+ *
+ * **Withdrawal is a closure.** `approve --content --remove` hands the record it
+ * removed in as `withdrawn`, which releases like a closed binding, and the
+ * approvals it passes no longer hold it.
  *
  * **Why it runs before the sweep.** The sweep removes the closed, unmarked
  * bindings whose `run_id` this reads. Run after it, this would find nothing to
- * act on and the content would outlive its window.
+ * act on and the content would outlive its window. The sweep in turn keeps a
+ * closed binding whose erasure an open approval deferred, so the content still
+ * has a closed binding to release it when the holder closes.
  *
  * **Why it reads the merged approvals inside the lock.** An `approve --content`
  * from another attachment may have landed since the top of the advance, and
@@ -1138,23 +1168,49 @@ function sweepExpiredApprovals(
 function eraseReleasedContent(
   pluginRuns: EngineState['plugin_runs'],
   approvals: EngineState['approvals'],
+  manifests: ReadonlyMap<string, PluginManifest>,
   now: number,
 ): void {
+  for (const plugin of Object.keys(pluginRuns)) {
+    eraseIfReleased(pluginRuns, plugin, approvals, manifests, now)
+  }
+}
+
+/**
+ * The one producer's half of `eraseReleasedContent`, and the rule both callers
+ * share: the end-of-run write loops it over every producer, and
+ * `approve --content --remove` calls it once for the producer whose binding it
+ * withdrew. See `eraseReleasedContent` for when it erases and why.
+ */
+export function eraseIfReleased(
+  pluginRuns: EngineState['plugin_runs'],
+  plugin: string,
+  approvals: EngineState['approvals'],
+  manifests: ReadonlyMap<string, PluginManifest>,
+  now: number,
+  withdrawn?: Approval,
+): void {
+  const run = Object.hasOwn(pluginRuns, plugin) ? pluginRuns[plugin] : undefined
+  const out = run?.last_output
+  if (run === undefined || out === undefined) return
+  if (out.body === undefined || out.erased_at !== undefined) return
+  const runId = out.run_id
+  if (runId === undefined) return
+  const manifest = manifests.get(plugin)
+  const fingerprint =
+    manifest === undefined ? undefined : denialFingerprint(plugin, manifest.side_effects, [out])
+  const binds = (a: Approval): boolean =>
+    a.run_id === runId ||
+    (a.producer === plugin && a.marked_at === null && a.fingerprint === fingerprint)
   const records = Object.values(approvals)
-  for (const [plugin, run] of Object.entries(pluginRuns)) {
-    const out = run.last_output
-    if (out === undefined || out.body === undefined || out.erased_at !== undefined) continue
-    const runId = out.run_id
-    if (runId === undefined) continue
-    const named = records.filter((a) => a.run_id !== null && a.run_id === runId)
-    const closedHere = named.some((a) => a.producer === plugin && windowClosed(a, now))
-    const stillOpen = named.some((a) => !windowClosed(a, now))
-    if (!closedHere || stillOpen) continue
-    const { body, ...rest } = out
-    pluginRuns[plugin] = {
-      ...run,
-      last_output: { ...rest, body_sha256: sha256(body), erased_at: new Date(now).toISOString() },
-    }
+  const released = records.filter((a) => windowClosed(a, now))
+  if (withdrawn !== undefined) released.push(withdrawn)
+  if (!released.some((a) => a.producer === plugin && binds(a))) return
+  if (records.some((a) => !windowClosed(a, now) && binds(a))) return
+  const { body, ...rest } = out
+  pluginRuns[plugin] = {
+    ...run,
+    last_output: { ...rest, body_sha256: sha256(body), erased_at: new Date(now).toISOString() },
   }
 }
 
@@ -3105,8 +3161,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     await lockStateDocument(stateDir, async () => {
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
       const merged = mergeApprovals(disk.approvals, updatedState.approvals)
-      eraseReleasedContent(updatedState.plugin_runs, merged, approvalNow)
-      updatedState.approvals = sweepExpiredApprovals(merged, approvalNow)
+      eraseReleasedContent(updatedState.plugin_runs, merged, plugins, approvalNow)
+      updatedState.approvals = sweepExpiredApprovals(merged, updatedState.plugin_runs, approvalNow)
       await writeEngineState(updatedState as EngineState, stateDir)
       // The home's layout version, stamped beside the document it describes and
       // inside the same lock, so the two halves of the migration cannot land

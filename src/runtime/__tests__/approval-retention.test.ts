@@ -520,14 +520,18 @@ describe('when a content approval releases its content', () => {
 
     const first = await readState()
     expect(first.plugin_runs[PRODUCER]!.last_output!.body).toBe(BODY)
-    expect(first.approvals[CONSUMER]).toBeUndefined()
+    // The closed binding is kept while its erasure is deferred. Swept here, it
+    // would leave nothing to release the content once the open one closes.
+    expect(first.approvals[CONSUMER]).toBeDefined()
     expect(first.approvals['second-sender']).toBeDefined()
 
     await advance(resolveWallClock(OPEN, 'UTC') + 1)
 
-    const out = (await readState()).plugin_runs[PRODUCER]!.last_output!
+    const second = await readState()
+    const out = second.plugin_runs[PRODUCER]!.last_output!
     expect('body' in out).toBe(false)
     expect(out.erased_at).toBeDefined()
+    expect(second.approvals).toEqual({})
   })
 
   test('R1: an open binding naming the same run for another producer also holds the content', async () => {

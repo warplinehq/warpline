@@ -136,9 +136,9 @@ export type OutputRecord = z.infer<typeof OutputRecordSchema>
 /**
  * The Output record the state document stores at `plugin_runs[name].last_output`.
  *
- * Its one difference from `OutputRecordSchema` is the erased state. Once no
- * open content approval names the run that produced it, the runtime erases
- * `body` and stamps `erased_at` and `body_sha256`. The record stays, so a
+ * Its one difference from `OutputRecordSchema` is the erased state. Once the
+ * last content approval that binds it has closed, the runtime erases `body`
+ * and stamps `erased_at` and `body_sha256`. The record stays, so a
  * reader can still tell "produced, content erased" and "never produced" apart.
  *
  * **Handlers never see this shape.** They are still parsed against

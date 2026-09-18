@@ -36,6 +36,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { _setHome } from '../../lib/paths.js'
+import { resolveWallClock } from '../../lib/wall-clock.js'
+import type { Approval, EngineState } from '../../schemas/engine-state.js'
+import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
+import { approvalStanding, loadPluginManifests, proposalFingerprint } from '../engine.js'
 import { createTwoAdvanceHome, type TwoAdvanceHome } from './helpers/two-advance-home.js'
 import { snapshotHome } from './helpers/snapshot-home.js'
 
@@ -170,6 +174,88 @@ test('R8: once the last window naming a run closes, the approved content is nowh
   await h.advance()
   expect(await filesHolding(h.root, sentinel)).toEqual([])
   expect((await h.persistedRun('prod'))!.last_output).toEqual(after)
+})
+
+/**
+ * The gate decides authority by fingerprint, not by run. A producer that
+ * re-produced byte-identical content under a later run leaves an approval
+ * naming the earlier run `live`. A closed binding on the later run must not
+ * erase under it, and must still be there to release the content once the
+ * earlier one closes too.
+ */
+describe('an open binding that matches the bytes holds them, whichever run it names', () => {
+  const OPEN = '2099-01-01T00:00'
+
+  function binding(plugin: string, runId: string, notAfter: string, fingerprint: string): Approval {
+    return {
+      plugin,
+      producer: 'prod',
+      fingerprint,
+      run_id: runId,
+      approved_at: '2000-01-01T00:00:00.000Z',
+      not_before: null,
+      not_after: notAfter,
+      zone: 'UTC',
+      effect_id: null,
+      marked_at: null,
+      confirmed_at: null,
+    }
+  }
+
+  /** Never installed, so it never fires. Only `approvalStanding` reads it. */
+  const consumer = PluginManifestSchema.parse({
+    name: 'batch-sender',
+    version: '1.0.0',
+    description: 'batch-sender',
+    inputs: {},
+    outputs: {},
+    capabilities: [],
+    schedule: 'on_run',
+    autonomy_level: 'autonomous',
+    side_effects: ['sends_email'],
+    approval_class: 'content',
+    ttl_hours: 24,
+    dependencies: ['prod'],
+    timeout_ms: 5000,
+    max_parallelism: 1,
+  })
+
+  const readState = async (): Promise<EngineState> =>
+    JSON.parse(await readFile(h.statePath, 'utf-8')) as EngineState
+
+  test('WR-01: a closed binding on the current run leaves a live one on an earlier run live, and the content goes once both have closed', async () => {
+    await h.advance()
+    expect(await filesHolding(h.root, sentinel)).toEqual(['state/engine-state.json'])
+
+    const { manifests } = await loadPluginManifests(h.pluginsDir)
+    const doc = await readState()
+    const runId = doc.plugin_runs['prod']!.last_output!.run_id!
+    const fingerprint = proposalFingerprint(doc, 'prod', manifests.get('prod')!)
+    doc.approvals = {
+      // A yes to the same bytes, produced by an earlier run, window open.
+      'batch-sender': binding('batch-sender', 'an-earlier-run', OPEN, fingerprint),
+      // A yes to the current run, window closed.
+      'second-sender': binding('second-sender', runId, '2000-01-02T00:00', fingerprint),
+    }
+    await writeFile(h.statePath, JSON.stringify(doc))
+
+    await h.setMarker()
+    await h.advance()
+
+    const held = await readState()
+    expect(held.plugin_runs['prod']!.last_output!.body).toBe(sentinel)
+    const standingManifests = new Map(manifests).set('batch-sender', consumer)
+    expect(approvalStanding(held, 'batch-sender', standingManifests, Date.now()).standing).toBe('live')
+    // Kept, because its erasure was deferred. It is what releases the content.
+    expect(held.approvals['second-sender']).toBeDefined()
+
+    await h.advance(resolveWallClock(OPEN, 'UTC') + 1)
+
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    const after = await readState()
+    expect(after.plugin_runs['prod']!.last_output!.erased_at).toBeDefined()
+    expect(after.approvals).toEqual({})
+  })
 })
 
 describe('a consumer reads erased content as produced', () => {
