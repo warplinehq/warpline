@@ -590,3 +590,100 @@ describe('when a content approval releases its content', () => {
     expect(denialStanding(after, PRODUCER, manifest).standing).toBe('live')
   })
 })
+
+/**
+ * These are pins. Each is paired with a positive case in the describe above
+ * and differs from it by the one condition its title names, so a pin cannot
+ * pass because the erasure never ran at all.
+ *
+ * The null pairing guards against a loose equality between a binding's null
+ * `run_id` and an Output that carries no `run_id`: both are "no run", and
+ * neither names one. The file-pointer case records that the runtime erases
+ * only the bytes it holds.
+ */
+describe('content erasure leaves everything else alone', () => {
+  beforeEach(async () => {
+    home = await createTestHome()
+    _setHome(home.root)
+    statePath = join(home.stateDir, 'engine-state.json')
+    eventsPath = join(home.stateDir, 'events.jsonl')
+    approvalPath = join(home.root, '.session-approval')
+    await writeFiller()
+  })
+
+  afterEach(async () => {
+    await home.cleanup()
+  })
+
+  /** Seed, advance once, and assert the producer's entry did not move. */
+  async function leftAlone(patch: Partial<EngineState>): Promise<void> {
+    await seedState(patch)
+    const before = structuredClone(patch.plugin_runs?.[PRODUCER])
+
+    const result = await advance()
+
+    expect(result.status).not.toBe('failed')
+    // Widened: the entry may be absent on both sides, and the index type
+    // alone does not say so.
+    const after = (await readState()).plugin_runs[PRODUCER] as PluginRun | undefined
+    expect(after).toEqual(before)
+  }
+
+  test('R5: a closed binding naming another run leaves the Output alone', async () => {
+    await leftAlone({
+      plugin_runs: { [PRODUCER]: producerRun(produced({ run_id: 'newer-run' })) },
+      approvals: { [CONSUMER]: approval({ not_after: CLOSED }) },
+    })
+  })
+
+  test('R5: a binding with a null run id leaves an Output that carried none alone', async () => {
+    // Built without the key. Setting it to undefined would read the same after
+    // `JSON.stringify` drops it, and hide what the case is about.
+    const noRunId = {
+      type: 'brief',
+      format: 'json',
+      body: BODY,
+      produced_at: '2026-08-29T10:00:00.000Z',
+    } as StoredOutputRecord
+    expect('run_id' in noRunId).toBe(false)
+    await leftAlone({
+      plugin_runs: { [PRODUCER]: producerRun(noRunId) },
+      approvals: { [CONSUMER]: approval({ run_id: null, not_after: CLOSED }) },
+    })
+  })
+
+  test('R5: an open binding leaves the Output alone', async () => {
+    await leftAlone({
+      plugin_runs: { [PRODUCER]: producerRun(produced()) },
+      approvals: { [CONSUMER]: approval() },
+    })
+  })
+
+  test('R5: a binding whose zone the host cannot resolve leaves the Output alone', async () => {
+    await leftAlone({
+      plugin_runs: { [PRODUCER]: producerRun(produced()) },
+      approvals: { [CONSUMER]: approval({ not_after: CLOSED, zone: 'Mars/Olympus_Mons' }) },
+    })
+  })
+
+  test('R5: a closed binding for a producer with no plugin_runs entry changes nothing and does not fail', async () => {
+    await leftAlone({
+      approvals: { [CONSUMER]: approval({ not_after: CLOSED }) },
+    })
+  })
+
+  test('a file-pointer Output is never erased', async () => {
+    await leftAlone({
+      plugin_runs: {
+        [PRODUCER]: producerRun({
+          type: 'report',
+          format: 'markdown',
+          path: 'report.md',
+          run_id: 'approved-run',
+          produced_at: '2026-08-29T10:00:00.000Z',
+        } as StoredOutputRecord),
+      },
+      approvals: { [CONSUMER]: approval({ not_after: CLOSED }) },
+    })
+  })
+})
