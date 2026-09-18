@@ -449,7 +449,8 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
   // A plugin listed in this manifest's `dependencies`, read for both facts.
   // `lastOutput` is `null` when that plugin has never produced an Output — a
   // fact about the plugin, not about its last run, because a run that produces
-  // none leaves the previous record in place. `lastRun` is `null` when the
+  // none leaves the previous record in place. An erased record is non-null: it
+  // carries `erased_at` and no `body`. `lastRun` is `null` when the
   // plugin has never run at all, and otherwise is its last run's status. A name
   // this manifest does not declare throws from either one.
   const upstream = capabilities.dependencies.lastOutput(capabilities.caller, 'anomaly-watch')
@@ -458,6 +459,9 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
   if (upstream === null) {
     // Nothing produced yet. `upstreamRun` says whether that is because
     // anomaly-watch has not run (`null`) or ran and produced none.
+  } else if (upstream.erased_at !== undefined) {
+    // The content was erased when the approval window that bound it closed.
+    // The record says anomaly-watch produced, and there are no bytes to read.
   } else if (upstream.body !== undefined) {
     const payload: unknown = JSON.parse(upstream.body)
     // ...guard the shape before trusting it: another plugin wrote this.
@@ -473,7 +477,7 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
 
 The two members answer two different questions about the same declared name,
 and reading only the first is how a plugin ends up publishing "nothing yet"
-about a dependency that produced last week. Together they name four states:
+about a dependency that produced last week. Together they name five states:
 
 | `lastOutput` | `lastRun` | What it means |
 |---|---|---|
@@ -481,6 +485,7 @@ about a dependency that produced last week. Together they name four states:
 | `null` | `'success'` | Ran, and has never produced an Output. |
 | a record | `'failed'` | Produced before; its latest run failed. The record stands, and it is older than that run. **Not reachable under a full advance** — see below. |
 | a record | `'success'` | Produced, and its latest run is healthy. |
+| an erased record (`erased_at` set, no `body`) | any | Produced; its content was erased when the approval window that bound it closed. Run the producer again for new content. |
 
 **A record beside `'success'` does not mean the record came from that run.** A
 run that produced nothing carries the previous record forward, so this row also
@@ -499,7 +504,7 @@ still reachable elsewhere — the carve-out below is the same one — and becaus
 handler that drops the branch is wrong on any host that supplies dependency state
 without running the gate.
 
-**These four states describe an engine advance.** A host may supply no
+**These five states describe an engine advance.** A host may supply no
 dependency state at all, and both members then answer `null` for every declared
 name whatever `engine-state.json` holds — so `null` means "never run" only on a
 host that supplies it. `warpline run` is a host that does not: it invokes one
@@ -516,8 +521,9 @@ summary, so it ran and produced nothing this time. Treat it the way you treat
 of these three is gated: only `'failed'` is, and only under a full advance, so
 `'skipped'`, `'gated'` and `'partial'` all arrive at your handler normally.
 
-An Output carries **either** a `body` or a `path`, never both. When it carries a
-`path`, resolving it is your handler's business — `readJsonOrNull` from
+An Output carries a `body`, a `path`, or, once erased and marked by `erased_at`,
+neither. Its `body_sha256` is a digest of what was erased, never content. When
+it carries a `path`, resolving it is your handler's business — `readJsonOrNull` from
 `warpline/unstable-fs` is the sanctioned way. The member hands you the record
 and reads no filesystem itself.
 

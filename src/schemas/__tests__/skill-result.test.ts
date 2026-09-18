@@ -3,6 +3,7 @@ import {
   SkillResultSchema,
   SkillErrorSchema,
   OutputRecordSchema,
+  StoredOutputRecordSchema,
   OUTPUT_BODY_CAP_BYTES,
 } from '../skill-result.js'
 
@@ -20,6 +21,14 @@ describe('SkillResultSchema', () => {
   it('validates a complete valid input', () => {
     const result = SkillResultSchema.safeParse(validResult)
     expect(result.success).toBe(true)
+  })
+
+  it('refuses a result whose Output is bodiless and claims to be erased', () => {
+    const result = SkillResultSchema.safeParse({
+      ...validResult,
+      artifacts_produced: [{ type: 'brief', erased_at: '2026-09-02T00:00:00.000Z' }],
+    })
+    expect(result.success).toBe(false)
   })
 
   it('rejects invalid status value', () => {
@@ -156,6 +165,30 @@ describe('OutputRecordSchema', () => {
     expect(result.success).toBe(false)
   })
 
+  // The handler boundary does not know the stored-only keys. A handler cannot
+  // hand the runtime an erased Output, or a hash of its own choosing.
+  it('strips the stored-only keys from a handler Output that has a body', () => {
+    const result = OutputRecordSchema.safeParse({
+      type: 'brief',
+      body: 'x',
+      erased_at: '2026-09-02T00:00:00.000Z',
+      body_sha256: 'a'.repeat(64),
+    })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect('erased_at' in result.data).toBe(false)
+      expect('body_sha256' in result.data).toBe(false)
+    }
+  })
+
+  it('refuses a handler Output that is bodiless and claims to be erased', () => {
+    const result = OutputRecordSchema.safeParse({
+      type: 'brief',
+      erased_at: '2026-09-02T00:00:00.000Z',
+    })
+    expect(result.success).toBe(false)
+  })
+
   // The cap is measured in UTF-8 BYTES, not characters. These three fixtures
   // are multi-byte on purpose: an ASCII-only cap test passes against a
   // `.length`-based (UTF-16 code unit) implementation and proves nothing.
@@ -181,6 +214,63 @@ describe('OutputRecordSchema', () => {
     it('rejects a body one UTF-8 byte over the cap', () => {
       expect(OutputRecordSchema.safeParse({ type: 'brief', body: overCap }).success).toBe(false)
     })
+  })
+})
+
+describe('StoredOutputRecordSchema', () => {
+  const erased = {
+    type: 'brief',
+    format: 'json',
+    run_id: 'run-1',
+    produced_at: '2026-09-01T00:00:00.000Z',
+    erased_at: '2026-09-02T00:00:00.000Z',
+    body_sha256: 'a'.repeat(64),
+  }
+
+  it('parses an erased record, which carries neither body nor path', () => {
+    expect(StoredOutputRecordSchema.safeParse(erased).success).toBe(true)
+  })
+
+  it('rejects an erased record that still carries a body', () => {
+    expect(StoredOutputRecordSchema.safeParse({ ...erased, body: 'x' }).success).toBe(false)
+  })
+
+  it('rejects an erased record that carries a path', () => {
+    expect(StoredOutputRecordSchema.safeParse({ ...erased, path: 'x.md' }).success).toBe(false)
+  })
+
+  it('rejects an erased record without the hash of what it held', () => {
+    const { body_sha256: _dropped, ...hashless } = erased
+    expect(StoredOutputRecordSchema.safeParse(hashless).success).toBe(false)
+  })
+
+  it('rejects a record that is not erased and carries neither body nor path', () => {
+    expect(StoredOutputRecordSchema.safeParse({ type: 'brief' }).success).toBe(false)
+  })
+
+  it('still parses a body record and a file-pointer record', () => {
+    expect(StoredOutputRecordSchema.safeParse({ type: 'brief', body: 'x' }).success).toBe(true)
+    expect(StoredOutputRecordSchema.safeParse({ type: 'brief', path: 'x.md' }).success).toBe(true)
+  })
+
+  it('still enforces the body cap in UTF-8 bytes', () => {
+    // '日' is 3 UTF-8 bytes; 5461 * 3 + 2 is one byte over the cap.
+    const overCap = '日'.repeat(5461) + 'ab'
+    expect(Buffer.byteLength(overCap, 'utf8')).toBe(OUTPUT_BODY_CAP_BYTES + 1)
+    expect(StoredOutputRecordSchema.safeParse({ type: 'brief', body: overCap }).success).toBe(false)
+  })
+
+  it('adds exactly the two stored-only keys to the handler shape', () => {
+    expect(Object.keys(StoredOutputRecordSchema.shape).sort()).toEqual([
+      'body',
+      'body_sha256',
+      'erased_at',
+      'format',
+      'path',
+      'produced_at',
+      'run_id',
+      'type',
+    ])
   })
 })
 

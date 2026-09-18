@@ -41,9 +41,12 @@ function describeIssues(raw: IssuesSnapshot): string {
 /**
  * The parsed content of one dependency's last Output, or `null`.
  *
- * An Output carries exactly one of `body` or `path`, and the schema refuses
- * anything else; `readJsonOrNull` covers the `path` form and is null for a file
- * that is not there. Both halves can throw on content this plugin did not
+ * An Output carries `body` or `path`, or neither once the runtime has erased
+ * its content (`erased_at` set). `readJsonOrNull` covers the `path` form and is
+ * null for a file that is not there. An erased record reaches that file read
+ * with no location, which throws, and the catch below settles it to `null`:
+ * the same "nothing usable yet" as any unreadable source, and it comes from the
+ * catch, not from any design for erasure. Both halves can throw on content this plugin did not
  * author — `JSON.parse` on a body that is not JSON, `readJsonOrNull` on a path
  * it cannot read — and a throw out of a handler is a failed run with no
  * structure, which the runtime tells you not to return. So it is caught and

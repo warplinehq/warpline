@@ -73,8 +73,11 @@ export const handler: CapabilityHandlerFn = async (manifest, _args, _signal, cap
     })
   }
 
-  // An Output carries exactly one of `body` or `path`, and the schema refuses
-  // anything else. `feed-monitor` emits the `path` form, because an entry list
+  // An Output carries `body` or `path`, or neither once the runtime has erased
+  // its content (`erased_at` set). An erased record reaches the file read below
+  // with no location, which throws, and the catch settles it to `null`: the
+  // same "nothing to triage" as any unreadable source, coming from the catch,
+  // not from any design for erasure. `feed-monitor` emits the `path` form, because an entry list
   // grows with the feed and the body cap is 16 KiB; `readJsonOrNull` covers it
   // and is null for a file that is not there.
   //

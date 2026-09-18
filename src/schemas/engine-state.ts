@@ -20,7 +20,7 @@
  * strict, so a typo'd one still fails validation loudly.
  */
 import { z } from 'zod'
-import { OutputRecordSchema, SkillResultSchema } from './skill-result.js'
+import { StoredOutputRecordSchema, SkillResultSchema } from './skill-result.js'
 
 // ── Task-board records ────────────────────────────────────────────────────
 
@@ -230,8 +230,15 @@ export const PluginRunSchema = z.object({
   duration_ms: z.number().int().optional(),
   /**
    * The most recent Output this plugin produced, so the Board can name it
-   * without scanning the runs directory. The same record shape a `SkillResult`
-   * carries — not a second one that could disagree with it.
+   * without scanning the runs directory. This is the stored Output record: the
+   * handler shape plus the one state a handler cannot return, erased. That
+   * makes it a second shape by design, and the whole difference is
+   * `erased_at` and `body_sha256`.
+   *
+   * The content is erased at the end-of-run write of the advance in which a
+   * closed approval for this producer names this record's `run_id` and no open
+   * approval names it. The record stays, marked, so a reader can still tell
+   * "produced, content erased" and "never produced" apart.
    *
    * `.optional()` rather than `.nullable()`: an absent optional is omitted by
    * Zod and dropped by `JSON.stringify`, so a plugin that produced nothing
@@ -242,8 +249,8 @@ export const PluginRunSchema = z.object({
    * under the operator's configured retention policy. That is a dangling
    * pointer by design: it resolves to not-retained, and deleting the pointer to
    * avoid the case would throw away the only record that the Output existed. A
-   * dangling pointer is also not protective — the prune exempts a run a pending
-   * approval gate names, and nothing else.
+   * dangling pointer is also not protective. The prune exempts a run that a
+   * pending gate or an OPEN content approval names, and nothing else.
    *
    * The same argument covers a case it was not written for: a later run of the
    * same plugin that produced NO Output. That run has said nothing about what
@@ -257,7 +264,7 @@ export const PluginRunSchema = z.object({
    * one case. Preserving on only some of them would make this field mean a
    * fourth thing the sentence above does not say.
    */
-  last_output: OutputRecordSchema.optional(),
+  last_output: StoredOutputRecordSchema.optional(),
 })
 export type PluginRun = z.infer<typeof PluginRunSchema>
 

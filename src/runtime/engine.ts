@@ -104,7 +104,7 @@ import { ENGINE_STATE_MAX_SCHEMA_VERSION } from '../schemas/engine-state.js'
 import type { Approval, Denial, EngineState, PendingGate, PluginRun } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs } from './run-log-store.js'
 import type { RefusalReason, RunLog } from '../schemas/run-log.js'
-import type { OutputRecord, SkillResult } from '../schemas/skill-result.js'
+import type { SkillResult, StoredOutputRecord } from '../schemas/skill-result.js'
 import {
   emitBoardEvent,
   makeEvent,
@@ -203,12 +203,13 @@ export interface AdvanceOptions {
    * and not a getter, because a getter lets two reads inside one advance
    * disagree, which is the disagreement the seam exists to remove.
    *
-   * It reaches `evaluatePlugin`, and through `approvalNow` it reaches the two
+   * It reaches `evaluatePlugin`, and through `approvalNow` it reaches the three
    * `windowClosed` consumers — the retention protected set near the top of the
-   * advance and the approval expiry sweep at the end-of-run assembly. Those two
-   * read one captured value rather than the option directly, which is what stops
-   * protection and deletion disagreeing about an instant as well as about a
-   * rule. Nothing else reads it. `entryStart` stays a live
+   * advance, and the content erasure and the approval expiry sweep at the
+   * end-of-run assembly. All three read one captured value rather than the
+   * option directly, which is what stops protection and deletion disagreeing
+   * about an instant as well as about a rule. The erasure stamps `erased_at`
+   * from that same value, so an injected instant reaches the stamp too. Nothing else reads it. `entryStart` stays a live
    * `Date.now()` and remains the `elapsed_ms` baseline for every row in the run
    * log — freezing that to an injected past instant would make each duration a
    * large positive number describing time that did not pass. It is deliberately
@@ -365,13 +366,21 @@ function sha256(input: string): string {
  * keeps the content of an Output out of the denials record entirely. The
  * prefixes stop a path and a body of the same text colliding.
  *
+ * **An erased Output enters by the hash stored when its body was erased.** The
+ * prefix and the digest are the ones the live body produced, so erasure never
+ * moves a fingerprint. A denial stays live across it for every reader of
+ * `proposalFingerprint`: the evaluator's denial and approval checks, `deny` and
+ * `approve`. An erased record is not exempted from `superseded` anywhere, and no
+ * denial is re-bound at erasure. It simply hashes the same.
+ *
  * **`type` is hashed because R3 names it and because it is a change of
  * proposal.** Without it a plugin that turned the file at `report.md` from a
  * `draft` into a `report` produced a byte-identical fingerprint, so a denial
  * recorded against the draft went on silently suppressing the report — an
  * answer to a question the operator was never asked.
  */
-function outputFingerprintKey(output: OutputRecord): string {
+function outputFingerprintKey(output: StoredOutputRecord): string {
+  if (output.erased_at !== undefined) return `${output.type}|body:${output.body_sha256}`
   const body =
     output.path !== undefined ? `path:${output.path}` : `body:${sha256(output.body ?? '')}`
   return `${output.type}|${body}`
@@ -400,7 +409,7 @@ function outputFingerprintKey(output: OutputRecord): string {
 export function denialFingerprint(
   plugin: string,
   sideEffects: readonly string[],
-  outputs: readonly OutputRecord[],
+  outputs: readonly StoredOutputRecord[],
 ): string {
   return sha256(
     JSON.stringify({
@@ -613,23 +622,25 @@ export function approvalStanding(
 /**
  * Has this approval's fire window closed at `now`?
  *
- * **One predicate, two consumers, and that is the whole reason it is a
- * function.** An advance asks this question twice, at two ends of `runAdvance`:
- * once near the top, to decide which runs the prune must exempt, and once at
- * the end-of-run assembly, to decide which bindings to sweep. Those two sites
- * are a thousand lines apart and cannot share one computed value, so they share
- * this — because two independently written window checks are two answers that
- * can disagree about the same record. A run released while its binding is
- * retained is a dangling approval; a binding deleted while its run is pinned is
- * retain-forever wearing a deletion policy.
+ * **One predicate, three consumers, and that is the whole reason it is a
+ * function.** An advance asks this question at two ends of `runAdvance`: once
+ * near the top, to decide which runs the prune must exempt, and twice at the
+ * end-of-run assembly, to decide whose content to erase and which bindings to
+ * sweep. The erasure and the sweep read it at the same instant, one call after
+ * the other. The top and the tail are a thousand lines apart and cannot share
+ * one computed value, so they share this — because independently written window
+ * checks are answers that can disagree about the same record. A run released
+ * while its binding is retained is a dangling approval; a binding deleted while
+ * its run is pinned is retain-forever wearing a deletion policy; content erased
+ * while an open window still names it voids a live yes.
  *
  * It is NOT the same question `approvalStanding` answers, and must not be
  * mistaken for it. That function decides AUTHORITY — window, fingerprint,
  * producer identity, mark state, all of it — at the single call site the fire
- * decision is read from. This one reads one bound, is consumed by two readers
+ * decision is read from. This one reads one bound, is consumed by three readers
  * that never fire anything, and is deliberately a hair wider: strictly-less-than
  * rather than the standing's `>=`, so an approval sitting exactly on its
- * closing instant keeps its payload for one more advance. Wider in the
+ * closing instant keeps its content for one more advance. Wider in the
  * retaining direction is the safe error; narrower would delete bytes an
  * authority read still considers.
  *
@@ -1002,23 +1013,26 @@ function mergeApprovals(
  * Drop every approval whose fire window has closed, except the did-it-ship
  * evidence.
  *
- * The deletion path the fourth Prohibition requires, stated as one filter. A
- * frozen batch is recipient data: EDPB ¶82 wants its deletion automated and
- * tested rather than left to operator hygiene, and this runs inside every
- * advance.
+ * The binding's half of the deletion path the fourth Prohibition requires,
+ * stated as one filter. A frozen batch is recipient data: EDPB ¶82 wants its
+ * deletion automated and tested rather than left to operator hygiene, and this
+ * runs inside every advance.
  *
- * **Two objects, two halves, and only one of them is here.** The PAYLOAD is not
- * in this record — the record holds a hex fingerprint, a producer name, a run id
- * and timestamps, while the bytes live in the producer's run log. That half is
- * closed by `protectedRunIds` releasing the run the moment the window closes,
- * which hands the bytes to ordinary retention. This is the other half: the
- * BINDING, once there is nothing left for it to bind to.
+ * **Three objects, three halves, and only one of them is here.** The record
+ * holds a hex fingerprint, a producer name, a run id and timestamps, never the
+ * content. The RUN LOG is released by `protectedRunIds` the moment the window
+ * closes, which hands it to ordinary retention; that log holds a summary of the
+ * run, never the content. The CONTENT is `plugin_runs[producer].last_output.body`
+ * in the state document, and `eraseReleasedContent` erases it just before this
+ * runs, at the same instant and by the same predicate. This is the third half:
+ * the BINDING, once there is nothing left for it to bind to.
  *
  * **The marked-unconfirmed exception is D-11a, and it is not a leak.** A record
  * with `marked_at` set and `confirmed_at` null is the runtime's account of a
  * fire it began and cannot prove it finished. Deleting it would destroy the
  * did-it-ship evidence for a send that may well have landed — repudiation, not
- * hygiene — and it is safe to keep because the payload went with the run log.
+ * hygiene. It is safe to keep because its bound content is erased by the same
+ * rule; what it keeps is the fingerprint and the effect id, never the bytes.
  * The operator resolves it at the sink with the effect id.
  *
  * A CONFIRMED record past its window is dropped, which means the state report
@@ -1026,12 +1040,12 @@ function mergeApprovals(
  * loud here so it reads as a decision rather than as a surprise.
  *
  * **Two ceilings, stated rather than hidden.**
- * `state.plugin_runs[producer].last_output` is NOT deleted by this: it is the
- * producer's own record, preserved across a run that produced nothing and
- * overwritten by the producer's next Output, and deleting it would break a
- * contract this change did not open. And there is still no operator gesture that
- * resolves an `indeterminate` record — so a marked-unconfirmed one survives
- * here indefinitely, by design and for want of a verb.
+ * `state.plugin_runs[producer].last_output` is kept as a record: it is a fact
+ * about the producer, preserved across a run that produced nothing and
+ * overwritten by the producer's next Output. Only its content is erased, and
+ * the record says so with `erased_at`. And there is still no operator gesture
+ * that resolves an `indeterminate` record — so a marked-unconfirmed one
+ * survives here indefinitely, by design and for want of a verb.
  */
 function sweepExpiredApprovals(
   approvals: EngineState['approvals'],
@@ -1043,6 +1057,67 @@ function sweepExpiredApprovals(
     if (!windowClosed(record, now) || markedUnconfirmed) kept[plugin] = record
   }
   return kept
+}
+
+/**
+ * Erase the content of every Output whose last approval window has closed.
+ *
+ * **What it erases, and what it leaves.** For a producer whose `last_output`
+ * carries an inline `body`, it deletes the `body` and stamps `body_sha256` and
+ * `erased_at` on a new record. The record itself stays, as a fact about the
+ * producer, so a reader can still tell "produced, content erased" from "never
+ * produced". The binding that named the run is swept by the next call.
+ *
+ * **When.** Only when a closed approval for THIS producer names the record's
+ * `run_id`, and no open approval names it at all. The open check ignores the
+ * producer on purpose: any window still open over that run holds the content,
+ * which matches the run ids the prune protects.
+ *
+ * **Why it runs before the sweep.** The sweep removes the closed, unmarked
+ * bindings whose `run_id` this reads. Run after it, this would find nothing to
+ * act on and the content would outlive its window.
+ *
+ * **Why it reads the merged approvals inside the lock.** An `approve --content`
+ * from another attachment may have landed since the top of the advance, and
+ * that yes must hold the content. The protected set computed at the top is also
+ * the wrong input for a second reason: it holds pending-gate run ids too.
+ *
+ * **Why it stores the hash.** An erased Output enters the fingerprint by
+ * `body_sha256`, the same digest its body produced, so erasure never moves a
+ * fingerprint and never re-raises a denial the operator already answered.
+ *
+ * **What it does not reach, named plainly.** A `path` Output: the runtime holds
+ * no bytes for it, and `approve --content` refuses such Outputs. A home whose
+ * bindings an earlier build swept: nothing records which Output was approved,
+ * and the producer's next Output replaces it. Content copied into a parked
+ * gate's `plugin_result`. And a plugin's own `summary` text.
+ *
+ * It reads no clock. The stamp comes from `now`, which is `approvalNow`, and it
+ * reads the window through `windowClosed` only, which already retains on a zone
+ * the host cannot resolve. It never throws, and it never writes an empty body:
+ * the key is absent.
+ */
+function eraseReleasedContent(
+  pluginRuns: EngineState['plugin_runs'],
+  approvals: EngineState['approvals'],
+  now: number,
+): void {
+  const records = Object.values(approvals)
+  for (const [plugin, run] of Object.entries(pluginRuns)) {
+    const out = run.last_output
+    if (out === undefined || out.body === undefined || out.erased_at !== undefined) continue
+    const runId = out.run_id
+    if (runId === undefined) continue
+    const named = records.filter((a) => a.run_id !== null && a.run_id === runId)
+    const closedHere = named.some((a) => a.producer === plugin && windowClosed(a, now))
+    const stillOpen = named.some((a) => !windowClosed(a, now))
+    if (!closedHere || stillOpen) continue
+    const { body, ...rest } = out
+    pluginRuns[plugin] = {
+      ...run,
+      last_output: { ...rest, body_sha256: sha256(body), erased_at: new Date(now).toISOString() },
+    }
+  }
 }
 
 /**
@@ -2049,18 +2124,20 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // `ReadonlySet<string>`, and dedup is free because it is a `Set`, which is
     // why an id named by both a gate and an approval is protected once.
     //
-    // **Only while the window is OPEN**, which is the deletion path the fourth
-    // Prohibition requires. A frozen batch is recipient data and its bytes live
-    // in the producer's run log; a set that never releases would pin them
-    // forever. Releasing on close hands them straight back to ordinary
-    // retention — already running, already tested, no new mechanism — and the
-    // binding itself is swept at the end-of-run assembly below.
+    // **Only while the window is OPEN.** A set that never releases would pin
+    // the run log forever. Releasing on close hands the log to ordinary
+    // retention — already running, already tested, no new mechanism — and that
+    // log holds a summary of the run, not the content. The content a frozen
+    // batch carries is recipient data, and it sits in the state document, in
+    // `plugin_runs[producer].last_output.body`. The end-of-run write below
+    // erases it, and then sweeps the binding itself.
     //
-    // **`windowClosed` and not a second window comparison**, and the two sites
-    // are far enough apart that the sharing has to be the FUNCTION rather than
-    // a computed value: this runs before the level loop and the sweep runs
-    // after it. `approvalNow` is what keeps them from disagreeing about the
-    // instant as well as about the rule — one clock read, both readers.
+    // **`windowClosed` and not a second window comparison**, and the sites are
+    // far enough apart that the sharing has to be the FUNCTION rather than a
+    // computed value: this runs before the level loop, and the erasure and the
+    // sweep run after it. `approvalNow` is what keeps them from disagreeing
+    // about the instant as well as about the rule — one clock read, three
+    // readers.
     //
     // **This is a CONSUMER of the record, not a second read of the authority
     // for the fire decision.** R2's Acceptance names this set among the readers
@@ -2965,6 +3042,15 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // and a record confirmed inside this advance is a record whose window was
     // open when the fire was authorised.
     //
+    // **The content erasure sits between the merge and the sweep.** It reads
+    // the MERGED approvals, so a yes another attachment landed mid-advance still
+    // holds its content, and it reads them at `approvalNow`, the instant the
+    // sweep reads. It has to run before the sweep: the sweep drops the closed,
+    // unmarked bindings whose `run_id` the erasure matches on, and after it
+    // there would be nothing left to say which content was released. It writes
+    // only `plugin_runs` entries, which this process owns in memory, so the
+    // floor rule above does not apply to it.
+    //
     // **No `catch` around this write, and that is load-bearing.** A spend mark
     // that failed on storage (`mark_unavailable`, `mark_uncertain`) exits `0`
     // on its own, and that decision in `exit-codes.ts` is safe only because a
@@ -2973,10 +3059,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // `catch` and those faults go quiet: revisit `advanceExitCode` first.
     await lockStateDocument(stateDir, async () => {
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
-      updatedState.approvals = sweepExpiredApprovals(
-        mergeApprovals(disk.approvals, updatedState.approvals),
-        approvalNow,
-      )
+      const merged = mergeApprovals(disk.approvals, updatedState.approvals)
+      eraseReleasedContent(updatedState.plugin_runs, merged, approvalNow)
+      updatedState.approvals = sweepExpiredApprovals(merged, approvalNow)
       await writeEngineState(updatedState as EngineState, stateDir)
       // The home's layout version, stamped beside the document it describes and
       // inside the same lock, so the two halves of the migration cannot land
@@ -3641,7 +3726,7 @@ export async function applyPendingGate(
 function lastOutputOf(
   result: SkillResult | null,
   prior: PluginRun | undefined,
-): { last_output?: OutputRecord } {
+): { last_output?: StoredOutputRecord } {
   // `null` is the third caller: an invocation that threw has no result at all,
   // which is the strongest form of "this run produced nothing" and takes the
   // carry-forward for the same reason the other two do. Widened here rather

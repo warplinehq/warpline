@@ -318,9 +318,23 @@ async function approveContent(
       return 1
     }
 
+    // Erased content is its own refusal, checked before the file check below.
+    // The record says the producer produced, and its content is gone, so there
+    // is nothing an operator could have read. Only the two plugin names are
+    // interpolated.
+    if (lastOutput.erased_at !== undefined) {
+      process.stderr.write(
+        `${consumer} cannot be approved by content: ${producer}'s last Output was erased ` +
+          `when the approval window that bound it closed, so there are no bytes to read. ` +
+          `Run ${producer} again to produce new content. Nothing was written.\n`,
+      )
+      return 1
+    }
+
     // -- The shape of the Output -------------------------------------------
-    // An Output declares exactly one of `body` or `path`, so an absent body is
-    // a path. Refused outright rather than resolved: approving by content means
+    // A stored Output carries `body`, `path`, or neither once erased. Erasure
+    // was refused just above, so an absent body here is the file-pointer form.
+    // Refused outright rather than resolved: approving by content means
     // the operator read the exact bytes, and producing them would mean reading
     // a file the runtime was never asked to read. Refusing is also how this
     // sidesteps path traversal entirely instead of defending against it — the

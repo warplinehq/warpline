@@ -12,15 +12,25 @@
  * comparison pay for an engine setup.
  */
 import { describe, it, expect } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { denialFingerprint, denialStanding, proposalFingerprint } from '../engine.js'
 import { defaultEngineState } from '../../schemas/engine-state.js'
-import type { OutputRecord } from '../../schemas/skill-result.js'
+import type { OutputRecord, StoredOutputRecord } from '../../schemas/skill-result.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 const HEX_64 = /^[0-9a-f]{64}$/
 
 const pathOutput = (path: string): OutputRecord => ({ type: 'report', format: 'markdown', path })
 const bodyOutput = (body: string): OutputRecord => ({ type: 'brief', format: 'markdown', body })
+/** A `brief` whose content the runtime erased, keeping the hash of what it held. */
+const erasedOutput = (sha: string): StoredOutputRecord => ({
+  type: 'brief',
+  format: 'markdown',
+  erased_at: '2026-09-02T00:00:00.000Z',
+  body_sha256: sha,
+})
+/** Hex sha256, computed here because the engine's own helper is not exported. */
+const hex = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex')
 
 function makeManifest(name: string, sideEffects: string[]): PluginManifest {
   return {
@@ -238,6 +248,41 @@ describe('proposalFingerprint', () => {
     })
 
     expect(proposalFingerprint(state, 'x', manifest)).toBe(withoutGate)
+  })
+
+  it("R7: erasing an Output's content does not move the fingerprint", () => {
+    const manifest = makeManifest('x', ['sends_email'])
+    const withBody = defaultEngineState()
+    withBody.plugin_runs['x'] = {
+      last_run_at: '2026-08-29T10:00:00.000Z',
+      status: 'success',
+      last_output: bodyOutput('the batch'),
+    }
+    const erased = defaultEngineState()
+    erased.plugin_runs['x'] = {
+      last_run_at: '2026-08-29T10:00:00.000Z',
+      status: 'success',
+      last_output: erasedOutput(hex('the batch')),
+    }
+
+    const before = proposalFingerprint(withBody, 'x', manifest)
+    expect(proposalFingerprint(erased, 'x', manifest)).toBe(before)
+
+    // A denial recorded before the erasure still answers the proposal after it.
+    erased.denials['x'] = {
+      plugin: 'x',
+      reason: 'operator said no',
+      denied_at: '2026-08-29T10:00:00.000Z',
+      note: null,
+      fingerprint: before,
+    }
+    expect(denialStanding(erased, 'x', manifest).standing).toBe('live')
+  })
+
+  it('an erased Output does not collide with a genuinely empty body', () => {
+    expect(denialFingerprint('p', [], [erasedOutput(hex('the batch'))])).not.toBe(
+      denialFingerprint('p', [], [bodyOutput('')]),
+    )
   })
 })
 

@@ -1605,6 +1605,33 @@ describe('warpline approve --content', () => {
     expect(await approvalsOnDisk()).toBe(before)
   })
 
+  test('C22: an erased Output is refused by name, and nothing is written', async () => {
+    const erased = {
+      type: 'brief',
+      format: 'json',
+      run_id: 'run-the-operator-read',
+      produced_at: '2026-09-01T00:00:00.000Z',
+      erased_at: '2026-09-02T00:00:00.000Z',
+      body_sha256: 'b'.repeat(64),
+    }
+    await writeContentPair()
+    await seedContentState(true, erased)
+    // Raw bytes, not the parsed approvals: nothing at all may be written.
+    const before = await readFile(statePath)
+
+    const { code, stdout, stderr } = await capture('approve', approveArgs)
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(CONSUMER)
+    expect(stderr).toContain('Nothing was written')
+    expect(stderr.toLowerCase()).toContain('erase')
+    // The file-pointer refusal's word. Erased content is its own refusal, and
+    // it must not read as the file-pointer one.
+    expect(stderr.toLowerCase()).not.toContain('path')
+    expect(stdout).not.toContain('----- begin approved bytes -----')
+    expect(Buffer.compare(await readFile(statePath), before)).toBe(0)
+  })
+
   test('C14: the fingerprint prints whole on its own line and is the one the gate compares', async () => {
     await writeContentPair()
     await seedContentState(true)

@@ -31,7 +31,7 @@
  */
 import type { PluginRun } from '../schemas/engine-state.js'
 import type { PluginManifest, SideEffectType } from '../schemas/plugin-manifest.js'
-import type { OutputRecord } from '../schemas/skill-result.js'
+import type { StoredOutputRecord } from '../schemas/skill-result.js'
 
 /**
  * The two fields of a dependency's last run that may be handed to a different
@@ -228,7 +228,7 @@ export const CAPABILITY_REGISTRY: Readonly<Record<string, CapabilityEntry>> = {
       }
 
       return {
-        lastOutput: (caller, dependencyName): OutputRecord | null => {
+        lastOutput: (caller, dependencyName): StoredOutputRecord | null => {
           // The caller is required and unread, for the reason `SecretsHandle`
           // states. `void` keeps it from being deleted as dead code.
           void caller
@@ -321,7 +321,8 @@ export interface SecretsHandle {
  *
  * **It does not read the filesystem.** It closes over a value the caller
  * supplied, which is also what makes it testable from a literal. Note that an
- * Output may carry a `path` rather than a `body`; resolving that path is the
+ * Output may carry a `body`, a `path`, or, once its content was erased,
+ * neither; resolving a `path` is the
  * handler's business — `readJsonOrNull` from `warpline/unstable-fs` is the
  * sanctioned way — and doing it here is how this member would acquire the disk
  * access the sentence above rules out.
@@ -336,6 +337,11 @@ export interface SecretsHandle {
  * never run; ran and has never produced; produced, and its latest run failed;
  * produced, and its latest run is healthy — and a supervised producer parked at
  * a gate reads `gated`, which is an answer rather than an error.
+ *
+ * An erased record is returned non-null, and that names a fifth state:
+ * produced, then its content erased when the approval window that bound it
+ * closed. It is recognisable by `erased_at` and no `body`. `null` still means
+ * only "never produced", because the record is still a fact about the plugin.
  *
  * An earlier version of this docstring argued that collapsing "has never run"
  * into "produced nothing" was deliberate, because a handler could not act on
@@ -379,7 +385,7 @@ export interface DependenciesHandle {
   readonly lastOutput: (
     caller: CapabilityCaller,
     dependencyName: string,
-  ) => OutputRecord | null
+  ) => StoredOutputRecord | null
   readonly lastRun: (
     caller: CapabilityCaller,
     dependencyName: string,

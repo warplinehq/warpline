@@ -354,7 +354,9 @@ name the reading manifest declares:
 
 - `lastOutput(caller, name)` returns that plugin's most recent Output record, or
   `null` when it has never produced one. See § `last_output` for why that is a
-  fact about the plugin and not about its last run.
+  fact about the plugin and not about its last run. A producer whose content was
+  erased still returns its record, which carries `erased_at` and no `body`.
+  `null` still means never produced.
 - `lastRun(caller, name)` returns that plugin's last run status — one of
   `success`, `partial`, `failed`, `skipped`, `gated` — or `null` when it has
   never run. It is the same enum § `plugin_runs` records, and it is the whole of
@@ -814,9 +816,20 @@ the pre-0.2 shape, it stays valid until 1.0, and it is reachable only because
 | `produced_at` | ISO 8601 | stamped | When the producing run accepted it |
 | `body` | string | exactly one of | Inline content, capped at 16384 UTF-8 bytes |
 | `path` | string | exactly one of | Filesystem path to the content |
+| `erased_at` | ISO 8601 | stored only | Set by the runtime when it erased `body` (§ 10, `last_output`). Never accepted from a handler |
+| `body_sha256` | hex string | stored only | The sha256 of the erased body, so a fingerprint does not move across erasure |
 
-Exactly one of `body` and `path`. Declaring both fails validation and declaring
-neither fails validation, so a reader never has to decide which one wins.
+A handler's Output declares exactly one of `body` and `path`. Declaring both
+fails validation and declaring neither fails validation, so a reader never has
+to decide which one wins.
+
+The record the state document stores, `StoredOutputRecordSchema` (exported from
+`warpline/schemas/skill-result` beside `OutputRecordSchema`), adds one state:
+erased. An erased record declares neither `body` nor `path`, carries
+`erased_at`, and must carry `body_sha256`. The two stored-only keys are the
+runtime's, never a handler's. A handler that returns either one has it stripped
+when its Output has a body or a path, and is refused as an invalid result when
+its Output has neither. So no plugin can hand the runtime a bodiless Output.
 
 The inline cap is **16384 UTF-8 bytes**, and the unit is the point. It is
 enforced with `Buffer.byteLength`, not with a string length: a string length
@@ -943,24 +956,26 @@ and a third is never a candidate at all:
   a human's approval;
 - a run named by a pending approval gate;
 - a run named by a content approval **whose fire window is still open** (§ 10,
-  `approvals`). The bytes an operator froze live in the producer's run log, and
-  reclaiming that log while their yes is outstanding would leave an approval
-  bound to nothing. A stored `run_id` that is neither a pending gate's nor an
+  `approvals`). That run's log holds a summary of the run, not the content. The
+  approved content is `plugin_runs[producer].last_output.body` in the state
+  document. Keeping the log while the yes is outstanding keeps the record of
+  the run an approval names. A stored `run_id` that is neither a pending gate's nor an
   open approval's does **not** protect: a `last_output` pointer and a versioned
   Output's history are documented to dangle (§ 10), and treating a dangling
   pointer as protective would be retain-forever by accident;
 - a document that will not parse, which is left on disk so an operator can
   inspect it by hand.
 
-**An approval's protection ENDS when its window closes**, and that is the
-deletion path for the approved payload. From the first advance after
-`not_after`, the referenced run is an ordinary candidate again and the three
-bounds below reclaim it with no new mechanism — automated, and running inside
-every advance rather than waiting on operator hygiene. A frozen batch is
-recipient data; a carve-out that never released would be retain-forever with a
-carve-out's name on it. The binding that named the run is swept in the same
-advance (§ 10, "Expiry and deletion"), and both decisions read one predicate, so
-a released run and a retained binding cannot come apart. Protection does not
+**An approval's protection ENDS when its window closes.** From the first
+advance after `not_after`, the referenced run's log is an ordinary candidate
+again and the three bounds below reclaim it with no new mechanism. That log
+holds a summary, not the content. The content a frozen batch carries is
+recipient data, and it is erased by the end-of-run write of the same advance:
+`body` deleted, `erased_at` and `body_sha256` stamped (§ 10, "Expiry and
+deletion"). The binding that named the run is swept in that write too. Three
+readers share one predicate: prune protection, the content erasure and the
+binding sweep. So a released run, erased content and a retained binding cannot
+come apart. Protection does not
 depend on the mark: an approval already spent still protects its run while its
 window is open, and a marked-unconfirmed one stops protecting when the window
 closes exactly as an unmarked one does.
@@ -1486,7 +1501,7 @@ arrives without a migration step, so it arrives unannounced.
 | `last_run_at` | ISO 8601 string | When the run ended |
 | `status` | `success` \| `partial` \| `failed` \| `skipped` \| `gated` | How it ended |
 | `duration_ms` | integer, optional | Wall time for the run |
-| `last_output` | Output record, optional | The most recent Output this plugin produced |
+| `last_output` | Output record, optional | The most recent Output this plugin produced. Its content may have been erased; see § `last_output` |
 
 `gated` records a supervised plugin that ran and was parked pending approval.
 It is written when the plugin is parked, anchored at the gate's completion
@@ -1866,7 +1881,9 @@ as being the record key, so two plugins with byte-identical payloads produce
 different values and no denial can answer for another plugin's proposal. An
 inline Output enters by a hash of its body rather than by the body itself,
 which bounds the fingerprint whatever the inline cap allows and keeps Output
-content out of the record.
+content out of the record. An erased Output enters by the `body_sha256` stored
+when its body was erased. That is the same digest, so erasure never moves a
+fingerprint and never re-raises an answered Ask.
 
 The Outputs hashed are the ones in `plugin_runs[plugin].last_output`, not the
 ones in a parked gate. A gate now outlives the advance that parked it, so the
@@ -1957,13 +1974,23 @@ A record whose window has closed is **removed from this subtree** at the
 end-of-run state write, unless it is marked-unconfirmed. Nothing an operator
 does is required, and the sweep runs inside every advance.
 
-This is the second half of one deletion policy. The first half is retention: an
-approval stops protecting its producer's run the moment its window closes (§ 6),
-so the approved bytes are reclaimed by the ordinary prune. This half removes what
-is left — a fingerprint, a producer name, a run id and some timestamps — once
-there is nothing for it to bind to. Both halves read the **same** window
-predicate over the **same** instant, which is what stops a run being released
-while its binding is retained, or the reverse.
+This is the last of three steps in one deletion policy. All three read the
+**same** window predicate over the **same** instant:
+
+1. **The run log is released.** An approval stops protecting its producer's run
+   the moment its window closes (§ 6), so the ordinary prune reclaims that log.
+   It holds a summary of the run, not the content.
+2. **The content is erased.** The end-of-run write erases the content of every
+   Output that a closed approval for that producer names by `run_id`, once no
+   open approval names that `run_id`: `body` is deleted, and `erased_at` and
+   `body_sha256` are stamped. The record stays (§ `last_output`).
+3. **The binding is swept.** This removes what is left of the approval — a
+   fingerprint, a producer name, a run id and some timestamps — once there is
+   nothing for it to bind to.
+
+Sharing one predicate and one instant is what stops a run being released while
+its binding is retained, content being erased while an open window still names
+it, or the reverse of either.
 
 The one exception:
 
@@ -1976,7 +2003,8 @@ The one exception:
 A marked-unconfirmed record is never replaced by absence. It is the runtime's
 account of a fire it began and cannot prove it finished, and deleting it would
 destroy that account for a send that may well have landed. Keeping it is safe
-because it holds no payload — those bytes went with the run log. The operator
+because its content is erased by the same rule as any other, and the evidence it
+keeps is the fingerprint and the effect id, never the bytes. The operator
 settles it at the sink using the effect id.
 
 A **confirmed** record past its window is dropped, and one consequence is worth
@@ -1986,15 +2014,25 @@ The plugin simply reads as having no approval, which it no longer has.
 
 Two ceilings this does not reach:
 
-- `plugin_runs[producer].last_output` is **not** deleted by the sweep. It is the
-  producer's own record, carried forward across a run that produced nothing and
-  overwritten by that producer's next Output; its lifetime is bound to the
-  producer, not to any approval, and shortening it here would break a contract
-  the approval never opened.
+- `plugin_runs[producer].last_output` is **kept** as a record. It is a fact
+  about the producer, carried forward across a run that produced nothing and
+  overwritten by that producer's next Output. Only its content is erased, and
+  the record says so with `erased_at`.
 - There is **no operator gesture that resolves an `indeterminate` record**. A
   marked-unconfirmed approval therefore survives the sweep indefinitely, by
   design and for want of a verb. It authorises nothing — every advance refuses
   it with `indeterminate` — but it does not go away on its own.
+
+Erasure reaches inline content in the state document and nothing else. What it
+does **not** erase:
+
+- a `path` Output. The runtime holds no bytes for it, only a pointer, and
+  `approve --content` refuses such Outputs, so no content approval names one.
+- a home whose bindings an earlier build `swept`. Nothing records which Output
+  was approved, so nothing says what to erase. The producer's next Output
+  replaces it.
+- content a plugin copied into a parked gate's `plugin_result`.
+- a plugin's own `summary` text, which is the plugin's to write.
 
 A zone the host tz database can no longer resolve **retains** the record rather
 than sweeping it, and does not fail the advance. Deleting recipient-bound data
@@ -2113,6 +2151,13 @@ is a promise about a file that may say something else by the time it is read,
 and refusing outright is how the verb sidesteps path traversal entirely rather
 than defending against it.
 
+**An Output whose content was erased is refused by name.** When the producer's
+`last_output` carries `erased_at`, there are no bytes for the operator to read,
+so the command says the content was erased when the approval window that bound
+it closed, tells the operator to run the producer again, and exits `1`. This is
+checked before the file check above. The refusal for a producer that has never
+produced is unchanged, and in both cases nothing is written.
+
 **Withdrawal is validated against the record, not against what is installed.**
 A plugin uninstalled after it was approved is still reachable by name from
 `--remove`; were it checked against the loaded manifests, its record would be
@@ -2140,9 +2185,10 @@ on purpose, not something to reach by loosening either refusal.
 ### `last_output`
 
 A pointer to the most recent Output a plugin produced, so a reader can name it
-without scanning the runs directory. It is the Output record shape from § 5,
-reused rather than restated — a second shape would be a second thing that could
-disagree with the first.
+without scanning the runs directory. It is the § 5 Output record plus one
+stored-only state, erased. That makes it a second shape on purpose, and its only
+difference from the handler's shape is `erased_at` and `body_sha256`
+(`StoredOutputRecordSchema`, § 5).
 
 Every write of a `plugin_runs` entry decides this key — the autonomous
 completion, the supervised park, the approve verb applying a gate, and the
@@ -2170,6 +2216,12 @@ about which run they describe.
 `last_output` key at all — not `null`, not `{}`. Reading a missing key is
 unambiguous; reading an empty object means guessing whether the plugin produced
 nothing or the writer failed.
+
+**Erased, not absent.** Once the last approval window naming its run has closed,
+the content is erased and the record kept: `body` is gone, and `erased_at` and
+`body_sha256` are set (§ `approvals`, "Expiry and deletion"). So
+`capabilities.dependencies.lastOutput` still returns the record, and `null`
+still means never produced. The producer's next Output replaces it.
 
 The pointer may dangle. Its `run_id` names a run log, and run logs are pruned
 under the operator's configured retention policy (§ 6), so a pointer can outlive

@@ -193,9 +193,12 @@ export const handler: CapabilityHandlerFn = async (_manifest, args, signal, capa
       phases_completed: ['anomaly-issue'],
     })
   }
-  // An Output carries exactly one of `body` or `path`, and the schema refuses
-  // anything else. `readJsonOrNull` covers the `path` form and is null for a
-  // file that is not there.
+  // An Output carries `body` or `path`, or neither once the runtime has erased
+  // its content (`erased_at` set). `readJsonOrNull` covers the `path` form and
+  // is null for a file that is not there. An erased record reaches that file
+  // read with no location, which throws, and the catch below settles it to
+  // `null`. That is the same "nothing to file" as any unreadable source, and it
+  // comes from the catch, not from any design for erasure.
   //
   // Caught, because both halves can throw on content this plugin did not
   // author: `JSON.parse` on a body that is not JSON, and `readJsonOrNull` on a

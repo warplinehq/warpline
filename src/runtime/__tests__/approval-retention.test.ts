@@ -1,35 +1,40 @@
 /**
  * What a content approval protects, and the instant it stops protecting it.
  *
- * Two consumers of ONE predicate, tested together because they are the same
- * decision seen from two sides:
+ * Three consumers of ONE predicate, tested together because they are the same
+ * decision seen from three sides:
  *
- *   - **The protected set (R15).** A frozen batch's bytes live in the
- *     producer's run log, and ordinary retention would evict that log while the
- *     operator's yes was still outstanding. So an approval's `run_id` joins the
- *     set `pruneRunLogs` exempts — the second kind of held record its own
- *     docstring anticipated, joined by the caller, with `run-log-store.ts`
- *     unchanged.
+ *   - **The protected set (R15).** A run's log holds a summary of that run,
+ *     never the approved content, and ordinary retention would evict it while
+ *     the operator's yes was still outstanding. So an approval's `run_id` joins
+ *     the set `pruneRunLogs` exempts, and protection keeps the log while the yes
+ *     is outstanding — the second kind of held record its own docstring
+ *     anticipated, joined by the caller, with `run-log-store.ts` unchanged.
  *
- *   - **The expiry sweep (OQ3, half B).** The same reference must not pin those
- *     bytes forever. A frozen batch is recipient data, and the fourth
+ *   - **The expiry sweep (OQ3, half B).** The same reference must not pin
+ *     anything forever. A frozen batch is recipient data, and the fourth
  *     Prohibition forbids retaining its binding past the window with no
  *     deletion path. So protection is unioned only for approvals whose window
  *     is still OPEN: the moment it closes, the run falls back to ordinary
  *     retention, and the binding itself is dropped from the record.
  *
- * **One `windowClosed`, two consumers, and that is the property under test.**
- * Two independently computed window checks are two answers that can disagree
- * about the same approval — a run released while its binding is retained, or a
- * binding deleted while its run is still pinned. Every case below is written so
- * that a second, drifting predicate would show up as a contradiction rather
- * than as a pass.
+ *   - **The content erasure.** The approved content is the producer's
+ *     `last_output.body` in the state document. Once no open window names its
+ *     run, the end-of-run write erases it, just before the sweep. It is tested
+ *     in `content-erasure.test.ts` and in this file's later cases.
+ *
+ * **One `windowClosed`, three readers, and that is the property under test.**
+ * Independently computed window checks are answers that can disagree about the
+ * same approval — a run released while its binding is retained, or a binding
+ * deleted while its run is still pinned. Every case below is written so that a
+ * second, drifting predicate would show up as a contradiction rather than as a
+ * pass.
  *
  * **The marked-unconfirmed exception is not an oversight (D-11a).** A record
  * with `marked_at` set and `confirmed_at` null is the did-it-ship evidence for
  * a send that may have landed. It survives the sweep, and it is safe to: it
- * holds a fingerprint, a producer name and a pointer, never the payload — the
- * payload went with the run log the moment the window closed.
+ * holds a fingerprint, a producer name and a pointer, and its bound content is
+ * erased by the same rule as any other.
  *
  * Every case drives a REAL advance against a temp home. The protected set is
  * built inside `runAdvance` and handed to `pruneRunLogs`; asserting it at the

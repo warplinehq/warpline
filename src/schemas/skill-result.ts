@@ -91,7 +91,9 @@ export const OUTPUT_BODY_CAP_BYTES = 16_384
 /**
  * A thing a plugin produced that an operator will read and take away.
  *
- * Carries either an inline `body` or a `path`, never both and never neither.
+ * A handler's Output carries exactly one of an inline `body` or a `path`. The
+ * record the state document stores is `StoredOutputRecordSchema` below, whose
+ * erased state carries neither.
  * `run_id` and `produced_at` are stamped by the RUNTIME, never by the plugin —
  * they are optional here precisely because a handler must be able to return an
  * Output without them, and the runtime overwrites whatever a handler put there.
@@ -130,6 +132,59 @@ export const OutputRecordSchema = z
   })
 
 export type OutputRecord = z.infer<typeof OutputRecordSchema>
+
+/**
+ * The Output record the state document stores at `plugin_runs[name].last_output`.
+ *
+ * Its one difference from `OutputRecordSchema` is the erased state. Once no
+ * open content approval names the run that produced it, the runtime erases
+ * `body` and stamps `erased_at` and `body_sha256`. The record stays, so a
+ * reader can still tell "produced, content erased" and "never produced" apart.
+ *
+ * **Handlers never see this shape.** They are still parsed against
+ * `OutputRecordSchema`, which does not know the two keys. A handler Output that
+ * carries them has them stripped when it has a body or a path, and is refused
+ * as an invalid result when it has neither. No plugin can hand the runtime a
+ * bodiless Output.
+ *
+ * **Nothing may strip `body` from a record after a parse.** A `{type, format}`
+ * leftover fails this refine on the next fail-closed read and makes the home
+ * unreadable. Erasure writes both stamps in the same step.
+ *
+ * **The hash is required once erased.** Without it an erased record would
+ * fingerprint like an empty body, and a denial of real content would read the
+ * same as a denial of nothing.
+ *
+ * Built by spreading the shape, not with `.extend`: `.extend` keeps the base
+ * exactly-one refine, which can never admit a record with neither. The spread
+ * keeps the byte cap, because the cap sits on the `body` field itself.
+ */
+export const StoredOutputRecordSchema = z
+  .object({
+    ...OutputRecordSchema.shape,
+    /**
+     * When the runtime erased `body`. Stamped by the runtime, never by a
+     * plugin. Present only on a record whose content is gone.
+     */
+    erased_at: z.string().optional(),
+    /**
+     * The hex sha256 of the erased body, so a fingerprint taken before erasure
+     * still matches after it. A digest, not content.
+     */
+    body_sha256: z.string().optional(),
+  })
+  .refine(
+    (o) =>
+      o.erased_at !== undefined
+        ? o.body === undefined && o.path === undefined && o.body_sha256 !== undefined
+        : (o.body === undefined) !== (o.path === undefined),
+    {
+      message:
+        'a stored Output declares exactly one of body or path, or neither once erased, and an erased one keeps the hash of what it held',
+    },
+  )
+
+export type StoredOutputRecord = z.infer<typeof StoredOutputRecordSchema>
 
 /**
  * The shape a handoff's context path must have, as one sentence reused by the

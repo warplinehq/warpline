@@ -43,7 +43,7 @@
  * parameter, so a plugin author calling one cannot name the argument's type
  * without them. `DependenciesHandle` carries two members, and neither return
  * type is published here because both already have a home: `lastOutput` answers
- * `OutputRecord | null`, from `warpline/schemas/skill-result`, and `lastRun`
+ * `StoredOutputRecord | null`, from `warpline/schemas/skill-result`, and `lastRun`
  * answers `PluginRun['status'] | null`, from `warpline/schemas/engine-state` —
  * or from `ReturnType<DependenciesHandle['lastRun']>`, which is the form an
  * example under `examples/` must use, since `import-direction.test.ts` does not
