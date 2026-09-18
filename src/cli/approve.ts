@@ -227,6 +227,11 @@ function escapeForOperator(body: string): string {
  * rewrites the whole state document, and an advance completing between a read
  * outside and the write would be erased by a command that only meant to record
  * an approval.
+ *
+ * A record this replaces is withdrawn in the same locked write, and its content
+ * is released by the rule `approve --content --remove` uses. When the new
+ * record names the same producer, it binds that producer's current Output and
+ * holds it, so nothing is erased.
  */
 async function approveContent(
   consumer: string,
@@ -409,6 +414,7 @@ async function approveContent(
     }
 
     const fingerprint = proposalFingerprint(state, producer, producerManifest)
+    const replaced = Object.hasOwn(state.approvals, consumer) ? state.approvals[consumer] : undefined
     state.approvals[consumer] = {
       plugin: consumer,
       producer,
@@ -421,6 +427,11 @@ async function approveContent(
       effect_id: null,
       marked_at: null,
       confirmed_at: null,
+    }
+    // Replacing a record withdraws it. The new record is already in the table,
+    // so it holds whatever it binds.
+    if (replaced !== undefined) {
+      eraseIfReleased(state.plugin_runs, replaced.producer, state.approvals, manifests, now, replaced)
     }
     await writeEngineState(state, statePath)
 
@@ -454,7 +465,7 @@ async function approveContent(
  * marked-unconfirmed refusal enforceable rather than advisory: a record could
  * otherwise be marked between a read that saw it unmarked and the write that
  * removed it. The same write erases the content the record bound, when no
- * other open approval still holds it.
+ * other open approval for the same producer still holds it.
  */
 async function removeContentApproval(
   consumer: string,

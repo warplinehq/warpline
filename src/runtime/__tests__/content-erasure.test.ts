@@ -1,13 +1,13 @@
 /**
- * Approved content is erased from the state document once no open window
- * names its run.
+ * Approved content is erased from the state document once no open approval
+ * for its producer binds it.
  *
  * **What it guards.** An operator's content approval binds a producer's Output
  * by `run_id`. That content is recipient data. While a window is open it has
  * to stay readable, because the consumer is still allowed to send it. Once the
- * last window naming the run has closed, nothing may keep it: the advance
- * erases `last_output.body` at its end-of-run write and leaves the record,
- * marked, behind.
+ * last window of an approval for that producer binding it has closed, nothing
+ * may keep it: the advance erases `last_output.body` at its end-of-run write
+ * and leaves the record, marked, behind.
  *
  * **Why the scan walks the whole home with no exclusion list.** The content
  * was never in the run log. It lived in `plugin_runs[producer].last_output` in
@@ -33,7 +33,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createHash, randomUUID } from 'node:crypto'
-import { readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { _setHome } from '../../lib/paths.js'
 import { resolveWallClock } from '../../lib/wall-clock.js'
@@ -357,6 +357,245 @@ describe('withdrawing a binding releases the content it bound', () => {
     expect(await filesHolding(h.root, sentinel)).toEqual([])
     const after = JSON.parse(await readFile(h.statePath, 'utf-8')) as EngineState
     expect(after.approvals).toEqual({})
+  })
+})
+
+/**
+ * A `run_id` is the advance's id, shared by every plugin that produced in that
+ * advance. So an approval for another producer names this content's run by
+ * accident: it never reads these bytes, and it could never release them. If it
+ * held them, nothing would.
+ *
+ * The foreign holder is a real, installed co-producer, `prod2`. It produces in
+ * the same advance, so it shares the run id naturally, and it honours the
+ * marker, so its `last_output` keeps that run. A foreign holder with no
+ * `plugin_runs` entry would bind nothing whichever rule held, and prove
+ * nothing.
+ */
+describe('only an approval for the producer holds or releases its content', () => {
+  const OPEN = '2099-01-01T00:00'
+  const CLOSED = '2000-01-02T00:00'
+  const CO_PRODUCED = 'co-producer-bytes'
+
+  function binding(
+    plugin: string,
+    producer: string,
+    runId: string,
+    notAfter: string,
+    fingerprint = 'not-compared-here',
+    zone = 'UTC',
+  ): Approval {
+    return {
+      plugin,
+      producer,
+      fingerprint,
+      run_id: runId,
+      approved_at: '2000-01-01T00:00:00.000Z',
+      not_before: null,
+      not_after: notAfter,
+      zone,
+      effect_id: null,
+      marked_at: null,
+      confirmed_at: null,
+    }
+  }
+
+  const readState = async (): Promise<EngineState> =>
+    JSON.parse(await readFile(h.statePath, 'utf-8')) as EngineState
+
+  async function seed(approvals: Record<string, Approval>): Promise<void> {
+    const doc = await readState()
+    doc.approvals = approvals
+    await writeFile(h.statePath, JSON.stringify(doc))
+  }
+
+  /** Runs the CLI verb with its output swallowed, and returns its exit code. */
+  async function cli(args: string[]): Promise<number> {
+    const realOut = process.stdout.write
+    const realErr = process.stderr.write
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      const { run } = await import('../../cli/approve.js')
+      return await run(args)
+    } finally {
+      process.stdout.write = realOut
+      process.stderr.write = realErr
+    }
+  }
+
+  /**
+   * Installs a content-class consumer of `dependency`. Its handler returns no
+   * artifacts, and no case advances after installing it, so it never reads
+   * the content. It is here so `approve --content` can write a record for it.
+   */
+  async function writeSender(dependency: string): Promise<void> {
+    const dir = join(h.pluginsDir, 'sender')
+    await mkdir(dir, { recursive: true })
+    const manifest = {
+      name: 'sender',
+      version: '1.0.0',
+      description: 'sender',
+      inputs: {},
+      outputs: {},
+      capabilities: [],
+      schedule: 'on_run',
+      autonomy_level: 'autonomous',
+      side_effects: ['sends_email'],
+      approval_class: 'content',
+      ttl_hours: 24,
+      dependencies: [dependency],
+      timeout_ms: 5000,
+      max_parallelism: 1,
+    }
+    await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+    await writeFile(
+      join(dir, 'handler.ts'),
+      `export async function handler() {
+  return { status: 'success', phases_completed: [], phases_failed: [], errors: [], data_freshness: {}, summary: 'sent nothing', artifacts_produced: [], schema_version: 1 }
+}
+`,
+    )
+  }
+
+  /** Advance 1, which runs both producers. Returns the run id they share. */
+  async function produceBoth(): Promise<string> {
+    await h.advance()
+    const doc = await readState()
+    const runId = doc.plugin_runs['prod']!.last_output!.run_id!
+    expect(doc.plugin_runs['prod2']!.last_output!.run_id).toBe(runId)
+    expect(doc.plugin_runs['prod2']!.last_output!.body).toBe(CO_PRODUCED)
+    expect(await filesHolding(h.root, sentinel)).toEqual(['state/engine-state.json'])
+    return runId
+  }
+
+  beforeEach(async () => {
+    await h.writePlugin('prod2', {
+      outputs: { brief: {} },
+      handlerBody: `
+import { existsSync } from 'node:fs'
+export async function handler() {
+  const base = { status: 'success', phases_completed: ['prod2'], phases_failed: [], errors: [], data_freshness: {}, schema_version: 1 }
+  if (existsSync(${JSON.stringify(h.marker)})) return { ...base, summary: 'prod2 produced nothing', artifacts_produced: [] }
+  return { ...base, summary: 'prod2 produced', artifacts_produced: [{ type: 'brief', format: 'text', body: ${JSON.stringify(CO_PRODUCED)} }] }
+}
+`,
+    })
+  })
+
+  test('withdrawing a binding erases the content even when an open binding for another producer names the same run', async () => {
+    const runId = await produceBoth()
+    await seed({
+      'batch-sender': binding('batch-sender', 'prod', runId, OPEN),
+      'other-sender': binding('other-sender', 'prod2', runId, OPEN),
+    })
+
+    expect(await cli(['batch-sender', '--content', '--remove'])).toBe(0)
+
+    // Straight after the withdrawal's own write, with no advance between.
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    const after = await readState()
+    expect(Object.keys(after.approvals)).toEqual(['other-sender'])
+    expect(after.plugin_runs['prod2']!.last_output!.body).toBe(CO_PRODUCED)
+  })
+
+  test('a closed fingerprint binding erases the content even when an open binding for another producer names the current run', async () => {
+    const runId = await produceBoth()
+    const { manifests } = await loadPluginManifests(h.pluginsDir)
+    const fingerprint = proposalFingerprint(await readState(), 'prod', manifests.get('prod')!)
+    await seed({
+      'batch-sender': binding('batch-sender', 'prod', 'an-earlier-run', CLOSED, fingerprint),
+      'other-sender': binding('other-sender', 'prod2', runId, OPEN),
+    })
+
+    await h.setMarker()
+    // One advance: the first end-of-run write is the one that must erase.
+    await h.advance()
+
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    expect(Object.keys((await readState()).approvals)).toEqual(['other-sender'])
+  })
+
+  test('an open binding for another producer in a zone the host cannot resolve does not hold the content', async () => {
+    const runId = await produceBoth()
+    await seed({
+      'batch-sender': binding('batch-sender', 'prod', runId, CLOSED),
+      'other-sender': binding('other-sender', 'prod2', runId, OPEN, 'x', 'Not/AZone'),
+    })
+
+    await h.setMarker()
+    await h.advance(resolveWallClock(OPEN, 'UTC') + 1)
+
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    const after = await readState()
+    // Kept by its own zone rule, which retains, and holding nothing.
+    expect(after.approvals['other-sender']).toBeDefined()
+    expect(after.approvals['batch-sender']).toBeUndefined()
+  })
+
+  test('re-approving a consumer onto another producer releases the binding it replaces in the same write', async () => {
+    const runId = await produceBoth()
+    // The consumer now depends on prod2. Its record was written when it read prod.
+    await writeSender('prod2')
+    await seed({ sender: binding('sender', 'prod', runId, OPEN) })
+
+    expect(await cli(['sender', '--content', '--not-after', OPEN, '--zone', 'UTC'])).toBe(0)
+
+    // Straight after the re-approve's own write, with no advance between.
+    const after = await readState()
+    expect(after.approvals['sender']!.producer).toBe('prod2')
+    expect(after.plugin_runs['prod']!.last_output!.erased_at).toBeDefined()
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    expect(after.plugin_runs['prod2']!.last_output!.body).toBe(CO_PRODUCED)
+  })
+
+  test('re-approving a consumer onto the same producer keeps the content the new binding names', async () => {
+    const runId = await produceBoth()
+    await writeSender('prod')
+    await seed({ sender: binding('sender', 'prod', runId, OPEN) })
+
+    expect(await cli(['sender', '--content', '--not-after', OPEN, '--zone', 'UTC'])).toBe(0)
+
+    const after = await readState()
+    expect(after.plugin_runs['prod']!.last_output!.body).toBe(sentinel)
+    expect(await filesHolding(h.root, sentinel)).toEqual(['state/engine-state.json'])
+    expect(after.approvals['sender']!.producer).toBe('prod')
+    // The record really was replaced, not left as seeded.
+    expect(after.approvals['sender']!.approved_at).not.toBe('2000-01-01T00:00:00.000Z')
+  })
+
+  test('a closed fingerprint binding is kept while a holder for the same producer is open, and releases the content once that holder has fired', async () => {
+    await produceBoth()
+    const { manifests } = await loadPluginManifests(h.pluginsDir)
+    const fingerprint = proposalFingerprint(await readState(), 'prod', manifests.get('prod')!)
+    await seed({
+      'batch-sender': binding('batch-sender', 'prod', 'an-earlier-run', CLOSED, fingerprint),
+      'second-sender': binding('second-sender', 'prod', 'another-earlier-run', OPEN, fingerprint),
+    })
+
+    await h.setMarker()
+    await h.advance()
+
+    const held = await readState()
+    expect(held.plugin_runs['prod']!.last_output!.body).toBe(sentinel)
+    // Kept, though it names neither the current run nor an open window: it
+    // is what releases the content once the holder stops binding it.
+    expect(held.approvals['batch-sender']).toBeDefined()
+
+    // The holder fires and confirms inside its window. Marked, it binds by run
+    // only, and it names an earlier run.
+    held.approvals['second-sender'] = {
+      ...held.approvals['second-sender']!,
+      marked_at: '2026-09-18T00:00:00.000Z',
+      effect_id: 'e',
+      confirmed_at: '2026-09-18T00:00:01.000Z',
+    }
+    await writeFile(h.statePath, JSON.stringify(held))
+
+    await h.advance()
+
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    expect((await readState()).approvals['batch-sender']).toBeUndefined()
   })
 })
 

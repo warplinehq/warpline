@@ -570,8 +570,8 @@ export function approvalStanding(
   // The binding can hold over content that is gone. The fingerprint does not
   // move when content is erased, on purpose: the stored hash keeps it equal, so
   // the compare in `bindingStanding` cannot see erasure. The erasure itself
-  // holds content any open, unmarked binding still matches by fingerprint, so
-  // it does not void a live yes. A binding can still meet erased content: the
+  // holds content any open, unmarked binding for that producer still matches
+  // by fingerprint, so it does not void a live yes. A binding can still meet erased content: the
   // producer's manifest was absent when the erasure ran, so no fingerprint
   // could hold it, and was installed again later. The answer is `content_moved`,
   // because the bytes this approval names are no longer there to ship.
@@ -671,10 +671,11 @@ function bindingStanding(
  * checks are answers that can disagree about the same record. A run released
  * while its binding is retained is a dangling approval; a binding deleted while
  * its run is pinned is retain-forever wearing a deletion policy; content erased
- * while an open window still binds it voids a live yes. The erasure has one
- * caller outside the advance, `approve --content --remove`, and it reads the
- * window through the same `eraseIfReleased`, so a withdrawal cannot hold or
- * release content by a different rule.
+ * while an open window still binds it voids a live yes. The erasure has two
+ * callers outside the advance, `approve --content --remove` and a re-approve
+ * over an existing record, and both read the window through the same
+ * `eraseIfReleased`, so neither can hold or release content by a different
+ * rule.
  *
  * It is NOT the same question `approvalStanding` answers, and must not be
  * mistaken for it. That function decides AUTHORITY — window, fingerprint,
@@ -1081,10 +1082,13 @@ function mergeApprovals(
  * The operator resolves it at the sink with the effect id.
  *
  * **A closed binding whose content erasure was deferred is kept too.** When an
- * open approval still holds the content it named, `eraseReleasedContent` leaves
- * the body, and this keeps the closed binding until the holder closes, so the
- * content still has a binding to release it then. It goes on the sweep after
- * its content is erased or replaced by the producer's next Output.
+ * open approval for the same producer still holds the content it binds,
+ * `eraseReleasedContent` leaves the body, and this keeps the closed binding
+ * until the holder closes, so the content still has a binding to release it
+ * then. It is kept by the erasure's own rule, `bindsHeldContent`, by run or by
+ * fingerprint: a holder that binds by fingerprint stops binding once it is
+ * marked, and the closed binding must still be there then. It goes on the
+ * sweep after its content is erased or replaced by the producer's next Output.
  *
  * A CONFIRMED record past its window is dropped, which means the state report
  * naming a spent approval stops being rendered once the window closes. Said out
@@ -1101,17 +1105,17 @@ function mergeApprovals(
 function sweepExpiredApprovals(
   approvals: EngineState['approvals'],
   pluginRuns: EngineState['plugin_runs'],
+  manifests: ReadonlyMap<string, PluginManifest>,
   now: number,
 ): EngineState['approvals'] {
   const kept: EngineState['approvals'] = {}
   for (const [plugin, record] of Object.entries(approvals)) {
     const markedUnconfirmed = record.marked_at !== null && record.confirmed_at === null
-    // A closed binding whose content erasure was deferred. The erasure ran just
-    // before this, so a closed binding still naming a `last_output` that keeps
-    // its body is one an open approval held. Dropping it would leave nothing to
-    // erase that content when the holder closes.
-    const out = pluginRuns[record.producer]?.last_output
-    const deferred = out?.body !== undefined && out.run_id === record.run_id
+    // A closed binding that still binds its producer's held content, by run or
+    // by fingerprint. The erasure ran just before this by the same rule, so
+    // such a binding is one an open approval for that producer held. Dropping
+    // it would leave nothing to erase that content when the holder closes.
+    const deferred = bindsHeldContent(record, pluginRuns, manifests)
     if (!windowClosed(record, now) || markedUnconfirmed || deferred) kept[plugin] = record
   }
   return kept
@@ -1126,30 +1130,36 @@ function sweepExpiredApprovals(
  * producer, so a reader can still tell "produced, content erased" from "never
  * produced". The binding that named the run is swept by the next call.
  *
- * **When.** Only when a closed approval for THIS producer binds the record, and
- * no open approval still binds it. An approval binds the record when it names
- * its `run_id`, or, for an unmarked approval of this producer, when its
- * fingerprint equals the one these bytes produce. The second arm matters
- * because the gate decides authority by fingerprint, not by run: a producer
- * that re-produced byte-identical content under a later run leaves an approval
- * naming the earlier run `live`, and erasing under it would void that yes. The
- * open check on `run_id` ignores the producer on purpose: any window still open
- * over that run holds the content, which matches the run ids the prune
- * protects. A marked approval binds by `run_id` only, because it can never be
- * `live` again, and a marked-unconfirmed one is kept for good, where a
- * fingerprint arm would erase the same bytes every time they were produced.
+ * **When.** Only when a closed approval for THIS producer binds the record,
+ * and no open approval for it still binds it. An approval binds the record
+ * when it names its `run_id`, or, for an unmarked approval of this producer,
+ * when its fingerprint equals the one these bytes produce. The second arm
+ * matters because the gate decides authority by fingerprint, not by run: a
+ * producer that re-produced byte-identical content under a later run leaves
+ * an approval naming the earlier run `live`, and erasing under it would void
+ * that yes. Both the hold and the release count only approvals for THIS
+ * producer. `run_id` is the advance id, which every plugin that produced in
+ * the advance shares, so another producer's approval names the run by
+ * accident. It never reads these bytes, and it could not release them. The
+ * prune's set stays advance-wide because the run log is. A marked approval
+ * binds by `run_id` only, because it can never be `live` again, and a
+ * marked-unconfirmed one is kept for good, where a fingerprint arm would erase
+ * the same bytes every time they were produced.
  * The fingerprint arm needs the producer's manifest, and without one the
  * binding is not `live` either, so only the `run_id` arm applies.
  *
  * **Withdrawal is a closure.** `approve --content --remove` hands the record it
- * removed in as `withdrawn`, which releases like a closed binding, and the
- * approvals it passes no longer hold it.
+ * removed in as `withdrawn`, and a re-approve over an existing record hands in
+ * the record it replaced. Either releases like a closed binding. The approvals
+ * passed no longer hold it. On a re-approve they hold the new record instead,
+ * which holds the content when it names the same producer.
  *
  * **Why it runs before the sweep.** The sweep removes the closed, unmarked
  * bindings whose `run_id` this reads. Run after it, this would find nothing to
  * act on and the content would outlive its window. The sweep in turn keeps a
  * closed binding whose erasure an open approval deferred, so the content still
- * has a closed binding to release it when the holder closes.
+ * has a closed binding to release it when the holder closes. It asks by this
+ * function's own binds rule, `bindsHeldContent`.
  *
  * **Why it reads the merged approvals inside the lock.** An `approve --content`
  * from another attachment may have landed since the top of the advance, and
@@ -1184,10 +1194,37 @@ function eraseReleasedContent(
 }
 
 /**
- * The one producer's half of `eraseReleasedContent`, and the rule both callers
- * share: the end-of-run write loops it over every producer, and
+ * Does `a` bind its own producer's held content?
+ *
+ * Held means `plugin_runs[a.producer].last_output` still carries an unerased
+ * body with a `run_id`. `a` binds it when it names that run, or, unmarked, when
+ * its fingerprint equals the one those bytes produce under the producer's
+ * loaded manifest. A marked approval binds by run only, because it can never
+ * be `live` again.
+ *
+ * The erasure's hold and release ask it under `a.producer === plugin`, and the
+ * sweep asks it as it stands, so the three cannot disagree about which binding
+ * still binds.
+ */
+function bindsHeldContent(
+  a: Approval,
+  pluginRuns: EngineState['plugin_runs'],
+  manifests: ReadonlyMap<string, PluginManifest>,
+): boolean {
+  const out = Object.hasOwn(pluginRuns, a.producer) ? pluginRuns[a.producer]!.last_output : undefined
+  if (out?.body === undefined || out.erased_at !== undefined || out.run_id === undefined) return false
+  if (a.run_id === out.run_id) return true
+  if (a.marked_at !== null) return false
+  const manifest = manifests.get(a.producer)
+  return manifest !== undefined && a.fingerprint === denialFingerprint(a.producer, manifest.side_effects, [out])
+}
+
+/**
+ * The one producer's half of `eraseReleasedContent`, and the rule its three
+ * callers share: the end-of-run write loops it over every producer,
  * `approve --content --remove` calls it once for the producer whose binding it
- * withdrew. See `eraseReleasedContent` for when it erases and why.
+ * withdrew, and a re-approve calls it once for the producer of the record it
+ * replaced. See `eraseReleasedContent` for when it erases and why.
  */
 export function eraseIfReleased(
   pluginRuns: EngineState['plugin_runs'],
@@ -1203,16 +1240,11 @@ export function eraseIfReleased(
   if (out.body === undefined || out.erased_at !== undefined) return
   const runId = out.run_id
   if (runId === undefined) return
-  const manifest = manifests.get(plugin)
-  const fingerprint =
-    manifest === undefined ? undefined : denialFingerprint(plugin, manifest.side_effects, [out])
-  const binds = (a: Approval): boolean =>
-    a.run_id === runId ||
-    (a.producer === plugin && a.marked_at === null && a.fingerprint === fingerprint)
+  const binds = (a: Approval): boolean => a.producer === plugin && bindsHeldContent(a, pluginRuns, manifests)
   const records = Object.values(approvals)
   const released = records.filter((a) => windowClosed(a, now))
   if (withdrawn !== undefined) released.push(withdrawn)
-  if (!released.some((a) => a.producer === plugin && binds(a))) return
+  if (!released.some(binds)) return
   if (records.some((a) => !windowClosed(a, now) && binds(a))) return
   const { body, ...rest } = out
   // The stored schema's key order. The next read's parse emits it, so any other is rewritten.
@@ -3194,7 +3226,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         }
       }
       eraseReleasedContent(updatedState.plugin_runs, merged, plugins, approvalNow)
-      updatedState.approvals = sweepExpiredApprovals(merged, updatedState.plugin_runs, approvalNow)
+      updatedState.approvals = sweepExpiredApprovals(merged, updatedState.plugin_runs, plugins, approvalNow)
       await writeEngineState(updatedState as EngineState, stateDir)
       // The home's layout version, stamped beside the document it describes and
       // inside the same lock, so the two halves of the migration cannot land

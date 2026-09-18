@@ -19,9 +19,10 @@
  *     retention, and the binding itself is dropped from the record.
  *
  *   - **The content erasure.** The approved content is the producer's
- *     `last_output.body` in the state document. Once no open window names its
- *     run, the end-of-run write erases it, just before the sweep. It is tested
- *     in `content-erasure.test.ts` and in this file's later cases.
+ *     `last_output.body` in the state document. Once no open window of an
+ *     approval for that producer binds it, the end-of-run write erases it, just
+ *     before the sweep. It is tested in `content-erasure.test.ts` and in this
+ *     file's later cases.
  *
  * **One `windowClosed`, three readers, and that is the property under test.**
  * Independently computed window checks are answers that can disagree about the
@@ -534,7 +535,7 @@ describe('when a content approval releases its content', () => {
     expect(second.approvals).toEqual({})
   })
 
-  test('R1: an open binding naming the same run for another producer also holds the content', async () => {
+  test('R1: an open binding for another producer on the same run does not hold the content', async () => {
     await seedState({
       plugin_runs: { [PRODUCER]: producerRun(produced()) },
       approvals: {
@@ -545,7 +546,14 @@ describe('when a content approval releases its content', () => {
 
     await advance()
 
-    expect('body' in (await readState()).plugin_runs[PRODUCER]!.last_output!).toBe(true)
+    // A run id is the advance's, shared by every plugin in it. The other
+    // producer's approval never reads these bytes, so it cannot hold them.
+    const after = await readState()
+    const out = after.plugin_runs[PRODUCER]!.last_output!
+    expect('body' in out).toBe(false)
+    expect(out.erased_at).toBeDefined()
+    expect(after.approvals[CONSUMER]).toBeUndefined()
+    expect(after.approvals['other-sender']).toBeDefined()
   })
 
   test('R1: a producer that produces again in the same advance keeps its new content', async () => {
