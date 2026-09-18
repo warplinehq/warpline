@@ -3111,7 +3111,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // Everything except `approvals` is still the advance's own in-memory state,
     // spread above: this closes the read-modify-write window of #25 for that ONE
     // subtree and leaves the general case — `plugin_runs`, `pending_gates`,
-    // `last_run_id` — open, which is where `engine-state-store.ts` files it.
+    // `last_run_id` — open, which is where `engine-state-store.ts` files it. The
+    // one exception is an erased `last_output` on disk, which is never written
+    // back over with a body, for the reason given at the loop below.
     // Widening it here would be a second control-flow change wearing the same
     // commit.
     //
@@ -3165,6 +3167,25 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     await lockStateDocument(stateDir, async () => {
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
       const merged = mergeApprovals(disk.approvals, updatedState.approvals)
+      // Erasure is one-way. An overlapping advance may have erased a body this
+      // advance still holds in memory, and swept the binding that released it,
+      // so the merge above drops this advance's copy of that binding too.
+      // Written back, the body would have nothing left to erase it again. So
+      // an erased record on disk for the same run wins over the in-memory body.
+      for (const [plugin, run] of Object.entries(updatedState.plugin_runs)) {
+        const onDisk = Object.hasOwn(disk.plugin_runs, plugin)
+          ? disk.plugin_runs[plugin]!.last_output
+          : undefined
+        const mine = run.last_output
+        if (
+          onDisk?.erased_at !== undefined &&
+          mine?.body !== undefined &&
+          mine.run_id !== undefined &&
+          mine.run_id === onDisk.run_id
+        ) {
+          updatedState.plugin_runs[plugin] = { ...run, last_output: onDisk }
+        }
+      }
       eraseReleasedContent(updatedState.plugin_runs, merged, plugins, approvalNow)
       updatedState.approvals = sweepExpiredApprovals(merged, updatedState.plugin_runs, approvalNow)
       await writeEngineState(updatedState as EngineState, stateDir)

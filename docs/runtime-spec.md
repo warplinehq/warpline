@@ -2663,6 +2663,15 @@ it is the only part another attachment writes: one home can be attached from
 several machines, so a `warpline approve --content` lands at an instant the
 advance cannot predict.
 
+**One `plugin_runs` field is reconciled too, and only in one direction.** Erased
+content must stay erased. If the fresh read inside the end-of-run lock shows a
+producer's `last_output` erased, and this advance's in-memory copy still holds a
+body for the same `run_id`, the erased record is written. An overlapping advance
+may have erased that body and swept the binding that released it, so the merge
+drops this advance's copy of the binding as well, and a body written back would
+have nothing left to erase it. The rest of `plugin_runs` is still the advance's
+own in-memory state.
+
 **Which file each writer writes, since this has been recorded wrongly before.**
 The `deny` verb and the board write the engine state document, under the state
 lock. So does `approve --content`, which records the approval, and `approve

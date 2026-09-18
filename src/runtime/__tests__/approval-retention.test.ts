@@ -566,6 +566,54 @@ describe('when a content approval releases its content', () => {
     expect('erased_at' in out).toBe(false)
   })
 
+  test('WR-03: content an overlapping advance erased is not written back by this one', async () => {
+    // Stands in for a second advance whose end-of-run write lands while this
+    // one is mid-run: it erases the producer's body and sweeps the binding.
+    // Run as a plugin, so the write lands between this advance's read and its
+    // own end-of-run write, which is the window two advances overlap in.
+    const stamp = '2026-09-18T00:00:00.000Z'
+    const dir = join(home.pluginsDir, 'interloper')
+    await writeAutonomous('interloper')
+    await writeFile(
+      join(dir, 'handler.ts'),
+      `import { readFileSync, writeFileSync } from 'node:fs'
+export async function handler() {
+  const doc = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf-8'))
+  const { body, ...rest } = doc.plugin_runs[${JSON.stringify(PRODUCER)}].last_output
+  doc.plugin_runs[${JSON.stringify(PRODUCER)}].last_output = {
+    ...rest,
+    erased_at: ${JSON.stringify(stamp)},
+    body_sha256: ${JSON.stringify(hex(BODY))},
+  }
+  doc.approvals = {}
+  writeFileSync(${JSON.stringify(statePath)}, JSON.stringify(doc))
+  return {
+    status: 'success',
+    phases_completed: ['run'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'ran',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`,
+    )
+    await seedState({
+      plugin_runs: { [PRODUCER]: producerRun(produced()) },
+      approvals: { [CONSUMER]: approval({ not_after: CLOSED }) },
+    })
+
+    await advance()
+
+    const out = (await readState()).plugin_runs[PRODUCER]!.last_output!
+    expect('body' in out).toBe(false)
+    expect(out.erased_at).toBe(stamp)
+    expect(out.body_sha256).toBe(hex(BODY))
+    expect(out.run_id).toBe('approved-run')
+  })
+
   test('R7: a live denial on the producer is still live after its content is erased', async () => {
     const manifest = PluginManifestSchema.parse(await writeAutonomous(PRODUCER))
     const seeded: EngineState = {
