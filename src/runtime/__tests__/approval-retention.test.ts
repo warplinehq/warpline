@@ -498,11 +498,11 @@ describe('when a content approval releases its content', () => {
 
     await advance()
 
-    // Deep-equal, not byte-equal: the erasure writes its two keys in the
-    // opposite order to the schema, and the next read's parse reorders them.
-    // What must not move is the stamp, and nothing may be dropped.
     const second = await readState()
-    expect(second.plugin_runs[PRODUCER]).toEqual(first.plugin_runs[PRODUCER])
+    // A raw `JSON.parse` keeps the written key order, so a rewrite that reorders keys fails this.
+    expect(JSON.stringify(second.plugin_runs[PRODUCER])).toBe(
+      JSON.stringify(first.plugin_runs[PRODUCER]),
+    )
     expect(second.plugin_runs[PRODUCER]!.last_output!.erased_at).toBe(out.erased_at)
     expect(second.approvals[CONSUMER]).toBeDefined()
   })

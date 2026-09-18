@@ -1215,9 +1215,10 @@ export function eraseIfReleased(
   if (!released.some((a) => a.producer === plugin && binds(a))) return
   if (records.some((a) => !windowClosed(a, now) && binds(a))) return
   const { body, ...rest } = out
+  // The stored schema's key order. The next read's parse emits it, so any other is rewritten.
   pluginRuns[plugin] = {
     ...run,
-    last_output: { ...rest, body_sha256: sha256(body), erased_at: new Date(now).toISOString() },
+    last_output: { ...rest, erased_at: new Date(now).toISOString(), body_sha256: sha256(body) },
   }
 }
 
