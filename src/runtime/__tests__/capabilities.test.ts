@@ -38,7 +38,7 @@ import {
 import { invokePlugin } from '../invoke-plugin.js'
 import { PluginManifestSchema, SideEffectType } from '../../schemas/plugin-manifest.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
-import type { OutputRecord } from '../../schemas/skill-result.js'
+import type { OutputRecord, StoredOutputRecord } from '../../schemas/skill-result.js'
 
 /** A real manifest, parsed by the live schema so every default is the real one. */
 function manifestDeclaring(sideEffects: SideEffectType[]): PluginManifest {
@@ -327,6 +327,18 @@ describe('the dependencies handle', () => {
   const FAILED_AFTER_PRODUCING: DependencyRun = { status: 'failed', last_output: REC }
   /** A dependency that ran and has never produced anything. */
   const RAN_PRODUCING_NOTHING: DependencyRun = { status: 'success' }
+  /** A dependency that produced, and whose content the runtime has since erased. */
+  const ERASED: DependencyRun = {
+    status: 'success',
+    last_output: {
+      type: 'brief',
+      format: 'json',
+      run_id: 'run-0',
+      produced_at: '2026-09-01T00:00:00.000Z',
+      erased_at: '2026-09-02T00:00:00.000Z',
+      body_sha256: 'a'.repeat(64),
+    },
+  }
 
   function handleFor(
     dependencies: string[],
@@ -352,6 +364,20 @@ describe('the dependencies handle', () => {
 
   test('a declared dependency that produced an Output reads that record', () => {
     expect(handleFor(['dep-a'], { 'dep-a': PRODUCED }).lastOutput(CALLER, 'dep-a')).toEqual(REC)
+  })
+
+  test('a declared dependency whose content was erased reads the erased record, not null', () => {
+    // Typed as the widened return, so the typecheck proves it too.
+    const rec: StoredOutputRecord | null = handleFor(['dep-a'], { 'dep-a': ERASED }).lastOutput(
+      CALLER,
+      'dep-a',
+    )
+    expect(rec).toEqual(ERASED.last_output!)
+    expect(rec).not.toBeNull()
+    expect(rec!.erased_at).toBeDefined()
+    expect('body' in rec!).toBe(false)
+    // An erased dependency is not a dependency that never produced.
+    expect(handleFor(['dep-a'], {}).lastOutput(CALLER, 'dep-a')).toBeNull()
   })
 
   test('a declared dependency that produced none reads null', () => {

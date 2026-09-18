@@ -22,15 +22,16 @@
  * do with the runtime. The handler builds the body by concatenation from an
  * environment variable, so the source never carries the value.
  *
- * **Why no consumer is installed.** The approval is keyed by a name with no
- * installed plugin, as `approval-retention.test.ts` does. A consumer would
- * read the content and could copy it into its own Outputs or summary, and then
- * the scan would be measuring the consumer. With none, nothing but
- * `last_output.body` ever holds the sentinel.
+ * **Why the approval's consumer is never installed.** The approval is keyed by
+ * a name with no installed plugin, as `approval-retention.test.ts` does. A
+ * consumer that read the content could copy it into its own Outputs or
+ * summary, and then the scan would be measuring the consumer. The one case
+ * that does install a reader has it serialise three booleans and nothing it
+ * was handed, so nothing but `last_output.body` ever holds the sentinel.
  *
  * Writes only inside its temp home. Nothing under the repository is touched.
  */
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -56,6 +57,31 @@ async function filesHolding(root: string, needle: string): Promise<string[]> {
     if (text.includes(needle)) kept.push(name)
   }
   return kept.sort()
+}
+
+/**
+ * One binding whose window closed long ago, naming `runId` for `prod`. Keyed
+ * by a consumer that is not installed.
+ */
+async function seedClosedBinding(runId: string): Promise<void> {
+  const state = JSON.parse(await readFile(h.statePath, 'utf-8')) as Record<string, unknown>
+  state.approvals = {
+    ...((state.approvals as Record<string, unknown> | undefined) ?? {}),
+    'batch-sender': {
+      plugin: 'batch-sender',
+      producer: 'prod',
+      fingerprint: 'not-compared-here',
+      run_id: runId,
+      approved_at: '2026-08-29T11:00:00.000Z',
+      not_before: null,
+      not_after: '2000-01-02T00:00',
+      zone: 'UTC',
+      effect_id: null,
+      marked_at: null,
+      confirmed_at: null,
+    },
+  }
+  await writeFile(h.statePath, JSON.stringify(state))
 }
 
 beforeEach(async () => {
@@ -116,26 +142,8 @@ test('R8: once the last window naming a run closes, the approved content is nowh
   expect(typeof prior.run_id).toBe('string')
   expect((prior.run_id as string).length).toBeGreaterThan(0)
 
-  // One binding whose window closed long ago, naming the run that produced
-  // the content. Keyed by a consumer that is not installed.
-  const state = JSON.parse(await readFile(h.statePath, 'utf-8')) as Record<string, unknown>
-  state.approvals = {
-    ...((state.approvals as Record<string, unknown> | undefined) ?? {}),
-    'batch-sender': {
-      plugin: 'batch-sender',
-      producer: 'prod',
-      fingerprint: 'not-compared-here',
-      run_id: prior.run_id,
-      approved_at: '2026-08-29T11:00:00.000Z',
-      not_before: null,
-      not_after: '2000-01-02T00:00',
-      zone: 'UTC',
-      effect_id: null,
-      marked_at: null,
-      confirmed_at: null,
-    },
-  }
-  await writeFile(h.statePath, JSON.stringify(state))
+  // One closed binding naming the run that produced the content.
+  await seedClosedBinding(prior.run_id as string)
 
   await h.setMarker()
   await h.advance()
@@ -162,4 +170,116 @@ test('R8: once the last window naming a run closes, the approved content is nowh
   await h.advance()
   expect(await filesHolding(h.root, sentinel)).toEqual([])
   expect((await h.persistedRun('prod'))!.last_output).toEqual(after)
+})
+
+describe('a consumer reads erased content as produced', () => {
+  /**
+   * Reads its dependency through the capability and reports three booleans
+   * about what it was handed. It never serialises the record, so its summary
+   * in the run log cannot hold the content and the scan stays about the
+   * runtime.
+   */
+  const consumer = `
+export async function handler(manifest, args, signal, capabilities) {
+  const rec = capabilities.dependencies.lastOutput(capabilities.caller, 'prod')
+  return {
+    status: 'success',
+    phases_completed: ['cons'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: JSON.stringify({
+      nonNull: rec !== null,
+      erased: rec !== null && rec.erased_at !== undefined,
+      hasBody: rec !== null && 'body' in rec,
+    }),
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`
+
+  async function consSaw(runLogPath: string): Promise<unknown> {
+    return JSON.parse((await h.entryFor(runLogPath, 'cons'))!.result_summary)
+  }
+
+  test('R3: after erasure a consumer receives the record, non-null, marked erased, with no body', async () => {
+    await h.writePlugin('cons', { dependencies: ['prod'], handlerBody: consumer })
+
+    const first = await h.advance()
+    // Non-vacuity: before erasure the same consumer saw the content.
+    expect(await consSaw(first.run_log_path)).toEqual({ nonNull: true, erased: false, hasBody: true })
+
+    const prior = (await h.persistedRun('prod'))!.last_output as Record<string, unknown>
+    await seedClosedBinding(prior.run_id as string)
+    await h.setMarker()
+
+    // The erasure is the end-of-run write of this advance, so the consumer in
+    // it still reads the record as it was. The next advance is the one that
+    // hands it the erased record.
+    await h.advance()
+    const third = await h.advance()
+    expect(await consSaw(third.run_log_path)).toEqual({ nonNull: true, erased: true, hasBody: false })
+
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+  })
+})
+
+/**
+ * These are pins. The handler boundary rejected both shapes before content
+ * could be erased, and these tests keep it that way now that the stored schema
+ * admits an erased arm: the erased state is one only the runtime can write.
+ */
+describe('a handler cannot hand the runtime an erased Output', () => {
+  function returning(output: Record<string, unknown>): string {
+    return `
+export async function handler() {
+  return {
+    status: 'success',
+    phases_completed: ['prod'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'prod produced',
+    artifacts_produced: [${JSON.stringify(output)}],
+    schema_version: 1,
+  }
+}
+`
+  }
+
+  test('R2: stored-only keys beside a body are stripped at the boundary', async () => {
+    await h.writePlugin('prod', {
+      outputs: { brief: {} },
+      handlerBody: returning({
+        type: 'brief',
+        format: 'text',
+        body: 'kept',
+        erased_at: '2026-01-01T00:00:00.000Z',
+        body_sha256: 'c'.repeat(64),
+      }),
+    })
+
+    await h.advance()
+
+    const run = (await h.persistedRun('prod'))!
+    expect(run.status).toBe('success')
+    const out = run.last_output as Record<string, unknown>
+    expect(out.body).toBe('kept')
+    expect('erased_at' in out).toBe(false)
+    expect('body_sha256' in out).toBe(false)
+  })
+
+  test('R2: a bodiless Output carrying erased_at is refused, and nothing lands', async () => {
+    await h.writePlugin('prod', {
+      outputs: { brief: {} },
+      handlerBody: returning({ type: 'brief', format: 'text', erased_at: '2026-01-01T00:00:00.000Z' }),
+    })
+
+    await h.advance()
+
+    const run = (await h.persistedRun('prod'))!
+    expect(run.status).toBe('failed')
+    expect('last_output' in run).toBe(false)
+  })
 })
