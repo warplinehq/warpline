@@ -153,7 +153,8 @@ export type OutputRecord = z.infer<typeof OutputRecordSchema>
  *
  * **The hash is required once erased.** Without it an erased record would
  * fingerprint like an empty body, and a denial of real content would read the
- * same as a denial of nothing.
+ * same as a denial of nothing. It is refused on a record that is not erased,
+ * because both stored-only keys belong to the erased state and nowhere else.
  *
  * Built by spreading the shape, not with `.extend`: `.extend` keeps the base
  * exactly-one refine, which can never admit a record with neither. The spread
@@ -164,23 +165,30 @@ export const StoredOutputRecordSchema = z
     ...OutputRecordSchema.shape,
     /**
      * When the runtime erased `body`. Stamped by the runtime, never by a
-     * plugin. Present only on a record whose content is gone.
+     * plugin. Present only on a record whose content is gone. An ISO instant
+     * in UTC, the form the runtime writes, and nothing looser: the state
+     * document is hand-editable and this is its fail-closed read.
      */
-    erased_at: z.string().optional(),
+    erased_at: z.iso.datetime().optional(),
     /**
      * The hex sha256 of the erased body, so a fingerprint taken before erasure
-     * still matches after it. A digest, not content.
+     * still matches after it. A digest, not content. Exactly 64 lowercase hex
+     * characters, because it enters the fingerprint verbatim: an empty or
+     * truncated value would move it, and a live denial would read superseded.
      */
-    body_sha256: z.string().optional(),
+    body_sha256: z
+      .string()
+      .regex(/^[0-9a-f]{64}$/)
+      .optional(),
   })
   .refine(
     (o) =>
       o.erased_at !== undefined
         ? o.body === undefined && o.path === undefined && o.body_sha256 !== undefined
-        : (o.body === undefined) !== (o.path === undefined),
+        : o.body_sha256 === undefined && (o.body === undefined) !== (o.path === undefined),
     {
       message:
-        'a stored Output declares exactly one of body or path, or neither once erased, and an erased one keeps the hash of what it held',
+        'a stored Output declares exactly one of body or path, or neither once erased, and only an erased one keeps the hash of what it held',
     },
   )
 

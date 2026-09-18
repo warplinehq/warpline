@@ -817,8 +817,8 @@ the pre-0.2 shape, it stays valid until 1.0, and it is reachable only because
 | `produced_at` | ISO 8601 | stamped | When the producing run accepted it |
 | `body` | string | exactly one of | Inline content, capped at 16384 UTF-8 bytes |
 | `path` | string | exactly one of | Filesystem path to the content |
-| `erased_at` | ISO 8601 | stored only | Set by the runtime when it erased `body` (§ 10, `last_output`). Never accepted from a handler |
-| `body_sha256` | hex string | stored only | The sha256 of the erased body, so a fingerprint does not move across erasure |
+| `erased_at` | ISO 8601, UTC (`Z`) | stored only | Set by the runtime when it erased `body` (§ 10, `last_output`). Never accepted from a handler |
+| `body_sha256` | 64 lowercase hex characters | stored only | The sha256 of the erased body, so a fingerprint does not move across erasure |
 
 A handler's Output declares exactly one of `body` and `path`. Declaring both
 fails validation and declaring neither fails validation, so a reader never has
@@ -827,8 +827,9 @@ to decide which one wins.
 The record the state document stores, `StoredOutputRecordSchema` (exported from
 `warpline/schemas/skill-result` beside `OutputRecordSchema`), adds one state:
 erased. An erased record declares neither `body` nor `path`, carries
-`erased_at`, and must carry `body_sha256`. The two stored-only keys are the
-runtime's, never a handler's. A handler that returns either one has it stripped
+`erased_at`, and must carry `body_sha256`. A record that is not erased carries
+no `body_sha256`, and the stored read refuses one that does. The two stored-only
+keys are the runtime's, never a handler's. A handler that returns either one has it stripped
 when its Output has a body or a path, and is refused as an invalid result when
 its Output has neither. So no plugin can hand the runtime a bodiless Output.
 

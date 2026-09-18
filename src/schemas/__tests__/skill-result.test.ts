@@ -244,6 +244,22 @@ describe('StoredOutputRecordSchema', () => {
     expect(StoredOutputRecordSchema.safeParse(hashless).success).toBe(false)
   })
 
+  it('rejects an erased_at that is not an ISO instant', () => {
+    expect(StoredOutputRecordSchema.safeParse({ ...erased, erased_at: '' }).success).toBe(false)
+    expect(StoredOutputRecordSchema.safeParse({ ...erased, erased_at: 'yesterday' }).success).toBe(false)
+  })
+
+  it('rejects a body_sha256 that is not 64 lowercase hex characters', () => {
+    expect(StoredOutputRecordSchema.safeParse({ ...erased, body_sha256: '' }).success).toBe(false)
+    expect(StoredOutputRecordSchema.safeParse({ ...erased, body_sha256: 'a'.repeat(63) }).success).toBe(false)
+    expect(StoredOutputRecordSchema.safeParse({ ...erased, body_sha256: 'z'.repeat(64) }).success).toBe(false)
+  })
+
+  it('rejects a record that is not erased and carries a body_sha256', () => {
+    const stray = { type: 'brief', body: 'x', body_sha256: 'a'.repeat(64) }
+    expect(StoredOutputRecordSchema.safeParse(stray).success).toBe(false)
+  })
+
   it('rejects a record that is not erased and carries neither body nor path', () => {
     expect(StoredOutputRecordSchema.safeParse({ type: 'brief' }).success).toBe(false)
   })
