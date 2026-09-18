@@ -2796,7 +2796,7 @@ should test them:
    not answered yet; a non-zero `refused` means a human already did, and the
    send still did not happen. Either the answer stopped applying (a marked fire
    never confirmed, `indeterminate`; the window closed, `outside_window`; the
-   approved bytes moved, `content_moved`), or the runtime could not record the
+   approved bytes moved or were erased, `content_moved`), or the runtime could not record the
    send in its own state and so did not make it (`mark_unavailable`,
    `mark_uncertain`). A fleet that refuses every send on every advance for a week is a fleet doing
    nothing, and `failed` and `gated` both stay `0` throughout. This field is the

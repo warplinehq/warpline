@@ -948,12 +948,15 @@ function contentGateDetail(g: GateInput): string {
     // record's `producer` is not. In THIS arm it may be the very name that no
     // longer matches the declared dependency, so it is not a declared plugin
     // name at all, and the arm cannot tell that case from the fingerprint-drift
-    // one without a second read.
+    // one without a second read. The producer name is used to look up whether
+    // its content was erased, where the fingerprint still matches by design,
+    // and is never interpolated.
     case 'content_moved':
-      return (
-        `unapproved: the approved content has moved — the fingerprint on file ` +
-        `(${s.approval.fingerprint}) is no longer what would ship`
-      )
+      return g.ctx.state.plugin_runs[s.approval.producer]?.last_output?.erased_at !== undefined
+        ? `unapproved: the approved content was erased — the fingerprint on file ` +
+            `(${s.approval.fingerprint}) still matches, but there are no bytes left to ship`
+        : `unapproved: the approved content has moved — the fingerprint on file ` +
+            `(${s.approval.fingerprint}) is no longer what would ship`
     case 'live':
       // Unreachable behind the predicate above; written out so the record
       // narrows and so a future arm cannot land here silently.
@@ -1413,10 +1416,13 @@ function markRefusalDetail(reason: MarkRefusal, plugin: string, fingerprint: str
         `refused (indeterminate): the content approval for '${plugin}' was already marked spent ` +
         'before this fire could mark it, so the runtime cannot tell whether that fire completed'
       )
+    // One string for both causes: the reason code is shared, and telling them
+    // apart would take a second value out of the locked read.
     case 'content_moved':
       return (
-        `refused (content_moved): the approved content moved between the gate and the spend mark — ` +
-        `the fingerprint the gate decided on (${fingerprint}) is no longer the one on file`
+        `refused (content_moved): the approved content moved or was erased between the gate and ` +
+        `the spend mark — the fingerprint the gate decided on (${fingerprint}) is no longer the ` +
+        `one on file, or the content it names is gone`
       )
     case 'mark_unavailable':
       return (

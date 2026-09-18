@@ -619,6 +619,42 @@ describe('the content-authority decision', () => {
   })
 
   /**
+   * The erased arm shares the reason code and must not share the cause. Its
+   * fingerprint still matches by design, so the drift sentence would send an
+   * operator looking for a change that did not happen.
+   */
+  test('the content-moved detail over erased content says erased, not moved', async () => {
+    const state = seedState(APPROVED_BODY)
+    state.approvals[CONSUMER] = approvalFor(APPROVED_BODY)
+    state.plugin_runs[PRODUCER] = {
+      ...state.plugin_runs[PRODUCER]!,
+      last_output: erasedOf(APPROVED_BODY),
+    }
+    const manifest = consumerManifestFor(PRODUCER)
+    const ctx: EvalContext = {
+      currentTier: 'normal',
+      force: false,
+      state,
+      approvalPath: join(home.root, '.session-approval'),
+      manifests: new Map([
+        [PRODUCER, producerManifest()],
+        [CONSUMER, manifest],
+      ]),
+    }
+
+    const result = await evaluatePlugin(CONSUMER, manifest, ctx, Date.now())
+
+    expect(result.due).toBe(false)
+    if (result.due) throw new Error('unreachable')
+    expect(result.reason).toBe('unapproved')
+    expect(result.detail).toContain('erased')
+    expect(result.detail).toContain('still matches')
+    expect(result.detail).not.toContain('no longer what would ship')
+    expect(result.detail).not.toContain(PRODUCER)
+    expect(result.detail).toContain(state.approvals[CONSUMER]!.fingerprint)
+  })
+
+  /**
    * The backstop edge. A host tz database that no longer knows the zone must
    * land on a refusal, never on a fire and never on a throw — a throw here would
    * reach `plan`, which is contracted never to fail.
