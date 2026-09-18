@@ -44,7 +44,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { contentEffectId, proposalFingerprint, runAdvance } from '../engine.js'
 import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
@@ -584,6 +584,76 @@ describe("the spend mark's own I/O failing is a refusal, not a dead advance", ()
 })
 
 /**
+ * Content erased between the gate and the mark is refused by the mark itself.
+ *
+ * The gate decides on the advance's in-memory state, so it still reads a body.
+ * The mark re-reads the document under its lock and compares fingerprints, and
+ * that compare cannot see erasure: the stored hash keeps the fingerprint equal.
+ * So the mark checks the erasure on its own, and this case is what reaches that
+ * check.
+ *
+ * **The erasure is planted by the producer's `onPluginEnd`.** It stands in for
+ * another advance's end-of-run write landing after this advance's run lock
+ * expired by its TTL. It is the only hook that fires between the two levels,
+ * which puts the write after the gate's read and before the mark's.
+ *
+ * **`approvals` is left exactly as read, on purpose.** Removing the binding
+ * would refuse at the missing-record check above the erased check, and the case
+ * would pass without ever reaching the line it exists for.
+ */
+describe('the spend mark re-reads erasure under its lock', () => {
+  test("a mark that finds the producer's content erased since the gate read it refuses content_moved and never invokes the handler", async () => {
+    await seedLiveApproval('returns')
+    // Off for the reason the mark_unavailable case gives: under `true` the
+    // session-class producer parks a gate and stops the level loop, taking the
+    // only hook between the levels with it.
+    await writeFile(join(home.stateDir, 'preferences.json'), JSON.stringify({ review_gate: false }))
+
+    /** Whether the planted record really had a body to drop. */
+    let erasedUnderIt = false
+    /** What `onPluginEnd` was told about the sender. */
+    const details: string[] = []
+
+    const result = await advance({
+      // 25 hours on: past the producer's 24 h TTL, so it is due and runs.
+      now: Date.now() + 25 * 60 * 60 * 1000,
+      // Synchronous, so the write has landed before the mark's read begins.
+      onPluginEnd: (plugin, _status, _elapsed, reason) => {
+        if (plugin === PRODUCER) {
+          const doc = JSON.parse(readFileSync(statePath(), 'utf-8')) as EngineState
+          const run = doc.plugin_runs[PRODUCER]!
+          const { body: _dropped, ...rest } = run.last_output!
+          run.last_output = {
+            ...rest,
+            erased_at: '2026-09-18T00:00:00.000Z',
+            body_sha256: createHash('sha256').update(APPROVED_BODY, 'utf8').digest('hex'),
+          }
+          writeFileSync(statePath(), JSON.stringify(doc))
+          erasedUnderIt = typeof _dropped === 'string'
+        }
+        if (plugin === CONSUMER && reason !== undefined) details.push(reason)
+      },
+    })
+
+    // The handler never ran. FIRST, because it is the whole claim.
+    expect(firedCount()).toBe(0)
+    expect(result.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'content_moved' }])
+    expect(erasedUnderIt).toBe(true)
+    // The mark's own string, not the gate's `unapproved:` one: the gate said
+    // fire and the mark refused.
+    expect(details).toHaveLength(1)
+    expect(details[0]).toStartWith(
+      'refused (content_moved): the approved content moved or was erased between the gate and the spend mark',
+    )
+
+    const record = (await readState()).approvals[CONSUMER]
+    expect(record.marked_at).toBeNull()
+    expect(record.effect_id).toBeNull()
+    expect(record.confirmed_at).toBeNull()
+  })
+})
+
+/**
  * The module-level declaration named `name`, as its own lines.
  *
  * Module scope rather than inside one `describe`, because two suites below read
@@ -798,11 +868,12 @@ describe('the write arm and its rollback are still written', () => {
   })
 
   /**
-   * The weaker, structural form, as its neighbours are. The mark is not
-   * exported, and staging the cross-advance race that erases the content
-   * between the gate and the mark is not worth its fixture. What it pins: the
-   * precondition refuses erased content, after the fingerprint compare (which
-   * cannot see erasure) and before the mark check.
+   * The refusal itself is proved by behaviour, in the erasure case above. This
+   * pin holds the check's PLACEMENT: after the fingerprint compare, which cannot
+   * see erasure, and before the `indeterminate` check. The behavioural case
+   * cannot observe that placement, because with an unmarked record either order
+   * refuses the same way. And this pin cannot catch a check that reads the wrong
+   * producer's entry, which the behavioural case does. That is why both exist.
    */
   test("the mark refuses content_moved when the producer's content was erased under it", () => {
     const code = bodyOf('markContentApprovalSpent').filter((l) => !/^\s*(\/\/|\*)/.test(l))
