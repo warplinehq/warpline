@@ -655,6 +655,47 @@ describe('the content-authority decision', () => {
   })
 
   /**
+   * "Still matches" is a claim about the fingerprint, so it is made only when
+   * the one authority read checked the fingerprint and found it equal. Over an
+   * erased record the binding can still have moved for any of the other three
+   * reasons, and each of those must read as moved.
+   */
+  test('the erased detail is given only when erasure is the one cause, never over drifted bytes, a missing producer manifest or a rewritten dependency', async () => {
+    const approved = approvalFor(APPROVED_BODY)
+    const cases: Array<{ name: string; erasedBody: string; consumer: PluginManifest; withProducer: boolean }> = [
+      { name: 'drift', erasedBody: DRIFTED_BODY, consumer: consumerManifestFor(PRODUCER), withProducer: true },
+      { name: 'no producer manifest', erasedBody: APPROVED_BODY, consumer: consumerManifestFor(PRODUCER), withProducer: false },
+      { name: 'rewritten dependency', erasedBody: APPROVED_BODY, consumer: consumerManifestFor('other-builder'), withProducer: true },
+    ]
+
+    for (const c of cases) {
+      const state = seedState(APPROVED_BODY)
+      state.approvals[CONSUMER] = { ...approved }
+      state.plugin_runs[PRODUCER] = {
+        ...state.plugin_runs[PRODUCER]!,
+        last_output: erasedOf(c.erasedBody),
+      }
+      const manifests = new Map<string, PluginManifest>([[CONSUMER, c.consumer]])
+      if (c.withProducer) manifests.set(PRODUCER, producerManifest())
+      const ctx: EvalContext = {
+        currentTier: 'normal',
+        force: false,
+        state,
+        approvalPath: join(home.root, '.session-approval'),
+        manifests,
+      }
+
+      const result = await evaluatePlugin(CONSUMER, c.consumer, ctx, Date.now())
+
+      expect(result.due, c.name).toBe(false)
+      if (result.due) throw new Error('unreachable')
+      expect(result.detail, c.name).not.toContain('still matches')
+      expect(result.detail, c.name).toContain('no longer what would ship')
+      expect(result.detail, c.name).not.toContain(PRODUCER)
+    }
+  })
+
+  /**
    * The backstop edge. A host tz database that no longer knows the zone must
    * land on a refusal, never on a fire and never on a throw — a throw here would
    * reach `plan`, which is contracted never to fail.

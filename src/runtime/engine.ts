@@ -538,6 +538,9 @@ export function contentEffectId(
  * `approval` is the record itself, never a copy. The mid-run mark mutates
  * `state.approvals` through this reference; a clone would leave it writing to
  * an object nobody reads.
+ *
+ * `erased` is set only by `approvalStanding`'s erased arm, which means the
+ * binding was otherwise live.
  */
 export type ApprovalStanding =
   | { standing: 'none' }
@@ -545,7 +548,7 @@ export type ApprovalStanding =
   | { standing: 'indeterminate'; approval: Approval }
   | { standing: 'outside_window'; approval: Approval }
   | { standing: 'before_window'; approval: Approval }
-  | { standing: 'content_moved'; approval: Approval }
+  | { standing: 'content_moved'; approval: Approval; erased?: true }
   | { standing: 'live'; approval: Approval }
 
 /**
@@ -584,7 +587,7 @@ export function approvalStanding(
     binding.standing === 'live' &&
     state.plugin_runs[binding.approval.producer]?.last_output?.erased_at !== undefined
   ) {
-    return { standing: 'content_moved', approval: binding.approval }
+    return { standing: 'content_moved', approval: binding.approval, erased: true }
   }
   return binding
 }
@@ -948,12 +951,16 @@ function contentGateDetail(g: GateInput): string {
     // The fingerprint is a runtime-derived closed-form value and is safe; the
     // record's `producer` is not. In THIS arm it may be the very name that no
     // longer matches the declared dependency, so it is not a declared plugin
-    // name at all, and the arm cannot tell that case from the fingerprint-drift
-    // one without a second read. The producer name is used to look up whether
-    // its content was erased, where the fingerprint still matches by design,
-    // and is never interpolated.
+    // name at all, and it is never interpolated.
+    //
+    // The erased sentence is chosen by the standing's own flag, which only
+    // `approvalStanding`'s erased arm sets, and only over a binding that was
+    // otherwise live. So "still matches" is what the one authority read found,
+    // not an assumption. Every other `content_moved` (drift, a missing producer
+    // manifest, a rewritten dependency) gets the moved sentence, erased record
+    // or not. The detail reads nothing out of the state for this.
     case 'content_moved':
-      return g.ctx.state.plugin_runs[s.approval.producer]?.last_output?.erased_at !== undefined
+      return s.erased === true
         ? `unapproved: the approved content was erased — the fingerprint on file ` +
             `(${s.approval.fingerprint}) still matches, but there are no bytes left to ship`
         : `unapproved: the approved content has moved — the fingerprint on file ` +
