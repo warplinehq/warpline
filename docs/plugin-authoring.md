@@ -460,7 +460,7 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
     // Nothing produced yet. `upstreamRun` says whether that is because
     // anomaly-watch has not run (`null`) or ran and produced none.
   } else if (upstream.erased_at !== undefined) {
-    // The content was erased when the approval window that bound it closed.
+    // The content was erased when the approval that bound it closed or was withdrawn.
     // The record says anomaly-watch produced, and there are no bytes to read.
   } else if (upstream.body !== undefined) {
     const payload: unknown = JSON.parse(upstream.body)
@@ -485,7 +485,7 @@ about a dependency that produced last week. Together they name five states:
 | `null` | `'success'` | Ran, and has never produced an Output. |
 | a record | `'failed'` | Produced before; its latest run failed. The record stands, and it is older than that run. **Not reachable under a full advance** — see below. |
 | a record | `'success'` | Produced, and its latest run is healthy. |
-| an erased record (`erased_at` set, no `body`) | any | Produced; its content was erased when the approval window that bound it closed. Run the producer again for new content. |
+| an erased record (`erased_at` set, no `body`) | any | Produced; its content was erased when the approval that bound it closed or was withdrawn. Run the producer again for new content. |
 
 **A record beside `'success'` does not mean the record came from that run.** A
 run that produced nothing carries the previous record forward, so this row also

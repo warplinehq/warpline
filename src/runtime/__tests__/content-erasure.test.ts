@@ -258,6 +258,108 @@ describe('an open binding that matches the bytes holds them, whichever run it na
   })
 })
 
+/**
+ * `approve --content --remove` is a closure. Withdrawn, a binding no longer
+ * names its run, so if the removal did not release the content, no later
+ * advance would.
+ */
+describe('withdrawing a binding releases the content it bound', () => {
+  const OPEN = '2099-01-01T00:00'
+
+  function binding(plugin: string, runId: string, fingerprint = 'not-compared-here'): Approval {
+    return {
+      plugin,
+      producer: 'prod',
+      fingerprint,
+      run_id: runId,
+      approved_at: '2000-01-01T00:00:00.000Z',
+      not_before: null,
+      not_after: OPEN,
+      zone: 'UTC',
+      effect_id: null,
+      marked_at: null,
+      confirmed_at: null,
+    }
+  }
+
+  /** Runs the CLI verb with its output swallowed, and returns its exit code. */
+  async function withdraw(consumer: string): Promise<number> {
+    const realOut = process.stdout.write
+    const realErr = process.stderr.write
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      const { run } = await import('../../cli/approve.js')
+      return await run([consumer, '--content', '--remove'])
+    } finally {
+      process.stdout.write = realOut
+      process.stderr.write = realErr
+    }
+  }
+
+  async function seed(approvals: Record<string, Approval>): Promise<EngineState> {
+    const doc = JSON.parse(await readFile(h.statePath, 'utf-8')) as EngineState
+    doc.approvals = approvals
+    await writeFile(h.statePath, JSON.stringify(doc))
+    return doc
+  }
+
+  test('WR-02: --remove on the only open binding erases the content in the same write', async () => {
+    await h.advance()
+    const runId = ((await h.persistedRun('prod'))!.last_output as { run_id: string }).run_id
+    // Open window: whatever erases the content here is the removal, not a closure.
+    await seed({ 'batch-sender': binding('batch-sender', runId) })
+    expect(await filesHolding(h.root, sentinel)).toEqual(['state/engine-state.json'])
+
+    expect(await withdraw('batch-sender')).toBe(0)
+
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    const after = JSON.parse(await readFile(h.statePath, 'utf-8')) as EngineState
+    expect(after.approvals).toEqual({})
+    expect(after.plugin_runs['prod']!.last_output!.erased_at).toBeDefined()
+  })
+
+  test('WR-02: --remove leaves content another open binding on the same run still holds', async () => {
+    await h.advance()
+    const runId = ((await h.persistedRun('prod'))!.last_output as { run_id: string }).run_id
+    await seed({
+      'batch-sender': binding('batch-sender', runId),
+      'second-sender': binding('second-sender', runId),
+    })
+
+    expect(await withdraw('batch-sender')).toBe(0)
+
+    expect(await filesHolding(h.root, sentinel)).toEqual(['state/engine-state.json'])
+    const after = JSON.parse(await readFile(h.statePath, 'utf-8')) as EngineState
+    expect(after.approvals['batch-sender']).toBeUndefined()
+    expect(after.plugin_runs['prod']!.last_output!.body).toBe(sentinel)
+  })
+
+  test('WR-02: content a withdrawal left to a fingerprint holder on an earlier run goes when that holder closes', async () => {
+    await h.advance()
+    const { manifests } = await loadPluginManifests(h.pluginsDir)
+    const doc = JSON.parse(await readFile(h.statePath, 'utf-8')) as EngineState
+    const runId = doc.plugin_runs['prod']!.last_output!.run_id!
+    const fingerprint = proposalFingerprint(doc, 'prod', manifests.get('prod')!)
+    await seed({
+      'batch-sender': binding('batch-sender', runId, fingerprint),
+      // Names an earlier run of the same bytes, so only the fingerprint holds.
+      'second-sender': binding('second-sender', 'an-earlier-run', fingerprint),
+    })
+
+    expect(await withdraw('batch-sender')).toBe(0)
+    expect(await filesHolding(h.root, sentinel)).toEqual(['state/engine-state.json'])
+
+    // Nothing names the current run now. The holder's own closure releases it.
+    await h.setMarker()
+    await h.advance(resolveWallClock(OPEN, 'UTC') + 1)
+
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    const after = JSON.parse(await readFile(h.statePath, 'utf-8')) as EngineState
+    expect(after.approvals).toEqual({})
+  })
+})
+
 describe('a consumer reads erased content as produced', () => {
   /**
    * Reads its dependency through the capability and reports three booleans

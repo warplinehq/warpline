@@ -69,6 +69,7 @@ import {
   applyPendingGate,
   approvalStanding,
   denialStanding,
+  eraseIfReleased,
   findPendingGate,
   loadPluginManifests,
   proposalFingerprint,
@@ -325,7 +326,7 @@ async function approveContent(
     if (lastOutput.erased_at !== undefined) {
       process.stderr.write(
         `${consumer} cannot be approved by content: ${producer}'s last Output was erased ` +
-          `when the approval window that bound it closed, so there are no bytes to read. ` +
+          `when the approval that bound it closed or was withdrawn, so there are no bytes to read. ` +
           `Run ${producer} again to produce new content. Nothing was written.\n`,
       )
       return 1
@@ -452,7 +453,8 @@ async function approveContent(
  * The read and the write are ONE critical section, which is what makes the
  * marked-unconfirmed refusal enforceable rather than advisory: a record could
  * otherwise be marked between a read that saw it unmarked and the write that
- * removed it.
+ * removed it. The same write erases the content the record bound, when no
+ * other open approval still holds it.
  */
 async function removeContentApproval(
   consumer: string,
@@ -496,7 +498,12 @@ async function removeContentApproval(
       return 1
     }
 
+    // Withdrawal is a closure, so the content it bound is released in this
+    // same locked write, under the rule the advance's erasure uses. Left to the
+    // next advance it would never go: nothing would name the run any more.
+    const withdrawn = state.approvals[consumer]!
     delete state.approvals[consumer]
+    eraseIfReleased(state.plugin_runs, withdrawn.producer, state.approvals, manifests, now, withdrawn)
     await writeEngineState(state, statePath)
     process.stdout.write(
       `Withdrew the content approval for ${consumer}. Those bytes will not ship on any later ` +

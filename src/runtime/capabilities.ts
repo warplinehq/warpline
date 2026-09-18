@@ -339,8 +339,8 @@ export interface SecretsHandle {
  * a gate reads `gated`, which is an answer rather than an error.
  *
  * An erased record is returned non-null, and that names a fifth state:
- * produced, then its content erased when the approval window that bound it
- * closed. It is recognisable by `erased_at` and no `body`. `null` still means
+ * produced, then its content erased when the approval that bound it closed or
+ * was withdrawn. It is recognisable by `erased_at` and no `body`. `null` still means
  * only "never produced", because the record is still a fact about the plugin.
  *
  * An earlier version of this docstring argued that collapsing "has never run"

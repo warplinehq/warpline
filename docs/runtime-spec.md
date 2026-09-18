@@ -1999,7 +1999,10 @@ This is the last of three steps in one deletion policy. All three read the
    naming the earlier run `live`, and erasing under it would void that yes. A
    marked approval binds by `run_id` only, since it can never be `live` again.
    The fingerprint needs the producer's manifest, so a producer that is not
-   installed is bound by `run_id` only.
+   installed is bound by `run_id` only. Withdrawing an approval with
+   `approve --content --remove` is a closure too: that command erases the
+   content the record bound in its own locked write, by this same rule, when no
+   other open approval still binds it (§ "Writing and withdrawing one").
 3. **The binding is swept.** This removes what is left of the approval — a
    fingerprint, a producer name, a run id and some timestamps — once there is
    nothing for it to bind to.
@@ -2177,8 +2180,8 @@ than defending against it.
 
 **An Output whose content was erased is refused by name.** When the producer's
 `last_output` carries `erased_at`, there are no bytes for the operator to read,
-so the command says the content was erased when the approval window that bound
-it closed, tells the operator to run the producer again, and exits `1`. This is
+so the command says the content was erased when the approval that bound it
+closed or was withdrawn, tells the operator to run the producer again, and exits `1`. This is
 checked before the file check above. The refusal for a producer that has never
 produced is unchanged, and in both cases nothing is written.
 
@@ -2189,6 +2192,12 @@ stranded in the state document with no gesture that reaches it. `--remove` is
 not `revoke`, which retires a session grant, and not `deny`, which answers a
 proposal with a no — it is the yes to specific bytes taken back, and it leaves
 the plugin reported as ordinary unapproved rather than as refused.
+
+**Withdrawal releases the content.** Removed, the record no longer names its
+run, so no later advance could tell which content it bound. The same locked
+write therefore erases the producer's `last_output` content as a window closing
+would (§ "Expiry and deletion"), unless another open approval still binds it.
+Content left to such a holder is erased when that holder closes.
 
 **Two refusals protect a marked-unconfirmed record.** For a record with
 `marked_at` set and `confirmed_at` still null, both a fresh approval and a

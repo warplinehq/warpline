@@ -671,7 +671,10 @@ function bindingStanding(
  * checks are answers that can disagree about the same record. A run released
  * while its binding is retained is a dangling approval; a binding deleted while
  * its run is pinned is retain-forever wearing a deletion policy; content erased
- * while an open window still names it voids a live yes.
+ * while an open window still binds it voids a live yes. The erasure has one
+ * caller outside the advance, `approve --content --remove`, and it reads the
+ * window through the same `eraseIfReleased`, so a withdrawal cannot hold or
+ * release content by a different rule.
  *
  * It is NOT the same question `approvalStanding` answers, and must not be
  * mistaken for it. That function decides AUTHORITY — window, fingerprint,
@@ -1160,8 +1163,9 @@ function sweepExpiredApprovals(
  * and the producer's next Output replaces it. Content copied into a parked
  * gate's `plugin_result`. And a plugin's own `summary` text.
  *
- * It reads no clock. The stamp comes from `now`, which is `approvalNow`, and it
- * reads the window through `windowClosed` only, which already retains on a zone
+ * It reads no clock. The stamp comes from `now`, which is `approvalNow` in an
+ * advance and the command's one clock read in a withdrawal, and it reads the
+ * window through `windowClosed` only, which already retains on a zone
  * the host cannot resolve. It never throws, and it never writes an empty body:
  * the key is absent.
  */
