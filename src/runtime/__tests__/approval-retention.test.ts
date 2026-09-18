@@ -47,9 +47,13 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { readFile, utimes, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { runAdvance } from '../engine.js'
+import { createHash } from 'node:crypto'
+import { denialStanding, proposalFingerprint, runAdvance } from '../engine.js'
 import { defaultEngineState } from '../../schemas/engine-state.js'
-import type { Approval, EngineState } from '../../schemas/engine-state.js'
+import type { Approval, EngineState, PluginRun } from '../../schemas/engine-state.js'
+import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
+import type { StoredOutputRecord } from '../../schemas/skill-result.js'
+import { resolveWallClock } from '../../lib/wall-clock.js'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
 
@@ -70,36 +74,38 @@ let eventsPath: string
 let approvalPath: string
 
 /**
- * One trivial plugin, so the advance has something to load and reaches its
- * end-of-run assembly. It declares no side effects and is not the subject of
- * any assertion here.
+ * One autonomous plugin with no side effects, whose handler returns
+ * `artifactsSource` (source text) as its `artifacts_produced`. Returns the
+ * manifest object it wrote.
+ *
+ * A plugin that produces declares the one Output the handler returns, because
+ * the loader validates manifests. One that produces nothing keeps `outputs:
+ * {}`, so the filler's manifest is byte-identical to what it always was.
  */
-async function writeFiller(): Promise<void> {
-  const dir = join(home.pluginsDir, 'filler')
+async function writeAutonomous(name: string, artifactsSource = '[]'): Promise<Record<string, unknown>> {
+  const dir = join(home.pluginsDir, name)
   const { mkdir } = await import('node:fs/promises')
   await mkdir(dir, { recursive: true })
-  await writeFile(
-    join(dir, 'manifest.ts'),
-    `export const manifest = ${JSON.stringify({
-      name: 'filler',
-      version: '1.0.0',
-      description: 'filler',
-      inputs: {},
-      outputs: {},
-      capabilities: [],
-      schedule: 'on_run',
-      autonomy_level: 'autonomous',
-      side_effects: [],
-      approval_class: 'session',
-      ttl_hours: 24,
-      dependencies: [],
-      timeout_ms: 5000,
-      max_retries: 0,
-      retry_delay_ms: 10,
-      max_parallelism: 1,
-      min_tier: 'suspended',
-    })}`,
-  )
+  const manifest = {
+    name,
+    version: '1.0.0',
+    description: name,
+    inputs: {},
+    outputs: artifactsSource === '[]' ? {} : { brief: { type: 'json' } },
+    capabilities: [],
+    schedule: 'on_run',
+    autonomy_level: 'autonomous',
+    side_effects: [],
+    approval_class: 'session',
+    ttl_hours: 24,
+    dependencies: [],
+    timeout_ms: 5000,
+    max_retries: 0,
+    retry_delay_ms: 10,
+    max_parallelism: 1,
+    min_tier: 'suspended',
+  }
+  await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
   await writeFile(
     join(dir, 'handler.ts'),
     `export async function handler() {
@@ -110,12 +116,22 @@ async function writeFiller(): Promise<void> {
     errors: [],
     data_freshness: {},
     summary: 'ran',
-    artifacts_produced: [],
+    artifacts_produced: ${artifactsSource},
     schema_version: 1,
   }
 }
 `,
   )
+  return manifest
+}
+
+/**
+ * One trivial plugin, so the advance has something to load and reaches its
+ * end-of-run assembly. It declares no side effects and is not the subject of
+ * any assertion here.
+ */
+async function writeFiller(): Promise<void> {
+  await writeAutonomous('filler')
 }
 
 /** A run log old enough that ordinary retention would evict it. */
@@ -163,14 +179,45 @@ async function seedState(patch: Partial<EngineState> = {}): Promise<void> {
 const readState = async (): Promise<EngineState> =>
   JSON.parse(await readFile(statePath, 'utf-8')) as EngineState
 
-const advance = () =>
+/** `now` is passed only when given, so every case without it is unchanged. */
+const advance = (now?: number) =>
   runAdvance({
     pluginsDir: home.pluginsDir,
     stateDir: statePath,
     runsDir: home.runsDir,
     eventsPath,
     approvalPath,
+    ...(now === undefined ? {} : { now }),
   })
+
+/** The approved content: the producer's inline body. */
+const BODY = '{"batch":"twelve invoices"}'
+
+/** The producer's Output from the approved run, carrying `BODY`. */
+function produced(overrides: Partial<StoredOutputRecord> = {}): StoredOutputRecord {
+  return {
+    type: 'brief',
+    format: 'json',
+    body: BODY,
+    run_id: 'approved-run',
+    produced_at: '2026-08-29T10:00:00.000Z',
+    ...overrides,
+  } as StoredOutputRecord
+}
+
+/**
+ * The producer's `plugin_runs` entry. Its last run is older than the manifest
+ * TTL, so an installed producer is due.
+ */
+function producerRun(lastOutput?: StoredOutputRecord): PluginRun {
+  return {
+    last_run_at: '2026-01-01T00:00:00.000Z',
+    status: 'success',
+    ...(lastOutput === undefined ? {} : { last_output: lastOutput }),
+  }
+}
+
+const hex = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex')
 
 const survives = (id: string): boolean =>
   existsSync(join(home.runsDir, `${id}.json`)) && existsSync(join(home.runsDir, `${id}.log`))
@@ -362,5 +409,184 @@ describe('when a content approval is swept', () => {
 
     expect(result.status).not.toBe('failed')
     expect((await readState()).approvals[CONSUMER]).toBeDefined()
+  })
+})
+
+describe('when a content approval releases its content', () => {
+  beforeEach(async () => {
+    home = await createTestHome()
+    _setHome(home.root)
+    statePath = join(home.stateDir, 'engine-state.json')
+    eventsPath = join(home.stateDir, 'events.jsonl')
+    approvalPath = join(home.root, '.session-approval')
+    await writeFiller()
+  })
+
+  afterEach(async () => {
+    await home.cleanup()
+  })
+
+  test('R1: a closed binding with nothing open on its run erases the content and keeps the record', async () => {
+    await seedState({
+      plugin_runs: { [PRODUCER]: producerRun(produced()) },
+      approvals: { [CONSUMER]: approval({ not_after: CLOSED }) },
+    })
+
+    await advance()
+
+    const after = await readState()
+    const out = after.plugin_runs[PRODUCER]!.last_output!
+    expect('body' in out).toBe(false)
+    expect(out.body_sha256).toBe(hex(BODY))
+    expect(Number.isNaN(Date.parse(out.erased_at!))).toBe(false)
+    expect(out.type).toBe('brief')
+    expect(out.format).toBe('json')
+    expect(out.run_id).toBe('approved-run')
+    expect(out.produced_at).toBe('2026-08-29T10:00:00.000Z')
+    expect(after.approvals[CONSUMER]).toBeUndefined()
+  })
+
+  test('R1: at the exact closing instant neither the sweep nor the erasure acts, and one millisecond later both do', async () => {
+    const t = resolveWallClock(CLOSED, 'UTC')
+    await seedState({
+      plugin_runs: { [PRODUCER]: producerRun(produced()) },
+      approvals: { [CONSUMER]: approval({ not_after: CLOSED }) },
+    })
+
+    await advance(t)
+
+    const atClose = await readState()
+    expect(atClose.approvals[CONSUMER]).toBeDefined()
+    expect('body' in atClose.plugin_runs[PRODUCER]!.last_output!).toBe(true)
+
+    // No re-seed: the binding and body kept at `t` are the record judged at
+    // `t + 1`. The filler may not be due at an instant before its own last
+    // run, and that does not matter here: `runAdvance` returns early only for
+    // quiet hours, so the end-of-run write is reached either way.
+    await advance(t + 1)
+
+    const past = await readState()
+    expect(past.approvals[CONSUMER]).toBeUndefined()
+    const out = past.plugin_runs[PRODUCER]!.last_output!
+    expect('body' in out).toBe(false)
+    expect(out.erased_at).toBe(new Date(t + 1).toISOString())
+  })
+
+  test('R6: a marked-unconfirmed binding past its window keeps its record and loses its content, and a second advance changes neither', async () => {
+    await seedState({
+      plugin_runs: { [PRODUCER]: producerRun(produced()) },
+      approvals: {
+        [CONSUMER]: approval({
+          not_after: CLOSED,
+          marked_at: '2026-08-29T12:00:00.000Z',
+          effect_id: 'deadbeef',
+        }),
+      },
+    })
+
+    await advance()
+
+    const first = await readState()
+    const kept = first.approvals[CONSUMER]
+    expect(kept).toBeDefined()
+    expect(kept?.marked_at).toBe('2026-08-29T12:00:00.000Z')
+    expect(kept?.effect_id).toBe('deadbeef')
+    expect(kept?.confirmed_at).toBeNull()
+    const out = first.plugin_runs[PRODUCER]!.last_output!
+    expect('body' in out).toBe(false)
+    expect(out.erased_at).toBeDefined()
+
+    await advance()
+
+    // Deep-equal, not byte-equal: the erasure writes its two keys in the
+    // opposite order to the schema, and the next read's parse reorders them.
+    // What must not move is the stamp, and nothing may be dropped.
+    const second = await readState()
+    expect(second.plugin_runs[PRODUCER]).toEqual(first.plugin_runs[PRODUCER])
+    expect(second.plugin_runs[PRODUCER]!.last_output!.erased_at).toBe(out.erased_at)
+    expect(second.approvals[CONSUMER]).toBeDefined()
+  })
+
+  test('R1: with two bindings on one run, an open one holds the content until both have closed', async () => {
+    await seedState({
+      plugin_runs: { [PRODUCER]: producerRun(produced()) },
+      approvals: {
+        [CONSUMER]: approval({ not_after: CLOSED }),
+        'second-sender': approval({ plugin: 'second-sender' }),
+      },
+    })
+
+    await advance()
+
+    const first = await readState()
+    expect(first.plugin_runs[PRODUCER]!.last_output!.body).toBe(BODY)
+    expect(first.approvals[CONSUMER]).toBeUndefined()
+    expect(first.approvals['second-sender']).toBeDefined()
+
+    await advance(resolveWallClock(OPEN, 'UTC') + 1)
+
+    const out = (await readState()).plugin_runs[PRODUCER]!.last_output!
+    expect('body' in out).toBe(false)
+    expect(out.erased_at).toBeDefined()
+  })
+
+  test('R1: an open binding naming the same run for another producer also holds the content', async () => {
+    await seedState({
+      plugin_runs: { [PRODUCER]: producerRun(produced()) },
+      approvals: {
+        [CONSUMER]: approval({ not_after: CLOSED }),
+        'other-sender': approval({ plugin: 'other-sender', producer: 'another-producer' }),
+      },
+    })
+
+    await advance()
+
+    expect('body' in (await readState()).plugin_runs[PRODUCER]!.last_output!).toBe(true)
+  })
+
+  test('R1: a producer that produces again in the same advance keeps its new content', async () => {
+    await writeAutonomous(
+      PRODUCER,
+      `[{ type: 'brief', format: 'json', body: '{"batch":"thirteen invoices"}' }]`,
+    )
+    await seedState({
+      plugin_runs: { [PRODUCER]: producerRun(produced()) },
+      approvals: { [CONSUMER]: approval({ not_after: CLOSED }) },
+    })
+
+    const result = await advance()
+
+    const out = (await readState()).plugin_runs[PRODUCER]!.last_output!
+    expect(out.body).toBe('{"batch":"thirteen invoices"}')
+    expect(out.run_id).toBe(result.run_id)
+    expect('erased_at' in out).toBe(false)
+  })
+
+  test('R7: a live denial on the producer is still live after its content is erased', async () => {
+    const manifest = PluginManifestSchema.parse(await writeAutonomous(PRODUCER))
+    const seeded: EngineState = {
+      ...defaultEngineState(),
+      plugin_runs: { [PRODUCER]: producerRun(produced()) },
+      approvals: { [CONSUMER]: approval({ not_after: CLOSED }) },
+    }
+    seeded.denials = {
+      [PRODUCER]: {
+        plugin: PRODUCER,
+        reason: 'the operator said no to this batch',
+        denied_at: '2026-08-29T11:30:00.000Z',
+        note: null,
+        fingerprint: proposalFingerprint(seeded, PRODUCER, manifest),
+      },
+    }
+    expect(denialStanding(seeded, PRODUCER, manifest).standing).toBe('live')
+    await writeFile(statePath, JSON.stringify(seeded))
+
+    await advance()
+
+    const after = await readState()
+    const out = after.plugin_runs[PRODUCER]!.last_output!
+    expect(out.erased_at).toBeDefined()
+    expect('body' in out).toBe(false)
+    expect(denialStanding(after, PRODUCER, manifest).standing).toBe('live')
   })
 })
