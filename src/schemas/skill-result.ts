@@ -143,10 +143,13 @@ export type OutputRecord = z.infer<typeof OutputRecordSchema>
  * reader can still tell "produced, content erased" and "never produced" apart.
  * An approval binds it by `run_id`, or, unless its fire was left marked and
  * unconfirmed, by fingerprint until its window closes.
- * Two cases are not erased: bytes that only such an unconfirmed fire would
- * match, and content bound only by fingerprint once the producer is
- * uninstalled, its manifest failed to load, or its `side_effects` changed
- * (docs/runtime-spec.md § 10).
+ * The binding rule does not erase bytes that only such an unconfirmed fire
+ * would match, or content bound only by fingerprint once the producer is
+ * uninstalled, its manifest failed to load, or its `side_effects` changed. An
+ * approval in a zone the host can no longer resolve is kept, and so is the
+ * content it binds: the erasure never reads that window as closed.
+ * docs/runtime-spec.md § 10 names these and
+ * other cases erasure does not reach.
  *
  * **Handlers never see this shape.** They are still parsed against
  * `OutputRecordSchema`, which does not know the two keys. A handler Output that

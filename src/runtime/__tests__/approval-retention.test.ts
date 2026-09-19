@@ -15,21 +15,25 @@
  *     anything forever. A frozen batch is recipient data, and the fourth
  *     Prohibition forbids retaining its binding past the window with no
  *     deletion path. So protection is unioned only for approvals whose window
- *     is still OPEN: the moment it closes, the run falls back to ordinary
- *     retention, and the binding itself is dropped from the record.
+ *     is still OPEN: the moment it closes, it stops protecting its run,
+ *     and the sweep drops the binding unless runtime-spec § 10's exceptions
+ *     keep it.
  *
  *   - **The content erasure.** The approved content is the producer's
- *     `last_output.body` in the state document. Once no open window of an
- *     approval for that producer binds it, the end-of-run write erases it, just
- *     before the sweep. It is tested in `content-erasure.test.ts` and in this
- *     file's later cases.
+ *     `last_output.body` in the state document. Once an approval for that
+ *     producer that binds it
+ *     has closed and no open one binds it, the end-of-run write erases it,
+ *     just before the sweep. runtime-spec § 10
+ *     names the cases it does not reach. It is tested in
+ *     `content-erasure.test.ts` and in this file's later cases.
  *
  * **One `windowClosed`, three readers, and that is the property under test.**
  * Independently computed window checks are answers that can disagree about the
- * same approval — a run released while its binding is retained, or a binding
- * deleted while its run is still pinned. Every case below is written so that a
- * second, drifting predicate would show up as a contradiction rather than as a
- * pass.
+ * same approval: a run
+ * released while the approval naming it is still open, or a binding swept
+ * while its own protection still pins its run. Every case below is written so
+ * that a second, drifting predicate would show up as a contradiction rather
+ * than as a pass.
  *
  * **The marked-unconfirmed exception is not an oversight (D-11a).** A record
  * with `marked_at` set and `confirmed_at` null is the did-it-ship evidence for

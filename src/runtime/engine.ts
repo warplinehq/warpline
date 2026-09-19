@@ -672,10 +672,13 @@ function bindingStanding(
  * sweep. The erasure and the sweep read it at the same instant, one call after
  * the other. The top and the tail are a thousand lines apart and cannot share
  * one computed value, so they share this — because independently written window
- * checks are answers that can disagree about the same record. A run released
- * while its binding is retained is a dangling approval; a binding deleted while
- * its run is pinned is retain-forever wearing a deletion policy; content erased
- * while an open window still binds it voids a live yes. The erasure has two
+ * checks are answers that can disagree about the same record. Two readers
+ * that disagree about one record's window fail in three ways: a run
+ * released while the approval naming it is still open is a dangling approval,
+ * a record swept
+ * while its own protection still pins its run is retain-forever wearing a
+ * deletion policy, and content erased while an open window still binds it
+ * voids a live yes. The erasure has two
  * callers outside the advance, `approve --content --remove` and a re-approve
  * over an existing record, and both read the window through the same
  * `eraseIfReleased`, so neither can hold or release content by a different
@@ -1065,7 +1068,7 @@ function mergeApprovals(
 
 /**
  * Drop every approval whose fire window has closed, except the did-it-ship
- * evidence.
+ * evidence and a closed binding whose content erasure was deferred.
  *
  * The binding's half of the deletion path the fourth Prohibition requires,
  * stated as one filter. A frozen batch is recipient data: EDPB ¶82 wants its
@@ -1115,13 +1118,15 @@ function mergeApprovals(
  * dropped, that report stops being rendered. Said out loud here so it reads as
  * a decision rather than as a surprise.
  *
- * **Two ceilings, stated rather than hidden.**
+ * **Ceilings, stated rather than hidden.**
  * `state.plugin_runs[producer].last_output` is kept as a record: it is a fact
  * about the producer, preserved across a run that produced nothing and
  * overwritten by the producer's next Output. Only its content is erased, and
  * the record says so with `erased_at`. And there is still no operator gesture
  * that resolves an `indeterminate` record — so a marked-unconfirmed one
- * survives here indefinitely, by design and for want of a verb.
+ * survives here indefinitely, by design and for want of a verb. A record whose
+ * zone the host cannot resolve stays too, and so does the content it binds:
+ * `windowClosed` never reads that window as closed.
  */
 function sweepExpiredApprovals(
   approvals: EngineState['approvals'],
@@ -1149,7 +1154,8 @@ function sweepExpiredApprovals(
  * carries an inline `body`, it deletes the `body` and stamps `body_sha256` and
  * `erased_at` on a new record. The record itself stays, as a fact about the
  * producer, so a reader can still tell "produced, content erased" from "never
- * produced". The binding that named the run is swept by the next call.
+ * produced". The binding that named the run is
+ * swept by the next call, unless its fire was left marked and unconfirmed.
  *
  * **When.** Only when a closed approval for THIS producer binds the record,
  * and no open approval for it still binds it. An approval binds the record
@@ -2316,7 +2322,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // log holds a summary of the run, not the content. The content a frozen
     // batch carries is recipient data, and it sits in the state document, in
     // `plugin_runs[producer].last_output.body`. The end-of-run write below
-    // erases it, and then sweeps the binding itself.
+    // erases it and then sweeps the binding, as far as `eraseReleasedContent`
+    // and `sweepExpiredApprovals` say they reach.
     //
     // **`windowClosed` and not a second window comparison**, and the sites are
     // far enough apart that the sharing has to be the FUNCTION rather than a

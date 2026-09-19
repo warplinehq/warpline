@@ -972,15 +972,17 @@ and a third is never a candidate at all:
 advance after `not_after`, the referenced run's log is an ordinary candidate
 again and the three bounds below reclaim it with no new mechanism. That log
 holds a summary, not the content. The content a frozen batch carries is
-recipient data, and it is erased by the end-of-run write of the same advance:
-`body` deleted, `erased_at` and `body_sha256` stamped (§ 10, "Expiry and
-deletion"). The binding that named the run is swept in that write too. Three
+recipient data. The end-of-run write of the same advance erases it, with
+`body` deleted and `erased_at` and `body_sha256` stamped, and sweeps the
+binding that named the run, by the rules § 10, "Expiry and deletion", states.
+That section
+names the cases this paragraph does not reach. Three
 readers share one predicate: prune protection, the content erasure and the
 binding sweep. They share the window test, not one set: a run log covers every
 plugin in its advance, so any open approval naming the run protects it, while
 content belongs to one producer's Output, so
-only an open approval for that producer holds it. So a released run, erased
-content and a retained binding cannot come apart. Protection does not
+only an open approval for that producer holds it. So the three
+never disagree about whether a window has closed. Protection does not
 depend on the mark: an approval already spent still protects its run while its
 window is open, and a marked-unconfirmed one stops protecting when the window
 closes exactly as an unmarked one does.
@@ -1983,8 +1985,9 @@ write another.
 #### Expiry and deletion
 
 A record whose window has closed is **removed from this subtree** at the
-end-of-run state write, unless it is marked-unconfirmed. Nothing an operator
-does is required, and the sweep runs inside every advance.
+end-of-run state write,
+unless it is marked-unconfirmed or the last row of the table below keeps it.
+Nothing an operator does is required, and the sweep runs inside every advance.
 
 This is the last of three steps in one deletion policy. All three read the
 **same** window predicate over the **same** instant:
@@ -2028,11 +2031,17 @@ This is the last of three steps in one deletion policy. All three read the
    fingerprint, a producer name, a run id and some timestamps — once there is
    nothing for it to bind to.
 
-Sharing one predicate and one instant is what stops a run being released while
-its binding is retained, and content being erased while an open window still
-binds it. The reverse, content kept after every window that bound it has
-closed, is stopped as far as the binds rule reaches, and
-the two limits in step 2 are where it does not.
+Sharing one predicate and one instant is what keeps the three steps from
+disagreeing about whether a window has closed, and what stops content being
+erased while an open window still binds it. The reverse, content kept after
+every window that bound it has closed, is stopped as far as the binds rule
+reaches, and
+the two limits in step 2 are where it does not. Nor is it stopped for an
+approval in a zone the host can no longer resolve: the shared predicate never
+reads that window as closed, so the record is kept, and so is the content it
+binds (the last paragraph of this section). A binding the table below keeps
+after its window closes
+is retained after it stops protecting its run.
 
 The one exception:
 
@@ -2075,7 +2084,8 @@ ordinary not-due report naming the spent approval and the instant it fired is
 still rendered. Once the record is dropped, that report stops being rendered,
 and the plugin reads as having no approval, which it no longer has.
 
-Two ceilings this does not reach:
+Ceilings this does not reach, besides the two limits in step 2 and the zone
+case in the last paragraph of this section:
 
 - `plugin_runs[producer].last_output` is **kept** as a record. It is a fact
   about the producer, carried forward across a run that produced nothing and
@@ -2098,7 +2108,10 @@ does **not** erase:
 - a plugin's own `summary` text, which is the plugin's to write.
 
 A zone the host tz database can no longer resolve **retains** the record rather
-than sweeping it, and does not fail the advance. Deleting recipient-bound data
+than sweeping it, and does not fail the advance.
+The content it binds is kept with it, and
+the run it names stays protected, because the content erasure and prune
+protection read the same predicate. Deleting recipient-bound data
 because the host forgot a timezone is not a deletion policy. Note that this is
 the opposite direction from the fire decision, which reads an unresolvable zone
 as a closed window and refuses: both are the conservative answer to their own
@@ -2302,7 +2315,8 @@ nothing or the writer failed.
 **Erased, not absent.** Once the last approval for its producer that binds it
 has closed, been withdrawn or been replaced by a re-approve, the content is
 erased and the record kept: `body` is gone, and `erased_at` and
-`body_sha256` are set (§ `approvals`, "Expiry and deletion"). So
+`body_sha256` are set (§ `approvals`, "Expiry and deletion",
+which names the cases this does not reach). So
 `capabilities.dependencies.lastOutput` still returns the record, and `null`
 still means never produced. The producer's next Output replaces it.
 

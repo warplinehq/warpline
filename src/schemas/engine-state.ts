@@ -248,8 +248,9 @@ export const PluginRunSchema = z.object({
    * The content is erased at the end-of-run write of the advance in which a
    * closed approval for this producer binds this record, by `run_id` or by
    * fingerprint, and no open approval for this producer binds it (runtime-spec
-   * § 10, "Expiry and deletion", which also names the two cases it does not
-   * reach). The record stays, marked, so a reader can still tell
+   * § 10, "Expiry and deletion",
+   * which also names the cases it does not reach). The record stays, marked,
+   * so a reader can still tell
    * "produced, content erased" and "never produced" apart.
    *
    * `.optional()` rather than `.nullable()`: an absent optional is omitted by
