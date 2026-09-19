@@ -1747,7 +1747,7 @@ describe('warpline approve --content', () => {
     }
   })
 
-  test('C14:the fingerprint prints whole on its own line and is the one the gate compares', async () => {
+  test('C14: the fingerprint prints whole on its own line and is the one the gate compares', async () => {
     await writeContentPair()
     await seedContentState(true)
 
