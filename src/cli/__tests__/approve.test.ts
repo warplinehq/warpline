@@ -1493,9 +1493,9 @@ describe('warpline approve --content', () => {
       CONSUMER,
       '--content',
       '--not-after',
-      '2026-01-01T00:00',
+      '2099-01-01T00:00',
       '--not-before',
-      '2026-06-01T00:00',
+      '2099-06-01T00:00',
     ])
 
     expect(code).toBe(1)
@@ -1683,6 +1683,42 @@ describe('warpline approve --content', () => {
     expect(stderr.toLowerCase()).not.toContain('path')
     expect(stdout).not.toContain('----- begin approved bytes -----')
     expect(Buffer.compare(await readFile(statePath), before)).toBe(0)
+  })
+
+  test('C23: a --not-after that has already passed is refused on a first approval and on a re-approve, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    const pastArgs = [CONSUMER, '--content', '--not-after', '2000-01-02T00:00']
+    // Raw bytes, not the parsed approvals: nothing at all may be written.
+    const before = await readFile(statePath)
+
+    const first = await capture('approve', pastArgs)
+
+    expect(first.code).toBe(1)
+    expect(first.stderr).toContain('--not-after')
+    expect(first.stderr).toContain('has already passed')
+    expect(first.stderr).toContain('Nothing was written')
+    // The bounds refusal's words. A closed window is its own refusal.
+    expect(first.stderr).not.toContain('never open')
+    expect(first.stdout).not.toContain('----- begin approved bytes -----')
+    expect(Buffer.compare(await readFile(statePath), before)).toBe(0)
+
+    expect((await capture('approve', approveArgs)).code).toBe(0)
+    const approved = await readFile(statePath)
+
+    // A re-approve would withdraw the open record in the same write, and with
+    // nothing open left, erase the bytes it was about to print.
+    const again = await capture('approve', pastArgs)
+
+    expect(again.code).toBe(1)
+    expect(Buffer.compare(await readFile(statePath), approved)).toBe(0)
+    const doc = JSON.parse(await readFile(statePath, 'utf-8')) as {
+      plugin_runs: Record<string, { last_output: Record<string, unknown> }>
+      approvals: Record<string, Record<string, unknown>>
+    }
+    expect(doc.plugin_runs[PRODUCER]!.last_output.body).toBe(DEFAULT_OUTPUT.body)
+    expect(doc.plugin_runs[PRODUCER]!.last_output.erased_at).toBeUndefined()
+    expect(doc.approvals[CONSUMER]!.not_after).toBe('2099-01-01T00:00')
   })
 
   test('C14: the fingerprint prints whole on its own line and is the one the gate compares', async () => {

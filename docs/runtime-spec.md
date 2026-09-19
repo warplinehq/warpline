@@ -2191,6 +2191,10 @@ asserting a fact it does not have.
 `warpline approve <plugin> --content --remove` takes it back. Both validate
 everything inside a single state-lock critical section before mutating anything,
 so a refused command leaves the document byte-unchanged.
+A `--not-after` that has already passed is refused before anything is written,
+on a first approval and on a re-approve alike: the record would be
+`outside_window` from the moment it was written, and a re-approve would erase
+in the same write the bytes it had just printed.
 
 **The command prints the bytes it is asking about.** The whole guarantee rests
 on the operator having read them, so the producer's inline body is written to

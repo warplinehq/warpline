@@ -384,6 +384,13 @@ async function approveContent(
       return 1
     }
 
+    // A closed window authorises nothing, and on a re-approve the release in
+    // this same write would erase the bytes the command is about to print.
+    if (closesAt <= now) {
+      process.stderr.write(`--not-after '${notAfter}' in zone '${zone}' has already passed, so the approval would authorise nothing. Nothing was written.\n`)
+      return 1
+    }
+
     // The approval instant when no bound was typed, which is what
     // `approvalStanding` reads for a null `not_before`. Held at this scope so
     // the resolved pair can be printed: a zone mistake is invisible in the wall
