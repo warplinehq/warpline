@@ -634,6 +634,34 @@ export async function handler() {
     // The marked-unconfirmed record is kept, and the released closed one is swept.
     expect(Object.keys((await readState()).approvals)).toEqual(['second-sender'])
   })
+
+  /**
+   * A closed binding that has fired and been confirmed still binds its
+   * producer's content by fingerprint. While another approval for the same
+   * producer holds that content open, the sweep keeps the confirmed record.
+   * Dropping it would leave nothing to erase the content once the holder
+   * stops holding it. When the holder is left marked and unconfirmed, it binds
+   * by run only, so the content goes and the confirmed record goes with it.
+   */
+  test('a closed CONFIRMED fingerprint binding is kept while a holder is open, and releases once the holder is left unconfirmed', async () => {
+    await produceBoth()
+    const { manifests } = await loadPluginManifests(h.pluginsDir)
+    const fingerprint = proposalFingerprint(await readState(), 'prod', manifests.get('prod')!)
+    await seed({
+      'batch-sender': { ...binding('batch-sender', 'prod', 'an-earlier-run', CLOSED, fingerprint), marked_at: '2000-01-01T01:00:00.000Z', effect_id: 'x', confirmed_at: '2000-01-01T01:00:01.000Z' },
+      'second-sender': binding('second-sender', 'prod', 'another-earlier-run', OPEN, fingerprint),
+    })
+    await h.setMarker()
+    await h.advance()
+    const held = await readState()
+    expect(held.plugin_runs['prod']!.last_output!.body).toBe(sentinel)
+    expect(held.approvals['batch-sender']).toBeDefined()
+    held.approvals['second-sender'] = { ...held.approvals['second-sender']!, marked_at: '2026-09-18T00:00:00.000Z', effect_id: 'e' }
+    await writeFile(h.statePath, JSON.stringify(held))
+    await h.advance()
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    expect(Object.keys((await readState()).approvals)).toEqual(['second-sender'])
+  })
 })
 
 /**
