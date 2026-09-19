@@ -104,8 +104,13 @@ export const ApprovalSchema = z.object({
    *
    * It is provenance: the run the operator read. A fire does not rewrite it.
    * The content erasure binds by this run or by fingerprint (runtime-spec
-   * § 10, "Expiry and deletion"), so an approval that fired on byte-identical
-   * bytes under a later run still releases them when its window closes.
+   * § 10, "Expiry and deletion", step 2). So an approval whose fire was
+   * confirmed releases the byte-identical bytes it shipped under a later run
+   * when its window closes, as long as the producer is still installed and its
+   * manifest still loads with the same `side_effects`.
+   * Another open approval for the same producer can still hold them.
+   * A fire left marked and unconfirmed binds by this run only, so it never
+   * releases those bytes.
    */
   run_id: z.string().nullable(),
   approved_at: z.string(),

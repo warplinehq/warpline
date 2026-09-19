@@ -2064,14 +2064,16 @@ it shipped.
 A marked-unconfirmed record is never replaced by absence. It is the runtime's
 account of a fire it began and cannot prove it finished, and deleting it would
 destroy that account for a send that may well have landed. Keeping it is safe
-because its content is erased by the same rule as any other, and the evidence it
-keeps is the fingerprint and the effect id, never the bytes. The operator
-settles it at the sink using the effect id.
+because its bound content is erased by the same rule, and it binds by `run_id`
+only, so identical bytes the producer makes later are not erased on its account
+(step 2). The evidence it keeps is the fingerprint and the effect id, never the
+bytes. The operator settles it at the sink using the effect id.
 
-A **confirmed** record past its window is dropped, and one consequence is worth
-stating rather than discovering: the ordinary not-due report naming a spent
-approval and the instant it fired stops being rendered once the window closes.
-The plugin simply reads as having no approval, which it no longer has.
+A **confirmed** record past its window is dropped, unless the last row of the
+table above keeps it. While that row keeps it, it reads `spent`, and the
+ordinary not-due report naming the spent approval and the instant it fired is
+still rendered. Once the record is dropped, that report stops being rendered,
+and the plugin reads as having no approval, which it no longer has.
 
 Two ceilings this does not reach:
 

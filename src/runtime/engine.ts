@@ -573,11 +573,12 @@ export function approvalStanding(
   // The binding can hold over content that is gone. The fingerprint does not
   // move when content is erased, on purpose: the stored hash keeps it equal, so
   // the compare in `bindingStanding` cannot see erasure. The erasure itself
-  // holds content any open, unmarked binding for that producer still matches
-  // by fingerprint, so it does not void a live yes. A binding can still meet erased content: the
-  // producer's manifest was absent when the erasure ran, so no fingerprint
-  // could hold it, and was installed again later. The answer is `content_moved`,
-  // because the bytes this approval names are no longer there to ship.
+  // holds content that any open binding for that producer still matches by
+  // fingerprint, unless that binding is marked-unconfirmed, so it does not void
+  // a live yes. A binding can still meet erased content: the producer's
+  // manifest was absent when the erasure ran, so no fingerprint could hold it,
+  // and was installed again later. The answer is `content_moved`, because the
+  // bytes this approval names are no longer there to ship.
   //
   // Only a `live` answer is turned, so every earlier refusal, `outside_window`
   // included, keeps its precedence. The arm is here and not in
@@ -1100,9 +1101,11 @@ function mergeApprovals(
  * still be there then. It goes on the sweep after its content is erased or
  * replaced by the producer's next Output.
  *
- * A CONFIRMED record past its window is dropped, which means the state report
- * naming a spent approval stops being rendered once the window closes. Said out
- * loud here so it reads as a decision rather than as a surprise.
+ * A CONFIRMED record past its window is dropped, unless the paragraph above
+ * keeps it as a deferred binding. While it is kept, it reads `spent`, and the
+ * state report naming the spent approval is still rendered. Once it is
+ * dropped, that report stops being rendered. Said out loud here so it reads as
+ * a decision rather than as a surprise.
  *
  * **Two ceilings, stated rather than hidden.**
  * `state.plugin_runs[producer].last_output` is kept as a record: it is a fact

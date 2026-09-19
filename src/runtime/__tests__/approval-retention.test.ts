@@ -35,7 +35,8 @@
  * with `marked_at` set and `confirmed_at` null is the did-it-ship evidence for
  * a send that may have landed. It survives the sweep, and it is safe to: it
  * holds a fingerprint, a producer name and a pointer, and its bound content is
- * erased by the same rule as any other.
+ * erased by the same rule. It binds by `run_id` only, so identical bytes the
+ * producer makes later are not erased on its account.
  *
  * Every case drives a REAL advance against a temp home. The protected set is
  * built inside `runAdvance` and handed to `pruneRunLogs`; asserting it at the
