@@ -1078,8 +1078,10 @@ function mergeApprovals(
  * closes, which hands it to ordinary retention; that log holds a summary of the
  * run, never the content. The CONTENT is `plugin_runs[producer].last_output.body`
  * in the state document, and `eraseReleasedContent` erases it just before this
- * runs, at the same instant and by the same predicate. This is the third half:
- * the BINDING, once there is nothing left for it to bind to.
+ * runs, at the same instant and by the same predicate,
+ * when the binds rule releases it. That function's docstring names what it
+ * does not reach. This is the third half: the BINDING, once there is nothing
+ * left for it to bind to.
  *
  * **The marked-unconfirmed exception is D-11a, and it is not a leak.** A record
  * with `marked_at` set and `confirmed_at` null is the runtime's account of a
@@ -1099,7 +1101,13 @@ function mergeApprovals(
  * fingerprint: a holder that binds by fingerprint
  * stops binding if its fire is left unconfirmed, and the closed binding must
  * still be there then. It goes on the sweep after its content is erased or
- * replaced by the producer's next Output.
+ * replaced by the producer's next Output. The fingerprint arm needs the
+ * producer's manifest as it is now. With the
+ * producer uninstalled, its manifest failing to load, or its `side_effects`
+ * changed,
+ * a closed binding kept only by fingerprint no longer binds, so this drops it,
+ * and content bound only by fingerprint stays until the producer's next Output
+ * replaces it (runtime-spec § 10, step 2).
  *
  * A CONFIRMED record past its window is dropped, unless the paragraph above
  * keeps it as a deferred binding. While it is kept, it reads `spent`, and the
