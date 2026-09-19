@@ -141,6 +141,12 @@ export type OutputRecord = z.infer<typeof OutputRecordSchema>
  * withdrawn, or been replaced by a re-approve, the runtime erases `body` and
  * stamps `erased_at` and `body_sha256`. The record stays, so a
  * reader can still tell "produced, content erased" and "never produced" apart.
+ * An approval binds it by `run_id`, or, unless its fire was left marked and
+ * unconfirmed, by fingerprint until its window closes.
+ * Two cases are not erased: bytes that only such an unconfirmed fire would
+ * match, and content bound only by fingerprint once the producer is
+ * uninstalled, its manifest failed to load, or its `side_effects` changed
+ * (docs/runtime-spec.md § 10).
  *
  * **Handlers never see this shape.** They are still parsed against
  * `OutputRecordSchema`, which does not know the two keys. A handler Output that

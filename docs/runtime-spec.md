@@ -1996,15 +1996,28 @@ This is the last of three steps in one deletion policy. All three read the
    Output that a closed approval for that producer binds, once no open approval
    for that producer still binds it: `body` is deleted, and `erased_at` and
    `body_sha256` are stamped. The record stays (§ `last_output`). An approval
-   for that producer binds its Output when it names the Output's `run_id`. An unmarked approval for that producer
-   also binds it when its `fingerprint` equals the one the Output's bytes
-   produce, because the gate decides authority by fingerprint: a producer that
-   re-produced byte-identical content under a later run leaves an approval
-   naming the earlier run `live`, and erasing under it would void that yes. A
-   marked approval binds by `run_id` only, since it can never be `live` again.
-   The fingerprint needs the producer's manifest, so a producer that is not
-   installed is bound by `run_id` only. A `run_id` is the advance's id, shared
-   by every plugin that ran in that advance, so
+   for that producer binds its Output when it names the Output's `run_id`, or
+   when its `fingerprint` equals the one the Output's bytes produce, because
+   the gate decides authority by fingerprint: a producer that re-produced
+   byte-identical content under a later run leaves an approval naming the
+   earlier run `live`, and erasing under it would void that yes.
+   Binding is not the same question as being `live`. A confirmed approval can
+   never fire again, but
+   it binds by fingerprint until its window closes: bytes it shipped under a
+   later run than it names, and byte-identical bytes the producer makes again
+   after the fire, are held while its window is open and erased when it
+   closes. The fire does not rewrite its `run_id`, which stays the run the
+   operator read. Two limits are stated, not closed.
+   A marked-unconfirmed approval binds by `run_id` only: the sweep keeps it
+   for good, and binding by fingerprint would erase every later identical
+   Output at the write that produced it, so bytes it would match only by
+   fingerprint are neither held nor released by it. And the fingerprint is
+   computed over the producer's manifest as it is now: when the producer is
+   uninstalled,
+   its manifest failed to load, or its `side_effects` changed before the
+   window closes, content bound only by fingerprint is not erased, and stays
+   until the producer's next Output replaces it. A `run_id` is the advance's
+   id, shared by every plugin that ran in that advance, so
    an approval for another producer neither holds nor releases this content: it
    never reads these bytes. Withdrawing an approval with `approve --content --remove`, or
    replacing it by re-approving the same consumer, is a closure too: that
@@ -2016,8 +2029,10 @@ This is the last of three steps in one deletion policy. All three read the
    nothing for it to bind to.
 
 Sharing one predicate and one instant is what stops a run being released while
-its binding is retained, content being erased while an open window still binds
-it, or the reverse of either.
+its binding is retained, and content being erased while an open window still
+binds it. The reverse, content kept after every window that bound it has
+closed, is stopped as far as the binds rule reaches, and
+the two limits in step 2 are where it does not.
 
 The one exception:
 
@@ -2034,12 +2049,17 @@ too. When an open approval for the same producer still binds the content a
 closed one binds, the erasure leaves the body and the sweep keeps the closed
 binding, so the content still has a binding to release it once the holder
 closes. The sweep asks this by the erasure's own binds rule, by run or by
-fingerprint, because a holder that binds by fingerprint stops binding once it
-is marked, and the closed binding must still be there then. It is dropped on
-the first sweep after its content is erased or replaced by the producer's next
-Output. Until then the gate reports it `outside_window`, which is true, and that
-has a cost: each advance that evaluates its consumer records
+fingerprint, because a holder that binds by fingerprint
+stops binding if its fire is left unconfirmed, and the closed binding must
+still be there then. It is dropped on the first sweep after its content is
+erased or replaced by the producer's next Output.
+Until then the gate reports an unmarked one `outside_window`, which is true,
+and that has a cost: each advance that evaluates its consumer records
 one `refused_plugins` entry and one `plugin_refused` event for it.
+A confirmed one reads `spent` and is not counted. A confirmed approval binds
+by fingerprint until its window closes, so a closed, confirmed record is kept
+this way whenever an open approval for the same producer still holds the bytes
+it shipped.
 
 A marked-unconfirmed record is never replaced by absence. It is the runtime's
 account of a fire it began and cannot prove it finished, and deleting it would
@@ -2212,9 +2232,12 @@ run, so no later advance could tell which content it bound. The same locked
 write therefore erases the producer's `last_output` content as a window closing
 would (§ "Expiry and deletion"), unless another open approval for the same
 producer still binds it. Content left to such a holder is erased when that
-holder closes or is withdrawn, as long as it still binds the content then. A
-holder that bound it by fingerprint and has since fired binds by run only, so
-that content stays until the producer's next Output replaces it.
+holder closes or is withdrawn, as long as it still binds the content then.
+A holder that has fired and confirmed still binds by fingerprint until its window closes.
+The two limits in § "Expiry and deletion" step 2 apply here too: a holder whose
+fire is marked and unconfirmed binds by `run_id` only, and content bound only
+by fingerprint is not erased once the producer is uninstalled,
+its manifest failed to load, or its `side_effects` changed.
 Re-approving a consumer over an existing record withdraws the old record the
 same way, in the same write. When the new record names the same producer, it binds that
 producer's current Output and holds it.
@@ -2726,7 +2749,7 @@ file's own age.
 | `skipped_reason` | string \| null | `null` when the advance ran. `"quiet_hours"` when it returned early because a quiet window was active. |
 | `gated` | integer | How many plugins are holding at an approval gate. |
 | `failed` | integer | How many plugins ended failed, manifests that would not load included. |
-| `refused` | integer | How many plugins holding a content approval were not fired: the approval stopped applying (`indeterminate`, `outside_window`, `content_moved`), or the spend mark's own state I/O failed and nothing was sent (`mark_unavailable`, `mark_uncertain`) (§ 5). The **count only**: the reasons are plugin-derived and reach a reader through `warpline advance --json`, never through this file. A closed binding the sweep keeps because its content is still held (§ 10, "Expiry and deletion") counts here on every advance until that content is erased. |
+| `refused` | integer | How many plugins holding a content approval were not fired: the approval stopped applying (`indeterminate`, `outside_window`, `content_moved`), or the spend mark's own state I/O failed and nothing was sent (`mark_unavailable`, `mark_uncertain`) (§ 5). The **count only**: the reasons are plugin-derived and reach a reader through `warpline advance --json`, never through this file. An unmarked closed binding the sweep keeps because its content is still held (§ 10, "Expiry and deletion") counts here on every advance until that content is erased. A confirmed one reads `spent` and is not counted. |
 | `pruned` | integer | How many run records this advance's retention prune removed. Always `0` on a skipped advance, which returns above the prune. |
 
 Those eight keys are the whole document, and `dead-man.test.ts` enumerates them

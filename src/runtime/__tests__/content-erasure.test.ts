@@ -22,18 +22,19 @@
  * do with the runtime. The handler builds the body by concatenation from an
  * environment variable, so the source never carries the value.
  *
- * **Why the approval's consumer is never installed.** The approval is keyed by
- * a name with no installed plugin, as `approval-retention.test.ts` does. A
- * consumer that read the content could copy it into its own Outputs or
- * summary, and then the scan would be measuring the consumer. The one case
- * that does install a reader has it serialise three booleans and nothing it
- * was handed, so nothing but `last_output.body` ever holds the sentinel.
+ * **Why an installed consumer never copies the content.** Most cases key the
+ * approval to a name with no installed plugin, as `approval-retention.test.ts`
+ * does. Where a case installs a consumer, its handler returns no artifacts and
+ * a fixed summary, or serialises three booleans and nothing it was handed. A
+ * consumer that copied the content into its own Outputs or summary would make
+ * the scan measure the consumer, so nothing but `last_output.body` ever holds
+ * the sentinel.
  *
  * Writes only inside its temp home. Nothing under the repository is touched.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { _setHome } from '../../lib/paths.js'
 import { resolveWallClock } from '../../lib/wall-clock.js'
@@ -564,7 +565,7 @@ export async function handler() {
     expect(after.approvals['sender']!.approved_at).not.toBe('2000-01-01T00:00:00.000Z')
   })
 
-  test('a closed fingerprint binding is kept while a holder for the same producer is open, and releases the content once that holder has fired', async () => {
+  test('a closed fingerprint binding is kept while a holder for the same producer is open, and releases the content once that holder has fired and its window has closed', async () => {
     await produceBoth()
     const { manifests } = await loadPluginManifests(h.pluginsDir)
     const fingerprint = proposalFingerprint(await readState(), 'prod', manifests.get('prod')!)
@@ -582,8 +583,8 @@ export async function handler() {
     // is what releases the content once the holder stops binding it.
     expect(held.approvals['batch-sender']).toBeDefined()
 
-    // The holder fires and confirms inside its window. Marked, it binds by run
-    // only, and it names an earlier run.
+    // The holder fires and confirms inside its window. Fired and confirmed, it
+    // still binds by fingerprint until its window closes, so it still holds.
     held.approvals['second-sender'] = {
       ...held.approvals['second-sender']!,
       marked_at: '2026-09-18T00:00:00.000Z',
@@ -594,8 +595,215 @@ export async function handler() {
 
     await h.advance()
 
+    const fired = await readState()
+    expect(fired.plugin_runs['prod']!.last_output!.body).toBe(sentinel)
+    expect(fired.approvals['batch-sender']).toBeDefined()
+    expect(fired.approvals['second-sender']).toBeDefined()
+
+    await h.advance(resolveWallClock(OPEN, 'UTC') + 1)
+
     expect(await filesHolding(h.root, sentinel)).toEqual([])
-    expect((await readState()).approvals['batch-sender']).toBeUndefined()
+    expect(Object.keys((await readState()).approvals)).toEqual([])
+  })
+
+  test('a closed fingerprint binding releases the content once a holder for the same producer is left marked and unconfirmed', async () => {
+    await produceBoth()
+    const { manifests } = await loadPluginManifests(h.pluginsDir)
+    const fingerprint = proposalFingerprint(await readState(), 'prod', manifests.get('prod')!)
+    await seed({
+      'batch-sender': binding('batch-sender', 'prod', 'an-earlier-run', CLOSED, fingerprint),
+      'second-sender': binding('second-sender', 'prod', 'another-earlier-run', OPEN, fingerprint),
+    })
+
+    await h.setMarker()
+    await h.advance()
+
+    // The holder began a fire it cannot prove finished. Left unconfirmed, it
+    // binds by run only, and it names an earlier run.
+    const held = await readState()
+    held.approvals['second-sender'] = {
+      ...held.approvals['second-sender']!,
+      marked_at: '2026-09-18T00:00:00.000Z',
+      effect_id: 'e',
+    }
+    await writeFile(h.statePath, JSON.stringify(held))
+
+    await h.advance()
+
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    // The marked-unconfirmed record is kept, and the released closed one is swept.
+    expect(Object.keys((await readState()).approvals)).toEqual(['second-sender'])
+  })
+})
+
+/**
+ * Live and binds are two questions. A fired approval can never authorise
+ * another fire, but its window still keeps the bytes it shipped, and those can
+ * sit under a later run than the one it names: the producer re-produced them
+ * before the fire, or makes them again after it. A fire left marked and
+ * unconfirmed is the one exception. Its record is kept for good, so it binds by
+ * run only.
+ *
+ * Each case installs a real content-class consumer of `prod` that is due on
+ * every advance, and fires it through the gate, so the mark is the runtime's
+ * own. Its handler returns no artifacts and a fixed summary.
+ */
+describe('an approval that has fired binds the bytes it shipped until its window closes', () => {
+  const OPEN = '2099-01-01T00:00'
+  const PAST = resolveWallClock(OPEN, 'UTC') + 60_000
+
+  const readState = async (): Promise<EngineState> =>
+    JSON.parse(await readFile(h.statePath, 'utf-8')) as EngineState
+
+  /** Runs the CLI verb with its output swallowed, and returns its exit code. */
+  async function cli(args: string[]): Promise<number> {
+    const realOut = process.stdout.write
+    const realErr = process.stderr.write
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      const { run } = await import('../../cli/approve.js')
+      return await run(args)
+    } finally {
+      process.stdout.write = realOut
+      process.stderr.write = realErr
+    }
+  }
+
+  /**
+   * Installs a content-class consumer of `prod`, due on every advance. Its
+   * handler sends nothing it was handed.
+   */
+  async function writeFiringSender(name: string): Promise<void> {
+    const dir = join(h.pluginsDir, name)
+    await mkdir(dir, { recursive: true })
+    const manifest = {
+      name,
+      version: '1.0.0',
+      description: name,
+      inputs: {},
+      outputs: {},
+      capabilities: [],
+      schedule: 'on_run',
+      autonomy_level: 'autonomous',
+      side_effects: ['sends_email'],
+      approval_class: 'content',
+      ttl_hours: 0.0000001,
+      dependencies: ['prod'],
+      timeout_ms: 5000,
+      max_parallelism: 1,
+    }
+    await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+    await writeFile(
+      join(dir, 'handler.ts'),
+      `export async function handler() {
+  return { status: 'success', phases_completed: [], phases_failed: [], errors: [], data_freshness: {}, summary: 'sent', artifacts_produced: [], schema_version: 1 }
+}
+`,
+    )
+  }
+
+  beforeEach(async () => {
+    await writeFiringSender('sender')
+  })
+
+  test('content a fired approval shipped under a later run than it names is erased when its window closes', async () => {
+    await h.advance()
+    const r1 = (await readState()).plugin_runs['prod']!.last_output!.run_id!
+    expect(await filesHolding(h.root, sentinel)).toEqual(['state/engine-state.json'])
+
+    expect(await cli(['sender', '--content', '--not-after', OPEN, '--zone', 'UTC'])).toBe(0)
+
+    // The producer re-produces the same bytes under r2, and the consumer fires
+    // on them in the same advance.
+    await h.advance()
+    const fired = await readState()
+    const r2 = fired.plugin_runs['prod']!.last_output!.run_id!
+    expect(r2).not.toBe(r1)
+    expect(fired.plugin_runs['prod']!.last_output!.body).toBe(sentinel)
+    expect(fired.approvals['sender']!.run_id).toBe(r1)
+    expect(fired.approvals['sender']!.marked_at).not.toBeNull()
+    expect(fired.approvals['sender']!.confirmed_at).not.toBeNull()
+
+    await h.setMarker()
+    await h.advance(PAST)
+
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    const after = await readState()
+    expect(Object.keys(after.approvals)).toEqual([])
+    expect(after.plugin_runs['prod']!.last_output!.erased_at).toBeDefined()
+    expect(after.plugin_runs['prod']!.last_output!.run_id).toBe(r2)
+  })
+
+  test('bytes the producer makes again after the fire are held while the window is open and erased when it closes', async () => {
+    await h.advance()
+    const r1 = (await readState()).plugin_runs['prod']!.last_output!.run_id!
+
+    expect(await cli(['sender', '--content', '--not-after', OPEN, '--zone', 'UTC'])).toBe(0)
+
+    // The consumer fires on r1 while the producer is silent.
+    await h.setMarker()
+    await h.advance()
+    const fired = await readState()
+    expect(fired.approvals['sender']!.confirmed_at).not.toBeNull()
+    expect(fired.approvals['sender']!.run_id).toBe(r1)
+    expect(fired.plugin_runs['prod']!.last_output!.run_id).toBe(r1)
+
+    // The producer makes the same bytes again, under r3, inside the window.
+    await rm(h.marker)
+    await h.advance()
+    const again = await readState()
+    const r3 = again.plugin_runs['prod']!.last_output!.run_id!
+    expect(r3).not.toBe(r1)
+    expect(again.plugin_runs['prod']!.last_output!.body).toBe(sentinel)
+    expect(again.approvals['sender']).toBeDefined()
+
+    await h.setMarker()
+    await h.advance(PAST)
+
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    const after = await readState()
+    expect(after.plugin_runs['prod']!.last_output!.erased_at).toBeDefined()
+    expect(after.plugin_runs['prod']!.last_output!.run_id).toBe(r3)
+    expect(after.approvals).toEqual({})
+  })
+
+  test('a fire left unconfirmed binds by run only, so bytes the producer makes again stay and can still be approved', async () => {
+    await h.advance()
+    const r1 = (await readState()).plugin_runs['prod']!.last_output!.run_id!
+
+    expect(await cli(['sender', '--content', '--not-after', OPEN, '--zone', 'UTC'])).toBe(0)
+
+    // As a handler that never returned would leave it: marked, unconfirmed.
+    const doc = await readState()
+    doc.approvals['sender'] = { ...doc.approvals['sender']!, marked_at: '2026-09-18T00:00:00.000Z', effect_id: 'e' }
+    await writeFile(h.statePath, JSON.stringify(doc))
+
+    // The window closes. The content the record names by run still goes.
+    await h.setMarker()
+    await h.advance(PAST)
+    const closed = await readState()
+    expect(closed.plugin_runs['prod']!.last_output!.erased_at).toBeDefined()
+    expect(await filesHolding(h.root, sentinel)).toEqual([])
+    expect(closed.approvals['sender']).toBeDefined()
+    expect(closed.approvals['sender']!.confirmed_at).toBeNull()
+
+    // The producer makes the same bytes again. The kept record does not erase them.
+    await rm(h.marker)
+    await h.advance(PAST + 60_000)
+    const again = await readState()
+    const out = again.plugin_runs['prod']!.last_output!
+    expect(out.run_id).not.toBe(r1)
+    expect(out.body).toBe(sentinel)
+    expect(out.erased_at).toBeUndefined()
+    expect(await filesHolding(h.root, sentinel)).toEqual(['state/engine-state.json'])
+    expect(again.approvals['sender']!.confirmed_at).toBeNull()
+
+    // A second consumer of the producer can still approve them. The kept record
+    // itself refuses a fresh approval by design.
+    await writeFiringSender('sender2')
+    expect(await cli(['sender2', '--content', '--not-after', OPEN, '--zone', 'UTC'])).toBe(0)
+    expect((await readState()).approvals['sender2']!.run_id).toBe(out.run_id!)
   })
 })
 

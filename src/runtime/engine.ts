@@ -1085,7 +1085,9 @@ function mergeApprovals(
  * fire it began and cannot prove it finished. Deleting it would destroy the
  * did-it-ship evidence for a send that may well have landed — repudiation, not
  * hygiene. It is safe to keep because its bound content is erased by the same
- * rule; what it keeps is the fingerprint and the effect id, never the bytes.
+ * rule; it binds by `run_id` only, so identical bytes the producer makes later
+ * are not erased on its account. What it keeps is the fingerprint and the
+ * effect id, never the bytes.
  * The operator resolves it at the sink with the effect id.
  *
  * **A closed binding whose content erasure was deferred is kept too.** When an
@@ -1093,9 +1095,10 @@ function mergeApprovals(
  * `eraseReleasedContent` leaves the body, and this keeps the closed binding
  * until the holder closes, so the content still has a binding to release it
  * then. It is kept by the erasure's own rule, `bindsHeldContent`, by run or by
- * fingerprint: a holder that binds by fingerprint stops binding once it is
- * marked, and the closed binding must still be there then. It goes on the
- * sweep after its content is erased or replaced by the producer's next Output.
+ * fingerprint: a holder that binds by fingerprint
+ * stops binding if its fire is left unconfirmed, and the closed binding must
+ * still be there then. It goes on the sweep after its content is erased or
+ * replaced by the producer's next Output.
  *
  * A CONFIRMED record past its window is dropped, which means the state report
  * naming a spent approval stops being rendered once the window closes. Said out
@@ -1139,7 +1142,7 @@ function sweepExpiredApprovals(
  *
  * **When.** Only when a closed approval for THIS producer binds the record,
  * and no open approval for it still binds it. An approval binds the record
- * when it names its `run_id`, or, for an unmarked approval of this producer,
+ * when it names its `run_id`, or, unless its fire is marked and unconfirmed,
  * when its fingerprint equals the one these bytes produce. The second arm
  * matters because the gate decides authority by fingerprint, not by run: a
  * producer that re-produced byte-identical content under a later run leaves
@@ -1148,12 +1151,15 @@ function sweepExpiredApprovals(
  * producer. `run_id` is the advance id, which every plugin that produced in
  * the advance shares, so another producer's approval names the run by
  * accident. It never reads these bytes, and it could not release them. The
- * prune's set stays advance-wide because the run log is. A marked approval
- * binds by `run_id` only, because it can never be `live` again, and a
- * marked-unconfirmed one is kept for good, where a fingerprint arm would erase
- * the same bytes every time they were produced.
- * The fingerprint arm needs the producer's manifest, and without one the
- * binding is not `live` either, so only the `run_id` arm applies.
+ * prune's set stays advance-wide because the run log is.
+ * A confirmed approval still binds by fingerprint until its window closes.
+ * It can never fire again, but binding follows the content, not the fire, so
+ * bytes it shipped under a later run than it names are released when it
+ * closes. A fire left marked and unconfirmed binds by `run_id` only, because
+ * that record is kept for good, where a fingerprint arm would erase the same
+ * bytes every time they were produced. The fingerprint arm needs the
+ * producer's manifest as it is now, so without one only the `run_id` arm
+ * applies, and content held only by fingerprint stays.
  *
  * **Withdrawal is a closure.** `approve --content --remove` hands the record it
  * removed in as `withdrawn`, and a re-approve over an existing record hands in
@@ -1161,8 +1167,8 @@ function sweepExpiredApprovals(
  * passed no longer hold it. On a re-approve they hold the new record instead,
  * which holds the content when it names the same producer.
  *
- * **Why it runs before the sweep.** The sweep removes the closed, unmarked
- * bindings whose `run_id` this reads. Run after it, this would find nothing to
+ * **Why it runs before the sweep.** The sweep removes the closed bindings this
+ * reads, by run or by fingerprint. Run after it, this would find nothing to
  * act on and the content would outlive its window. The sweep in turn keeps a
  * closed binding whose erasure an open approval deferred, so the content still
  * has a closed binding to release it when the holder closes. It asks by this
@@ -1204,10 +1210,28 @@ function eraseReleasedContent(
  * Does `a` bind its own producer's held content?
  *
  * Held means `plugin_runs[a.producer].last_output` still carries an unerased
- * body with a `run_id`. `a` binds it when it names that run, or, unmarked, when
- * its fingerprint equals the one those bytes produce under the producer's
- * loaded manifest. A marked approval binds by run only, because it can never
- * be `live` again.
+ * body with a `run_id`. `a` binds it when it names that run, or when its
+ * fingerprint equals the one those bytes produce under the producer's loaded
+ * manifest.
+ *
+ * Live and binds are two questions.
+ * Live asks whether an approval can still authorise a fire, and a marked
+ * approval never can. Binds asks whether its window still keeps the content,
+ * and that follows the content's identity, not the mark. So a confirmed
+ * approval binds by fingerprint until its window closes: bytes it shipped
+ * under a later run than it names, and byte-identical bytes the producer made
+ * again after the fire, are held while it is open and released when it
+ * closes. `run_id` stays the run the operator read.
+ *
+ * The one exception is a fire left marked and unconfirmed, which binds by run
+ * only. The sweep keeps that record for good, so a fingerprint arm would
+ * release every later identical Output at the write that produced it, and
+ * `approve --content` would then refuse.
+ *
+ * The fingerprint arm needs the producer's manifest as it is now. With the
+ * producer uninstalled, its manifest failing to load, or its `side_effects`
+ * changed before the window closes, content held only by fingerprint is not
+ * released.
  *
  * The erasure's hold and release ask it under `a.producer === plugin`, and the
  * sweep asks it as it stands, so the three cannot disagree about which binding
@@ -1221,7 +1245,7 @@ function bindsHeldContent(
   const out = Object.hasOwn(pluginRuns, a.producer) ? pluginRuns[a.producer]!.last_output : undefined
   if (out?.body === undefined || out.erased_at !== undefined || out.run_id === undefined) return false
   if (a.run_id === out.run_id) return true
-  if (a.marked_at !== null) return false
+  if (a.marked_at !== null && a.confirmed_at === null) return false
   const manifest = manifests.get(a.producer)
   return manifest !== undefined && a.fingerprint === denialFingerprint(a.producer, manifest.side_effects, [out])
 }
@@ -3198,8 +3222,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // **The content erasure sits between the merge and the sweep.** It reads
     // the MERGED approvals, so a yes another attachment landed mid-advance still
     // holds its content, and it reads them at `approvalNow`, the instant the
-    // sweep reads. It has to run before the sweep: the sweep drops the closed,
-    // unmarked bindings whose `run_id` the erasure matches on, and after it
+    // sweep reads. It has to run before the sweep: the sweep drops the closed
+    // bindings the erasure matches, by run or by fingerprint, and after it
     // there would be nothing left to say which content was released. It writes
     // only `plugin_runs` entries, which this process owns in memory, so the
     // floor rule above does not apply to it.

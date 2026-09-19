@@ -101,6 +101,11 @@ export const ApprovalSchema = z.object({
    * none came from a run the store cannot name, and null says exactly that. An
    * empty string here would read as a real id and protect nothing, silently,
    * which is the failure mode a protected reference exists to avoid.
+   *
+   * It is provenance: the run the operator read. A fire does not rewrite it.
+   * The content erasure binds by this run or by fingerprint (runtime-spec
+   * § 10, "Expiry and deletion"), so an approval that fired on byte-identical
+   * bytes under a later run still releases them when its window closes.
    */
   run_id: z.string().nullable(),
   approved_at: z.string(),
@@ -236,8 +241,10 @@ export const PluginRunSchema = z.object({
    * `erased_at` and `body_sha256`.
    *
    * The content is erased at the end-of-run write of the advance in which a
-   * closed approval for this producer names this record's `run_id` and no open
-   * approval names it. The record stays, marked, so a reader can still tell
+   * closed approval for this producer binds this record, by `run_id` or by
+   * fingerprint, and no open approval for this producer binds it (runtime-spec
+   * § 10, "Expiry and deletion", which also names the two cases it does not
+   * reach). The record stays, marked, so a reader can still tell
    * "produced, content erased" and "never produced" apart.
    *
    * `.optional()` rather than `.nullable()`: an absent optional is omitted by
