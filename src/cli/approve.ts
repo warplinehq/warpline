@@ -237,7 +237,6 @@ async function approveContent(
   consumer: string,
   values: { 'not-after'?: string; 'not-before'?: string; zone?: string },
   manifests: Map<string, PluginManifest>,
-  now: number,
 ): Promise<number> {
   const manifest = manifests.get(consumer)
   if (manifest === undefined) {
@@ -257,6 +256,10 @@ async function approveContent(
   const lockPath = pathsForStateFile(statePath).lockPath
 
   return await withStateLockAt(lockPath, async () => {
+    // Read once the lock is held. The wait can outlast a --not-after, and every
+    // decision below (the closed-window check, standing, approved_at, erasure) is
+    // about the state this write replaces, so it reads the clock at that instant.
+    const now = Date.now()
     let state: EngineState
     try {
       state = await readEngineState(statePath)
@@ -477,12 +480,13 @@ async function approveContent(
 async function removeContentApproval(
   consumer: string,
   manifests: Map<string, PluginManifest>,
-  now: number,
 ): Promise<number> {
   const statePath = engineStatePath()
   const lockPath = pathsForStateFile(statePath).lockPath
 
   return await withStateLockAt(lockPath, async () => {
+    // Read once the lock is held, for the reason `approveContent` gives.
+    const now = Date.now()
     let state: EngineState
     try {
       state = await readEngineState(statePath)
@@ -664,7 +668,7 @@ export async function run(argv: string[]): Promise<number> {
   // this name against the manifests would report it unknown and strand its
   // record in the state document with no CLI gesture that reaches it.
   if (values.content && values.remove) {
-    return await removeContentApproval(positionals[0]!, manifests, Date.now())
+    return await removeContentApproval(positionals[0]!, manifests)
   }
 
   // Name validation, all of it, before any write.
@@ -699,7 +703,7 @@ export async function run(argv: string[]): Promise<number> {
   // Reaches no symbol in `approval-gate.ts`, writes no grant, applies no parked
   // result, and returns before the gate-first dispatch below ever runs.
   if (values.content) {
-    return await approveContent(positionals[0]!, values, manifests, now)
+    return await approveContent(positionals[0]!, values, manifests)
   }
 
   // -- Gate-first dispatch -------------------------------------------------

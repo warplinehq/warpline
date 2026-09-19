@@ -1721,7 +1721,33 @@ describe('warpline approve --content', () => {
     expect(doc.approvals[CONSUMER]!.not_after).toBe('2099-01-01T00:00')
   })
 
-  test('C14: the fingerprint prints whole on its own line and is the one the gate compares', async () => {
+  test('C23b: a --not-after that passes while the command waits on the state lock is refused, and nothing is written', async () => {
+    const { setSystemTime } = await import('bun:test')
+    setSystemTime(new Date('2030-01-01T00:00:57.000Z'))
+    try {
+      await writeContentPair()
+      await seedContentState(true)
+      const before = await readFile(statePath)
+      const { pathsForStateFile, withStateLockAt } = await import('../../board/state-manager.js')
+      const lockPath = pathsForStateFile(statePath).lockPath
+      let pending: ReturnType<typeof capture> | undefined
+      await withStateLockAt(lockPath, async () => {
+        pending = capture('approve', [CONSUMER, '--content', '--not-after', '2030-01-01T00:01', '--zone', 'UTC'])
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        // Five seconds on: the window has closed, and the lock is neither stale nor timed out.
+        setSystemTime(new Date('2030-01-01T00:01:02.000Z'))
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      })
+      const result = await (pending as NonNullable<typeof pending>)
+      expect(result.code).toBe(1)
+      expect(result.stderr).toContain('has already passed')
+      expect(Buffer.compare(await readFile(statePath), before)).toBe(0)
+    } finally {
+      setSystemTime()
+    }
+  })
+
+  test('C14:the fingerprint prints whole on its own line and is the one the gate compares', async () => {
     await writeContentPair()
     await seedContentState(true)
 
