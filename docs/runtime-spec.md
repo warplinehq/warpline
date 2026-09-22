@@ -970,7 +970,8 @@ and a third is never a candidate at all:
 
 **An approval's protection ENDS when its window closes.** From the first
 advance after `not_after`, the referenced run's log is an ordinary candidate
-again and the three bounds below reclaim it with no new mechanism. That log
+again, unless a pending gate or another open approval names the same run, and
+the three bounds below reclaim it with no new mechanism. That log
 holds a summary, not the content. The content a frozen batch carries is
 recipient data. The end-of-run write of the same advance erases it, with
 `body` deleted and `erased_at` and `body_sha256` stamped, and sweeps the

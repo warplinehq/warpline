@@ -1077,9 +1077,11 @@ function mergeApprovals(
  *
  * **Three objects, three halves, and only one of them is here.** The record
  * holds a hex fingerprint, a producer name, a run id and timestamps, never the
- * content. The RUN LOG is released by `protectedRunIds` the moment the window
- * closes, which hands it to ordinary retention; that log holds a summary of the
- * run, never the content. The CONTENT is `plugin_runs[producer].last_output.body`
+ * content. The approval stops protecting its RUN LOG the moment the window
+ * closes (`protectedRunIds`), which hands it to ordinary retention unless a
+ * pending gate or another open approval names the same run — the set is
+ * advance-wide, and a log covers every plugin that ran in that advance; that
+ * log holds a summary of the run, never the content. The CONTENT is `plugin_runs[producer].last_output.body`
  * in the state document, and `eraseReleasedContent` erases it just before this
  * runs, at the same instant and by the same predicate,
  * when the binds rule releases it. That function's docstring names what it
