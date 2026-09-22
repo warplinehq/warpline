@@ -1115,8 +1115,8 @@ function mergeApprovals(
  * only by fingerprint is not erased while nothing can match it, and stays
  * until the producer's next Output replaces it for as long as that is true.
  * Should the manifest load again while a closed binding still matches the body
- * by fingerprint, that binding releases it then, and the erasure just above
- * takes the body before any new Output. The erasure errs toward deleting,
+ * by fingerprint, that binding releases it then, and the erasure that runs
+ * just before this takes the body before any new Output. The erasure errs toward deleting,
  * which is the safe direction (runtime-spec § 10, step 2, which states the
  * limit as `side_effects` "changed before the window closes").
  *
