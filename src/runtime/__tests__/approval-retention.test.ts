@@ -326,6 +326,34 @@ describe('what a content approval protects', () => {
 
     expect(survives('approved-run')).toBe(false)
   })
+
+  test('an approval whose zone this host no longer resolves keeps protecting its run', async () => {
+    // The zone arm of the shared predicate, read from the PROTECTION side.
+    // The sweep's zone case (below) pins that the record stays, and R5's zone
+    // case pins that its content stays. Neither would move if protection alone
+    // grew a second predicate that read an unresolvable zone as closed, and
+    // runtime-spec § 10's last paragraph claims the run stays protected too.
+    // This is that claim's pin: a drifting protection predicate reclaims the
+    // log here while the two cases beside it still pass.
+    await writeAgedRun('approved-run')
+    // The age-peer is what makes this an exemption rather than a prune that
+    // did nothing.
+    await writeAgedRun('peer-run')
+    await seedState({
+      approvals: {
+        [CONSUMER]: approval({ not_after: CLOSED, zone: 'Mars/Olympus_Mons' }),
+      },
+    })
+
+    const result = await advance()
+
+    expect(result.status).not.toBe('failed')
+    expect(survives('approved-run')).toBe(true)
+    expect(survives('peer-run')).toBe(false)
+    // Retained, so the assertion above is about protection rather than about a
+    // record that is no longer there to protect anything.
+    expect((await readState()).approvals[CONSUMER]).toBeDefined()
+  })
 })
 
 describe('when a content approval is swept', () => {
