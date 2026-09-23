@@ -3277,9 +3277,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // subtree and leaves the general case — `plugin_runs`, `pending_gates`,
     // `last_run_id` — open, which is where `engine-state-store.ts` files it.
     // Three narrow reconciles from the fresh read are the exceptions, each for
-    // the reason given at its loop below. An apply that landed mid-advance on a
-    // gate this advance still holds as pending is kept, with that run's
-    // `plugin_runs` entry. An erased `last_output` is kept over this advance's
+    // the reason given at its loop below. An apply that landed mid-advance is
+    // kept: the applied gate, if this advance still holds it as pending, and
+    // that run's `plugin_runs` entry while it is still the parked one. An
+    // erased `last_output` is kept over this advance's
     // body for the same run. Erased bytes in an applied gate's copy are never
     // written back with a body.
     // An erased `last_output` of another run is still written over, and a gate
@@ -3347,6 +3348,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // advance's too, but only while this advance's entry is still the `gated`
       // one that run's park wrote, because the park stamps one instant into
       // both that entry's `last_run_at` and the gate's `run_completed_at`.
+      // That match needs no gate slot, so it holds when the gate aged out
+      // during this advance and is no longer held here. The gate itself is
+      // not brought back.
       // A newer run this advance made stays.
       // This runs first, so the erasure reconciles below and the release write
       // all see the gate as applied.
@@ -3376,11 +3380,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         )
         if (i !== -1) {
           updatedState.pending_gates[i] = d
-          const entry = Object.hasOwn(updatedState.plugin_runs, d.plugin) ? updatedState.plugin_runs[d.plugin] : undefined
-          const gatedByThisRun = entry?.status === 'gated' && entry.last_run_at === d.run_completed_at
-          if (gatedByThisRun && Object.hasOwn(disk.plugin_runs, d.plugin)) {
-            updatedState.plugin_runs[d.plugin] = disk.plugin_runs[d.plugin]!
-          }
+        }
+        const entry = Object.hasOwn(updatedState.plugin_runs, d.plugin) ? updatedState.plugin_runs[d.plugin] : undefined
+        const gatedByThisRun = entry?.status === 'gated' && entry.last_run_at === d.run_completed_at
+        if (gatedByThisRun && Object.hasOwn(disk.plugin_runs, d.plugin)) {
+          updatedState.plugin_runs[d.plugin] = disk.plugin_runs[d.plugin]!
         }
         for (const o of d.plugin_result.artifacts_produced) {
           if (!('erased_at' in o) || o.erased_at === undefined) continue

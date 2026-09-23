@@ -530,8 +530,10 @@ export async function handler() {
  * Installs a plugin that runs a real `approve prod` mid-advance, checks on disk
  * that its own write applied the gate, with the gate copy erased or not as
  * `erased` says, and records the `applied_at` it wrote. Returns the stamp path.
+ * Given `holdUntilMs`, it then waits until the real clock is past that instant,
+ * so the advance's later steps run after it.
  */
-async function installMidAdvanceApply(erased: boolean): Promise<string> {
+async function installMidAdvanceApply(erased: boolean, holdUntilMs = 0): Promise<string> {
   const approvePath = fileURLToPath(new URL('../../cli/approve.ts', import.meta.url))
   const stampPath = join(home.root, 'apply-stamp')
   await writePlugin(
@@ -555,6 +557,7 @@ export async function handler() {
   const copy = gate.plugin_result.artifacts_produced.at(-1)
   if ((copy.body === undefined) !== ${JSON.stringify(erased)}) throw new Error('the gate copy is not as expected')
   writeFileSync(${JSON.stringify(stampPath)}, gate.applied_at)
+  while (Date.now() <= ${holdUntilMs}) await new Promise((r) => setTimeout(r, 50))
   return { status: 'success', phases_completed: ['interloper'], phases_failed: [], errors: [],
     data_freshness: {}, summary: 'interloper ran', schema_version: 1, artifacts_produced: [] }
 }
@@ -689,4 +692,36 @@ export async function handler() {
   expect(gate.applied_at).toBeNull()
   expect(s.plugin_runs.prod?.status).toBe('gated')
   expect(s.plugin_runs.prod?.last_run_at).toBe(gate.run_completed_at!)
+})
+
+test('an apply that lands mid-advance on a gate that ages out during it keeps the producer entry the apply wrote', async () => {
+  const { GATE_MAX_AGE_MS } = await import('../engine.js')
+  await advance()
+  const parked = gateOf(await stored(), 'prod')
+  expect(parked.applied_at).toBeNull()
+
+  // Moved back to three seconds short of the gate ceiling, one instant for the
+  // gate and the entry as the park writes it. The apply lands inside those
+  // three seconds, or the interloper throws. It then holds the advance until
+  // the ceiling has passed, so the advance drops the gate it read as pending.
+  const completedMs = Date.now() - GATE_MAX_AGE_MS + 3000
+  const completedAt = new Date(completedMs).toISOString()
+  const stampPath = await installMidAdvanceApply(false, completedMs + GATE_MAX_AGE_MS + 500)
+  const doc = JSON.parse(await readFile(statePath, 'utf-8')) as EngineState
+  const shift = completedMs - new Date(parked.run_completed_at!).getTime()
+  const g = doc.pending_gates.find((x) => x.plugin === 'prod')!
+  g.run_started_at = new Date(new Date(g.run_started_at!).getTime() + shift).toISOString()
+  g.run_completed_at = completedAt
+  g.created_at = completedAt
+  doc.plugin_runs.prod!.last_run_at = completedAt
+  await writeFile(statePath, JSON.stringify(doc))
+
+  await advance()
+  const s = await stored()
+  expect(await readFile(stampPath, 'utf-8')).not.toBe('')
+  // The apply's terminal status and anchor stay.
+  expect(s.plugin_runs.prod?.status).toBe(parked.plugin_result.status)
+  expect(s.plugin_runs.prod?.last_run_at).toBe(completedAt)
+  // What stays open: the spent marker is not brought back.
+  expect(s.pending_gates.some((x) => x.plugin === 'prod')).toBe(false)
 })
