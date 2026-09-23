@@ -1116,9 +1116,9 @@ function mergeApprovals(
  * until the producer's next Output replaces it for as long as that is true.
  * Should the manifest load again while a closed binding still matches the body
  * by fingerprint, that binding releases it then, and the erasure that runs
- * just before this takes the body before any new Output. The erasure errs toward deleting,
- * which is the safe direction (runtime-spec § 10, step 2, which states the
- * limit as `side_effects` "changed before the window closes").
+ * just before this takes the body before any new Output. Runtime-spec § 10,
+ * step 2, states the limit as `side_effects` "changed before the window
+ * closes".
  *
  * A CONFIRMED record past its window is dropped, unless the paragraph above
  * keeps it as a deferred binding. While it is kept, it reads `spent`, and the
