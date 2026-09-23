@@ -1349,7 +1349,7 @@ export function eraseIfReleased(
  * with the content. `applyPendingGate` erases it when it applies a gate whose
  * run's content was already erased while the gate was pending. The end-of-run
  * reconcile in `runAdvance` erases it when it keeps an erased record another
- * write left on disk.
+ * write left on disk, either in `last_output` or in an applied gate's copy.
  */
 function eraseGateCopies(pendingGates: PendingGate[], plugin: string, bodySha256: string, now: number): void {
   for (let i = 0; i < pendingGates.length; i++) {
@@ -3274,8 +3274,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // spread above: this closes the read-modify-write window of #25 for that ONE
     // subtree and leaves the general case — `plugin_runs`, `pending_gates`,
     // `last_run_id` — open, which is where `engine-state-store.ts` files it. The
-    // one exception is an erased `last_output` on disk, which is never written
-    // back over with a body, for the reason given at the loop below.
+    // one exception is erased content on disk, in `last_output` or in an applied
+    // gate's copy, which is never written back over with a body, for the reason
+    // given at the loops below.
     // Widening it here would be a second control-flow change wearing the same
     // commit.
     //
@@ -3337,6 +3338,20 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // an erased record on disk for the same run wins over the in-memory body.
       // This advance's copy of `pending_gates` was read before that write too,
       // so an applied gate's copy of the same bytes is erased here as well.
+      //
+      // The gate copies are reconciled from disk on their own, not only through
+      // that `plugin_runs` match. A producer that ran again in this advance
+      // without parking holds a newer run in memory, so the match misses. The
+      // write that erased its content also erased the applied gate's copy on
+      // disk, and dropped the binding, so nothing here would release it again.
+      // Written back, that copy would keep its body until the gate ceiling.
+      for (const d of disk.pending_gates) {
+        if (d.applied_at === null) continue
+        for (const o of d.plugin_result.artifacts_produced) {
+          if (!('erased_at' in o) || o.erased_at === undefined) continue
+          eraseGateCopies(updatedState.pending_gates, d.plugin, o.body_sha256!, Date.parse(o.erased_at))
+        }
+      }
       for (const [plugin, run] of Object.entries(updatedState.plugin_runs)) {
         const onDisk = Object.hasOwn(disk.plugin_runs, plugin)
           ? disk.plugin_runs[plugin]!.last_output

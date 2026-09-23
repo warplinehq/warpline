@@ -2778,6 +2778,14 @@ have nothing left to erase it. The rest of `plugin_runs` is still the advance's
 own in-memory state.
 It erases the copy an applied gate of that producer holds of the same bytes too,
 because this advance's `pending_gates` was read before that erasure as well.
+The copies applied gates hold are reconciled the same way on their own. Any
+Output the fresh read shows erased in an applied gate erases every copy of the
+same bytes that this advance's applied gates of that producer still hold, with
+the erased record's `erased_at`, whether or not `last_output` matched. This
+covers a producer that ran again in this advance without parking a gate: its
+`last_output` now names the new run, so the match above misses, and a
+withdrawal that landed mid-advance has already dropped the binding that would
+release the old bytes again.
 
 **Which file each writer writes, since this has been recorded wrongly before.**
 The `deny` verb and the board write the engine state document, under the state

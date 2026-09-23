@@ -40,6 +40,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { _setHome } from '../../lib/paths.js'
 import type { EngineState, PendingGate } from '../../schemas/engine-state.js'
 import { readEngineState } from '../engine-state-store.js'
@@ -450,4 +451,76 @@ export async function handler() {
   const gateOut = lastOutputOfGate(gate)
   expect('body' in gateOut).toBe(false)
   expect(gateOut.body_sha256).toBe(sha256Hex(sentinel))
+})
+
+test('a withdrawal that lands while the producer re-runs ungated is not undone by the advance', async () => {
+  // `ttl_hours: 1` and the gate turned off below, unlike the rest of this file:
+  // the producer has to run again in the advance without parking a gate that
+  // would supersede the applied one. Written before the first advance, so the
+  // manifest is never served from the module cache.
+  await writePlugin(
+    'prod',
+    manifest('prod', { ttl_hours: 1 }),
+    `
+export async function handler() {
+  return { status: 'success', phases_completed: ['prod'], phases_failed: [], errors: [],
+    data_freshness: {}, summary: 'prod produced', schema_version: 1,
+    artifacts_produced: [{ type: 'brief', format: 'text', body: 'approved-content:' + process.env.WARPLINE_GATE_ERASURE_SENTINEL }] }
+}
+`,
+  )
+  await advance()
+  expect(await cli(['prod'])).toBe(0)
+  expect(await cli(['sender', '--content', '--not-after', wallClockUtc(Date.now() + 48 * HOUR)])).toBe(0)
+  const before = await stored()
+  const applied = gateOf(before, 'prod')
+  expect(applied.applied_at).not.toBeNull()
+
+  await writeFile(join(home.stateDir, 'preferences.json'), JSON.stringify({ review_gate: false }))
+  // A real `approve sender --content --remove`, landing mid-advance. It checks
+  // on disk that its own write erased both copies, and records the stamp the
+  // gate copy got, so the case below cannot pass on a withdrawal that missed.
+  const approvePath = fileURLToPath(new URL('../../cli/approve.ts', import.meta.url))
+  const stampPath = join(home.root, 'withdrawal-stamp')
+  await writePlugin(
+    'interloper',
+    manifest('interloper', {}),
+    `
+import { readFileSync, writeFileSync } from 'node:fs'
+export async function handler() {
+  const { run } = await import(${JSON.stringify(approvePath)})
+  const out = process.stdout.write
+  const err = process.stderr.write
+  process.stdout.write = () => true
+  process.stderr.write = () => true
+  let code
+  try { code = await run(['sender', '--content', '--remove']) }
+  finally { process.stdout.write = out; process.stderr.write = err }
+  if (code !== 0) throw new Error('withdrawal exited ' + code)
+  const doc = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf-8'))
+  const gate = doc.pending_gates.find((g) => g.plugin === 'prod' && g.applied_at !== null)
+  const copy = gate.plugin_result.artifacts_produced.at(-1)
+  if (copy.body !== undefined || copy.erased_at === undefined) throw new Error('the gate copy was not erased')
+  if (doc.plugin_runs.prod.last_output.body !== undefined) throw new Error('last_output was not erased')
+  writeFileSync(${JSON.stringify(stampPath)}, copy.erased_at)
+  return { status: 'success', phases_completed: ['interloper'], phases_failed: [], errors: [],
+    data_freshness: {}, summary: 'interloper ran', schema_version: 1, artifacts_produced: [] }
+}
+`,
+  )
+
+  await advance(Date.now() + 2 * HOUR)
+  const s = await stored()
+  expect(s.plugin_runs.interloper?.status).toBe('success')
+  // The producer ran again, and parked nothing.
+  expect(lastOutputOf(s, 'prod').run_id).not.toBe(applied.run_id)
+  expect(s.pending_gates.length).toBe(1)
+  const gate = gateOf(s, 'prod')
+  expect(gate.run_id).toBe(applied.run_id)
+  const gateOut = lastOutputOfGate(gate)
+  expect('body' in gateOut).toBe(false)
+  expect(gateOut.body_sha256).toBe(sha256Hex(sentinel))
+  expect(gateOut.erased_at).toBe(await readFile(stampPath, 'utf-8'))
+  // The only copy left is the fresh run's `last_output`, which nothing released.
+  expect(await copies()).toBe(1)
 })
