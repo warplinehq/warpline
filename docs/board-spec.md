@@ -348,7 +348,7 @@ ignored.
 | Field | Default | Meaning |
 |---|---|---|
 | `max_sends_per_day` | `20` | Cap on side-effecting sends per day |
-| `review_gate` | `true` | Treat every `autonomous` plugin as `supervised`: it runs, is recorded `gated`, and the run stops after its level — whether or not it declares side effects. Independent of the side-effect gate, which applies regardless |
+| `review_gate` | `true` | Treat every `autonomous` plugin as `supervised`: it runs, is recorded `gated`, and the run stops after its level — whether or not it declares side effects. A result that is `failed` is not parked: it is recorded `failed` and the run continues. Independent of the side-effect gate, which applies regardless |
 | `quiet_hours` | `null` (off) | When set to `{ start, end }` (`HH:MM`, defaulting to `22:00`–`07:00` for the omitted field), nothing notifies or executes inside the window |
 
 On a default install over the twelve bundled examples, with no grant, this is

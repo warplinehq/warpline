@@ -451,9 +451,10 @@ one attempt and emits no `attempt_failed` notice. Timeout and cancellation
 still take precedence at the status level: an attempt aborted after the
 handler returned reports `timeout` or `cancelled`, while its result body
 carries the refusal. Under the default preferences (`review_gate: true`), or
-for a plugin with `autonomy_level: 'supervised'`, the refused result is parked
-like any other failed result, so the plugin entry and `plugin_runs` read
-`gated`, with the refusal in the summary. It is never `delegated`.
+for a plugin with `autonomy_level: 'supervised'`, the refused result is not
+parked, because a `failed` result never is (§ 9). The plugin entry and
+`plugin_runs` read `failed` there too, with the refusal in the summary. It is
+never `delegated`.
 
 ### Attempt status
 
@@ -704,7 +705,7 @@ set is closed — an unlisted value fails validation rather than being dropped.
 | `completed` | The handler ran and returned a result the engine accepted |
 | `failed` | The handler threw, returned a failed result, returned a `[needs-llm]` handoff its manifest does not declare (`llm_handoff`), or the plugin's manifest never loaded |
 | `skipped` | The plugin was not due — fresh, filtered, locked, without a session Grant, or holding a declared dependency whose last run failed |
-| `gated` | Supervised: the handler ran and its result was parked pending a human answer |
+| `gated` | Supervised: the handler ran, its result did not fail, and the result was parked pending a human answer |
 | `denied` | A human answered no, and the answer still applies to what is being proposed |
 | `refused` | A human answered yes, and the conditions that yes was bound to no longer hold |
 
@@ -1291,6 +1292,15 @@ runs, its result is parked in `pending_gates`, it is recorded `gated`, and the
 advance stops after its level. This is independent of the side-effect gate
 above — it applies whether or not the plugin declares any side effect.
 
+**A `failed` result is never parked.** This holds for a promoted plugin and for
+one declaring `autonomy_level: 'supervised'` alike, and in a dry run too. The
+result is recorded `failed` exactly as an `autonomous` failure is: in the run
+log, in `plugin_runs`, in the board events, the exit code (§ 11) and the
+dead-man file. The advance does not stop after its level, and a plugin that
+declares it as a dependency is skipped with `dependency_failed`. There is
+nothing to review. The handler's side effects fired before any gate, and a park
+would have published the result's Output to `plugin_runs` all the same.
+
 **A plugin declaring `approval_class: 'content'` is not promoted.** One conjunct
 on the promotion condition, and nothing else about it changes: every other
 plugin behaves exactly as before, `review_gate: false` included.
@@ -1517,6 +1527,8 @@ arrives without a migration step, so it arrives unannounced.
 | `last_output` | Output record, optional | The most recent Output this plugin produced. Its content may have been erased; see § `last_output` |
 
 `gated` records a supervised plugin that ran and was parked pending approval.
+A supervised run whose result is `failed` is not parked, and records `failed`
+(§ 9).
 It is written when the plugin is parked, anchored at the gate's completion
 time — a later approval is a separate event and does not move when the work
 happened.
@@ -1702,7 +1714,7 @@ does, in order, all decided before anything is written:
    `notice`. **This is a state transition the approve verb makes, not something
    a renderer infers**, which is what stops an approval and an expiry racing
    into a double apply.
-4. **Otherwise applied.** The `gated` `plugin_runs` entry is overwritten in
+4. **Otherwise applied.** The plugin's `plugin_runs` entry is overwritten in
    place: `last_run_at` stays at `run_completed_at`, the status becomes the
    result's real terminal status, and `last_output` carries the Output the run
    already produced. `applied_at` is stamped on the gate. If that Output's
@@ -1711,10 +1723,20 @@ does, in order, all decided before anything is written:
    and the binding that released it is gone. The same write erases the gate's
    copy of those bytes.
 
+   That entry is usually the `gated` one the park wrote. It is not when the
+   plugin ran again after the park and that run failed, or its invocation
+   threw: a failed run parks nothing, so it does not supersede the older gate,
+   and the entry is that later run's `failed` one. Applying the older gate then
+   writes its result over the newer failure. This gap is known and open. The
+   approve verb does not check whether the plugin has run since the gate was
+   parked.
+
 On either refusal the plugin's `plugin_runs` entry is deleted, which leaves it
 due on the next advance. The parked result was never accepted, so there is no
 accepted run to hold the work back; the `gated` entry existed to stop the
-effects re-firing during the hold, and the hold is over.
+effects re-firing during the hold, and the hold is over. When a later run of the
+plugin failed after the gate was parked (step 4), the entry deleted is that
+later run's, and its `failed` status goes with it.
 
 The delete takes `last_output` with it, and that loss is permanent. The pointer
 lives inside the entry, and the carry-forward described in § `last_output` works

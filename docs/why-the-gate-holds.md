@@ -17,8 +17,8 @@ Everything a plugin does that reaches outside its own process has to be declared
 in its manifest. Sending mail, filing an issue, writing to a database, calling
 somebody else's API. Anything it declares there waits on an approval I grant by
 hand, for this session. Without one, the run records that plugin `skipped` and
-carries on without it. A `supervised` plugin that has run is recorded `gated` for
-review, and the run stops after its level.
+carries on without it. A `supervised` plugin whose run didn't fail is recorded
+`gated` for review, and the run stops after its level.
 
 That's the gate. What follows is the argument for keeping it when it's in the
 way, which is the only time a gate is ever really tested.

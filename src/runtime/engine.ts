@@ -3,7 +3,7 @@
  *
  * Provides:
  *   topoSort()    — topological sort of plugin dependency graph into execution levels
- *   runAdvance()  — full engine loop: resolve order, check staleness, execute, gate supervised, log
+ *   runAdvance()  — full engine loop: resolve order, check staleness, execute, gate supervised results that did not fail, log
  *
  * Design decisions:
  *   A per-plugin FSM tracks six states plus `skipped`.
@@ -12,7 +12,8 @@
  *   Each level runs in parallel via Promise.all, with try/catch around each
  *   plugin individually — one failing plugin must not cancel its siblings.
  *   Supervised plugins pause the engine outside dry-run and park their payloads
- *   in `pending_gates`.
+ *   in `pending_gates`, unless the result failed. A failed result parks nothing
+ *   and is recorded `failed`, as it is for an autonomous plugin.
  */
 import { mkdir } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
@@ -2058,7 +2059,7 @@ export function topoSort(plugins: Map<string, PluginManifest>): string[][] {
  *
  * Autonomy gating:
  *   manual     → always skipped (reason: "manual — requires explicit invocation")
- *   supervised → gated after execution (pending human approval), unless dryRun
+ *   supervised → gated after execution (pending human approval), unless dryRun or the result failed
  *   autonomous → executed and completed/failed based on result
  *
  * Staleness:
@@ -2940,8 +2941,18 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
           const { result, retried } = invocationResult
 
-          // -- Supervised: gate (unless dry-run) --
+          // -- Supervised: gate (unless dry-run, or the result failed) --
           // review_gate forces autonomous plugins to be treated as supervised
+          //
+          // A failed result skips this arm, dry run or not, and is recorded by
+          // the write below exactly as an autonomous failure is. There's nothing
+          // to review: parking it asked an operator to approve a run that did
+          // nothing, and the park reviewed no more than the write below records.
+          // Its Outputs were already published to `plugin_runs` at park time and
+          // its side effects fired before any gate. Recording it `failed` also
+          // arms the dependency gate for its dependents and lets the exit code
+          // and the dead-man file count it. A supervised throw was already
+          // recorded `failed` by the catch above, so this makes the two agree.
           //
           // EXCEPT a content-class plugin, and the exemption is not a
           // convenience. A content approval IS the review — the operator read
@@ -2962,7 +2973,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             manifest.approval_class !== 'content'
               ? 'supervised'
               : manifest.autonomy_level
-          if (effectiveAutonomy === 'supervised') {
+          if (effectiveAutonomy === 'supervised' && result.status !== 'failed') {
             if (dryRun) {
               // Dry-run: report "would pause here" and continue. On stderr like
               // the quiet-hours line above, even though `advance` cannot reach
@@ -3056,7 +3067,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             return
           }
 
-          // -- Autonomous: completed or failed --
+          // -- Recorded directly: autonomous, or any failed result --
           const finalStatus = result.status === 'failed' ? 'failed' : 'completed'
           plugin_states.set(pluginName, finalStatus)
           // A content-authorised fire whose handler RETURNED. Recorded here and
@@ -4020,10 +4031,16 @@ export async function applyPendingGate(
   // completion, not `now` — a later approval must not move when the work
   // happened.
   //
-  // The prior entry read here is the `gated` one this same run wrote, so a
-  // gated run that produced no Output has already had the plugin's prior Output
-  // carried through the park — this site reads what is there and carries it one
-  // step further, rather than reconstructing it.
+  // The prior entry read here is usually the `gated` one this same run wrote, so
+  // a gated run that produced no Output has already had the plugin's prior
+  // Output carried through the park — this site reads what is there and carries
+  // it one step further, rather than reconstructing it.
+  //
+  // Not always. A later run of the same plugin that failed, or whose invocation
+  // threw, parked nothing, so it did not supersede this gate, and the entry
+  // here is that later run's. Applying writes this older result over the newer
+  // failure. That gap is known and open: nothing here checks whether the plugin
+  // has run since the gate was parked.
   const priorApprovedEntry = state.plugin_runs[gate.plugin]
   const priorOut = priorApprovedEntry?.last_output
   const keptErased = priorOut?.erased_at !== undefined && priorOut.run_id === gate.run_id ? priorOut : undefined

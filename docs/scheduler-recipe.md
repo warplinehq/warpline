@@ -367,7 +367,9 @@ lock left behind by a dead process heals on the next tick.
 this gate decides what happens to the RESULT, not whether the handler is
 invoked — and then that result parks at an approval gate waiting for a human.
 The advance reports `partial`, the plugin's state in the `--json` document is
-`gated`, and the exit code is `0`.
+`gated`, and the exit code is `0`. A plugin whose result is `failed` is not
+parked. Its state reads `failed`, and the advance exits `1`, just as it does
+with `review_gate` off.
 
 That is the behaviour for a plugin declaring no side effects. A plugin whose
 manifest declares any is stopped by a second and separate gate, before its
