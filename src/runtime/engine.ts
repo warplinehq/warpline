@@ -1315,12 +1315,13 @@ export function eraseIfReleased(
   if (!released.some(binds)) return
   if (records.some((a) => !windowClosed(a, now) && binds(a))) return
   const { body, ...rest } = out
+  const erasedAt = new Date(now).toISOString()
   // The stored schema's key order. The next read's parse emits it, so any other is rewritten.
   pluginRuns[plugin] = {
     ...run,
-    last_output: { ...rest, erased_at: new Date(now).toISOString(), body_sha256: sha256(body) },
+    last_output: { ...rest, erased_at: erasedAt, body_sha256: sha256(body) },
   }
-  eraseGateCopies(pendingGates, plugin, sha256(body), now)
+  eraseGateCopies(pendingGates, plugin, sha256(body), erasedAt)
 }
 
 /**
@@ -1342,8 +1343,9 @@ export function eraseIfReleased(
  * mutating it would erase `last_output` outside the release rule. The erased
  * record uses the stored schema's key order, the same as `eraseIfReleased`.
  *
- * It reads no clock and no window. The stamp comes from `now`, which is the
- * caller's.
+ * It reads no clock and no window. It writes `erasedAt` verbatim, the stamp of
+ * the erased record the caller writes or keeps, so the gate copy and that
+ * record agree about when the same bytes were erased.
  *
  * It has three callers. The release write, `eraseIfReleased`, erases the copy
  * with the content. `applyPendingGate` erases it when it applies a gate whose
@@ -1351,7 +1353,7 @@ export function eraseIfReleased(
  * reconcile in `runAdvance` erases it when it keeps an erased record another
  * write left on disk, either in `last_output` or in an applied gate's copy.
  */
-function eraseGateCopies(pendingGates: PendingGate[], plugin: string, bodySha256: string, now: number): void {
+function eraseGateCopies(pendingGates: PendingGate[], plugin: string, bodySha256: string, erasedAt: string): void {
   for (let i = 0; i < pendingGates.length; i++) {
     const gate = pendingGates[i]!
     if (gate.plugin !== plugin || gate.applied_at === null) continue
@@ -1364,7 +1366,7 @@ function eraseGateCopies(pendingGates: PendingGate[], plugin: string, bodySha256
         artifacts_produced: gate.plugin_result.artifacts_produced.map((o) => {
           if (!holds(o)) return o
           const { body: _erased, ...rest } = o
-          return { ...rest, erased_at: new Date(now).toISOString(), body_sha256: bodySha256 }
+          return { ...rest, erased_at: erasedAt, body_sha256: bodySha256 }
         }),
       },
     }
@@ -3349,7 +3351,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         if (d.applied_at === null) continue
         for (const o of d.plugin_result.artifacts_produced) {
           if (!('erased_at' in o) || o.erased_at === undefined) continue
-          eraseGateCopies(updatedState.pending_gates, d.plugin, o.body_sha256!, Date.parse(o.erased_at))
+          eraseGateCopies(updatedState.pending_gates, d.plugin, o.body_sha256!, o.erased_at)
         }
       }
       for (const [plugin, run] of Object.entries(updatedState.plugin_runs)) {
@@ -3364,7 +3366,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           mine.run_id === onDisk.run_id
         ) {
           updatedState.plugin_runs[plugin] = { ...run, last_output: onDisk }
-          eraseGateCopies(updatedState.pending_gates, plugin, onDisk.body_sha256!, approvalNow)
+          eraseGateCopies(updatedState.pending_gates, plugin, onDisk.body_sha256!, onDisk.erased_at)
         }
       }
       eraseReleasedContent(updatedState.plugin_runs, updatedState.pending_gates, merged, plugins, approvalNow)
@@ -3999,7 +4001,7 @@ export async function applyPendingGate(
   gate.applied_at = new Date(now).toISOString()
   // After the stamp, because the helper acts only on an applied gate.
   if (keptErased !== undefined) {
-    eraseGateCopies(state.pending_gates, gate.plugin, keptErased.body_sha256!, now)
+    eraseGateCopies(state.pending_gates, gate.plugin, keptErased.body_sha256!, keptErased.erased_at!)
   }
   await writeEngineState(state, opts.statePath)
 

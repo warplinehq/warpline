@@ -398,7 +398,7 @@ test('applying a gate after its content was erased keeps it erased, and the gate
   expect(gate.applied_at).not.toBeNull()
   const gateOut = lastOutputOfGate(gate)
   expect('body' in gateOut).toBe(false)
-  expect(typeof gateOut.erased_at).toBe('string')
+  expect(gateOut.erased_at).toBe(erased.erased_at)
   expect(gateOut.body_sha256).toBe(erased.body_sha256)
   expect(await filesHolding(home.root, sentinel)).toEqual([])
 
@@ -450,6 +450,7 @@ export async function handler() {
   expect(gate.applied_at).not.toBeNull()
   const gateOut = lastOutputOfGate(gate)
   expect('body' in gateOut).toBe(false)
+  expect(gateOut.erased_at).toBe(last.erased_at)
   expect(gateOut.body_sha256).toBe(sha256Hex(sentinel))
 })
 
