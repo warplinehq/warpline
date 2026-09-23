@@ -111,6 +111,37 @@ export async function handler(manifest, args, signal, capabilities) {
 `
 }
 
+/** Produces on advance 1; returns `partial` on advance 2 once the marker exists. */
+function partialProducer(marker: string): string {
+  return `
+import { existsSync } from 'node:fs'
+export async function handler(manifest, args, signal, capabilities) {
+  if (existsSync(${JSON.stringify(marker)})) {
+    return {
+      status: 'partial',
+      phases_completed: ['prod'],
+      phases_failed: ['enrich'],
+      errors: [],
+      data_freshness: {},
+      summary: 'prod returned partial',
+      artifacts_produced: [],
+      schema_version: 1,
+    }
+  }
+  return {
+    status: 'success',
+    phases_completed: ['prod'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'prod produced',
+    artifacts_produced: [{ type: 'brief', format: 'json', body: '{"advance":1}' }],
+    schema_version: 1,
+  }
+}
+`
+}
+
 describe('the persisted run status is the status the run reached', () => {
   let home: TwoAdvanceHome
 
@@ -299,6 +330,36 @@ for (const supervision of ['review_gate', 'supervised'] as const) {
         const log = JSON.parse(await readFile(r2.run_log_path, 'utf-8')) as { plugin_entries: { status: string }[] }
         expect(log.plugin_entries.map((e) => e.status)).not.toContain('delegated')
         expect(Object.values(state.plugin_runs).map((r) => r.status)).not.toContain('delegated')
+      })
+    }
+
+    // The other side of the same condition. Only a failed result skips the
+    // park: a declared handoff (`skipped`) and a `partial` result are parked
+    // exactly as a success is.
+    for (const kind of ['skipped', 'partial'] as const) {
+      test(`[${supervision}] a ${kind === 'skipped' ? 'declared handoff (skipped)' : 'partial result'} is still parked`, async () => {
+        await home.writePlugin('prod', {
+          outputs: { brief: {} },
+          autonomyLevel,
+          llmHandoff: kind === 'skipped',
+          handlerBody: kind === 'skipped' ? handoffProducer('prefix', home.marker) : partialProducer(home.marker),
+        })
+
+        const r1 = await home.advance()
+        // CONTROL: supervision engaged, so advance 1's success was parked.
+        expect(r1.gated_plugins).toEqual(['prod'])
+
+        await home.setMarker()
+        const r2 = await home.advance()
+
+        // Asserted first, so a result that stopped parking fails here, on the
+        // status it was recorded with instead.
+        expect(((await home.persistedRun('prod')) as Record<string, unknown>).status).toBe('gated')
+        expect(r2.gated_plugins).toEqual(['prod'])
+        const state = JSON.parse(await readFile(home.statePath, 'utf-8')) as {
+          pending_gates: { run_id: string; plugin_result: { status: string } }[]
+        }
+        expect(state.pending_gates.filter((g) => g.run_id === r2.run_id).map((g) => g.plugin_result.status)).toEqual([kind])
       })
     }
   })
