@@ -2325,9 +2325,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // why an id named by both a gate and an approval is protected once.
     //
     // **Only while the window is OPEN.** A set that never releases would pin
-    // the run log forever. Releasing on close hands the log to ordinary
-    // retention — already running, already tested, no new mechanism — and that
-    // log holds a summary of the run, not the content. The content a frozen
+    // the run log forever. Dropping a closed approval from the set hands the
+    // log to ordinary retention, unless a pending gate or another open
+    // approval still names the same run. That retention is already running and
+    // already tested, so there is no new mechanism. The log holds a summary of
+    // the run, not the content. The content a frozen
     // batch carries is recipient data, and it sits in the state document, in
     // `plugin_runs[producer].last_output.body`. The end-of-run write below
     // erases it and then sweeps the binding, as far as `eraseReleasedContent`

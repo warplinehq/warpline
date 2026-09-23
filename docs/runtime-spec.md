@@ -1993,9 +1993,10 @@ Nothing an operator does is required, and the sweep runs inside every advance.
 This is the last of three steps in one deletion policy. All three read the
 **same** window predicate over the **same** instant:
 
-1. **The run log is released.** An approval stops protecting its producer's run
-   the moment its window closes (§ 6), so the ordinary prune reclaims that log.
-   It holds a summary of the run, not the content.
+1. **The run log stops being protected.** An approval stops protecting the run
+   it names the moment its window closes (§ 6), so the log is an ordinary
+   prune candidate again unless a pending gate or another open approval names
+   the same run. It holds a summary of the run, not the content.
 2. **The content is erased.** The end-of-run write erases the content of every
    Output that a closed approval for that producer binds, once no open approval
    for that producer still binds it: `body` is deleted, and `erased_at` and
