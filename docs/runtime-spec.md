@@ -1527,8 +1527,6 @@ arrives without a migration step, so it arrives unannounced.
 | `last_output` | Output record, optional | The most recent Output this plugin produced. Its content may have been erased; see § `last_output` |
 
 `gated` records a supervised plugin that ran and was parked pending approval.
-A supervised run whose result is `failed` is not parked, and records `failed`
-(§ 9).
 It is written when the plugin is parked, anchored at the gate's completion
 time — a later approval is a separate event and does not move when the work
 happened.
@@ -1539,6 +1537,9 @@ all; the gate decides what happens to the result, not whether the work
 happened. A parked run that recorded nothing left the plugin due on the next
 advance, so its side effects fired again — every advance, for the whole grant
 window, on one approval.
+
+A supervised run whose result is `failed` is not parked, and records `failed`
+(§ 9).
 
 `skipped` records a run whose handler returned `skipped` — in practice every
 dispatched handoff from a plugin declaring `llm_handoff: true`, since that is
@@ -1622,8 +1623,12 @@ Pinned by `plan.test.ts` Test 2b.
 
 ### `pending_gates`
 
-A supervised plugin's result parked pending a human answer. One entry per
-plugin gated by the most recent advance.
+A supervised plugin's result parked pending a human answer. There is at most
+one entry per plugin, and a fresh park replaces it. An advance that parks
+nothing for the plugin leaves its entry in place, for example when the plugin
+was not due, its result failed, or its invocation threw. So the entry can come
+from an earlier advance than the most recent one (§ 10, "Applying a gate",
+step 4).
 
 | Field | Type | Meaning |
 |-------|------|---------|
