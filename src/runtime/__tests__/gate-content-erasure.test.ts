@@ -525,3 +525,134 @@ export async function handler() {
   // The only copy left is the fresh run's `last_output`, which nothing released.
   expect(await copies()).toBe(1)
 })
+
+/**
+ * Installs a plugin that runs a real `approve prod` mid-advance, checks on disk
+ * that its own write applied the gate, with the gate copy erased or not as
+ * `erased` says, and records the `applied_at` it wrote. Returns the stamp path.
+ */
+async function installMidAdvanceApply(erased: boolean): Promise<string> {
+  const approvePath = fileURLToPath(new URL('../../cli/approve.ts', import.meta.url))
+  const stampPath = join(home.root, 'apply-stamp')
+  await writePlugin(
+    'interloper',
+    manifest('interloper', { ttl_hours: 1 }),
+    `
+import { readFileSync, writeFileSync } from 'node:fs'
+export async function handler() {
+  const { run } = await import(${JSON.stringify(approvePath)})
+  const out = process.stdout.write
+  const err = process.stderr.write
+  process.stdout.write = () => true
+  process.stderr.write = () => true
+  let code
+  try { code = await run(['prod']) }
+  finally { process.stdout.write = out; process.stderr.write = err }
+  if (code !== 0) throw new Error('apply exited ' + code)
+  const doc = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf-8'))
+  const gate = doc.pending_gates.find((g) => g.plugin === 'prod')
+  if (gate.applied_at === null) throw new Error('the gate was not applied')
+  const copy = gate.plugin_result.artifacts_produced.at(-1)
+  if ((copy.body === undefined) !== ${JSON.stringify(erased)}) throw new Error('the gate copy is not as expected')
+  writeFileSync(${JSON.stringify(stampPath)}, gate.applied_at)
+  return { status: 'success', phases_completed: ['interloper'], phases_failed: [], errors: [],
+    data_freshness: {}, summary: 'interloper ran', schema_version: 1, artifacts_produced: [] }
+}
+`,
+  )
+  return stampPath
+}
+
+test('an apply that lands mid-advance after erasure is not reverted by the advance', async () => {
+  await advance()
+  expect(await cli(['sender', '--content', '--not-after', wallClockUtc(Date.now() + HOUR)])).toBe(0)
+  await advance(Date.now() + 2 * HOUR)
+  const before = await stored()
+  const erased = lastOutputOf(before, 'prod')
+  expect('body' in erased).toBe(false)
+  const pending = gateOf(before, 'prod')
+  expect(pending.applied_at).toBeNull()
+  expect(lastOutputOfGate(pending).body).toBe(sentinel)
+  expect(pending.plugin_result.status).toBe('success')
+  expect(await copies()).toBe(1)
+
+  const stampPath = await installMidAdvanceApply(true)
+  await advance(Date.now() + 2 * HOUR)
+  const s = await stored()
+  const gate = gateOf(s, 'prod')
+  expect(gate.run_id).toBe(pending.run_id)
+  expect(gate.applied_at).toBe(await readFile(stampPath, 'utf-8'))
+  const gateOut = lastOutputOfGate(gate)
+  expect('body' in gateOut).toBe(false)
+  expect(gateOut.erased_at).toBe(erased.erased_at)
+  expect(gateOut.body_sha256).toBe(sha256Hex(sentinel))
+  expect(s.plugin_runs.prod?.status).toBe(pending.plugin_result.status)
+  expect(s.plugin_runs.prod?.last_run_at).toBe(pending.run_completed_at!)
+  expect(lastOutputOf(s, 'prod')).toEqual(erased)
+  expect(await copies()).toBe(0)
+  expect(await filesHolding(home.root, sentinel)).toEqual([])
+})
+
+test('an apply that lands mid-advance while the content is bound is erased with it when the advance releases it', async () => {
+  await advance()
+  expect(await cli(['sender', '--content', '--not-after', wallClockUtc(Date.now() + HOUR)])).toBe(0)
+  const before = await stored()
+  const pending = gateOf(before, 'prod')
+  expect(pending.applied_at).toBeNull()
+  expect(lastOutputOf(before, 'prod').body).toBe(sentinel)
+  expect(await copies()).toBe(2)
+
+  // The apply lands while the content is still bound, so the gate keeps its
+  // body until this advance's write releases it.
+  const stampPath = await installMidAdvanceApply(false)
+  await advance(Date.now() + 2 * HOUR)
+  const s = await stored()
+  expect(s.approvals).toEqual({})
+  const last = lastOutputOf(s, 'prod')
+  expect('body' in last).toBe(false)
+  expect(last.body_sha256).toBe(sha256Hex(sentinel))
+  const gate = gateOf(s, 'prod')
+  expect(gate.run_id).toBe(pending.run_id)
+  expect(gate.applied_at).toBe(await readFile(stampPath, 'utf-8'))
+  const gateOut = lastOutputOfGate(gate)
+  expect('body' in gateOut).toBe(false)
+  expect(gateOut.erased_at).toBe(last.erased_at)
+  expect(gateOut.body_sha256).toBe(last.body_sha256)
+  expect(s.plugin_runs.prod?.status).toBe(pending.plugin_result.status)
+  expect(await copies()).toBe(0)
+  expect(await filesHolding(home.root, sentinel)).toEqual([])
+})
+
+test('an apply that lands mid-advance keeps the newer run the producer made in that advance', async () => {
+  // `ttl_hours: 1` and the gate turned off below, unlike most of this file:
+  // the producer has to run again in the advance without parking a gate that
+  // would supersede the one under test. Written before the first advance, so
+  // the manifest is never served from the module cache.
+  await writePlugin(
+    'prod',
+    manifest('prod', { ttl_hours: 1 }),
+    `
+export async function handler() {
+  return { status: 'success', phases_completed: ['prod'], phases_failed: [], errors: [],
+    data_freshness: {}, summary: 'prod produced', schema_version: 1,
+    artifacts_produced: [{ type: 'brief', format: 'text', body: 'approved-content:' + process.env.WARPLINE_GATE_ERASURE_SENTINEL }] }
+}
+`,
+  )
+  await advance()
+  const pending = gateOf(await stored(), 'prod')
+  expect(pending.applied_at).toBeNull()
+
+  await writeFile(join(home.stateDir, 'preferences.json'), JSON.stringify({ review_gate: false }))
+  const stampPath = await installMidAdvanceApply(false)
+  await advance(Date.now() + 2 * HOUR)
+  const s = await stored()
+  expect(s.plugin_runs.interloper?.status).toBe('success')
+  // The producer ran again, parked nothing, and its newer run is what stays.
+  expect(lastOutputOf(s, 'prod').run_id).not.toBe(pending.run_id)
+  expect(s.plugin_runs.prod?.last_run_at).not.toBe(pending.run_completed_at!)
+  expect(s.pending_gates.length).toBe(1)
+  const gate = gateOf(s, 'prod')
+  expect(gate.run_id).toBe(pending.run_id)
+  expect(gate.applied_at).toBe(await readFile(stampPath, 'utf-8'))
+})

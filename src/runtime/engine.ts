@@ -3275,12 +3275,16 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // Everything except `approvals` is still the advance's own in-memory state,
     // spread above: this closes the read-modify-write window of #25 for that ONE
     // subtree and leaves the general case — `plugin_runs`, `pending_gates`,
-    // `last_run_id` — open, which is where `engine-state-store.ts` files it. The
-    // one exception is erased content on disk, in `last_output` or in an applied
-    // gate's copy, which is never written back over with a body, for the reason
-    // given at the loops below.
-    // Widening it here would be a second control-flow change wearing the same
-    // commit.
+    // `last_run_id` — open, which is where `engine-state-store.ts` files it.
+    // Three narrow reconciles from the fresh read are the exceptions, each for
+    // the reason given at its loop below. An apply that landed mid-advance on a
+    // gate this advance still holds as pending is kept, with that run's
+    // `plugin_runs` entry. An erased `last_output` is kept over this advance's
+    // body for the same run. Erased bytes in an applied gate's copy are never
+    // written back with a body.
+    // An erased `last_output` of another run is still written over, and a gate
+    // another writer discarded mid-advance is still written back.
+    // Closing the general case is a change of its own.
     //
     // `approvals` is the subtree that needs it because it is the only one
     // another ATTACHMENT writes. One home can be attached from several machines,
@@ -3333,6 +3337,24 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     await lockStateDocument(stateDir, async () => {
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
       const merged = mergeApprovals(disk.approvals, updatedState.approvals)
+      // An apply can land while this advance runs, because `approve <plugin>`
+      // takes the state lock and this advance holds none across its plugins.
+      // Written back from memory, the gate would read pending again with its
+      // copy, and the plugin's entry would read `gated`: the operator's apply
+      // would be lost. So an applied gate in the fresh read replaces this
+      // advance's pending copy of it, matched by plugin and `run_id`. The
+      // plugin's `plugin_runs` entry from the fresh read replaces this
+      // advance's too, but only while this advance's entry is still the `gated`
+      // one that run's park wrote, because the park stamps one instant into
+      // both that entry's `last_run_at` and the gate's `run_completed_at`.
+      // A newer run this advance made stays.
+      // This runs first, so the erasure reconciles below and the release write
+      // all see the gate as applied.
+      // The adopted gate needs no erasure call of its own. An apply after
+      // erasure erased its copy in the apply's own write, an erasure on disk
+      // after the apply shows in the gate adopted here, and a copy still bound
+      // goes with the content if this write releases it.
+      //
       // Erasure is one-way. An overlapping advance may have erased a body this
       // advance still holds in memory, and swept the binding that released it,
       // so the merge above drops this advance's copy of that binding too.
@@ -3349,6 +3371,17 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // Written back, that copy would keep its body until the gate ceiling.
       for (const d of disk.pending_gates) {
         if (d.applied_at === null) continue
+        const i = updatedState.pending_gates.findIndex(
+          (g) => g.plugin === d.plugin && g.run_id === d.run_id && g.applied_at === null,
+        )
+        if (i !== -1) {
+          updatedState.pending_gates[i] = d
+          const entry = Object.hasOwn(updatedState.plugin_runs, d.plugin) ? updatedState.plugin_runs[d.plugin] : undefined
+          const gatedByThisRun = entry?.status === 'gated' && entry.last_run_at === d.run_completed_at
+          if (gatedByThisRun && Object.hasOwn(disk.plugin_runs, d.plugin)) {
+            updatedState.plugin_runs[d.plugin] = disk.plugin_runs[d.plugin]!
+          }
+        }
         for (const o of d.plugin_result.artifacts_produced) {
           if (!('erased_at' in o) || o.erased_at === undefined) continue
           eraseGateCopies(updatedState.pending_gates, d.plugin, o.body_sha256!, o.erased_at)

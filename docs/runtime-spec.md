@@ -2775,7 +2775,8 @@ body for the same `run_id`, the erased record is written. An overlapping advance
 may have erased that body and swept the binding that released it, so the merge
 drops this advance's copy of the binding as well, and a body written back would
 have nothing left to erase it. The rest of `plugin_runs` is still the advance's
-own in-memory state.
+own in-memory state,
+except an entry adopted with an apply that landed mid-advance (below).
 It erases the copy an applied gate of that producer holds of the same bytes too,
 because this advance's `pending_gates` was read before that erasure as well.
 The copies applied gates hold are reconciled the same way on their own. Any
@@ -2787,13 +2788,35 @@ covers a producer that ran again in this advance without parking a gate: its
 withdrawal that landed mid-advance has already dropped the binding that would
 release the old bytes again.
 
+**An apply that lands mid-advance is kept.**
+`warpline approve <plugin>` applies a parked gate under the state lock, so it
+can land while an advance that read the gate as pending is still running. If
+the fresh read inside the end-of-run lock shows that gate applied, for the same
+plugin and `run_id`, the applied gate is written instead of the advance's
+pending copy. The plugin's `plugin_runs` entry from the fresh read is written
+too, while the advance's own entry is still the `gated` one that run's park
+wrote. The park stamps one instant into that entry's `last_run_at` and the
+gate's `run_completed_at`, which is how the two are matched.
+A newer run this advance made is kept.
+This happens before the reconciles above and before the release write (§ 10).
+So a gate applied while its content was still bound is erased with that content
+when this write releases it, and an apply after erasure already erased the
+gate's copy in its own write (§ "Applying a gate", step 4). What it does not
+reach, and #25 leaves open:
+a gate the fresh read shows discarded, by a refused apply or a denial, is
+written back as the advance read it. A gate the advance no longer holds,
+because the plugin parked a newer one or the gate aged out, is not brought
+back. An erased `last_output` of another run is written over by the advance's
+entry.
+
 **Which file each writer writes, since this has been recorded wrongly before.**
 The `deny` verb and the board write the engine state document, under the state
 lock. So does `approve --content`, which records the approval, and `approve
---content --remove`, which withdraws it — both under the same lock. `approve`'s
-other modes write the session-approval file instead, `.session-approval` at the
-root of the home, and write no state document at all. The run lock guards none
-of them.
+--content --remove`, which withdraws it — both under the same lock.
+So does `approve <plugin>` when it answers a parked gate, applying it or
+discarding it, under the same lock. `approve`'s Grant path writes the
+session-approval file instead, `.session-approval` at the root of the home, and
+writes no state document at all. The run lock guards none of them.
 
 ## 13. The dead-man file
 

@@ -405,9 +405,10 @@ export async function withoutStateBackups<T>(fn: () => Promise<T>): Promise<T> {
  * because `approvals` is the only part of it another ATTACHMENT writes.
  *
  * `cli/approve.ts` IS a writer of this document: `--content` records the
- * approval and `--content --remove` withdraws it, both inside the same derived
- * lock. It writes the grant file via `mergeGrant` too, which is what its other
- * two modes do and all this paragraph used to say.
+ * approval, `--content --remove` withdraws it, and answering a parked gate
+ * applies or discards it, all inside the same derived lock.
+ * Only its Grant path writes the grant file, via `mergeGrant`, and it writes
+ * no state document.
  *
  * The lock still cannot move down into here: `board/state-manager.ts` calls
  * this from inside `withStateLock`, which is a non-reentrant `O_EXCL` file
