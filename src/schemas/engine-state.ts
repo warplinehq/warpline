@@ -20,7 +20,7 @@
  * strict, so a typo'd one still fails validation loudly.
  */
 import { z } from 'zod'
-import { StoredOutputRecordSchema, SkillResultSchema } from './skill-result.js'
+import { StoredOutputRecordSchema, StoredSkillResultSchema } from './skill-result.js'
 
 // ── Task-board records ────────────────────────────────────────────────────
 
@@ -290,13 +290,18 @@ export type PluginRun = z.infer<typeof PluginRunSchema>
  * `artifacts_produced` — and the thing the plugin actually produced was
  * dropped. Approval is acceptance of an observed outcome, so a gate that does
  * not carry the outcome cannot be approved in any meaningful sense.
+ *
+ * Its Outputs are stored records (`StoredSkillResultSchema`). When erasure
+ * releases the content an applied gate recorded, the gate's copy is erased in
+ * the same write and the record stays, marked `erased_at`. A gate still pending
+ * keeps its copy: the operator has not answered it.
  */
 export const PendingGateSchema = z.object({
   plugin: z.string(),
   run_id: z.string(),
   created_at: z.string(),
   payload_summary: z.string(),
-  plugin_result: SkillResultSchema,
+  plugin_result: StoredSkillResultSchema,
   /**
    * When the gated run STARTED. The dependency-staleness refusal compares each
    * dependency's `last_run_at` against this: a dependency that moved after the

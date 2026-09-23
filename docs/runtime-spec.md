@@ -832,6 +832,11 @@ no `body_sha256`, and the stored read refuses one that does. The two stored-only
 keys are the runtime's, never a handler's. A handler that returns either one has it stripped
 when its Output has a body or a path, and is refused as an invalid result when
 its Output has neither. So no plugin can hand the runtime a bodiless Output.
+An applied gate stores its result's Outputs in the same shape.
+`StoredSkillResultSchema`, exported beside `SkillResultSchema`, is the skill
+result with stored Outputs,
+used only at `pending_gates[].plugin_result`. Handlers are still parsed
+against `SkillResultSchema`.
 
 The inline cap is **16384 UTF-8 bytes**, and the unit is the point. It is
 enforced with `Buffer.byteLength`, not with a string length: a string length
@@ -1614,7 +1619,7 @@ plugin gated by the most recent advance.
 | `run_id` | string | The advance that parked it |
 | `created_at` | ISO 8601 string | When the gate was written |
 | `payload_summary` | string | The result's summary, for a one-line render |
-| `plugin_result` | Skill result | The REAL result the handler returned, Outputs and all |
+| `plugin_result` | Stored skill result | The REAL result the handler returned, Outputs and all. An applied gate's copy of released content is erased, not removed (§ 10) |
 | `run_started_at` | ISO 8601 string or null | When the gated run started |
 | `run_completed_at` | ISO 8601 string or null | When the gated run ended |
 | `applied_at` | ISO 8601 string or null | When the gate was applied; null while live |
@@ -1624,6 +1629,10 @@ stored a fabrication here — `status: 'partial'`, an empty `artifacts_produced`
 — and dropped the real thing. Approval is acceptance of an observed outcome, so
 a gate that does not carry the outcome cannot be approved in any meaningful
 sense.
+Its Outputs are stored records (§ 5). When erasure releases content an applied
+gate recorded, the gate's copy is erased in the same write and kept as a record
+marked `erased_at`, so the gate still says what the run produced. A gate still
+pending keeps its copy.
 
 `run_completed_at` is written from the same string as the `plugin_runs` entry
 the engine writes on the same branch, not from a second clock read. The two
@@ -1667,8 +1676,11 @@ does, in order, all decided before anything is written:
    renew by name, with only the far wider `--all` still working.
 
    The gate is marked rather than deleted so the note has a run to name and so
-   `deny` can tell an accepted result from a pending one. **A gate survives the
-   next advance, applied or not**, and is dropped only when it passes the
+   `deny` can tell an accepted result from a pending one.
+   Neither needs the bytes. When erasure releases the content the gate recorded,
+   the same write erases the marker's copy of it (§ 10, "Expiry and deletion"),
+   and the marker stays. **A gate survives the next advance, applied or not**,
+   and is dropped only when it passes the
    23-hour gate ceiling or when the plugin gates again and the new parked gate
    supersedes it. One rule covers the whole array; the clock differs because the
    question does. A marker ages from `applied_at`, the moment the result was
@@ -2034,6 +2046,11 @@ This is the last of three steps in one deletion policy. All three read the
    command erases the content the old record bound in its own locked write, by
    this same rule, when no other open approval for that producer still binds it
    (§ "Writing and withdrawing one").
+   Whichever write erases the content also erases the copy an applied gate
+   of that producer holds of those bytes, with the same `erased_at` and
+   `body_sha256`, and the gate stays as a marker (§ `pending_gates`).
+   A gate still pending keeps its copy, because the operator has not answered
+   it yet.
 3. **The binding is swept.** This removes what is left of the approval — a
    fingerprint, a producer name, a run id and some timestamps — once there is
    nothing for it to bind to.
@@ -2111,7 +2128,14 @@ does **not** erase:
 - a home whose bindings an earlier build `swept`. Nothing records which Output
   was approved, so nothing says what to erase. The producer's next Output
   replaces it.
-- content a plugin copied into a parked gate's `plugin_result`.
+- the copy a gate still pending holds in `pending_gates[].plugin_result`.
+  The operator has not answered it yet, and it has its own lifetime
+  (§ `pending_gates`).
+- anything an applied gate holds that erasure has not released: its other
+  Outputs, which no approval binds because a content approval binds only the
+  producer's last Output, and
+  bytes the producer has since replaced without gating again. They stay until
+  the gate is superseded or ages out, 23 hours after it was applied.
 - a plugin's own `summary` text, which is the plugin's to write.
 
 A zone the host tz database can no longer resolve **retains** the record rather

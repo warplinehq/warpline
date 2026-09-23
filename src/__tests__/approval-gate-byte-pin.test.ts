@@ -23,13 +23,14 @@
  * scoped to the declaration, sliced between two structural anchors rather than
  * by line numbers, which move.
  *
- * **Provenance.** Both digests are the `v0.2` content's, confirmed identical to
- * the working tree at authoring time. Reproduce:
+ * **Provenance.** The file digest is the `v0.2` content's, confirmed identical
+ * to the working tree at authoring time. The block digest was the `v0.2`
+ * content's too until FREEZE-10 was amended on 2026-09-23. It now pins the
+ * amended declaration, whose one changed line is `plugin_result`. Reproduce:
  *
  *   git show v0.2:src/runtime/approval-gate.ts | shasum -a 256
- *   git show v0.2:src/schemas/engine-state.ts \
- *     | awk '/^export const PendingGateSchema = z\.object\(\{$/,/^export type PendingGate = /' \
- *     | shasum -a 256
+ *   awk '/^export const PendingGateSchema = z\.object\(\{$/,/^export type PendingGate = /' \
+ *     src/schemas/engine-state.ts | shasum -a 256
  *
  * **When one of these is legitimately changed.** Amend the FREEZE-10 contract
  * text FIRST — its requirement entry and the matching roadmap success criterion
@@ -58,8 +59,16 @@ const APPROVAL_GATE = join(REPO_ROOT, 'src', 'runtime', 'approval-gate.ts')
 const ENGINE_STATE = join(REPO_ROOT, 'src', 'schemas', 'engine-state.ts')
 
 const APPROVAL_GATE_SHA256 = 'd286a53f2b55b19ddbabeae64ce3bc0423912d376860cd5d73c23e6d48ffb72d'
+/**
+ * Re-pinned when FREEZE-10 was amended on 2026-09-23. `plugin_result` takes
+ * `StoredSkillResultSchema`, so an applied gate can hold an erased Output: once
+ * erasure releases the content the gate recorded, its copy is erased in the same
+ * write and the fail-closed read must still accept the gate. Every other line of
+ * the declaration is the `v0.2` one. The `v0.2` digest was
+ * `37141140c4d83cc8807f44d630d4d0620104469f7486e859cbd51927403c5815`.
+ */
 const PENDING_GATE_BLOCK_SHA256 =
-  '37141140c4d83cc8807f44d630d4d0620104469f7486e859cbd51927403c5815'
+  '5fcadf77f9e2dd0fa25ca0085b4e02f7cd933b399d7d3a4d5b30c0a24cc888d3'
 
 const BLOCK_START = 'export const PendingGateSchema = z.object({'
 const BLOCK_END = 'export type PendingGate = '

@@ -134,6 +134,15 @@ export const OutputRecordSchema = z
 export type OutputRecord = z.infer<typeof OutputRecordSchema>
 
 /**
+ * The pre-0.2 bare-string Output, normalized at the parse boundary to a `path`
+ * Output. One arm, shared by `SkillResultSchema` and `StoredSkillResultSchema`,
+ * so the two result schemas cannot drift on it.
+ */
+const bareStringOutput = z
+  .string()
+  .transform((s): OutputRecord => ({ type: 'artifact', format: 'markdown', path: s }))
+
+/**
  * The Output record the state document stores at `plugin_runs[name].last_output`.
  *
  * Its one difference from `OutputRecordSchema` is the erased state. Once the
@@ -141,6 +150,7 @@ export type OutputRecord = z.infer<typeof OutputRecordSchema>
  * withdrawn, or been replaced by a re-approve, the runtime erases `body` and
  * stamps `erased_at` and `body_sha256`. The record stays, so a
  * reader can still tell "produced, content erased" and "never produced" apart.
+ * An applied gate stores the same record inside `StoredSkillResultSchema`.
  * An approval binds it by `run_id`, or, unless its fire was left marked and
  * unconfirmed, by fingerprint until its window closes.
  * The binding rule does not erase bytes that only such an unconfirmed fire
@@ -276,12 +286,7 @@ export const SkillResultSchema = z.object({
    */
   artifacts_produced: z
     .array(
-      z.union([
-        z
-          .string()
-          .transform((s): OutputRecord => ({ type: 'artifact', format: 'markdown', path: s })),
-        OutputRecordSchema,
-      ]),
+      z.union([bareStringOutput, OutputRecordSchema]),
     )
     .default([]),
   schema_version: z.number().default(2),
@@ -305,6 +310,26 @@ export const SkillResultSchema = z.object({
 })
 
 export type SkillResult = z.infer<typeof SkillResultSchema>
+
+/**
+ * The skill result the state document stores at `pending_gates[].plugin_result`.
+ *
+ * Its one difference from `SkillResultSchema` is its Outputs, which are
+ * `StoredOutputRecordSchema` records. Once erasure releases the content an
+ * applied gate recorded, the gate's copy is erased and its record stays,
+ * marked, so the gate still says what the run produced.
+ *
+ * **Handlers never see this shape.** A handler's result is parsed against
+ * `SkillResultSchema`, whose Outputs cannot be bodiless.
+ *
+ * `.extend` replaces the one field, and both schemas share `bareStringOutput`,
+ * so the two cannot drift.
+ */
+export const StoredSkillResultSchema = SkillResultSchema.extend({
+  artifacts_produced: z.array(z.union([bareStringOutput, StoredOutputRecordSchema])).default([]),
+})
+
+export type StoredSkillResult = z.infer<typeof StoredSkillResultSchema>
 
 /**
  * The result as a PRODUCER writes it, before the parse boundary runs.

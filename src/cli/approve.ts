@@ -441,7 +441,7 @@ async function approveContent(
     // Replacing a record withdraws it. The new record is already in the table,
     // so it holds whatever it binds.
     if (replaced !== undefined) {
-      eraseIfReleased(state.plugin_runs, replaced.producer, state.approvals, manifests, now, replaced)
+      eraseIfReleased(state.plugin_runs, state.pending_gates, replaced.producer, state.approvals, manifests, now, replaced)
     }
     await writeEngineState(state, statePath)
 
@@ -523,9 +523,10 @@ async function removeContentApproval(
     // Withdrawal is a closure, so the content it bound is released in this
     // same locked write, under the rule the advance's erasure uses. Left to the
     // next advance it would never go: nothing would name the run any more.
+    // The copy an applied gate holds of it goes in the same write.
     const withdrawn = state.approvals[consumer]!
     delete state.approvals[consumer]
-    eraseIfReleased(state.plugin_runs, withdrawn.producer, state.approvals, manifests, now, withdrawn)
+    eraseIfReleased(state.plugin_runs, state.pending_gates, withdrawn.producer, state.approvals, manifests, now, withdrawn)
     await writeEngineState(state, statePath)
     process.stdout.write(
       `Withdrew the content approval for ${consumer}. Those bytes will not ship on any later ` +

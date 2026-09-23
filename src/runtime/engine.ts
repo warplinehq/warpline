@@ -104,7 +104,7 @@ import { ENGINE_STATE_MAX_SCHEMA_VERSION } from '../schemas/engine-state.js'
 import type { Approval, Denial, EngineState, PendingGate, PluginRun } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs } from './run-log-store.js'
 import type { RefusalReason, RunLog } from '../schemas/run-log.js'
-import type { SkillResult, StoredOutputRecord } from '../schemas/skill-result.js'
+import type { SkillResult, StoredOutputRecord, StoredSkillResult } from '../schemas/skill-result.js'
 import {
   emitBoardEvent,
   makeEvent,
@@ -1164,6 +1164,10 @@ function sweepExpiredApprovals(
  * producer, so a reader can still tell "produced, content erased" from "never
  * produced". The binding that named the run is
  * swept by the next call, unless its fire was left marked and unconfirmed.
+ * Whichever write erases it
+ * also erases the copy an applied gate of that producer holds of those bytes,
+ * with the same stamps (`eraseGateCopies`). A gate still pending keeps its
+ * copy: the operator has not answered it.
  *
  * **When.** Only when a closed approval for THIS producer binds the record,
  * and no open approval for it still binds it. An approval binds the record
@@ -1211,8 +1215,10 @@ function sweepExpiredApprovals(
  * **What it does not reach, named plainly.** A `path` Output: the runtime holds
  * no bytes for it, and `approve --content` refuses such Outputs. A home whose
  * bindings an earlier build swept: nothing records which Output was approved,
- * and the producer's next Output replaces it. Content copied into a parked
- * gate's `plugin_result`. And a plugin's own `summary` text.
+ * and the producer's next Output replaces it.
+ * The copy a gate still pending holds, and anything an applied gate holds that
+ * this has not released: its other Outputs, and bytes the producer has since
+ * replaced without gating again. And a plugin's own `summary` text.
  *
  * It reads no clock. The stamp comes from `now`, which is `approvalNow` in an
  * advance and the command's one clock read in a withdrawal, and it reads the
@@ -1222,12 +1228,13 @@ function sweepExpiredApprovals(
  */
 function eraseReleasedContent(
   pluginRuns: EngineState['plugin_runs'],
+  pendingGates: PendingGate[],
   approvals: EngineState['approvals'],
   manifests: ReadonlyMap<string, PluginManifest>,
   now: number,
 ): void {
   for (const plugin of Object.keys(pluginRuns)) {
-    eraseIfReleased(pluginRuns, plugin, approvals, manifests, now)
+    eraseIfReleased(pluginRuns, pendingGates, plugin, approvals, manifests, now)
   }
 }
 
@@ -1281,9 +1288,14 @@ function bindsHeldContent(
  * `approve --content --remove` calls it once for the producer whose binding it
  * withdrew, and a re-approve calls it once for the producer of the record it
  * replaced. See `eraseReleasedContent` for when it erases and why.
+ *
+ * It takes `pendingGates` as a required parameter, so a caller cannot release
+ * content and leave an applied gate's copy of it behind: one that forgot would
+ * not compile.
  */
 export function eraseIfReleased(
   pluginRuns: EngineState['plugin_runs'],
+  pendingGates: PendingGate[],
   plugin: string,
   approvals: EngineState['approvals'],
   manifests: ReadonlyMap<string, PluginManifest>,
@@ -1307,6 +1319,49 @@ export function eraseIfReleased(
   pluginRuns[plugin] = {
     ...run,
     last_output: { ...rest, erased_at: new Date(now).toISOString(), body_sha256: sha256(body) },
+  }
+  eraseGateCopies(pendingGates, plugin, sha256(body), now)
+}
+
+/**
+ * Erase the copy an applied gate holds of content the release rule has erased.
+ *
+ * An applied gate is a spent marker. Its readers (`approve`, `deny`, and
+ * `applyPendingGate`'s early return) need its `run_id` and `applied_at`, never
+ * its Outputs, so the bytes it recorded can go once they are released. A gate
+ * still pending keeps its copy, because it is the operator's open question and
+ * those bytes are what they would be answering.
+ *
+ * The match is by bytes, not by run: an inline Output whose body hashes to
+ * `bodySha256` is erased, so a same-bytes copy in another applied gate of this
+ * producer goes too. An Output with other bytes stays, because nothing released
+ * it.
+ *
+ * It rebuilds the gate and its Outputs rather than mutating them. After an
+ * in-process apply, `last_output` and the gate's last Output are one object, and
+ * mutating it would erase `last_output` outside the release rule. The erased
+ * record uses the stored schema's key order, the same as `eraseIfReleased`.
+ *
+ * It reads no clock and no window. The stamp comes from `now`, which is the
+ * caller's.
+ */
+function eraseGateCopies(pendingGates: PendingGate[], plugin: string, bodySha256: string, now: number): void {
+  for (let i = 0; i < pendingGates.length; i++) {
+    const gate = pendingGates[i]!
+    if (gate.plugin !== plugin || gate.applied_at === null) continue
+    const holds = (o: StoredOutputRecord): boolean => o.body !== undefined && sha256(o.body) === bodySha256
+    if (!gate.plugin_result.artifacts_produced.some(holds)) continue
+    pendingGates[i] = {
+      ...gate,
+      plugin_result: {
+        ...gate.plugin_result,
+        artifacts_produced: gate.plugin_result.artifacts_produced.map((o) => {
+          if (!holds(o)) return o
+          const { body: _erased, ...rest } = o
+          return { ...rest, erased_at: new Date(now).toISOString(), body_sha256: bodySha256 }
+        }),
+      },
+    }
   }
 }
 
@@ -3188,6 +3243,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // result was ACCEPTED, a parked gate from when the run PRODUCED it, which is
     // the clock `applyPendingGate` already expires against.
     //
+    // A marker's copy of content that erasure has released does not wait for the
+    // ceiling: the write that releases the content erases it (`eraseGateCopies`).
+    //
     // A gate missing `run_completed_at` does not survive. Such a gate is refused
     // at apply time anyway ("carries no record of when its run happened"), so
     // keeping it would only park something that can never be answered.
@@ -3253,8 +3311,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // sweep reads. It has to run before the sweep: the sweep drops the closed
     // bindings the erasure matches, by run or by fingerprint, and after it
     // there would be nothing left to say which content was released. It writes
-    // only `plugin_runs` entries, which this process owns in memory, so the
-    // floor rule above does not apply to it.
+    // `plugin_runs` entries and the copies applied gates hold in `pending_gates`,
+    // both this advance's own in-memory state, so the floor rule above does not
+    // apply to it.
     //
     // **No `catch` around this write, and that is load-bearing.** A spend mark
     // that failed on storage (`mark_unavailable`, `mark_uncertain`) exits `0`
@@ -3284,7 +3343,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           updatedState.plugin_runs[plugin] = { ...run, last_output: onDisk }
         }
       }
-      eraseReleasedContent(updatedState.plugin_runs, merged, plugins, approvalNow)
+      eraseReleasedContent(updatedState.plugin_runs, updatedState.pending_gates, merged, plugins, approvalNow)
       updatedState.approvals = sweepExpiredApprovals(merged, updatedState.plugin_runs, plugins, approvalNow)
       await writeEngineState(updatedState as EngineState, stateDir)
       // The home's layout version, stamped beside the document it describes and
@@ -3952,7 +4011,7 @@ export async function applyPendingGate(
  * order the handler produced them.
  */
 function lastOutputOf(
-  result: SkillResult | null,
+  result: StoredSkillResult | null,
   prior: PluginRun | undefined,
 ): { last_output?: StoredOutputRecord } {
   // `null` is the third caller: an invocation that threw has no result at all,
