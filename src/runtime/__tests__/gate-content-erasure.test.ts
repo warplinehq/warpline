@@ -656,3 +656,37 @@ export async function handler() {
   expect(gate.run_id).toBe(pending.run_id)
   expect(gate.applied_at).toBe(await readFile(stampPath, 'utf-8'))
 })
+
+test('an apply that lands mid-advance leaves a gate the producer parked in that advance pending', async () => {
+  // `ttl_hours: 1`, unlike most of this file: the producer has to run again in
+  // the advance and park a fresh gate, so the advance holds that gate and not
+  // the one the apply answers. Written before the first advance, so the
+  // manifest is never served from the module cache.
+  await writePlugin(
+    'prod',
+    manifest('prod', { ttl_hours: 1 }),
+    `
+export async function handler() {
+  return { status: 'success', phases_completed: ['prod'], phases_failed: [], errors: [],
+    data_freshness: {}, summary: 'prod produced', schema_version: 1,
+    artifacts_produced: [{ type: 'brief', format: 'text', body: 'approved-content:' + process.env.WARPLINE_GATE_ERASURE_SENTINEL }] }
+}
+`,
+  )
+  await advance()
+  const pending = gateOf(await stored(), 'prod')
+  expect(pending.applied_at).toBeNull()
+
+  const stampPath = await installMidAdvanceApply(false)
+  await advance(Date.now() + 2 * HOUR)
+  const s = await stored()
+  // The apply landed on the older gate.
+  expect(await readFile(stampPath, 'utf-8')).not.toBe('')
+  // The fresh gate stays the open question, and the entry stays its park's.
+  expect(s.pending_gates.filter((g) => g.plugin === 'prod').length).toBe(1)
+  const gate = gateOf(s, 'prod')
+  expect(gate.run_id).not.toBe(pending.run_id)
+  expect(gate.applied_at).toBeNull()
+  expect(s.plugin_runs.prod?.status).toBe('gated')
+  expect(s.plugin_runs.prod?.last_run_at).toBe(gate.run_completed_at!)
+})
