@@ -377,3 +377,77 @@ export async function handler() {
   expect(await copies()).toBe(0)
   expect(await filesHolding(home.root, sentinel)).toEqual([])
 })
+
+test('applying a gate after its content was erased keeps it erased, and the gate holds no copy', async () => {
+  await advance()
+  expect(await cli(['sender', '--content', '--not-after', wallClockUtc(Date.now() + HOUR)])).toBe(0)
+  await advance(Date.now() + 2 * HOUR)
+  const before = await stored()
+  const erased = lastOutputOf(before, 'prod')
+  expect('body' in erased).toBe(false)
+  expect(typeof erased.erased_at).toBe('string')
+  // Non-vacuity: the gate is still pending and still holds the bytes.
+  expect(gateOf(before, 'prod').applied_at).toBeNull()
+  expect(lastOutputOfGate(gateOf(before, 'prod')).body).toBe(sentinel)
+
+  expect(await cli(['prod'])).toBe(0)
+  const s = await stored()
+  expect(lastOutputOf(s, 'prod')).toEqual(erased)
+  const gate = gateOf(s, 'prod')
+  expect(gate.applied_at).not.toBeNull()
+  const gateOut = lastOutputOfGate(gate)
+  expect('body' in gateOut).toBe(false)
+  expect(typeof gateOut.erased_at).toBe('string')
+  expect(gateOut.body_sha256).toBe(erased.body_sha256)
+  expect(await filesHolding(home.root, sentinel)).toEqual([])
+
+  // The binding that released it is swept, so nothing would erase it again.
+  await advance(Date.now() + 2 * HOUR)
+  expect(await filesHolding(home.root, sentinel)).toEqual([])
+  expect(lastOutputOf(await stored(), 'prod')).toEqual(erased)
+})
+
+test('an overlapping erasure is not undone by this advance writing its gate copy back', async () => {
+  await advance()
+  expect(await cli(['prod'])).toBe(0)
+  expect(await cli(['sender', '--content', '--not-after', wallClockUtc(Date.now() + HOUR)])).toBe(0)
+
+  // Stands in for another advance whose end-of-run write lands while this one
+  // is mid-run: it erases prod's body and sweeps the binding. Installed only
+  // now, so it runs on the next advance and never before. It hashes the body it
+  // reads, so its source never carries the sentinel.
+  const stamp = '2026-09-23T00:00:00.000Z'
+  await writePlugin(
+    'interloper',
+    manifest('interloper', { ttl_hours: 1 }),
+    `
+import { readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+export async function handler() {
+  const p = ${JSON.stringify(statePath)}
+  const doc = JSON.parse(readFileSync(p, 'utf-8'))
+  const { body, ...rest } = doc.plugin_runs.prod.last_output
+  doc.plugin_runs.prod.last_output = { ...rest, erased_at: ${JSON.stringify(stamp)},
+    body_sha256: createHash('sha256').update(body).digest('hex') }
+  doc.approvals = {}
+  writeFileSync(p, JSON.stringify(doc))
+  return { status: 'success', phases_completed: ['interloper'], phases_failed: [], errors: [],
+    data_freshness: {}, summary: 'interloper ran', schema_version: 1, artifacts_produced: [] }
+}
+`,
+  )
+
+  await advance(Date.now() + 2 * HOUR)
+  expect(await filesHolding(home.root, sentinel)).toEqual([])
+  const s = await stored()
+  const last = lastOutputOf(s, 'prod')
+  expect('body' in last).toBe(false)
+  // The overlapping write's record, kept by the one-way rule.
+  expect(last.erased_at).toBe(stamp)
+  expect(last.body_sha256).toBe(sha256Hex(sentinel))
+  const gate = gateOf(s, 'prod')
+  expect(gate.applied_at).not.toBeNull()
+  const gateOut = lastOutputOfGate(gate)
+  expect('body' in gateOut).toBe(false)
+  expect(gateOut.body_sha256).toBe(sha256Hex(sentinel))
+})

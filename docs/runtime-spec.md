@@ -1705,7 +1705,11 @@ does, in order, all decided before anything is written:
 4. **Otherwise applied.** The `gated` `plugin_runs` entry is overwritten in
    place: `last_run_at` stays at `run_completed_at`, the status becomes the
    result's real terminal status, and `last_output` carries the Output the run
-   already produced. `applied_at` is stamped on the gate.
+   already produced. `applied_at` is stamped on the gate. If that Output's
+   content was erased while the gate was pending,
+   the erased record stays, because erasure is one-way
+   and the binding that released it is gone. The same write erases the gate's
+   copy of those bytes.
 
 On either refusal the plugin's `plugin_runs` entry is deleted, which leaves it
 due on the next advance. The parked result was never accepted, so there is no
@@ -2131,6 +2135,8 @@ does **not** erase:
 - the copy a gate still pending holds in `pending_gates[].plugin_result`.
   The operator has not answered it yet, and it has its own lifetime
   (§ `pending_gates`).
+  Applying it after its content was erased keeps the Output erased
+  and erases that copy (§ "Applying a gate", step 4).
 - anything an applied gate holds that erasure has not released: its other
   Outputs, which no approval binds because a content approval binds only the
   producer's last Output, and
@@ -2327,7 +2333,9 @@ What each write records is the run's own most recent Output when the run
 produced one, and otherwise the pointer the entry already held. The field is a
 fact about the PLUGIN — the most recent Output it produced — not about its last
 run, so a run that produced nothing has said nothing about it and does not
-clear it.
+clear it. One write keeps an erased record instead: applying a gate whose run's
+Output was erased while it was pending (§ "Applying a gate", step 4). Erasure is
+one-way.
 
 **Status-blind.** What survives is keyed on the run producing no Output, never
 on how the run ended. A run that threw, a run that returned `failed`, and a run
@@ -2766,6 +2774,8 @@ may have erased that body and swept the binding that released it, so the merge
 drops this advance's copy of the binding as well, and a body written back would
 have nothing left to erase it. The rest of `plugin_runs` is still the advance's
 own in-memory state.
+It erases the copy an applied gate of that producer holds of the same bytes too,
+because this advance's `pending_gates` was read before that erasure as well.
 
 **Which file each writer writes, since this has been recorded wrongly before.**
 The `deny` verb and the board write the engine state document, under the state

@@ -1344,6 +1344,12 @@ export function eraseIfReleased(
  *
  * It reads no clock and no window. The stamp comes from `now`, which is the
  * caller's.
+ *
+ * It has three callers. The release write, `eraseIfReleased`, erases the copy
+ * with the content. `applyPendingGate` erases it when it applies a gate whose
+ * run's content was already erased while the gate was pending. The end-of-run
+ * reconcile in `runAdvance` erases it when it keeps an erased record another
+ * write left on disk.
  */
 function eraseGateCopies(pendingGates: PendingGate[], plugin: string, bodySha256: string, now: number): void {
   for (let i = 0; i < pendingGates.length; i++) {
@@ -3329,6 +3335,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // so the merge above drops this advance's copy of that binding too.
       // Written back, the body would have nothing left to erase it again. So
       // an erased record on disk for the same run wins over the in-memory body.
+      // This advance's copy of `pending_gates` was read before that write too,
+      // so an applied gate's copy of the same bytes is erased here as well.
       for (const [plugin, run] of Object.entries(updatedState.plugin_runs)) {
         const onDisk = Object.hasOwn(disk.plugin_runs, plugin)
           ? disk.plugin_runs[plugin]!.last_output
@@ -3341,6 +3349,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           mine.run_id === onDisk.run_id
         ) {
           updatedState.plugin_runs[plugin] = { ...run, last_output: onDisk }
+          eraseGateCopies(updatedState.pending_gates, plugin, onDisk.body_sha256!, approvalNow)
         }
       }
       eraseReleasedContent(updatedState.plugin_runs, updatedState.pending_gates, merged, plugins, approvalNow)
@@ -3775,6 +3784,14 @@ export function findPendingGate(state: EngineState, plugin: string): PendingGate
  * under the normal guard chain — a CLI command that ran them would have
  * bypassed every gate that chain applies.
  *
+ * **Erased content stays erased.** A gate can still be pending when an approval
+ * that bound its run's Output closes and that Output's content is erased.
+ * Applying it then keeps the erased record rather than writing the gate's body
+ * back, because nothing would be left to erase it again: the binding that
+ * released it is swept. The same write erases the gate's copy
+ * (`eraseGateCopies`), so the marker it becomes holds no bytes. The end-of-run
+ * reconcile in `runAdvance` keeps an erased record by the same rule.
+ *
  * `opts.manifests` is required rather than optional, and the whole `opts`
  * default is gone with it. The discard's carve-out below asks
  * `bindingStanding` whether an outstanding content approval is bound to this
@@ -3951,15 +3968,24 @@ export async function applyPendingGate(
   // carried through the park — this site reads what is there and carries it one
   // step further, rather than reconstructing it.
   const priorApprovedEntry = state.plugin_runs[gate.plugin]
+  const priorOut = priorApprovedEntry?.last_output
+  const keptErased = priorOut?.erased_at !== undefined && priorOut.run_id === gate.run_id ? priorOut : undefined
   state.plugin_runs[gate.plugin] = {
     last_run_at: completedAt,
     status: gate.plugin_result.status,
     duration_ms: Math.max(0, new Date(completedAt).getTime() - startedMs),
-    ...lastOutputOf(gate.plugin_result, priorApprovedEntry),
+    // An erased record for this run stays erased. See the docstring.
+    ...(keptErased !== undefined
+      ? { last_output: keptErased }
+      : lastOutputOf(gate.plugin_result, priorApprovedEntry)),
   }
   // Marked, not deleted. A deleted gate is an invisible one, and the next
   // `approve` would fall through to the Grant path instead of refusing.
   gate.applied_at = new Date(now).toISOString()
+  // After the stamp, because the helper acts only on an applied gate.
+  if (keptErased !== undefined) {
+    eraseGateCopies(state.pending_gates, gate.plugin, keptErased.body_sha256!, now)
+  }
   await writeEngineState(state, opts.statePath)
 
   return {
