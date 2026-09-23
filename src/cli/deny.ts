@@ -293,8 +293,10 @@ const denied_at = new Date().toISOString()
       // had already declined, in answer to a question they thought they were
       // re-opening.
       //
-      // Nothing durable is lost: the run artifact holds the full SkillResult
-      // (`RunLog.result`). The gate is the review queue, not the record.
+      // Nothing a reader depends on is lost. Whatever the park wrote to
+      // `plugin_runs[plugin]` stays, `last_output` included, and
+      // the run log keeps a summary of the run, never its result.
+      // The gate is the review queue, not the record.
       //
       // Only a LIVE gate. A marker is the trace of a result the operator
       // ACCEPTED, and a denial recorded later answers the standing proposal

@@ -1811,8 +1811,10 @@ asking. The only path that ever reached it was `deny --remove`, which would hand
 back a stale result the operator had already declined, in answer to a question
 they believed they were re-opening.
 
-Nothing durable is lost. The run artifact holds the full `SkillResult` in
-`RunLog.result`; `pending_gates` is the review queue, not the record.
+Nothing a reader depends on is lost. Whatever the park wrote to
+`plugin_runs[plugin]` stays, `last_output` included, and
+the run log keeps a summary of the run, never its result.
+`pending_gates` is the review queue, not the record.
 
 An **applied marker** is left alone. It is the trace of a result the operator
 accepted, and it is the only thing stopping a second `approve` from re-recording
@@ -1916,8 +1918,8 @@ The Outputs hashed are the ones in `plugin_runs[plugin].last_output`, not the
 ones in a parked gate. A gate now outlives the advance that parked it, so the
 original reason — that one would vanish a day later — no longer holds as
 stated; the choice does. A gate is still the shorter-lived record of the two:
-it is discarded on apply, on denial, when superseded, and at the ceiling, while
-`plugin_runs` outlives all four. Binding an answer to the longer-lived record is
+it is marked spent on apply, and discarded on denial, when superseded, and at
+the ceiling, while `plugin_runs` outlives all four. Binding an answer to the longer-lived record is
 what keeps a denial from expiring for a reason the operator never sees. The narrowing that buys: `last_output` is the last Output of the
 run, so a change confined to an earlier Output of a multi-Output result does not
 re-raise.

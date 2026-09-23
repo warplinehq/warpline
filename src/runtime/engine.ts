@@ -435,9 +435,9 @@ export function denialFingerprint(
  * A gate now outlives the advance that parked it, up to the gate ceiling, so
  * the original argument — that a fingerprint drawn on one would change the day
  * after it was recorded — no longer holds as stated. The choice does. A gate is
- * still the shorter-lived object of the two: it is discarded on apply, on
- * denial, when superseded, and at the ceiling, while `plugin_runs` outlives all
- * four. Binding an answer to the longer-lived record is what keeps a denial
+ * still the shorter-lived object of the two: it is marked spent on apply, and
+ * discarded on denial, when superseded, and at the ceiling, while `plugin_runs`
+ * outlives all four. Binding an answer to the longer-lived record is what keeps a denial
  * from expiring for a reason the operator never sees.
  *
  * The narrowing that buys: `last_output` is the LAST Output of the run
