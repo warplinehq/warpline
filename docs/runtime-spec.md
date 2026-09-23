@@ -2022,9 +2022,11 @@ This is the last of three steps in one deletion policy. All three read the
    its manifest failed to load, or its `side_effects` changed before the
    window closes, content bound only by fingerprint is not erased, and stays
    until the producer's next Output replaces it, for as long as that condition
-   lasts. Should the manifest load again while a closed binding still matches
-   the body by fingerprint, that binding releases it then, and this step erases
-   the body before any new Output. A `run_id` is the advance's
+   lasts. Should the manifest load again, or its `side_effects` change back,
+   while a closed binding still matches the body by fingerprint, that binding
+   releases it then. This step erases the body at that advance's end-of-run
+   write, unless the producer's own Output in that advance has already replaced
+   it with different bytes. A `run_id` is the advance's
    id, shared by every plugin that ran in that advance, so
    an approval for another producer neither holds nor releases this content: it
    never reads these bytes. Withdrawing an approval with `approve --content --remove`, or

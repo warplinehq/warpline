@@ -1111,12 +1111,12 @@ function mergeApprovals(
  * producer uninstalled, its manifest failing to load, or its `side_effects`
  * changed,
  * a closed binding kept only by fingerprint no longer binds, so this drops it.
- * The content clause holds only while that condition lasts: content bound
- * only by fingerprint is not erased while nothing can match it, and stays
- * until the producer's next Output replaces it for as long as that is true.
- * Should the manifest load again while a closed binding still matches the body
- * by fingerprint, that binding releases it then, and the erasure that runs
- * just before this takes the body before any new Output. Runtime-spec § 10,
+ * While nothing can match it, content bound only by fingerprint is not erased,
+ * and it stays until the producer's next Output replaces it. Once a closed
+ * binding matches it again, because the manifest loads again or its
+ * `side_effects` change back, the erasure that runs just before this releases
+ * it at that write. The exception is an Output from the same advance that has
+ * already replaced it with different bytes. Runtime-spec § 10,
  * step 2, states the limit as `side_effects` "changed before the window
  * closes".
  *
