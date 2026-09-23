@@ -41,27 +41,23 @@
  * `llm_handoff: true`. The undeclared cases below are the other side of that:
  * the runtime refuses the handoff, so the run is recorded `failed`, it
  * publishes no Output, and the gate stops the consumer.
+ *
+ * The supervised cases at the end hold the same under supervision, in both
+ * homes: the default `review_gate: true` and a manifest declaring
+ * `autonomy_level: 'supervised'`. A failed result, the refusal included, is
+ * recorded `failed` and is not parked, so nobody is asked to approve a run
+ * that did nothing. Each case first checks that supervision engaged at all,
+ * because without it every other assertion would pass for the wrong reason.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { _setHome } from '../../lib/paths.js'
 import { createTwoAdvanceHome, type TwoAdvanceHome } from './helpers/two-advance-home.js'
+import { advanceExitCode } from '../exit-codes.js'
 
-describe('the persisted run status is the status the run reached', () => {
-  let home: TwoAdvanceHome
-
-  beforeEach(async () => {
-    home = await createTwoAdvanceHome()
-  })
-
-  afterEach(async () => {
-    _setHome(null)
-    await home.cleanup()
-  })
-
-  /** Reads `lastRun` and serialises it, so the assertion can be on what the CONSUMER saw. */
-  const consumer = `
+/** Reads `lastRun` and serialises it, so the assertion can be on what the CONSUMER saw. */
+const consumer = `
 export async function handler(manifest, args, signal, capabilities) {
   return {
     status: 'success',
@@ -76,25 +72,20 @@ export async function handler(manifest, args, signal, capabilities) {
 }
 `
 
-  async function consumerSaw(runLogPath: string) {
-    const entry = await home.entryFor(runLogPath, 'consumer')
-    return entry ? (JSON.parse(entry.result_summary) as { ran: unknown }) : null
-  }
-
-  /**
-   * Produces on advance 1; hands off on advance 2 once the marker exists.
-   * `prefix` is the older summary-prefix arm, `field` the structured one.
-   */
-  function handoffProducer(arm: 'prefix' | 'field'): string {
-    const handoff =
-      arm === 'prefix'
-        ? `summary: '[needs-llm] summarise the brief',`
-        : `summary: 'summarise the brief',
+/**
+ * Produces on advance 1; hands off on advance 2 once the marker exists.
+ * `prefix` is the older summary-prefix arm, `field` the structured one.
+ */
+function handoffProducer(arm: 'prefix' | 'field', marker: string): string {
+  const handoff =
+    arm === 'prefix'
+      ? `summary: '[needs-llm] summarise the brief',`
+      : `summary: 'summarise the brief',
       needs_llm: { task: 'Summarise the brief', context_path: 'state/brief.json' },`
-    return `
+  return `
 import { existsSync } from 'node:fs'
 export async function handler(manifest, args, signal, capabilities) {
-  if (existsSync(${JSON.stringify(home.marker)})) {
+  if (existsSync(${JSON.stringify(marker)})) {
     return {
       status: 'skipped',
       phases_completed: [],
@@ -118,13 +109,30 @@ export async function handler(manifest, args, signal, capabilities) {
   }
 }
 `
+}
+
+describe('the persisted run status is the status the run reached', () => {
+  let home: TwoAdvanceHome
+
+  beforeEach(async () => {
+    home = await createTwoAdvanceHome()
+  })
+
+  afterEach(async () => {
+    _setHome(null)
+    await home.cleanup()
+  })
+
+  async function consumerSaw(runLogPath: string) {
+    const entry = await home.entryFor(runLogPath, 'consumer')
+    return entry ? (JSON.parse(entry.result_summary) as { ran: unknown }) : null
   }
 
   test('a [needs-llm] handoff is recorded as skipped, not as success', async () => {
     await home.writePlugin('prod', {
       outputs: { brief: {} },
       llmHandoff: true,
-      handlerBody: handoffProducer('prefix'),
+      handlerBody: handoffProducer('prefix', home.marker),
     })
     await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: consumer })
 
@@ -146,7 +154,7 @@ export async function handler(manifest, args, signal, capabilities) {
   for (const arm of ['field', 'prefix'] as const) {
     test(`an undeclared ${arm} handoff is recorded as failed, and the prior output carries forward`, async () => {
       // No `llmHandoff`: the manifest says nothing, which is undeclared.
-      await home.writePlugin('prod', { outputs: { brief: {} }, handlerBody: handoffProducer(arm) })
+      await home.writePlugin('prod', { outputs: { brief: {} }, handlerBody: handoffProducer(arm, home.marker) })
       await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: consumer })
 
       await home.advance()
@@ -213,5 +221,122 @@ export async function handler(manifest, args, signal, capabilities) {
     expect(consumerEntry).not.toBeNull()
     expect(consumerEntry!.status).toBe('skipped')
     expect(consumerEntry!.result_summary).toContain("'prod'")
+  })
+})
+
+for (const supervision of ['review_gate', 'supervised'] as const) {
+  describe(`under supervision (${supervision}), a failed result is recorded failed and never parked`, () => {
+    let home: TwoAdvanceHome
+    const autonomyLevel = supervision === 'supervised' ? 'supervised' : 'autonomous'
+
+    beforeEach(async () => {
+      // The review_gate home writes `<root>/state/preferences.json`, the file
+      // `runAdvance` reads when it is given a `stateDir`.
+      home = await createTwoAdvanceHome(
+        supervision === 'review_gate' ? { preferences: { review_gate: true } } : {},
+      )
+    })
+
+    afterEach(async () => {
+      _setHome(null)
+      await home.cleanup()
+    })
+
+    for (const arm of ['field', 'prefix', 'returned'] as const) {
+      test(`[${supervision}] a ${arm === 'returned' ? 'returned failed result' : `refused ${arm} handoff`} is recorded failed, not gated`, async () => {
+        await home.writePlugin('prod', {
+          outputs: { brief: {} },
+          autonomyLevel,
+          handlerBody: arm === 'returned' ? home.producer('failed') : handoffProducer(arm, home.marker),
+        })
+        await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: consumer })
+
+        const r1 = await home.advance()
+        // CONTROL: supervision engaged, so advance 1's success was parked.
+        // Without it every assertion below could pass for the wrong reason: an
+        // autonomous plugin already records a failed result as failed.
+        expect(r1.gated_plugins).toEqual(['prod'])
+
+        await home.setMarker()
+        const r2 = await home.advance()
+
+        const summary = arm === 'returned' ? 'prod returned failed' : 'prod: undeclared handoff'
+        const prodEntry = await home.entryFor(r2.run_log_path, 'prod')
+        expect(prodEntry).not.toBeNull()
+        expect(prodEntry!.status).toBe('failed')
+        expect(prodEntry!.result_summary).toBe(summary)
+
+        const entry = (await home.persistedRun('prod')) as Record<string, unknown>
+        expect(entry.status).toBe('failed')
+        expect(entry.last_output).toMatchObject({ type: 'brief', body: '{"advance":1}' })
+
+        expect(r2.gated_plugins).toEqual([])
+        const state = JSON.parse(await readFile(home.statePath, 'utf-8')) as {
+          pending_gates: { run_id: string }[]
+          plugin_runs: Record<string, { status: string }>
+        }
+        // Nothing parked BY this run. Advance 1's gate may still be live.
+        expect(state.pending_gates.filter((g) => g.run_id === r2.run_id)).toEqual([])
+
+        const events = (await readFile(home.eventsPath, 'utf-8'))
+          .split('\n')
+          .filter((line) => line.trim() !== '')
+          .map((line) => JSON.parse(line) as { type: string; source: string; run_id: string | null; summary: string })
+          .filter((e) => e.source === 'prod' && e.run_id === r2.run_id)
+        expect(events.filter((e) => e.type === 'error').map((e) => e.summary)).toEqual([`prod: ${summary}`])
+        expect(events.filter((e) => e.type === 'plugin_result').map((e) => e.summary)).toEqual(['prod: started'])
+
+        expect(advanceExitCode(r2)).toBe(1)
+        const deadMan = JSON.parse(await readFile(join(dirname(home.statePath), 'last-successful-advance'), 'utf-8'))
+        expect(deadMan).toMatchObject({ gated: 0, failed: 1 })
+
+        const consumerEntry = await home.entryFor(r2.run_log_path, 'consumer')
+        expect(consumerEntry).not.toBeNull()
+        expect(consumerEntry!.status).toBe('skipped')
+
+        // Negative guarantee, not a red-first guard: neither the run log nor
+        // plugin_runs has a `delegated` member, so this cannot fail today.
+        const log = JSON.parse(await readFile(r2.run_log_path, 'utf-8')) as { plugin_entries: { status: string }[] }
+        expect(log.plugin_entries.map((e) => e.status)).not.toContain('delegated')
+        expect(Object.values(state.plugin_runs).map((r) => r.status)).not.toContain('delegated')
+      })
+    }
+  })
+}
+
+describe('a supervised dry run', () => {
+  let home: TwoAdvanceHome
+
+  beforeEach(async () => {
+    home = await createTwoAdvanceHome()
+  })
+
+  afterEach(async () => {
+    _setHome(null)
+    await home.cleanup()
+  })
+
+  test('a supervised dry run that succeeds reports it would pause', async () => {
+    // CONTROL: the same fixture as the case below, without the marker, so the
+    // handler succeeds. It proves this fixture reaches the supervised dry-run
+    // arm, which a plugin declaring a side effect never does.
+    await home.writePlugin('prod', { outputs: { brief: {} }, autonomyLevel: 'supervised', handlerBody: home.producer('failed') })
+    const r = await home.advance(undefined, { dryRun: true })
+    const prodEntry = await home.entryFor(r.run_log_path, 'prod')
+    expect(prodEntry).not.toBeNull()
+    expect(prodEntry!.status).toBe('completed')
+    expect(prodEntry!.result_summary).toBe('[dry-run] would pause here: prod produced')
+    expect(await home.persistedRun('prod')).toBeUndefined()
+  })
+
+  test('a supervised dry run that fails is recorded failed, not reported as a pause', async () => {
+    await home.writePlugin('prod', { outputs: { brief: {} }, autonomyLevel: 'supervised', handlerBody: home.producer('failed') })
+    await home.setMarker()
+    const r = await home.advance(undefined, { dryRun: true })
+    const prodEntry = await home.entryFor(r.run_log_path, 'prod')
+    expect(prodEntry).not.toBeNull()
+    expect(prodEntry!.status).toBe('failed')
+    expect(prodEntry!.result_summary).toBe('prod returned failed')
+    expect(((await home.persistedRun('prod')) as Record<string, unknown>).status).toBe('failed')
   })
 })

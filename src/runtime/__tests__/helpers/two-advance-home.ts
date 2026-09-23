@@ -31,10 +31,16 @@
  * `llmHandoff` was added when a handoff started needing a declaration. It
  * defaults to what a manifest that never heard of the field means, which is
  * undeclared, so a fixture that hands off has to say so.
+ *
+ * `preferences`, `autonomyLevel` and `advance`'s `dryRun` were added for the
+ * supervised cases, which need the review gate on or a manifest declaring
+ * supervised, and a dry run through the same home. Each defaults to what the
+ * fixture did before them.
  */
 import { mkdir, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { createTestHome, type TestHome } from './create-test-home.js'
+import type { AdvanceResult } from '../../engine.js'
 
 /** What the producer does once the marker exists. */
 export type ProducerMode = 'throw' | 'failed' | 'success-with-nothing'
@@ -73,6 +79,8 @@ export interface TwoAdvanceHome {
        * handing-off fixture must say so explicitly or the runtime refuses it.
        */
       llmHandoff?: boolean
+      /** The manifest's `autonomy_level`. `autonomous` by default. */
+      autonomyLevel?: 'autonomous' | 'supervised'
       handlerBody: string
     },
   ): Promise<void>
@@ -99,8 +107,8 @@ export interface TwoAdvanceHome {
    * not silently move every plugin behind the `min_tier` gate.
    */
   seedState(extra: Record<string, unknown>): Promise<void>
-  /** `now` is passed to `runAdvance` only when given. */
-  advance(now?: number): Promise<{ run_log_path: string; run_id: string }>
+  /** `now` and `dryRun` are passed to `runAdvance` only when given. */
+  advance(now?: number, opts?: { dryRun?: boolean }): Promise<AdvanceResult>
   /** One plugin's row in a persisted run log, or `null` when it did not run. */
   entryFor(runLogPath: string, plugin: string): Promise<RunLogEntry | null>
   /** One plugin's persisted `plugin_runs` entry, straight from the state file. */
@@ -108,8 +116,10 @@ export interface TwoAdvanceHome {
   cleanup(): Promise<void>
 }
 
-export async function createTwoAdvanceHome(): Promise<TwoAdvanceHome> {
-  const ctx: TestHome = await createTestHome()
+export async function createTwoAdvanceHome(
+  opts: { preferences?: Record<string, unknown> } = {},
+): Promise<TwoAdvanceHome> {
+  const ctx: TestHome = await createTestHome({ preferences: opts.preferences })
   const pluginsDir = ctx.pluginsDir
   const statePath = join(ctx.stateDir, 'engine-state.json')
   // Redirected deliberately: runAdvance's eventsPath DEFAULTS to the real
@@ -148,7 +158,7 @@ export async function createTwoAdvanceHome(): Promise<TwoAdvanceHome> {
         ),
         capabilities: [],
         schedule: 'on_run',
-        autonomy_level: 'autonomous',
+        autonomy_level: opts.autonomyLevel ?? 'autonomous',
         side_effects: opts.sideEffects ?? [],
         llm_handoff: opts.llmHandoff ?? false,
         // Near-zero, so the second advance finds every plugin due again. A TTL
@@ -235,7 +245,7 @@ export async function handler(manifest, args, signal, capabilities) {
       )
     },
 
-    async advance(now) {
+    async advance(now, opts) {
       const { runAdvance } = await import('../../engine.js')
       return runAdvance({
         pluginsDir,
@@ -248,6 +258,7 @@ export async function handler(manifest, args, signal, capabilities) {
         // ambient environment instead of a fact about the fixture.
         approvalPath: join(ctx.root, '.session-approval'),
         ...(now === undefined ? {} : { now }),
+        ...(opts?.dryRun === true ? { dryRun: true } : {}),
       })
     },
 
