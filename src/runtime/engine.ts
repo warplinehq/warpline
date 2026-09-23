@@ -3281,8 +3281,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // kept: the applied gate, if this advance still holds it as pending, and
     // that run's `plugin_runs` entry while it is still the parked one. An
     // erased `last_output` is kept over this advance's
-    // body for the same run. Erased bytes in an applied gate's copy are never
-    // written back with a body.
+    // body for the same run. Erased bytes in an applied gate's copy are not
+    // written back with a body while the fresh read still holds that gate.
+    // An applied gate an overlapping advance dropped, after this advance's run
+    // lock was healed by its two-hour TTL, is written back as this advance read
+    // it, body included, and so is its `last_output`.
     // An erased `last_output` of another run is still written over, and a gate
     // another writer discarded mid-advance is still written back.
     // Closing the general case is a change of its own.

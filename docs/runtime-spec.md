@@ -2769,7 +2769,7 @@ several machines, so a `warpline approve --content` lands at an instant the
 advance cannot predict.
 
 **One `plugin_runs` field is reconciled too, and only in one direction.** Erased
-content must stay erased. If the fresh read inside the end-of-run lock shows a
+content stays erased as far as the fresh read still shows it erased. If the fresh read inside the end-of-run lock shows a
 producer's `last_output` erased, and this advance's in-memory copy still holds a
 body for the same `run_id`, the erased record is written. An overlapping advance
 may have erased that body and swept the binding that released it, so the merge
@@ -2813,7 +2813,11 @@ where an apply before the advance would have kept it until its own ceiling.
 A later `approve <plugin>` then grants without the note that the result was
 already applied. When the plugin parked a newer one, the newer park's `gated`
 entry stays. An erased `last_output` of another run is written over by the
-advance's entry.
+advance's entry. An applied gate this advance still holds but the fresh read
+does not, because an overlapping advance dropped it after this advance's run
+lock was healed by its two-hour TTL, is written back as this advance read it,
+body included, and so is this advance's `last_output` of that run. Content
+erased while this advance ran can come back that way.
 
 **Which file each writer writes, since this has been recorded wrongly before.**
 The `deny` verb and the board write the engine state document, under the state
