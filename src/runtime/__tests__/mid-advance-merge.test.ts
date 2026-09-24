@@ -349,6 +349,23 @@ test('a denial removed mid-advance stays removed', async () => {
   expect(s.denials).toEqual({})
 })
 
+test('an extension and an unknown top-level key written mid-advance survive it', async () => {
+  await interloper(`
+  const { mutateState } = await import(${JSON.stringify(BOARD)})
+  await mutateState((s) => {
+    s.extensions.mid_advance = { kept: true }
+    s.from_a_newer_build = 1
+  })
+  const doc = onDisk()
+  if (doc.extensions.mid_advance?.kept !== true || doc.from_a_newer_build !== 1) throw new Error('the write is not on disk')
+`)
+  await advance()
+  const s = await stored()
+  expect(s.plugin_runs.interloper?.status).toBe('gated')
+  expect(s.extensions).toEqual({ mid_advance: { kept: true } })
+  expect((s as Record<string, unknown>).from_a_newer_build).toBe(1)
+})
+
 test('a producer that produced nothing carries forward the Output on disk, not the one this advance read', async () => {
   // The gate off, so the producer and the nested advance record their runs
   // rather than parking them. The interloper depends on prod, so this
@@ -576,6 +593,26 @@ describe('a board write that lands mid-advance', () => {
     expect(s.plugin_runs.interloper?.status).toBe('gated')
     expect(s.task_aging.map((t) => [t.task_id, typeof t.archived_at])).toEqual([['task-quiet', 'string']])
     expect(s.deferrals).toEqual([])
+  })
+
+  test('a degraded advance does not auto-defer a task the board deferred while it ran', async () => {
+    await createTask(task('task-quiet', 'info'))
+    await mutateState((s) => {
+      s.last_interaction_at = new Date(Date.now() - 3 * DAY).toISOString()
+    })
+    const until = new Date(Date.now() + 2 * DAY).toISOString()
+    await interloper(
+      `
+  const { deferTask } = await import(${JSON.stringify(BOARD)})
+  await deferTask('task-quiet', ${JSON.stringify(until)})
+  if (!onDisk().deferrals.some((d) => d.task_id === 'task-quiet')) throw new Error('the deferral is not on disk')
+`,
+      { min_tier: 'suspended' },
+    )
+    await advance()
+    const s = await stored()
+    expect(s.plugin_runs.interloper?.status).toBe('gated')
+    expect(s.deferrals.map((d) => [d.task_id, d.reason, d.expires_at])).toEqual([['task-quiet', 'user-deferred', until]])
   })
 
   test('a suspended advance archives the task still open, and the completion stands', async () => {
