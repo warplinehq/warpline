@@ -1039,7 +1039,7 @@ describe('the write arm and its rollback are still written', () => {
     // so this line is the only thing that holds it.
     if (!innerLines.some((l) => l.includes('delete state.approvals[plugin]'))) {
       offenders.push(
-        'the catch around writeEngineState no longer restores an absent record as absent — the rollback would put back an own key holding undefined where there was no key, and every end-of-run reader of the record dereferences it',
+        'the catch around writeEngineState no longer restores an absent record as absent — with the delete gone, the marked record stays in memory and the end-of-run merge promotes a mark nothing observed land; with the rollback collapsed into one unconditional assignment, an own key holding undefined is put back where there was no key, and every end-of-run reader of the record dereferences it',
       )
     }
     const outerLines = body.slice(outer + 1, outer + 1 + OUTER_WINDOW)
