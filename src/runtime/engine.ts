@@ -346,7 +346,9 @@ export interface AdvanceResult {
   /**
    * How many approval gates the state document holds unapplied when this
    * advance returns, whichever advance parked them: as written on the normal
-   * arm, and as read on the quiet-hours arm, which writes no document.
+   * arm, and as read on the quiet-hours arm, which writes no document. Only
+   * gates for a plugin this advance loaded count, since no command can clear
+   * any other.
    *
    * Not `gated_plugins.length`. That is this advance's parks only, and it reads
    * `0` on every later advance while the same gate still waits on a human.
@@ -1177,9 +1179,14 @@ function mergePendingGates(disk: PendingGate[], parked: PendingGate[], now: numb
  *
  * An applied gate is kept only as a spent marker, so a second `approve` finds
  * it and refuses. It waits on nobody, so it is not counted.
+ *
+ * Nor is a gate for a plugin this advance did not load. `approve` and `deny`
+ * both refuse a name with no loaded manifest, so no command can clear it, and
+ * counting it would page `--strict` on every tick until the ceiling drops it.
+ * A manifest that failed to load already reports as `failed`.
  */
-function standingGateCount(gates: PendingGate[], now: number): number {
-  return mergePendingGates(gates, [], now).filter((g) => g.applied_at === null).length
+function standingGateCount(gates: PendingGate[], now: number, loaded: ReadonlyMap<string, unknown>): number {
+  return mergePendingGates(gates, [], now).filter((g) => g.applied_at === null && loaded.has(g.plugin)).length
 }
 
 /**
@@ -2505,7 +2512,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // stand whether or not this advance looked, and a detector must see a
       // gate that waits all night. Counted from the document this advance
       // read, because this arm writes none.
-      const quietPendingGates = standingGateCount(state.pending_gates, Date.now())
+      const quietPendingGates = standingGateCount(state.pending_gates, Date.now(), plugins)
       // `pruned: 0` and it is honest: the prune runs below this guard, so a
       // skipped advance reclaims nothing. Nothing looked, so nothing went.
       await writeDeadMan(
@@ -3519,7 +3526,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // The gates still waiting, counted from the document this advance just
       // wrote. Re-applying the ceiling rule to it drops nothing the merge
       // kept, short of a gate crossing the ceiling in the same instant.
-      return standingGateCount(merged.pending_gates, Date.now())
+      return standingGateCount(merged.pending_gates, Date.now(), plugins)
     })
 
     // 9. Write run log

@@ -2535,9 +2535,10 @@ Two consequences worth stating plainly:
 
 `warpline advance --strict` promotes an advance to `1` while any approval gate
 is still waiting on a human, **or** when a content approval refused a fire. A
-waiting gate is one the state document still holds unapplied (`pending_gates`,
-§ 13), whichever advance parked it: the advance that parks it counts it, and so
-does every later advance until it is applied or dropped. Use it where a gate
+waiting gate is one the state document still holds unapplied for a plugin the
+advance loaded (`pending_gates`, § 13), whichever advance parked it: the advance
+that parks it counts it, and so does every later advance until it is applied or
+dropped. Use it where a gate
 waiting on a human is itself the thing you want paged about — a fleet that is
 supposed to be running fully autonomously, for instance.
 
@@ -2939,7 +2940,7 @@ file's own age.
 | `status` | `"complete"` \| `"partial"` \| `"failed"` | The advance's own status. **Not the exit code.** |
 | `skipped_reason` | string \| null | `null` when the advance ran. `"quiet_hours"` when it returned early because a quiet window was active. |
 | `gated` | integer | How many plugins this advance parked at an approval gate. `0` on every later advance while the same gate still waits: `pending_gates` counts that. |
-| `pending_gates` | integer | How many approval gates are waiting on a human: entries in the state document's `pending_gates` (§ 10) with no `applied_at`, whichever advance parked them. A gate applied and kept as a spent marker is not counted. Counted from the document this advance wrote, or on a skipped advance from the one it read, since that advance writes none. Either way a gate past the gate ceiling (§ 10, `pending_gates`) is not counted, because the next write drops it. |
+| `pending_gates` | integer | How many approval gates are waiting on a human: entries in the state document's `pending_gates` (§ 10) with no `applied_at`, whichever advance parked them. A gate applied and kept as a spent marker is not counted. Nor is a gate for a plugin this advance did not load, one uninstalled or renamed since it parked: `approve` and `deny` both refuse a name with no loaded manifest, so no command can clear it, and it would page `--strict` on every tick until the ceiling drops it. Counted from the document this advance wrote, or on a skipped advance from the one it read, since that advance writes none. Either way a gate past the gate ceiling (§ 10, `pending_gates`) is not counted, because the next write drops it. |
 | `failed` | integer | How many plugins ended failed, manifests that would not load included. |
 | `refused` | integer | How many plugins holding a content approval were not fired: the approval stopped applying (`indeterminate`, `outside_window`, `content_moved`), or the spend mark's own state I/O failed and nothing was sent (`mark_unavailable`, `mark_uncertain`) (§ 5). The **count only**: the reasons are plugin-derived and reach a reader through `warpline advance --json`, never through this file. An unmarked closed binding the sweep keeps because its content is still held (§ 10, "Expiry and deletion") counts here on every advance until that content is erased. A confirmed one reads `spent` and is not counted. |
 | `pruned` | integer | How many run records this advance's retention prune removed. Always `0` on a skipped advance, which returns above the prune. |
