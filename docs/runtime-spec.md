@@ -2419,7 +2419,7 @@ them.
 | Code | Meaning |
 |------|---------|
 | `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, a plugin is holding at an approval gate, or a content approval declined to authorise a fire. |
-| `1` | At least one plugin failed, the plugin root loaded no manifests at all, or the command line was not valid. |
+| `1` | At least one plugin failed, the plugin root loaded no manifests at all, or the command line was not valid. Or, under `--strict`, an approval gate is still waiting or a content approval refused a fire. |
 | `75` | Could not finish. Often nothing ran and nothing was written, but not always — see below before treating it as a free retry. |
 | `130` | Interrupted by SIGINT or SIGTERM. The process stopped; the work may not have. |
 
@@ -2428,10 +2428,11 @@ positional argument are both refused by the argument parser: the command writes
 the parser's message plus its usage text to stderr, writes nothing to stdout,
 and exits `1` without running anything. `warpline advance strict` — the typo for
 `--strict` — is refused there rather than quietly running non-strict. That is a
-third cause of `1` and this table is a closed enumeration, so it is named here
-rather than left for a monitor to discover as "a plugin failed". What tells the
-three apart from outside: under `--json` a plugin failure and an empty plugin
-root each write a document to stdout, and a usage error writes none.
+cause of `1` in its own right and this table is a closed enumeration, so it is
+named here rather than left for a monitor to discover as "a plugin failed". What
+tells them apart from outside: under `--json` a plugin failure, an empty plugin
+root and a `--strict` promotion each write a document to stdout, the last with
+`pending_gates` or `refused` above zero, and a usage error writes none.
 
 `130` is the conventional code for a process ended by SIGINT, and this command
 reports it deliberately rather than by default: it installs a handler for the
