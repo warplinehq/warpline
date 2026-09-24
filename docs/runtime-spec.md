@@ -2884,8 +2884,11 @@ so neither erases what the other wrote for a plugin it did not run, or a gate it
 did not supersede.
 For a plugin both ran, the advance that writes last wins, even when its run is
 the older one, and a gate either one parks supersedes the other's gate for the
-same plugin. Keeping the newer run was rejected: the two runs' clocks can come
-from different hosts.
+same plugin. Only a parked gate supersedes. A run one advance recorded does not,
+so a gate the other parked for that plugin stays pending beside it, and an
+`approve` of that gate later writes the gated run's entry over the recorded one.
+Keeping the newer run was rejected: the two runs' clocks can come from different
+hosts.
 
 **Which file each writer writes, since this has been recorded wrongly before.**
 The `deny` verb and the board write the engine state document, under the state
