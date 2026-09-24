@@ -38,7 +38,7 @@ import { advanceCounts } from './exit-codes.js'
 // second spelling is a second answer about which fields of an advance the
 // record is derived from, and the two only have to disagree once.
 import type { AdvanceOutcome } from './exit-codes.js'
-import { acquireLock, releaseLock } from './lock.js'
+import { acquireLock, releaseLock, startHeartbeat } from './lock.js'
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
 import { PluginManifestSchema, type PluginManifest } from '../schemas/plugin-manifest.js'
 import { invokePlugin } from './invoke-plugin.js'
@@ -2267,6 +2267,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // anything read off disk or off argv.
   const resolvedLockPath = options.lockPath ?? getDefaultLockPath(options.stateDir)
   const heldLock = await acquireLock(resolvedLockPath, 'advance')
+  // The lease. Refreshes the lock's `heartbeat_at` every minute while this
+  // advance runs, so the two-hour window never heals a holder that is still
+  // alive, however long a plugin takes. Stopped, and its last refresh awaited,
+  // in the `finally` below, before the release.
+  const stopHeartbeat = startHeartbeat(resolvedLockPath, heldLock.run_id)
 
   try {
 
@@ -3376,7 +3381,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // wrote for a plugin it did not run. For a plugin both ran, the one that
     // writes last wins, even when its run is the older one, and a gate either
     // parks supersedes the other's by plugin. Keeping the newer run would
-    // compare clocks from two hosts.
+    // compare clocks from two hosts. The heartbeat on the run lock keeps this
+    // from happening to an advance that is still running (`startHeartbeat`).
     //
     // `approvals` takes a per-key rule rather than the floor, because this
     // advance writes it too, and so does another ATTACHMENT. One home can be
@@ -3560,10 +3566,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       pruned: prunedRunLogs,
     }
   } finally {
+    // The heartbeat first, and awaited: a refresh still in flight when the
+    // lock is released would write it back, held by a run that has ended.
+    await stopHeartbeat()
     // By run id, so this release cannot remove a lock this advance no longer
-    // holds — an advance whose own lock aged past the TTL is healed and
-    // reacquired by the next tick, and an unconditional unlink here deleted
-    // that one on the way out.
+    // holds — an advance whose heartbeat stopped for longer than the window is
+    // healed and reacquired by the next tick, and an unconditional unlink here
+    // deleted that one on the way out.
     await releaseLock(resolvedLockPath, heldLock.run_id)
   }
 }

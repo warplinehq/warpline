@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { mkdir, writeFile, unlink, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { createHmac, randomBytes } from 'node:crypto'
+import { atomicWriteText } from '../lib/fs-atomic.js'
 
 export const WarplineLockSchema = z.object({
   acquired_at: z.string(),
@@ -14,8 +15,8 @@ export const WarplineLockSchema = z.object({
    * An LLM-orchestrator session acquires the lock through a short-lived
    * bun process whose PID is dead moments later — a numeric PID there makes
    * every liveness check classify the live run's lock as stale (and clean
-   * it mid-run). Null opts out of the liveness check; the 2h TTL still
-   * expires abandoned locks.
+   * it mid-run). Null opts out of the liveness check; the two-hour window
+   * since the last heartbeat still expires abandoned locks.
    */
   pid: z.number().nullable(),
   /**
@@ -27,10 +28,10 @@ export const WarplineLockSchema = z.object({
    *
    * Null means the derivation chain found nothing here. It costs the liveness
    * check: a lock with a null host on either side is never judged dead by pid
-   * and expires only by the 2h TTL. Two null hosts NEVER compare equal — that
-   * is the whole of the rule, and it is what Git's `gc.pid` gets wrong by
-   * writing a literal placeholder string on failure, which makes two machines
-   * that could not identify themselves look like the same machine.
+   * and expires only by the two-hour window. Two null hosts NEVER compare
+   * equal — that is the whole of the rule, and it is what Git's `gc.pid` gets
+   * wrong by writing a literal placeholder string on failure, which makes two
+   * machines that could not identify themselves look like the same machine.
    *
    * Optional as well as nullable, and the optionality is load-bearing. A
    * required field makes every in-flight lock written by the previous build
@@ -39,11 +40,42 @@ export const WarplineLockSchema = z.object({
    * happened. A record with no `host` key behaves as the null case.
    */
   host: z.string().nullable().optional(),
+  /**
+   * When the holder last said it is still running. Written at acquire, equal to
+   * `acquired_at`, and refreshed by the holder every minute while its advance
+   * runs (`startHeartbeat`). The two-hour window is measured from it, so a
+   * holder that is alive is never healed however long its advance runs, and one
+   * that stopped refreshing, wedged or gone, still is.
+   *
+   * Optional for the reason `host` is. A lock written by an older build has no
+   * such key and is measured from `acquired_at`, as that build measures every
+   * lock. That build also drops the key when it reads a lock this one wrote, so
+   * a home attached from both heals a long advance at two hours from its start
+   * until every attached build has this field.
+   */
+  heartbeat_at: z.string().optional(),
 })
 
 export type WarplineLock = z.infer<typeof WarplineLockSchema>
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000
+
+/**
+ * How often a holder refreshes `heartbeat_at`. One small atomic write a minute,
+ * and a hundred and twenty refreshes inside the two-hour window, so a refresh
+ * that fails now and then costs nothing.
+ */
+export const HEARTBEAT_INTERVAL_MS = 60_000
+
+let heartbeatIntervalOverride: number | null = null
+
+/**
+ * Test-only: refresh every `ms` rather than every minute, so a test advance
+ * lives long enough to see a refresh. Pass null to restore the default.
+ */
+export function _setHeartbeatInterval(ms: number | null): void {
+  heartbeatIntervalOverride = ms
+}
 
 /**
  * The links of the host-identity chain, in the order they are consulted.
@@ -192,15 +224,16 @@ export function isProcessAlive(pid: number): boolean {
 /**
  * Is this lock safe to break?
  *
- * The TTL branch is unconditional. The pid branch is reached only when the
- * lock's host and this machine's host are BOTH known and equal — anything else
- * is a pid from a kernel that is not this one, and `process.kill(pid, 0)`
- * answers about the local kernel whatever the lock says. Either side null,
- * either side absent, or the two known and different: the pid branch is skipped
- * entirely and only the 2h TTL expires the lock.
+ * The TTL branch is unconditional, and it measures from the holder's last
+ * heartbeat, or from `acquired_at` for a lock that carries none. The pid branch
+ * is reached only when the lock's host and this machine's host are BOTH known
+ * and equal — anything else is a pid from a kernel that is not this one, and
+ * `process.kill(pid, 0)` answers about the local kernel whatever the lock says.
+ * Either side null, either side absent, or the two known and different: the pid
+ * branch is skipped entirely and only the two-hour window expires the lock.
  */
 export function isLockStale(lock: WarplineLock, read: MachineIdReader = readMachineIdFromHost): boolean {
-  const age = Date.now() - new Date(lock.acquired_at).getTime()
+  const age = Date.now() - new Date(lock.heartbeat_at ?? lock.acquired_at).getTime()
   if (age > TWO_HOURS_MS) return true
   if (lock.pid === null) return false
   const theirs = lock.host ?? null
@@ -273,12 +306,15 @@ export async function acquireLock(
   // it with an existence check and a write; that is the TOCTOU race this flag
   // exists to remove.
   const write = async (): Promise<WarplineLock> => {
+    const acquiredAt = new Date().toISOString()
     const lock: WarplineLock = {
-      acquired_at: new Date().toISOString(),
+      acquired_at: acquiredAt,
       run_id: generateRunId(),
       mode,
       pid: opts.pid === undefined ? process.pid : opts.pid,
       host: deriveHost(read),
+      // The lease exists from the first instant, before any refresh.
+      heartbeat_at: acquiredAt,
     }
     // The lock is the FIRST writer in an advance, and every other writer in
     // this tree does its own recursive mkdir before it writes. This one is the
@@ -328,6 +364,77 @@ export async function acquireLock(
  */
 export async function releaseLock(lockPath: string, runId: string): Promise<void> {
   await unlinkIfOwned(lockPath, runId)
+}
+
+/**
+ * Move `heartbeat_at` of the lock at `lockPath` to now, if it is still the one
+ * `runId` took. Returns whether it was.
+ *
+ * Never writes a lock this run does not hold. Like `unlinkIfOwned`, this
+ * NARROWS a window it cannot close: the read and the rename are not atomic, and
+ * a second process can heal and acquire in between, and then the rename writes
+ * over the winner's lock. That is reachable only once this holder's heartbeat is
+ * already older than the two-hour window, which means this process was wedged
+ * or asleep for that long. The rename is atomic, so a reader never sees a torn
+ * lock, which it would refuse rather than break.
+ */
+export async function refreshLock(lockPath: string, runId: string): Promise<boolean> {
+  const current = await readLock(lockPath)
+  if (current === null || current.run_id !== runId) return false
+  await atomicWriteText(lockPath, JSON.stringify({ ...current, heartbeat_at: new Date().toISOString() }, null, 2))
+  return true
+}
+
+/**
+ * Refresh this run's lock every `intervalMs` until the returned stop is
+ * awaited. The advance starts it right after it acquires and awaits the stop
+ * right before it releases.
+ *
+ * **The stop waits for a refresh already in flight.** A refresh that read the
+ * lock as this run's and renames after the release would put the lock back,
+ * held by a run that has finished, and every later advance would be refused
+ * until the window expires. So the release must never run before the last
+ * refresh has settled.
+ *
+ * **A tick never throws.** A refresh that fails, on a full disk or a lost mount,
+ * only leaves the heartbeat older, which is the safe direction. A tick that
+ * finds a refresh still in flight skips rather than queueing behind it.
+ *
+ * **It stops for good the first time the lock is not this run's**, healed and
+ * taken by another advance or removed by hand. The advance goes on; its writes
+ * are merged under the state lock either way.
+ *
+ * The interval is unref'd, so it never holds a process open on its own.
+ * `refresh` is injectable for the tests that hold a refresh in flight.
+ */
+export function startHeartbeat(
+  lockPath: string,
+  runId: string,
+  opts: { intervalMs?: number; refresh?: (lockPath: string, runId: string) => Promise<boolean> } = {},
+): () => Promise<void> {
+  const refresh = opts.refresh ?? refreshLock
+  let stopped = false
+  let inFlight: Promise<void> | null = null
+  const timer = setInterval(() => {
+    if (stopped || inFlight !== null) return
+    inFlight = refresh(lockPath, runId)
+      .then((ours) => {
+        if (!ours) stop()
+      })
+      .catch(() => {})
+      .finally(() => {
+        inFlight = null
+      })
+  }, opts.intervalMs ?? heartbeatIntervalOverride ?? HEARTBEAT_INTERVAL_MS)
+  timer.unref()
+  const stop = (): void => {
+    stopped = true
+    clearInterval(timer)
+  }
+  return async () => {
+    stop()
+    await inFlight
+  }
 }
 
 /**

@@ -2636,24 +2636,55 @@ takes a lock for the length of the run, and refuses rather than waits.
 **The file is `.lock`, beside `engine-state.json` in the home's state
 directory.** It is JSON, and it records when it was taken, the run id that took
 it, the mode (`advance`), the holding process id — which is `null` when the
-holder is an orchestrator session rather than a long-lived process — and the
+holder is an orchestrator session rather than a long-lived process — the
 `host` identifier of the machine that took it, which is `null` when that machine
-could not identify itself. `host` is **nullable and optional** (§ The host
-identifier, below).
+could not identify itself, and `heartbeat_at`, when the holder last said it is
+still running. `host` is **nullable and optional** (§ The host identifier,
+below). `heartbeat_at` is **optional** (§ The heartbeat, below).
 
 **Acquisition is an exclusive create, not a check followed by a write.** There
 is no window in which two processes both see an absent lock and both proceed.
 
-**A stale lock heals; a live one does not.** A lock is stale when it is more
-than two hours old, or when it names a process id that is no longer running **on
-the machine that took it**. The process-id test is reached only when the lock's
-`host` and the reading machine's `host` are both known and equal; in every other
-combination it is skipped and only the two-hour window expires the lock. On
+**A stale lock heals; a live one does not.** A lock is stale when its holder has
+not refreshed it for more than two hours, or when it names a process id that is
+no longer running **on the machine that took it**. The process-id test is
+reached only when the lock's `host` and the reading machine's `host` are both
+known and equal; in every other combination it is skipped and only the two-hour
+window expires the lock. On
 contention the acquire reads the holder back, and if it is stale it breaks it and
 retries exactly once. A holder that is neither — and a lock file that cannot be
 read back as a lock at all — is refused rather than broken. `lock.test.ts` in
 this repository holds every arm of that, including the two that refuse to unlink
 a file they could not parse.
+
+### The heartbeat
+
+**The two-hour window is measured from the holder's last heartbeat.** The
+advance writes `heartbeat_at` when it takes the lock, equal to `acquired_at`, and
+refreshes it every minute while it runs. So a holder that is alive is never
+healed, however long its advance runs: a plugin's `timeout_ms` has no upper
+bound, and healing a long advance let a second one run beside it and fire
+session-class side effects again. A holder that stops refreshing, wedged, asleep
+or gone, is healed two hours after its last refresh. A lock with no
+`heartbeat_at` is measured from `acquired_at`.
+
+**The refresh never writes a lock this run does not hold.** It reads the lock
+back, compares the run id, and renames a new copy into place, so a reader never
+sees a torn lock. The first time the lock is not this run's, the heartbeat stops
+for good and the advance carries on. The read and the rename are not atomic,
+like the release below: a second process can heal and acquire in between, and
+the rename then writes over its lock. That is reachable only when this holder's
+heartbeat is already two hours old.
+
+**The release waits for the heartbeat.** The advance stops the heartbeat, and
+waits for a refresh already in flight, before it releases the lock. A refresh
+landing after the release would put the lock back, held by a run that has ended.
+
+**The field is optional, and an older build ignores it.** A lock written by an
+older build has no `heartbeat_at`. An older build reading a lock this one wrote
+drops the field, so it measures the window from `acquired_at`, as it always
+did. A home attached from both builds can therefore still heal a healthy advance
+two hours after it started, until every attached build writes the field.
 
 ### The host identifier
 
@@ -2699,9 +2730,9 @@ PID-namespace-based identity is the named upgrade path and is not implemented.
 
 **A release removes only the lock it took.** Both unlinks in the lock module
 read the file back and compare the run id before deleting anything. Without
-that, an advance whose own lock was healed out from under it — the two-hour
-window expired while the run was still going — deletes the *next* advance's
-live lock on its way out, and the tick after that acquires cleanly while two
+that, an advance whose own lock was healed out from under it — its heartbeat
+stopped for two hours while the run was still going — deletes the *next*
+advance's live lock on its way out, and the tick after that acquires cleanly while two
 advances are still running. The narrowing is real and it is not a guarantee: a
 read followed by an unlink is not atomic, and there is no portable
 compare-and-delete to make it one.
@@ -2769,11 +2800,19 @@ it stands, not a lock hierarchy the runtime enforces.
 there will not be one: it is the single way to get two writers onto one home,
 which is the failure the lock exists to prevent. The cost, stated rather than
 discovered: a genuinely wedged live process blocks every advance against that
-home until the two-hour window expires. That is the choice, and the two-hour
-window and the dead-process check are what bound it — and for a lock taken on a
-different machine, only the two-hour window bounds it. An operator who knows the
-holder is gone can delete `.lock` by hand; an operator who is not sure should
-wait for the window.
+home until two hours after its last heartbeat. That is the choice, and the
+two-hour window and the dead-process check are what bound it — and for a lock
+taken on a different machine, only the two-hour window bounds it. An operator
+who knows the holder is gone can delete `.lock` by hand; an operator who is not
+sure should wait for the window.
+
+**A process that is alive but stuck keeps its lock.** The heartbeat runs on the
+process's event loop, not in the advance's steps. A loop blocked by a
+synchronous plugin, or a mount that never answers, stops the refresh, and the
+lock heals. A process whose loop is alive while the advance waits forever
+outside a plugin's `timeout_ms` keeps refreshing, and nothing heals it. Every
+plugin call is bounded by its `timeout_ms`, so that takes a fault in the runtime
+itself. An operator who finds one deletes `.lock` by hand.
 
 **An interrupted advance can leave a plugin running.** An advance interrupted by
 SIGINT or SIGTERM exits `130` (§ 11) as soon as its stdout has drained, or after
@@ -2830,8 +2869,11 @@ advance cannot predict.
 
 **The accepted cost: two advances after a TTL heal.** If an advance's run lock is
 healed by the two-hour window while the advance is still running, a second
-advance can run beside it. Each writes under the state lock, so neither erases
-what the other wrote for a plugin it did not run, or a gate it did not supersede.
+advance can run beside it. The heartbeat makes that reachable only when the
+holder stopped refreshing for two hours, or when an older build that ignores
+the heartbeat is attached to the same home. Each writes under the state lock,
+so neither erases what the other wrote for a plugin it did not run, or a gate it
+did not supersede.
 For a plugin both ran, the advance that writes last wins, even when its run is
 the older one, and a gate either one parks supersedes the other's gate for the
 same plugin. Keeping the newer run was rejected: the two runs' clocks can come
