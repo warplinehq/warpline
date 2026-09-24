@@ -550,6 +550,9 @@ describe('the advance exit-code matrix, in process', () => {
     const strict = await capture(() => main(['advance', '--strict']))
     expect(strict.stdout).toContain('producer: skipped')
     expect(strict.code).toBe(1)
+    // The one human-line pin with the two gate counts apart, so a render that
+    // swapped them or printed `gated` twice goes red here.
+    expect(strict.stdout).toContain('Gated: 0  Pending gates: 1  Refused: 0  Failed: 0  Exit: 1')
 
     const deadMan = JSON.parse(
       await readFile(join(home.stateDir, 'last-successful-advance'), 'utf8'),
