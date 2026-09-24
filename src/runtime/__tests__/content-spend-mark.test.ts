@@ -978,6 +978,10 @@ describe('the write arm and its rollback are still written', () => {
   /** Lines to read past the outer `catch` for its return. */
   const OUTER_WINDOW = 3
 
+  /** The lines that are code: a `//` line comment or a `*` doc line is dropped. */
+  const codeOnly = (body: readonly string[]): string[] =>
+    body.filter((l) => !/^\s*(\/\/|\*)/.test(l))
+
   /**
    * The offenders in a `markContentApprovalSpent` body, or an empty list.
    *
@@ -990,8 +994,12 @@ describe('the write arm and its rollback are still written', () => {
    * whose catches all sit above the write, and a body where the inner and outer
    * catch resolve to the same line. Each of those is "could not look", and
    * returning an empty offender list for one would be perfectly green.
+   *
+   * Comment lines are dropped first, before any index is computed, so a line
+   * that was commented out reads as gone and the windows count code only.
    */
-  function offendersIn(body: readonly string[]): string[] {
+  function offendersIn(raw: readonly string[]): string[] {
+    const body = codeOnly(raw)
     const writeAt = body.findIndex((l) => l.includes('writeEngineState'))
     if (writeAt === -1) {
       throw new Error('blind: markContentApprovalSpent names no writeEngineState')
@@ -1116,7 +1124,7 @@ describe('the write arm and its rollback are still written', () => {
    * producer's entry, which the behavioural case does. That is why both exist.
    */
   test("the mark refuses content_moved when the producer's content was erased under it", () => {
-    const code = bodyOf('markContentApprovalSpent').filter((l) => !/^\s*(\/\/|\*)/.test(l))
+    const code = codeOnly(bodyOf('markContentApprovalSpent'))
     const fingerprintAt = code.findIndex((l) =>
       /record\.fingerprint !== authority\.fingerprint\)\s*return 'content_moved'/.test(l),
     )
