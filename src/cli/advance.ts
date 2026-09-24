@@ -153,7 +153,7 @@ read. The codes are published in docs/runtime-spec.md § 11.
  *
  * The field list is deliberately short, because this document is parsed outside
  * this repository and every field is one somebody's detector can start reading.
- * A run id, a status, four integers, a code, the plugin list the human
+ * A run id, a status, five integers, a code, the plugin list the human
  * rendering is built from — a name and a state token each — and one refusal
  * list of a plugin name and a closed-enum reason. No plugin summary, no plugin
  * output, no path, no operator configuration value. Same constraint as the
@@ -169,6 +169,15 @@ export interface AdvancePayload {
   run_id: string
   status: AdvanceResult['status']
   gated: number
+  /**
+   * How many approval gates are still waiting on a human, whichever advance
+   * parked them. `gated` above is this advance's parks only.
+   *
+   * Always present, `0` included. Read off `advanceCounts`, never recounted
+   * here, which is what keeps an `exit_code: 1` under `--strict` explained by
+   * a count in the same document on a tick that parked nothing.
+   */
+  pending_gates: number
   failed: number
   /**
    * How many run records this advance's retention prune removed.
@@ -225,8 +234,8 @@ function renderHuman(payload: AdvancePayload): string {
   // refusal absent from the human view is the same silence the scheduler half
   // of this plan removes.
   lines.push(
-    `Gated: ${payload.gated}  Refused: ${payload.refused}  Failed: ${payload.failed}  ` +
-      `Exit: ${payload.exit_code}`,
+    `Gated: ${payload.gated}  Pending gates: ${payload.pending_gates}  ` +
+      `Refused: ${payload.refused}  Failed: ${payload.failed}  Exit: ${payload.exit_code}`,
   )
   return `${lines.join('\n')}\n`
 }
@@ -447,7 +456,7 @@ export async function run(
     }
 
     const exit_code = advanceExitCode(result, { strict })
-    const { gated, failed, refused } = advanceCounts(result)
+    const { gated, pending_gates, failed, refused } = advanceCounts(result)
 
     // The one site anything reaches stdout from, past every refusal above it.
     process.stdout.write(
@@ -456,6 +465,7 @@ export async function run(
           run_id: result.run_id,
           status: result.status,
           gated,
+          pending_gates,
           failed,
           refused,
           // The structured array straight off the result, so a consumer gets

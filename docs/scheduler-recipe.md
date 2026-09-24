@@ -381,8 +381,8 @@ So a fresh install walked through exactly as this page describes parks
 everything on its first tick:
 
 ```
-{"run_id":"...","status":"partial","gated":1,"failed":0,"refused":0,
- "pruned":0,"exit_code":0,"refused_plugins":[],
+{"run_id":"...","status":"partial","gated":1,"pending_gates":1,
+ "failed":0,"refused":0,"pruned":0,"exit_code":0,"refused_plugins":[],
  "plugins":[{"name":"metrics-rollup","state":"gated"}]}
 rc=0
 ```
@@ -554,7 +554,7 @@ terminal is what makes it match the scheduled case.
 |---|---|
 | The job never fires | The unit is installed but not enabled or not bootstrapped. Re-run the install commands and then the matching check above. |
 | First tick logs "command not found" | The interpreter path. Step 2. |
-| Exits `0` every tick, nothing ever happens | Three causes, and the `--json` document tells them apart. A home that resolved somewhere you did not mean, so the advance is looking at an empty fleet and correctly reporting nothing to do — the plugin list is empty. Or `review_gate` is on, which is its default, and every plugin is waiting at a gate: the dead-man file's `pending_gates` is non-zero on every tick. `gated` and the list's `gated` states show only on the tick that parked them, and later ticks read `skipped` until the plugin is due again. Or a plugin holding a content approval was not fired, in which case `refused` is non-zero and `refused_plugins` names the plugin and the reason. `indeterminate`: a marked fire was never confirmed. `outside_window`: the window closed. `content_moved`: the approved bytes moved. `mark_unavailable` or `mark_uncertain`: the runtime could not record the send in its own state, so it did not send. Run the last probe above. |
+| Exits `0` every tick, nothing ever happens | Three causes, and the `--json` document tells them apart. A home that resolved somewhere you did not mean, so the advance is looking at an empty fleet and correctly reporting nothing to do — the plugin list is empty. Or `review_gate` is on, which is its default, and every plugin is waiting at a gate: `pending_gates`, in the dead-man file and in the `--json` document, is non-zero on every tick. `gated` and the list's `gated` states show only on the tick that parked them, and later ticks read `skipped` until the plugin is due again. Or a plugin holding a content approval was not fired, in which case `refused` is non-zero and `refused_plugins` names the plugin and the reason. `indeterminate`: a marked fire was never confirmed. `outside_window`: the window closed. `content_moved`: the approved bytes moved. `mark_unavailable` or `mark_uncertain`: the runtime could not record the send in its own state, so it did not send. Run the last probe above. |
 | Exits `75` every tick | § 11 names three causes: a throw out of the advance, the refusal to create a home, and contention on the run lock. The message distinguishes them. |
 | Exits `1` on a home you know has plugins | The plugin root loaded no manifests, or every manifest in it threw. This is not a count of failures. Check the unit's command line too: a flag warpline does not know, or a stray word where a flag was meant, is refused with a usage message on stderr and exits `1` having run nothing. |
 | Worked for months, stopped after an upgrade | The absolute interpreter path and the explicit home are pins, and a Node upgrade that moves the binary or a moved home breaks them. That is the cost of the determinism they buy: resolving the interpreter at run time would put back the `PATH` problem step 2 solves. Re-check both after any upgrade or move. |
