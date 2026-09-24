@@ -552,6 +552,32 @@ describe('a board write that lands mid-advance', () => {
     expect(s.deferrals.map((d) => [d.task_id, d.reason])).toEqual([['task-quiet', 'Auto-deferred: degraded tier']])
   })
 
+  /**
+   * Archived is not open. The archive stands in for a suspended advance that
+   * overlapped this one after a heal, the only writer of `archived_at`.
+   */
+  test('a degraded advance does not auto-defer a task archived while it ran', async () => {
+    await createTask(task('task-quiet', 'info'))
+    await mutateState((s) => {
+      s.last_interaction_at = new Date(Date.now() - 3 * DAY).toISOString()
+    })
+    await interloper(
+      `
+  const { mutateState } = await import(${JSON.stringify(BOARD)})
+  await mutateState((s) => {
+    s.task_aging.find((t) => t.task_id === 'task-quiet').archived_at = new Date().toISOString()
+  })
+  if (!onDisk().task_aging.find((t) => t.task_id === 'task-quiet').archived_at) throw new Error('the archive is not on disk')
+`,
+      { min_tier: 'suspended' },
+    )
+    await advance()
+    const s = await stored()
+    expect(s.plugin_runs.interloper?.status).toBe('gated')
+    expect(s.task_aging.map((t) => [t.task_id, typeof t.archived_at])).toEqual([['task-quiet', 'string']])
+    expect(s.deferrals).toEqual([])
+  })
+
   test('a suspended advance archives the task still open, and the completion stands', async () => {
     await createTask(task('task-quiet', 'info'))
     await createTask(task('task-done', 'info'))
