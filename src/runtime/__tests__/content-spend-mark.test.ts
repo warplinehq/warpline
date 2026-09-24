@@ -1098,7 +1098,9 @@ describe('the write arm and its rollback are still written', () => {
 
   test('the same checker reports a body whose absent-restore line was removed', () => {
     const doctored = without(bodyOf('markContentApprovalSpent'), 'delete state.approvals')
-    expect(offendersIn(doctored)).not.toEqual([])
+    // The one offender, not any: a window shift that also pushed another check
+    // out would keep `not.toEqual([])` green with this check deleted.
+    expect(offendersIn(doctored)).toEqual([expect.stringContaining('absent record as absent')])
   })
 
   /**
