@@ -56,6 +56,9 @@ import { createTestHome, type TestHome } from './helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
 
+/** The writer as this file found it, before any case spies on it. */
+const REAL_WRITE_ENGINE_STATE = store.writeEngineState
+
 /** The bin entry, not the engine module: the child runs the path a scheduler runs. */
 const ENTRY = testFixturesDir(import.meta.url, '../../bin/warpline.ts')
 
@@ -675,7 +678,12 @@ describe('the spend mark re-reads erasure under its lock', () => {
  *
  * **The spy is restored in `finally`, before any assertion runs.** Bun runs
  * every test file in one process, and an assertion that threw with the writer
- * still mocked would change what the next file observes.
+ * still mocked would change what the next file observes. **And again in
+ * `afterEach`**, because the `finally` only runs once `advance()` settles. An
+ * advance that hangs past the per-test timeout fails the test without ever
+ * reaching it, and Bun still runs `afterEach`. A case below leaves a trap
+ * installed on purpose, and the check after this `describe` reads the writer
+ * back as the real one.
  *
  * The handler count is asserted first, for the reason the kill case gives: it
  * is the whole claim.
@@ -722,8 +730,16 @@ describe("the spend mark's own write throwing is mark_uncertain, reached through
       }
       return realWrite(payload, path)
     })
+    installed = spy
     return { spy, trips: () => trips }
   }
+
+  /** The case's spy, for `afterEach` to restore when its `finally` never ran. */
+  let installed: ReturnType<typeof spyOn> | undefined
+  afterEach(() => {
+    installed?.mockRestore()
+    installed = undefined
+  })
 
   /** The advance's run log, as text and as the consumer's entry. */
   function runLogOf(runLogPath: string) {
@@ -812,6 +828,26 @@ describe("the spend mark's own write throwing is mark_uncertain, reached through
     expect(firedCount()).toBe(0)
     expect(second.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'indeterminate' }])
   })
+
+  /**
+   * A case whose `finally` never ran, as a timed-out advance leaves it. The
+   * trap stays installed on purpose. The check after this `describe` is what
+   * reads whether `afterEach` took it out.
+   */
+  test('a trap left installed by its case is still in place when the case ends', () => {
+    failTheMarkWrite(false)
+    expect(store.writeEngineState).not.toBe(REAL_WRITE_ENGINE_STATE)
+  })
+})
+
+/**
+ * Read once the `describe` above has run: Bun runs a file's cases in the order
+ * they are declared. Red when the `afterEach` there is gone, because its last
+ * case leaves the writer mocked.
+ */
+test('the spend-mark spy never outlives its describe', () => {
+  expect(store.writeEngineState).toBe(REAL_WRITE_ENGINE_STATE)
+  expect(Object.hasOwn(store.writeEngineState, 'mock')).toBe(false)
 })
 
 /**
