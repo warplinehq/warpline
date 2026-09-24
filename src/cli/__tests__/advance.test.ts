@@ -749,8 +749,11 @@ describe('a lock somebody else holds', () => {
     // operator nothing.
     expect(stderr).not.toContain('null')
     expect(stderr).toContain('Nothing ran and nothing was written')
-    // An orchestrator-held lock never carries a heartbeat, so this is the clock
-    // that governs it.
+    // An orchestrator-held lock's heartbeat is written when it is taken and
+    // never refreshed, so the window runs from when it was taken. The heal
+    // wording is one shared text on every readable arm, so this checks the
+    // arm gets it and nothing orchestrator-specific. What is specific to this
+    // arm is the holder naming above.
     expect(stderr).toContain('from when it was taken')
     expect(existsSync(lock())).toBe(true)
     expect(await readdir(home.runsDir)).toEqual([])
