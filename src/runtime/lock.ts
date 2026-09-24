@@ -377,10 +377,24 @@ export async function releaseLock(lockPath: string, runId: string): Promise<void
  * already older than the two-hour window, which means this process was wedged
  * or asleep for that long. The rename is atomic, so a reader never sees a torn
  * lock, which it would refuse rather than break.
+ *
+ * Only two answers mean "not this run's": the file is gone, or it parses as a
+ * lock with another `run_id`. Anything else, a read that fails or a file that
+ * does not parse as a lock, is "could not look", and it throws. The heartbeat
+ * retries a throw on the next tick. Answering it `false`, as `readLock`'s one
+ * `null` would, stopped the heartbeat for good on a single EACCES, and the live
+ * holder was healed two hours later.
  */
 export async function refreshLock(lockPath: string, runId: string): Promise<boolean> {
-  const current = await readLock(lockPath)
-  if (current === null || current.run_id !== runId) return false
+  let raw: string
+  try {
+    raw = await readFile(lockPath, 'utf-8')
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw err
+  }
+  const current = WarplineLockSchema.parse(JSON.parse(raw))
+  if (current.run_id !== runId) return false
   await atomicWriteText(lockPath, JSON.stringify({ ...current, heartbeat_at: new Date().toISOString() }, null, 2))
   return true
 }
@@ -397,12 +411,14 @@ export async function refreshLock(lockPath: string, runId: string): Promise<bool
  * refresh has settled.
  *
  * **A tick never throws.** A refresh that fails, on a full disk or a lost mount,
- * only leaves the heartbeat older, which is the safe direction. A tick that
- * finds a refresh still in flight skips rather than queueing behind it.
+ * in its read or its write, only leaves the heartbeat older, which is the safe
+ * direction, and the next tick tries again. A tick that finds a refresh still
+ * in flight skips rather than queueing behind it.
  *
  * **It stops for good the first time the lock is not this run's**, healed and
  * taken by another advance or removed by hand. The advance goes on; its writes
- * are merged under the state lock either way.
+ * are merged under the state lock either way. A lock it could not read is not
+ * "not this run's" (`refreshLock`).
  *
  * The interval is unref'd, so it never holds a process open on its own.
  * `refresh` is injectable for the tests that hold a refresh in flight.

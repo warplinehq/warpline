@@ -2671,7 +2671,11 @@ or gone, is healed two hours after its last refresh. A lock with no
 **The refresh never writes a lock this run does not hold.** It reads the lock
 back, compares the run id, and renames a new copy into place, so a reader never
 sees a torn lock. The first time the lock is not this run's, the heartbeat stops
-for good and the advance carries on. The read and the rename are not atomic,
+for good and the advance carries on. Not this run's means the file is gone, or
+it reads back as a lock with another run id, and nothing else. A read that fails,
+or a file that does not read back as a lock, writes nothing, and the next
+refresh tries again: stopping there would let one failed read on a flaky mount
+heal a live holder two hours later. The read and the rename are not atomic,
 like the release below: a second process can heal and acquire in between, and
 the rename then writes over its lock. That is reachable only when this holder's
 heartbeat is already two hours old.
