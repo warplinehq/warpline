@@ -1,5 +1,5 @@
 import { describe, it, expect, mock, beforeEach, afterEach, setSystemTime } from 'bun:test'
-import { writeFile, unlink, readFile, mkdtemp, rm } from 'node:fs/promises'
+import { writeFile, unlink, readFile, mkdtemp, rm, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { snapshotHome } from './helpers/snapshot-home.js'
@@ -657,6 +657,44 @@ describe('the heartbeat lease', () => {
     await second
     await stop()
     expect(calls).toBeGreaterThanOrEqual(2)
+  })
+
+  /**
+   * Through the real refresh, not an injected one: the injected throw above
+   * never reached `refreshLock`, which answered a failed read as "not ours" and
+   * so stopped the heartbeat for good on one EACCES.
+   */
+  it('keeps refreshing after a read of its own lock fails', async () => {
+    const { startHeartbeat, refreshLock } = await import('../lock.js')
+    const lockPath = tmpLock()
+    const lock = await acquireLock(lockPath, 'advance')
+    setSystemTime(new Date('2026-04-03T13:00:00Z'))
+    await chmod(lockPath, 0o000)
+    // The fixture can fail: root reads through mode 000, and then this proves nothing.
+    await expect(readFile(lockPath, 'utf-8')).rejects.toMatchObject({ code: 'EACCES' })
+    let first!: () => void
+    const tried = new Promise<void>((r) => (first = r))
+    const stop = startHeartbeat(lockPath, lock.run_id, {
+      intervalMs: 5,
+      refresh: (p, id) => refreshLock(p, id).finally(() => first()),
+    })
+    await tried
+    await chmod(lockPath, 0o644)
+    for (let i = 0; i < 100 && (await readLock(lockPath))?.heartbeat_at === lock.acquired_at; i++) {
+      await new Promise((r) => setTimeout(r, 5))
+    }
+    await stop()
+    expect((await readLock(lockPath))?.heartbeat_at).toBe('2026-04-03T13:00:00.000Z')
+    await unlink(lockPath)
+  })
+
+  it('never writes, and never gives up on, a lock it could not parse', async () => {
+    const { refreshLock } = await import('../lock.js')
+    const lockPath = tmpLock()
+    await writeFile(lockPath, '{"run_id": "run-1", trunc')
+    await expect(refreshLock(lockPath, 'run-1')).rejects.toThrow()
+    expect(await readFile(lockPath, 'utf-8')).toBe('{"run_id": "run-1", trunc')
+    await unlink(lockPath)
   })
 
   it('stops for good the first time the lock is not its own', async () => {
