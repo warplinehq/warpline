@@ -1068,6 +1068,59 @@ function mergeApprovals(
 }
 
 /**
+ * The `pending_gates` this advance writes: the gates the fresh read holds that
+ * survive, followed by the gates this advance parked.
+ *
+ * **Over the fresh read, never this advance's copy.** A gate another writer
+ * discarded while this advance ran, by a denial or a refused apply, is not in it
+ * and does not come back. A gate applied while it ran is in it as applied, so it
+ * keeps its spent marker and ages from its `applied_at`, and its copy of
+ * released content is already erased, by the write that released the content
+ * (`eraseGateCopies`). A gate an overlapping advance parked or dropped is in it
+ * as that advance left it.
+ *
+ * **An APPLIED gate survives the advance.** `applyPendingGate` marks rather
+ * than deletes precisely so a second `approve` finds the gate and refuses
+ * instead of falling through to the Grant path — and assigning the parked gates
+ * over the whole array destroyed that marker on the next advance, so the
+ * sequence apply, advance, approve minted a session Grant. That is the
+ * wrong-gesture outcome mark-not-delete was chosen to prevent, reintroduced
+ * one advance later.
+ *
+ * They are dropped once older than the gate ceiling, so the array does not
+ * grow without bound, and a plugin that has gated again supersedes its own
+ * marker: the new parked gate is the live answer and the old marker has
+ * nothing left to refuse.
+ *
+ * **An UNAPPLIED gate survives too, under the same ceiling.** It did not,
+ * and the split was never chosen: markers lived a full ceiling while a
+ * parked result lived zero advances, so a daily engine destroyed Monday's
+ * proposal on Tuesday morning before anyone could review it. The ceiling
+ * itself was unreachable in live operation — a limit the spec states and
+ * only seeded-clock tests could ever observe.
+ *
+ * One rule for the whole array: a gate survives while it is younger than the
+ * ceiling and has not been superseded by a gate this advance parked for its
+ * plugin, whichever advance parked the older one. The clock differs because
+ * the question does — a marker ages from when the result was ACCEPTED, a
+ * parked gate from when the run PRODUCED it, which is the clock
+ * `applyPendingGate` already expires against.
+ *
+ * A gate missing `run_completed_at` does not survive. Such a gate is refused
+ * at apply time anyway ("carries no record of when its run happened"), so
+ * keeping it would only park something that can never be answered.
+ */
+function mergePendingGates(disk: PendingGate[], parked: PendingGate[], now: number): PendingGate[] {
+  const floorMs = now - GATE_MAX_AGE_MS
+  const survivors = disk.filter((g) => {
+    if (parked.some((p) => p.plugin === g.plugin)) return false
+    const clock = g.applied_at ?? g.run_completed_at
+    return clock !== null && new Date(clock).getTime() > floorMs
+  })
+  return [...survivors, ...parked]
+}
+
+/**
  * This advance's tier changes, applied by task id onto the tasks as the fresh
  * read holds them. The tier block in `runAdvance` decides them over its own
  * copy, and this is where they land.
@@ -1382,11 +1435,11 @@ export function eraseIfReleased(
  * the erased record the caller writes or keeps, so the gate copy and that
  * record agree about when the same bytes were erased.
  *
- * It has three callers. The release write, `eraseIfReleased`, erases the copy
+ * It has two callers. The release write, `eraseIfReleased`, erases the copy
  * with the content. `applyPendingGate` erases it when it applies a gate whose
  * run's content was already erased while the gate was pending. The end-of-run
- * reconcile in `runAdvance` erases it when it keeps an erased record another
- * write left on disk, either in `last_output` or in an applied gate's copy.
+ * write needs no call of its own: it takes `pending_gates` from the fresh read,
+ * where every write that erased content already erased these copies.
  */
 function eraseGateCopies(pendingGates: PendingGate[], plugin: string, bodySha256: string, erasedAt: string): void {
   for (let i = 0; i < pendingGates.length; i++) {
@@ -3250,51 +3303,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       }
     }
 
-    // 8. Write updated state (with pending_gates)
+    // 8. Write updated state
     //
-    // The gates this advance parked, assembled in the gated arm above where the
-    // plugin's real result is still in hand, are added to the gates that
-    // survive.
-    //
-    // **An APPLIED gate survives the advance.** `applyPendingGate` marks rather
-    // than deletes precisely so a second `approve` finds the gate and refuses
-    // instead of falling through to the Grant path — and assigning `parked_gates`
-    // over the whole array destroyed that marker on the next advance, so the
-    // sequence apply, advance, approve minted a session Grant. That is the
-    // wrong-gesture outcome mark-not-delete was chosen to prevent, reintroduced
-    // one advance later.
-    //
-    // They are dropped once older than the gate ceiling, so the array does not
-    // grow without bound, and a plugin that has gated again supersedes its own
-    // marker: the new parked gate is the live answer and the old marker has
-    // nothing left to refuse.
-    //
-    // **An UNAPPLIED gate survives too, under the same ceiling.** It did not,
-    // and the split was never chosen: markers lived a full ceiling while a
-    // parked result lived zero advances, so a daily engine destroyed Monday's
-    // proposal on Tuesday morning before anyone could review it. The ceiling
-    // itself was unreachable in live operation — a limit the spec states and
-    // only seeded-clock tests could ever observe.
-    //
-    // One rule for the whole array now: a gate survives while it is younger than
-    // the ceiling and has not been superseded by a fresh gate for its plugin.
-    // The clock differs because the question does — a marker ages from when the
-    // result was ACCEPTED, a parked gate from when the run PRODUCED it, which is
-    // the clock `applyPendingGate` already expires against.
-    //
-    // A marker's copy of content that erasure has released does not wait for the
-    // ceiling: the write that releases the content erases it (`eraseGateCopies`).
-    //
-    // A gate missing `run_completed_at` does not survive. Such a gate is refused
-    // at apply time anyway ("carries no record of when its run happened"), so
-    // keeping it would only park something that can never be answered.
-    const gateFloorMs = Date.now() - GATE_MAX_AGE_MS
-    const survivors = state.pending_gates.filter((g) => {
-      if (parked_gates.some((p) => p.plugin === g.plugin)) return false
-      const clock = g.applied_at ?? g.run_completed_at
-      return clock !== null && new Date(clock).getTime() > gateFloorMs
-    })
-
     // The single end-of-run write, and the second of this file's two locked
     // regions — sequential with the spend mark's, never nested (see
     // `lockStateDocument`).
@@ -3307,23 +3317,21 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // wrote, and a denial, a `deny --remove` or a board write that landed
     // mid-advance is kept. Onto that floor go the fields this advance changed:
     // its run id and clocks, its tier changes by task id (`mergeTierChanges`),
-    // and `approvals` by the table on `mergeApprovals`.
+    // the gates it parked (`mergePendingGates`), and `approvals` by the table
+    // on `mergeApprovals`. The gates that survive are decided over the fresh
+    // read, so a gate a denial or a refused apply discarded mid-advance stays
+    // gone, and one applied mid-advance keeps its spent marker.
     //
-    // `plugin_runs` and `pending_gates` are still this advance's own in-memory
-    // copies, so the window of #25 is still open for them, which is where
-    // `engine-state-store.ts` files it. Three narrow reconciles from the fresh
-    // read are the exceptions, each for the reason given at its loop below. An
-    // apply that landed mid-advance is kept: the applied gate, if this advance
-    // still holds it as pending, and that run's `plugin_runs` entry while it is
-    // still the parked one. An erased `last_output` is kept over this advance's
-    // body for the same run. Erased bytes in an applied gate's copy are not
-    // written back with a body while the fresh read still holds that gate.
-    // An applied gate an overlapping advance dropped, after this advance's run
-    // lock was healed by its two-hour TTL, is written back as this advance read
-    // it, body included, and so is its `last_output`.
-    // An erased `last_output` of another run is still written over, and a gate
-    // another writer discarded mid-advance is still written back.
-    // Closing the general case is a change of its own.
+    // `plugin_runs` is still this advance's own in-memory copy, so the window
+    // of #25 is still open for it, which is where `engine-state-store.ts` files
+    // it. Two narrow reconciles from the fresh read are the exceptions, each
+    // for the reason given at its loop below. An apply that landed mid-advance
+    // keeps that run's entry while this advance's is still the parked one. An
+    // erased `last_output` is kept over this advance's body for the same run.
+    // An erased `last_output` of another run is still written over, an entry a
+    // refused apply deleted is still written back, and so is this advance's
+    // `last_output` of a gate an overlapping advance dropped, after this
+    // advance's run lock was healed by its two-hour TTL.
     //
     // `approvals` takes a per-key rule rather than the floor, because this
     // advance writes it too, and so does another ATTACHMENT. One home can be
@@ -3393,7 +3401,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         last_run_at: new Date().toISOString(),
         last_interaction_at: state.last_interaction_at,
         plugin_runs: state.plugin_runs,
-        pending_gates: [...survivors, ...parked_gates],
+        pending_gates: mergePendingGates(disk.pending_gates, parked_gates, Date.now()),
         ...mergeTierChanges(disk, archivedTaskIds, autoDeferrals, tierStamp),
         // `confirmed_at` is written HERE and nowhere else — the second half of
         // the two-field mark, and the reason the mark is two fields rather than
@@ -3403,55 +3411,25 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       }
       // An apply can land while this advance runs, because `approve <plugin>`
       // takes the state lock and this advance holds none across its plugins.
-      // Written back from memory, the gate would read pending again with its
-      // copy, and the plugin's entry would read `gated`: the operator's apply
-      // would be lost. So an applied gate in the fresh read replaces this
-      // advance's pending copy of it, matched by plugin and `run_id`. The
-      // plugin's `plugin_runs` entry from the fresh read replaces this
-      // advance's too, but only while this advance's entry is still the `gated`
-      // one that run's park wrote, because the park stamps one instant into
-      // both that entry's `last_run_at` and the gate's `run_completed_at`.
-      // That match needs no gate slot, so it holds when the gate aged out
-      // during this advance and is no longer held here. The gate itself is
-      // not brought back.
-      // A newer run this advance made stays.
-      // This runs first, so the erasure reconciles below and the release write
-      // all see the gate as applied.
-      // The adopted gate needs no erasure call of its own. An apply after
-      // erasure erased its copy in the apply's own write, an erasure on disk
-      // after the apply shows in the gate adopted here, and a copy still bound
-      // goes with the content if this write releases it.
+      // The applied gate is already the fresh read's, above. The plugin's
+      // `plugin_runs` entry from the fresh read replaces this advance's too,
+      // but only while this advance's entry is still the `gated` one that
+      // run's park wrote, because the park stamps one instant into both that
+      // entry's `last_run_at` and the gate's `run_completed_at`. A newer run
+      // this advance made stays. This runs first, so the erasure reconcile
+      // below and the release write both see the entry as applied.
       //
       // Erasure is one-way. An overlapping advance may have erased a body this
       // advance still holds in memory, and swept the binding that released it,
       // so the merge above drops this advance's copy of that binding too.
       // Written back, the body would have nothing left to erase it again. So
       // an erased record on disk for the same run wins over the in-memory body.
-      // This advance's copy of `pending_gates` was read before that write too,
-      // so an applied gate's copy of the same bytes is erased here as well.
-      //
-      // The gate copies are reconciled from disk on their own, not only through
-      // that `plugin_runs` match. A producer that ran again in this advance
-      // without parking holds a newer run in memory, so the match misses. The
-      // write that erased its content also erased the applied gate's copy on
-      // disk, and dropped the binding, so nothing here would release it again.
-      // Written back, that copy would keep its body until the gate ceiling.
       for (const d of disk.pending_gates) {
         if (d.applied_at === null) continue
-        const i = merged.pending_gates.findIndex(
-          (g) => g.plugin === d.plugin && g.run_id === d.run_id && g.applied_at === null,
-        )
-        if (i !== -1) {
-          merged.pending_gates[i] = d
-        }
         const entry = Object.hasOwn(merged.plugin_runs, d.plugin) ? merged.plugin_runs[d.plugin] : undefined
         const gatedByThisRun = entry?.status === 'gated' && entry.last_run_at === d.run_completed_at
         if (gatedByThisRun && Object.hasOwn(disk.plugin_runs, d.plugin)) {
           merged.plugin_runs[d.plugin] = disk.plugin_runs[d.plugin]!
-        }
-        for (const o of d.plugin_result.artifacts_produced) {
-          if (!('erased_at' in o) || o.erased_at === undefined) continue
-          eraseGateCopies(merged.pending_gates, d.plugin, o.body_sha256!, o.erased_at)
         }
       }
       for (const [plugin, run] of Object.entries(merged.plugin_runs)) {
@@ -3466,7 +3444,6 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           mine.run_id === onDisk.run_id
         ) {
           merged.plugin_runs[plugin] = { ...run, last_output: onDisk }
-          eraseGateCopies(merged.pending_gates, plugin, onDisk.body_sha256!, onDisk.erased_at)
         }
       }
       eraseReleasedContent(merged.plugin_runs, merged.pending_gates, merged.approvals, plugins, approvalNow)

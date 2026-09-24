@@ -1628,7 +1628,8 @@ one entry per plugin, and a fresh park replaces it. An advance that parks
 nothing for the plugin leaves its entry in place, for example when the plugin
 was not due, its result failed, or its invocation threw. So the entry can come
 from an earlier advance than the most recent one (§ 10, "Applying a gate",
-step 4).
+step 4). An entry another writer applied or discarded while an advance ran
+stays as that writer left it (§ 12).
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -1704,6 +1705,9 @@ does, in order, all decided before anything is written:
    accepted. An unapplied gate ages from `run_completed_at`, the moment the run
    produced it — the same clock the expiry check uses. A gate carrying no
    `run_completed_at` never survives, since it is refused at apply time anyway.
+   The advance applies this rule to the gates the document holds when it
+   writes, not to the ones it read at its start. A gate applied while it ran
+   survives as a marker, and a gate discarded while it ran stays discarded.
 
    Both halves were once overwritten wholesale, and the split that replaced it
    kept markers while still discarding parked results. Nothing chose that: a
@@ -2783,8 +2787,8 @@ writes it at the end, a window that spans plugin execution, and it holds no stat
 lock across that window — holding one there would block the board for the length
 of a run. Closing #25 means applying the advance's changes as deltas onto a fresh
 read taken inside the state lock. The end-of-run write does that for every field
-but `plugin_runs` and `pending_gates`, which are still the advance's own copies.
-For those two, #25 is open.
+but `plugin_runs`, which is still the advance's own copy. For that field, #25 is
+open.
 
 **Every field the advance does not change comes from the fresh read.** The
 end-of-run write takes the state lock, re-reads the document inside it, and
@@ -2793,6 +2797,14 @@ that read holds them. So a denial, a `deny --remove` or a board write that lands
 while the advance runs is kept. Onto that the advance writes its own run id and
 clocks, and its tier changes: a task its tier archived or auto-deferred is
 changed by task id, and only while the fresh read still holds it open.
+
+**`pending_gates` is the fresh read's too, with the advance's parked gates
+added.** Which gates survive is decided over the fresh read (§ 10, "Applying a
+gate", step 1), and a gate the advance parked supersedes the plugin's gate
+there. So a gate a denial or a refused apply discarded while the advance ran
+stays discarded, and a gate applied while it ran keeps its spent marker. An
+applied gate's copy of released content was erased by the write that released
+it, so it is not written back.
 
 **`approvals` is merged per key.** Both of the advance's writes to it — the
 spend mark taken before a content-approved handler runs, and the single
@@ -2812,47 +2824,27 @@ drops this advance's copy of the binding as well, and a body written back would
 have nothing left to erase it. The rest of `plugin_runs` is still the advance's
 own in-memory state,
 except an entry adopted with an apply that landed mid-advance (below).
-It erases the copy an applied gate of that producer holds of the same bytes too,
-because this advance's `pending_gates` was read before that erasure as well.
-The copies applied gates hold are reconciled the same way on their own. Any
-Output the fresh read shows erased in an applied gate erases every copy of the
-same bytes that this advance's applied gates of that producer still hold, with
-the erased record's `erased_at`, whether or not `last_output` matched. This
-covers a producer that ran again in this advance without parking a gate: its
-`last_output` now names the new run, so the match above misses, and a
-withdrawal that landed mid-advance has already dropped the binding that would
-release the old bytes again.
 
 **An apply that lands mid-advance is kept.**
 `warpline approve <plugin>` applies a parked gate under the state lock, so it
-can land while an advance that read the gate as pending is still running. If
-the fresh read inside the end-of-run lock shows that gate applied, for the same
-plugin and `run_id`, the applied gate is written instead of the advance's
-pending copy. The plugin's `plugin_runs` entry from the fresh read is written
-too, while the advance's own entry is still the `gated` one that run's park
-wrote, whether or not the advance still holds the gate. The park stamps one
-instant into that entry's `last_run_at` and the gate's `run_completed_at`,
-which is how the two are matched.
-A newer run this advance made is kept.
-This happens before the reconciles above and before the release write (§ 10).
+can land while an advance that read the gate as pending is still running. The
+applied gate is written as the fresh read holds it, like every gate. The
+plugin's `plugin_runs` entry from the fresh read is written too, while the
+advance's own entry is still the `gated` one that run's park wrote. The park
+stamps one instant into that entry's `last_run_at` and the gate's
+`run_completed_at`, which is how the two are matched.
+A newer run this advance made is kept, and so is a newer gate it parked, which
+supersedes the applied one.
+This happens before the reconcile above and before the release write (§ 10).
 So a gate applied while its content was still bound is erased with that content
 when this write releases it, and an apply after erasure already erased the
 gate's copy in its own write (§ "Applying a gate", step 4). What it does not
 reach, and #25 leaves open:
-a gate the fresh read shows discarded, by a refused apply or a denial, is
-written back as the advance read it. A gate the advance no longer holds,
-because the plugin parked a newer one or the gate aged out, is not brought
-back. When it aged out during the advance, the entry is still written, so the
-plugin keeps the apply's terminal status. The spent marker is gone, though,
-where an apply before the advance would have kept it until its own ceiling.
-A later `approve <plugin>` then grants without the note that the result was
-already applied. When the plugin parked a newer one, the newer park's `gated`
-entry stays. An erased `last_output` of another run is written over by the
-advance's entry. An applied gate this advance still holds but the fresh read
-does not, because an overlapping advance dropped it after this advance's run
-lock was healed by its two-hour TTL, is written back as this advance read it,
-body included, and so is this advance's `last_output` of that run. Content
-erased while this advance ran can come back that way.
+an entry a refused apply deleted is written back as the advance read it, and an
+erased `last_output` of another run is written over by the advance's entry. So
+is this advance's `last_output` of a gate an overlapping advance dropped, after
+this advance's run lock was healed by its two-hour TTL. Content erased while
+this advance ran can come back that way.
 
 **Which file each writer writes, since this has been recorded wrongly before.**
 The `deny` verb and the board write the engine state document, under the state

@@ -397,9 +397,10 @@ export async function withoutStateBackups<T>(fn: () => Promise<T>): Promise<T> {
  * execution, and holding the lock across that would block the board for the
  * length of a run. So its end-of-run write re-reads this document inside the
  * lock and applies the advance's changes onto that fresh read. Every field the
- * advance did not change is written as the fresh read holds it. `plugin_runs`
- * and `pending_gates` are still the advance's own copies, and the window is
- * still open for them — tracked in #25.
+ * advance did not change is written as the fresh read holds it, and
+ * `pending_gates` is the fresh read's with the advance's parked gates added.
+ * `plugin_runs` is still the advance's own copy, and the window is still open
+ * for it — tracked in #25.
  *
  * `approvals` is merged per key rather than taken from the fresh read, because
  * the advance writes it too. Both of `engine.ts`'s writes — the mid-run spend
