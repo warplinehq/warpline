@@ -357,8 +357,11 @@ racing a scheduled one, because nothing in any scheduler knows about a human at
 a terminal. Two schedulers installed against one home collide the same way.
 
 When two advances do meet, the second exits `75`, names the holder, and says
-that nothing ran. `runtime-spec.md` § 12 is the whole of it, including how a
-lock left behind by a dead process heals on the next tick.
+that nothing ran. `runtime-spec.md` § 12 is the whole of it, including when a
+lock left behind by a dead process heals on the next tick (the lock and this
+machine carry the same known host identifier), and when it waits out the two
+hours from its last heartbeat, or from when it was taken if it carries none,
+instead.
 
 ## Decide about `review_gate` before the first tick
 

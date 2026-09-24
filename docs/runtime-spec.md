@@ -2472,9 +2472,12 @@ dead. Two consequences follow, and both are bounded rather than open:
   there is no code that means "cancelled cleanly" because there is no such
   outcome to report.
 - The run lock is left behind: the interrupt ends the process before the
-  release runs. The next advance heals it, because the lock names a process id
-  that is gone (§ 12). So an interrupted advance is recoverable without any flag
-  that breaks a held lock, which is why no such flag exists.
+  release runs. The next advance heals it only when the lock names a process id
+  that is gone and the lock's `host` and this machine's are both known and
+  equal. Otherwise it waits out the two-hour window, measured from the lock's
+  last heartbeat, or from when it was taken if it carries none (§ 12). Either
+  way an interrupted advance is recoverable without any flag that breaks a held
+  lock, which is why no such flag exists.
 
 ### What reaches stdout
 
@@ -2834,10 +2837,13 @@ itself. An operator who finds one deletes `.lock` by hand.
 SIGINT or SIGTERM exits `130` (§ 11) as soon as its stdout has drained, or after
 two seconds if it has not, which ends the process and not the work: the plugin that was in flight may run to completion in a process
 the operator believes is dead. The lock that interruption leaves behind is
-reclaimed by the heal described above — on the next advance if the holder's process is gone and the
-lock was taken on this same machine, and at the two-hour window if the lock was orchestrator-held,
-names no process, or came from another machine.
-The two facts belong beside each other because the second is what bounds the
+reclaimed by the heal described above: on the next advance if the holder's
+process is gone and the lock's `host` and this machine's are both known and
+equal, and in every other case at the two-hour window, measured from the last
+heartbeat or from when it was taken if it carries none (§ The heartbeat). That
+covers a lock that was orchestrator-held, names no process, came from another
+machine, or carries no `host` or a `null` one, and any lock read on a machine
+that cannot identify itself. The two facts belong beside each other because the second is what bounds the
 first.
 
 ### What the end-of-run write merges: issue #25
