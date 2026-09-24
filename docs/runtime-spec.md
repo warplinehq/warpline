@@ -2666,7 +2666,11 @@ healed, however long its advance runs: a plugin's `timeout_ms` has no upper
 bound, and healing a long advance let a second one run beside it and fire
 session-class side effects again. A holder that stops refreshing, wedged, asleep
 or gone, is healed two hours after its last refresh. A lock with no
-`heartbeat_at` is measured from `acquired_at`.
+`heartbeat_at` is measured from `acquired_at`. So is one whose `heartbeat_at` is
+not a date, or lies more than two hours ahead of the reading machine's clock:
+that is a wrong value, not a clock that runs fast, and trusting it would keep
+the lock from ever healing. A holder whose clock runs ahead by less than that
+keeps its lease, and is healed that much later.
 
 **The refresh never writes a lock this run does not hold.** It reads the lock
 back, compares the run id, and renames a new copy into place, so a reader never

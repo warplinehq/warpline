@@ -225,7 +225,7 @@ export function isProcessAlive(pid: number): boolean {
  * Is this lock safe to break?
  *
  * The TTL branch is unconditional, and it measures from the holder's last
- * heartbeat, or from `acquired_at` for a lock that carries none. The pid branch
+ * heartbeat, or from `acquired_at` for a lock that carries none it can use. The pid branch
  * is reached only when the lock's host and this machine's host are BOTH known
  * and equal — anything else is a pid from a kernel that is not this one, and
  * `process.kill(pid, 0)` answers about the local kernel whatever the lock says.
@@ -233,7 +233,15 @@ export function isProcessAlive(pid: number): boolean {
  * branch is skipped entirely and only the two-hour window expires the lock.
  */
 export function isLockStale(lock: WarplineLock, read: MachineIdReader = readMachineIdFromHost): boolean {
-  const age = Date.now() - new Date(lock.heartbeat_at ?? lock.acquired_at).getTime()
+  // A heartbeat that is not a date, or that sits further ahead than the window
+  // itself, is not a clock that runs fast. It is a wrong value, and trusting it
+  // pins the lock forever: NaN, or a negative age, never exceeds the window.
+  // It falls back to `acquired_at`. A schema check would be worse: a lock that
+  // does not parse is refused, never broken, so it would never heal at all.
+  const now = Date.now()
+  const heartbeat = Date.parse(lock.heartbeat_at ?? '')
+  const usable = !Number.isNaN(heartbeat) && heartbeat - now <= TWO_HOURS_MS
+  const age = now - (usable ? heartbeat : Date.parse(lock.acquired_at))
   if (age > TWO_HOURS_MS) return true
   if (lock.pid === null) return false
   const theirs = lock.host ?? null
