@@ -360,8 +360,8 @@ When two advances do meet, the second exits `75`, names the holder, and says
 that nothing ran. `runtime-spec.md` § 12 is the whole of it, including when a
 lock left behind by a dead process heals on the next tick (the lock and this
 machine carry the same known host identifier), and when it waits out the two
-hours from its last heartbeat, or from when it was taken if it carries none,
-instead.
+hours from its last heartbeat, or from when it was taken if it carries none it
+can use, instead.
 
 ## Decide about `review_gate` before the first tick
 

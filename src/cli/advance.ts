@@ -76,9 +76,9 @@
  * dead-holder heal on the next advance only when the lock and this machine
  * carry the same known host identifier. For a lock taken on another machine,
  * or where either side could not name its host, it waits two hours from the
- * lock's last heartbeat, or from when it was taken if it carries none. Either
- * way an interrupted advance stays recoverable without a flag that breaks a
- * held lock.
+ * lock's last heartbeat, or from when it was taken if it carries none it can
+ * use. Either way an interrupted advance stays recoverable without a flag that
+ * breaks a held lock.
  * `docs/runtime-spec.md` §§ 11 and 12 carry the same two facts for operators.
  *
  * The due-set is `runAdvance`'s and never this file's. `warpline plan` agrees
@@ -459,10 +459,10 @@ export async function run(
           `warpline advance: ${err.message} Nothing ran and nothing was written — another ` +
             `advance holds this home. The next scheduled tick retries. The lock is broken ` +
             `automatically two hours after its holder's last heartbeat, or two hours ` +
-            `from when it was taken if it carries none, or on the next tick if its ` +
-            `process has exited and the lock and this machine carry the same known ` +
-            `host identifier. Nothing breaks a lock its holder is still refreshing; ` +
-            `see docs/runtime-spec.md § 12.\n`,
+            `from when it was taken if it carries none it can use, or on the next ` +
+            `tick if its process has exited and the lock and this machine carry the ` +
+            `same known host identifier. Nothing breaks a lock its holder is still ` +
+            `refreshing; see docs/runtime-spec.md § 12.\n`,
         )
         return 75
       }

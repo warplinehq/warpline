@@ -2476,9 +2476,9 @@ dead. Two consequences follow, and both are bounded rather than open:
   release runs. The next advance heals it only when the lock names a process id
   that is gone and the lock's `host` and this machine's are both known and
   equal. Otherwise it waits out the two-hour window, measured from the lock's
-  last heartbeat, or from when it was taken if it carries none (§ 12). Either
-  way an interrupted advance is recoverable without any flag that breaks a held
-  lock, which is why no such flag exists.
+  last heartbeat, or from when it was taken if it carries none it can use
+  (§ 12). Either way an interrupted advance is recoverable without any flag
+  that breaks a held lock, which is why no such flag exists.
 
 ### What reaches stdout
 
@@ -2842,7 +2842,8 @@ the operator believes is dead. The lock that interruption leaves behind is
 reclaimed by the heal described above: on the next advance if the holder's
 process is gone and the lock's `host` and this machine's are both known and
 equal, and in every other case at the two-hour window, measured from the last
-heartbeat or from when it was taken if it carries none (§ The heartbeat). That
+heartbeat or from when it was taken if it carries none it can use: none at all,
+one that is not a date, or one more than two hours ahead (§ The heartbeat). That
 covers a lock that was orchestrator-held, names no process, came from another
 machine, or carries no `host` or a `null` one, and any lock read on a machine
 that cannot identify itself. The two facts belong beside each other because the second is what bounds the
