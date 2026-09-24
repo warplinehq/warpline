@@ -2814,7 +2814,7 @@ taken on a different machine, only the two-hour window bounds it. An operator
 who knows the holder is gone can delete `.lock` by hand; an operator who is not
 sure should wait for the window.
 
-**A process that is alive but stuck keeps its lock.** The heartbeat runs on the
+**A process whose event loop is alive keeps its lock, however stuck its advance.** The heartbeat runs on the
 process's event loop, not in the advance's steps. A loop blocked by a
 synchronous plugin, or a mount that never answers, stops the refresh, and the
 lock heals. A process whose loop is alive while the advance waits forever
