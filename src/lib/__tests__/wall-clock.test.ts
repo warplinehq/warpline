@@ -5,6 +5,8 @@
  * fixtures. Every expectation is a `Date.parse('<ISO>Z')` literal, never an
  * offset recomputed by the same arithmetic the implementation uses: an
  * expectation derived that way asserts the implementation against itself.
+ * One case replaces `Intl.DateTimeFormat` for one synchronous call pair and
+ * restores it in `finally`.
  */
 import { describe, it, expect } from 'bun:test'
 
@@ -128,5 +130,55 @@ describe('resolveWallClock — purity', () => {
     const first = resolveWallClock('2026-11-01T01:30', 'America/New_York')
     const second = resolveWallClock('2026-11-01T01:30', 'America/New_York')
     expect(second).toBe(first)
+  })
+})
+
+/**
+ * The in-process stand-in for a tz database update between approval and fire.
+ *
+ * The resolver must see the rules the host has at call time, so this case
+ * swaps one zone's rules between two calls: after the flip, America/New_York
+ * resolves with America/Chicago's rules. A resolver that kept a snapshot of the
+ * zone, such as a per-zone formatter memo, would hand back the old rules and
+ * the instant would not move. The real half, a tzdata package upgrade between
+ * two runs of the same binary, can't be scheduled in-process, and this case
+ * doesn't claim it.
+ */
+describe('resolveWallClock — zone rules are read at call time', () => {
+  it('the resolved instant follows the zone rules at call time, no snapshot', () => {
+    const Original = Intl.DateTimeFormat
+    let swapped = false
+    let rewrites = 0
+    // A `function`, not an arrow: the resolver calls it with `new`, and an
+    // arrow function is not constructible.
+    const wrapper = function (locales?: string | string[], options?: Intl.DateTimeFormatOptions) {
+      if (swapped && options?.timeZone === 'America/New_York') {
+        rewrites += 1
+        return new Original(locales, { ...options, timeZone: 'America/Chicago' })
+      }
+      return new Original(locales, options)
+    }
+    // A non-writable property makes this return false instead of throwing, and
+    // a silent no-op install is a case that cannot fail.
+    expect(Reflect.set(Intl, 'DateTimeFormat', wrapper)).toBe(true)
+
+    let before: number
+    let after: number
+    try {
+      before = resolveWallClock('2026-10-01T09:00', 'America/New_York')
+      swapped = true
+      after = resolveWallClock('2026-10-01T09:00', 'America/New_York')
+    } finally {
+      Reflect.set(Intl, 'DateTimeFormat', Original)
+    }
+
+    // EDT, UTC-4.
+    expect(before).toBe(Date.parse('2026-10-01T13:00:00Z'))
+    // CDT, UTC-5. The one a snapshot of the zone turns red.
+    expect(after).toBe(Date.parse('2026-10-01T14:00:00Z'))
+    expect(after - before).toBe(3_600_000)
+    // In reach: the swap was really consulted after the flip.
+    expect(rewrites).toBeGreaterThan(0)
+    expect(Intl.DateTimeFormat).toBe(Original)
   })
 })
