@@ -146,8 +146,9 @@ export function advanceExitCode(
   if (failed > 0) return 1
   // Gated OR refused OR still waiting, one clause and one `1`. Not additive
   // over exit codes: two reasons to report a held gate are still one held
-  // advance. `gated > 0` is implied by `pending_gates > 0` on the normal arm,
-  // and kept so the parking advance's `1` does not depend on the merge.
+  // advance. `pending_gates > 0` is implied by `gated > 0` on the normal arm,
+  // and `gated` is kept so the parking advance's `1` does not depend on the
+  // merge.
   // Evaluated below the `failed` check so a failure outranks all three, which
   // is the precedence every installed scheduler unit already keys on.
   if (gated > 0 || refused > 0 || pending_gates > 0) return opts.strict === true ? 1 : 0
