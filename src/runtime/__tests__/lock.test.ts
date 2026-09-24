@@ -573,6 +573,23 @@ describe('the heartbeat lease', () => {
     expect(isLockStale({ ...old, acquired_at: '2026-04-03T11:50:00Z' })).toBe(false)
   })
 
+  /**
+   * The heartbeat is rewritten every minute and is the only clock the window
+   * reads, so a value that is not a date must not pin the lock: NaN compares
+   * false against the window forever.
+   */
+  it('measures from acquired_at when the heartbeat is not a date', () => {
+    expect(isLockStale({ ...old, heartbeat_at: '' })).toBe(true)
+    expect(isLockStale({ ...old, heartbeat_at: 'not a date' })).toBe(true)
+    expect(isLockStale({ ...old, acquired_at: '2026-04-03T11:50:00Z', heartbeat_at: '' })).toBe(false)
+  })
+
+  it('measures from acquired_at when the heartbeat is further ahead than the window', () => {
+    expect(isLockStale({ ...old, heartbeat_at: '2099-01-01T00:00:00Z' })).toBe(true)
+    // A holder whose clock runs a few minutes ahead keeps its lease.
+    expect(isLockStale({ ...old, heartbeat_at: '2026-04-03T12:05:00Z' })).toBe(false)
+  })
+
   it('writes a heartbeat equal to acquired_at when it acquires', async () => {
     const lockPath = tmpLock()
     const lock = await acquireLock(lockPath, 'advance')
