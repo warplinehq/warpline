@@ -138,8 +138,9 @@ export const USAGE = `Usage: warpline advance [--strict] [--json]
 Executes every plugin the engine finds due and exits with a code a scheduler can
 read. The codes are published in docs/runtime-spec.md § 11.
 
-  --strict   Report a held approval gate, or a content approval that refused
-             the fire, as a failure (exit 1) rather than 0.
+  --strict   Report an approval gate still waiting on a human, whichever
+             advance parked it, or a content approval that refused the fire,
+             as a failure (exit 1) rather than 0.
   --json     Write one JSON document to stdout instead of the human rendering.
 `
 

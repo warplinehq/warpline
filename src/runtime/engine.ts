@@ -343,6 +343,17 @@ export interface AdvanceResult {
    * does afterwards strips unknown keys.
    */
   pruned: number
+  /**
+   * How many approval gates the state document holds unapplied when this
+   * advance returns, whichever advance parked them: as written on the normal
+   * arm, and as read on the quiet-hours arm, which writes no document.
+   *
+   * Not `gated_plugins.length`. That is this advance's parks only, and it reads
+   * `0` on every later advance while the same gate still waits on a human.
+   *
+   * Additive, on the argument `pruned` already makes above.
+   */
+  pending_gates: number
 }
 
 // -----------------------------------------------------------------------
@@ -1153,6 +1164,22 @@ function mergePendingGates(disk: PendingGate[], parked: PendingGate[], now: numb
     return clock !== null && new Date(clock).getTime() > floorMs
   })
   return [...survivors, ...parked]
+}
+
+/**
+ * How many gates are still waiting on a human: the unapplied gates among what
+ * `mergePendingGates` keeps at `now` with nothing parked.
+ *
+ * Counted over what the merge keeps, not over the raw array, so both arms of
+ * the advance count one set. That is also why a gate past the ceiling is not
+ * counted on the quiet-hours arm, which writes no document to drop it from:
+ * the next write that does would drop it.
+ *
+ * An applied gate is kept only as a spent marker, so a second `approve` finds
+ * it and refuses. It waits on nobody, so it is not counted.
+ */
+function standingGateCount(gates: PendingGate[], now: number): number {
+  return mergePendingGates(gates, [], now).filter((g) => g.applied_at === null).length
 }
 
 /**
@@ -2321,7 +2348,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
      * reading it start disagreeing about one advance.
      *
      * Nothing else goes in this document. A run id, a timestamp, the advance's
-     * own status, a reason token and four integers — no plugin summary, no
+     * own status, a reason token and five integers — no plugin summary, no
      * plugin output, no operator configuration value, no path. The key set is
      * enumerated by a test so that adding a field is a deliberate act.
      *
@@ -2329,12 +2356,15 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
      * content refusal carries are plugin-derived, and a list of them here would
      * be exactly the free-text channel the paragraph above refuses. A consumer
      * that wants them reads `warpline advance --json`.
+     *
+     * `gated` is what this advance parked and `pending_gates` is what is still
+     * waiting, whichever advance parked it. The second is the verdict field.
      */
     const writeDeadMan = async (
       outcome: AdvanceOutcome,
       fields: { run_id: string; status: AdvanceResult['status']; skipped_reason: string | null; pruned: number },
     ): Promise<void> => {
-      const { gated, failed, refused } = advanceCounts(outcome)
+      const { gated, pending_gates, failed, refused } = advanceCounts(outcome)
       await atomicWriteText(
         options.stateDir === undefined
           ? defaultDeadManPath()
@@ -2349,6 +2379,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             status: fields.status,
             skipped_reason: fields.skipped_reason,
             gated,
+            pending_gates,
             failed,
             refused,
             pruned: fields.pruned,
@@ -2470,12 +2501,22 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       for (const failure of loadFailures) {
         quietStates.set(failure.plugin, 'failed')
       }
+      // Unlike `pruned: 0`, this is not "nothing looked, so nothing". The gates
+      // stand whether or not this advance looked, and a detector must see a
+      // gate that waits all night. Counted from the document this advance
+      // read, because this arm writes none.
+      const quietPendingGates = standingGateCount(state.pending_gates, Date.now())
       // `pruned: 0` and it is honest: the prune runs below this guard, so a
       // skipped advance reclaims nothing. Nothing looked, so nothing went.
       await writeDeadMan(
         // Nothing was evaluated, so nothing was refused — the same honesty
         // `pruned: 0` makes below, and the same empty array this arm returns.
-        { plugin_states: quietStates, gated_plugins: [], refused_plugins: [] },
+        {
+          plugin_states: quietStates,
+          gated_plugins: [],
+          refused_plugins: [],
+          pending_gates: quietPendingGates,
+        },
         { run_id, status: quietStatus, skipped_reason: 'quiet_hours', pruned: 0 },
       )
       return {
@@ -2489,6 +2530,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         refused_plugins: [],
         run_log_path: '',
         pruned: 0,
+        pending_gates: quietPendingGates,
       }
     }
 
@@ -3433,7 +3475,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // full disk, a read-only home or an unbreakable lock that failed the mark
     // fails this write too, and the advance exits non-zero. Wrap this in a
     // `catch` and those faults go quiet: revisit `advanceExitCode` first.
-    await lockStateDocument(stateDir, async () => {
+    const standingGates = await lockStateDocument(stateDir, async () => {
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
       const merged: EngineState = {
         ...disk,
@@ -3474,6 +3516,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         join(dirname(dirname(stateDir)), 'version'),
         `${ENGINE_STATE_MAX_SCHEMA_VERSION}\n`,
       )
+      // The gates still waiting, counted from the document this advance just
+      // wrote. Re-applying the ceiling rule to it drops nothing the merge
+      // kept, short of a gate crossing the ceiling in the same instant.
+      return standingGateCount(merged.pending_gates, Date.now())
     })
 
     // 9. Write run log
@@ -3553,7 +3599,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // below, so two advances cannot interleave writes to it. Not in the release
     // block: a throw must leave the previous file standing.
     await writeDeadMan(
-      { plugin_states, gated_plugins, refused_plugins },
+      { plugin_states, gated_plugins, refused_plugins, pending_gates: standingGates },
       { run_id, status: engineStatus, skipped_reason: null, pruned: prunedRunLogs },
     )
 
@@ -3565,6 +3611,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       refused_plugins,
       run_log_path,
       pruned: prunedRunLogs,
+      pending_gates: standingGates,
     }
   } finally {
     // The heartbeat first, and awaited: a refresh still in flight when the

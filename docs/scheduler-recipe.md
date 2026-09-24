@@ -377,8 +377,8 @@ handler is invoked at all, and it reports `skipped` rather than `gated`. No
 `review_gate` setting reaches that one: turning `review_gate` off does not
 approve a side effect, and `runtime-spec.md` § 9 is the gate's specification.
 
-So a fresh install walked through exactly as this page describes gates
-everything on every tick:
+So a fresh install walked through exactly as this page describes parks
+everything on its first tick:
 
 ```
 {"run_id":"...","status":"partial","gated":1,"failed":0,"refused":0,
@@ -386,6 +386,11 @@ everything on every tick:
  "plugins":[{"name":"metrics-rollup","state":"gated"}]}
 rc=0
 ```
+
+Every later tick waits on the same gates. The plugin is not due again yet, so it
+reads `skipped`, `status` reads `complete` and `gated` reads `0`, because
+`gated` counts what this tick parked. The dead-man file's `pending_gates` stays
+`1` until somebody answers, and it is the field to watch.
 
 That is a correct unattended install that completes nothing until somebody
 approves. It is the right default for a fleet with a human near it, and the
@@ -426,17 +431,18 @@ Five things a scheduler operator should read there rather than infer:
   matter usually fails the rest of the advance and exits `75`, but not always,
   and `runtime-spec.md` § 11 says which case stays quiet. If any of these is what
   you want paged about, `warpline advance --strict` promotes them all to `1`
-  and changes none of the other `1` cases. An advance with a gate and a
+  and changes none of the other `1` cases. It does so on every tick while a
+  gate waits, not only the tick that parked it. An advance with a gate and a
   refusal is still a single `1`.
 
   Watch `refused` even when you do not run `--strict`. A fleet can refuse every
-  send on every advance indefinitely with `failed` and `gated` both at `0`
-  throughout, which is the one unhealthy shape the exit code alone cannot show
-  you. The count is in `warpline advance --json` and in the dead-man file; the
+  send on every advance indefinitely with `failed` and `pending_gates` both at
+  `0` throughout, which is the one unhealthy shape the exit code alone cannot
+  show you. The count is in `warpline advance --json` and in the dead-man file; the
   reason for each refusal is in the `--json` payload only.
 - **A tick against a home with no manifests still fires and exits `1`**, and it
-  writes the dead-man file with all three counts at zero. The unit is healthy
-  and the fleet is not. That is the pair to look at together.
+  writes the dead-man file with `gated`, `failed` and `refused` at zero. The
+  unit is healthy and the fleet is not. That is the pair to look at together.
 - **`130` means the process stopped, never that the work stopped.** The advance
   is not interruptible, so the plugin in flight may run to completion in a
   process you believe is dead (§ 11). warpline handles SIGTERM as well as
@@ -485,9 +491,10 @@ Two things that catch people out, both covered in § 13:
   `skipped_reason: "quiet_hours"` and no run log. Quiet hours are off until you
   configure a window, so on most homes that field is always `null`.
 - **The file's `status` is not the exit code.** An advance holding at a gate
-  reports `partial` there and exits `0`. Read `gated`, `refused` and `failed`
-  for the verdict — all three, because an advance that refused every send leaves
-  the first and the last at `0`.
+  reports `partial` there and exits `0`. Read `pending_gates`, `refused` and
+  `failed` for the verdict — all three, because an advance that refused every
+  send leaves the first and the last at `0`. Not `gated`: it counts what this
+  tick parked, and reads `0` on every later tick while the gate still waits.
 
 ## Retention
 
@@ -547,7 +554,7 @@ terminal is what makes it match the scheduled case.
 |---|---|
 | The job never fires | The unit is installed but not enabled or not bootstrapped. Re-run the install commands and then the matching check above. |
 | First tick logs "command not found" | The interpreter path. Step 2. |
-| Exits `0` every tick, nothing ever happens | Three causes, and the `--json` document tells them apart. A home that resolved somewhere you did not mean, so the advance is looking at an empty fleet and correctly reporting nothing to do — the plugin list is empty. Or `review_gate` is on, which is its default, and every plugin is parking at a gate — the list is full of `gated` states and `gated` is non-zero. Or a plugin holding a content approval was not fired, in which case `refused` is non-zero and `refused_plugins` names the plugin and the reason. `indeterminate`: a marked fire was never confirmed. `outside_window`: the window closed. `content_moved`: the approved bytes moved. `mark_unavailable` or `mark_uncertain`: the runtime could not record the send in its own state, so it did not send. Run the last probe above. |
+| Exits `0` every tick, nothing ever happens | Three causes, and the `--json` document tells them apart. A home that resolved somewhere you did not mean, so the advance is looking at an empty fleet and correctly reporting nothing to do — the plugin list is empty. Or `review_gate` is on, which is its default, and every plugin is waiting at a gate: the dead-man file's `pending_gates` is non-zero on every tick. `gated` and the list's `gated` states show only on the tick that parked them, and later ticks read `skipped` until the plugin is due again. Or a plugin holding a content approval was not fired, in which case `refused` is non-zero and `refused_plugins` names the plugin and the reason. `indeterminate`: a marked fire was never confirmed. `outside_window`: the window closed. `content_moved`: the approved bytes moved. `mark_unavailable` or `mark_uncertain`: the runtime could not record the send in its own state, so it did not send. Run the last probe above. |
 | Exits `75` every tick | § 11 names three causes: a throw out of the advance, the refusal to create a home, and contention on the run lock. The message distinguishes them. |
 | Exits `1` on a home you know has plugins | The plugin root loaded no manifests, or every manifest in it threw. This is not a count of failures. Check the unit's command line too: a flag warpline does not know, or a stray word where a flag was meant, is refused with a usage message on stderr and exits `1` having run nothing. |
 | Worked for months, stopped after an upgrade | The absolute interpreter path and the explicit home are pins, and a Node upgrade that moves the binary or a moved home breaks them. That is the cost of the determinism they buy: resolving the interpreter at run time would put back the `PATH` problem step 2 solves. Re-check both after any upgrade or move. |

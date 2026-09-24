@@ -28,15 +28,26 @@
  */
 import type { AdvanceResult } from './engine.js'
 
-/** The only three fields of an advance the exit code is allowed to read. */
+/** The only four fields of an advance the exit code is allowed to read. */
 export type AdvanceOutcome = Pick<
   AdvanceResult,
-  'plugin_states' | 'gated_plugins' | 'refused_plugins'
+  'plugin_states' | 'gated_plugins' | 'refused_plugins' | 'pending_gates'
 >
 
 export interface AdvanceCounts {
-  /** How many plugins are holding at an approval gate. */
+  /**
+   * How many plugins THIS advance parked at an approval gate.
+   *
+   * It reads `0` on every later advance while the same gate still waits.
+   * `pending_gates` is the count that does not forget.
+   */
   gated: number
+  /**
+   * How many approval gates are still waiting on a human, whichever advance
+   * parked them. Carried from the result, never recounted here: the engine
+   * counts it once, from the state document, and this is a pass-through.
+   */
+  pending_gates: number
   /** How many plugins ended in `'failed'`, load failures included. */
   failed: number
   /**
@@ -51,7 +62,7 @@ export interface AdvanceCounts {
 }
 
 /**
- * The gated, failed and refused counts for the run's own record.
+ * The gated, pending-gate, failed and refused counts for the run's own record.
  *
  * Exported so the record a monitor reads and the code it reads are derived from
  * one walk over one map. A second count computed somewhere else is a second
@@ -67,6 +78,7 @@ export function advanceCounts(result: AdvanceOutcome): AdvanceCounts {
   }
   return {
     gated: result.gated_plugins.length,
+    pending_gates: result.pending_gates,
     failed,
     // `.length` over the structured array the engine already populated. No
     // second walk: a refusal is counted where the advance recorded it.
@@ -83,9 +95,10 @@ export function advanceCounts(result: AdvanceOutcome): AdvanceCounts {
  * `'failed'` — so an empty map means the plugin root held nothing importable.
  * It is not a count of failures and must not be read as one.
  *
- * `opts.strict` promotes a held gate to `1`, and a content refusal with it. It
- * changes none of the `1` cases: a plugin failure and a zero-manifest root are
- * `1` with it or without it.
+ * `opts.strict` promotes a held gate to `1`, and a content refusal with it. A
+ * gate still waiting is promoted on every advance while it waits, not only on
+ * the advance that parked it. It changes none of the `1` cases: a plugin
+ * failure and a zero-manifest root are `1` with it or without it.
  *
  * A refusal on its own is `0`. For `indeterminate`, `outside_window` and
  * `content_moved` that is the reason stated at the top of this file: a held
@@ -129,13 +142,15 @@ export function advanceExitCode(
 ): 0 | 1 {
   if (result.plugin_states.size === 0) return 1
 
-  const { gated, failed, refused } = advanceCounts(result)
+  const { gated, pending_gates, failed, refused } = advanceCounts(result)
   if (failed > 0) return 1
-  // Gated OR refused, one clause and one `1`. Not additive over exit codes:
-  // two reasons to report a held gate are still one held advance. Evaluated
-  // below the `failed` check so a failure outranks both, which is the
-  // precedence every installed scheduler unit already keys on.
-  if (gated > 0 || refused > 0) return opts.strict === true ? 1 : 0
+  // Gated OR refused OR still waiting, one clause and one `1`. Not additive
+  // over exit codes: two reasons to report a held gate are still one held
+  // advance. `gated > 0` is implied by `pending_gates > 0` on the normal arm,
+  // and kept so the parking advance's `1` does not depend on the merge.
+  // Evaluated below the `failed` check so a failure outranks all three, which
+  // is the precedence every installed scheduler unit already keys on.
+  if (gated > 0 || refused > 0 || pending_gates > 0) return opts.strict === true ? 1 : 0
 
   return 0
 }

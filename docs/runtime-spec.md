@@ -2509,9 +2509,10 @@ code, which reaches it without being parsed.
 
 ### The code comes from the run's own state, never from its status
 
-The code is computed from exactly three fields of the advance result:
-`plugin_states`, `gated_plugins` and `refused_plugins`. It never reads
-`AdvanceResult.status`, and
+The code is computed from exactly four fields of the advance result:
+`plugin_states`, `gated_plugins`, `refused_plugins` and `pending_gates`, the
+count of gates still waiting (§ 13). It never reads `AdvanceResult.status`,
+and
 that distinction is the point. A run that stops at an
 approval gate reports `partial`, because it did not get through the fleet — but a
 held gate is the runtime doing exactly what it is for. Reporting it as a failure
@@ -2529,9 +2530,13 @@ Two consequences worth stating plainly:
 
 ### `--strict`
 
-`warpline advance --strict` promotes a gated **or refused** advance to `1`. Use
-it where a gate waiting on a human is itself the thing you want paged about — a
-fleet that is supposed to be running fully autonomously, for instance.
+`warpline advance --strict` promotes an advance to `1` while any approval gate
+is still waiting on a human, **or** when a content approval refused a fire. A
+waiting gate is one the state document still holds unapplied (`pending_gates`,
+§ 13), whichever advance parked it: the advance that parks it counts it, and so
+does every later advance until it is applied or dropped. Use it where a gate
+waiting on a human is itself the thing you want paged about — a fleet that is
+supposed to be running fully autonomously, for instance.
 
 A content refusal is `0` on its own, for all five reasons in § 5. Three of them
 say the approval stopped applying: `indeterminate` (a marked fire was never
@@ -2562,7 +2567,7 @@ nothing to do.
 
 `--strict` changes none of the `1` cases. A plugin failure is `1` with it or
 without it, and a plugin root that loaded no manifests is `1` with it or without
-it. The flag moves the gated and refused cases and nothing else — and it moves
+it. The flag moves the waiting-gate and refused cases and nothing else — and it moves
 them together, as one `1`: an advance with both is not two failures.
 
 ### `75`
@@ -2927,13 +2932,14 @@ file's own age.
 | `completed_at` | string | ISO 8601 UTC, the moment this file was written. Use the file's mtime for age checks; this field is for a human reading the file. |
 | `status` | `"complete"` \| `"partial"` \| `"failed"` | The advance's own status. **Not the exit code.** |
 | `skipped_reason` | string \| null | `null` when the advance ran. `"quiet_hours"` when it returned early because a quiet window was active. |
-| `gated` | integer | How many plugins are holding at an approval gate. |
+| `gated` | integer | How many plugins this advance parked at an approval gate. `0` on every later advance while the same gate still waits: `pending_gates` counts that. |
+| `pending_gates` | integer | How many approval gates are waiting on a human: entries in the state document's `pending_gates` (§ 10) with no `applied_at`, whichever advance parked them. A gate applied and kept as a spent marker is not counted. Counted from the document this advance wrote, or on a skipped advance from the one it read, since that advance writes none. Either way a gate past the gate ceiling (§ 10, `pending_gates`) is not counted, because the next write drops it. |
 | `failed` | integer | How many plugins ended failed, manifests that would not load included. |
 | `refused` | integer | How many plugins holding a content approval were not fired: the approval stopped applying (`indeterminate`, `outside_window`, `content_moved`), or the spend mark's own state I/O failed and nothing was sent (`mark_unavailable`, `mark_uncertain`) (§ 5). The **count only**: the reasons are plugin-derived and reach a reader through `warpline advance --json`, never through this file. An unmarked closed binding the sweep keeps because its content is still held (§ 10, "Expiry and deletion") counts here on every advance until that content is erased. A confirmed one reads `spent` and is not counted. |
 | `pruned` | integer | How many run records this advance's retention prune removed. Always `0` on a skipped advance, which returns above the prune. |
 
-Those eight keys are the whole document, and `dead-man.test.ts` enumerates them
-so that adding a ninth has to be a deliberate act. Nothing else belongs here:
+Those nine keys are the whole document, and `dead-man.test.ts` enumerates them
+so that adding a tenth has to be a deliberate act. Nothing else belongs here:
 no plugin summary, no plugin output, no value read out of your configuration and
 no path. A field carrying free text would make this file a channel for content it
 was never meant to carry.
@@ -2949,8 +2955,8 @@ detector that branches on `"interrupted"` here gets dead code.
 matters most on the case you will hit most.** An advance that stops at an
 approval gate reports `partial` here and exits `0` there, because a held gate is
 the runtime doing its job. A detector that treats `status` as a pass/fail verdict
-will page you every time a plugin waits for a human. Read `gated`, `refused` and
-`failed` for the verdict, and read `status` for what the run did.
+will page you every time a plugin waits for a human. Read `pending_gates`,
+`refused` and `failed` for the verdict, and read `status` for what the run did.
 
 ### When it is written, and when it is not
 
@@ -3003,35 +3009,41 @@ should test them:
    purpose, so it is recent and it is not stopped. No plugin ran, so `gated` is
    always `0` here — but `failed` is not: a manifest that would not load is
    counted on this arm too, which is what lets a broken plugin root show through
-   a quiet night instead of waiting for morning. Check this step before the next
+   a quiet night instead of waiting for morning. `pending_gates` is not always
+   `0` either: a gate still waiting overnight is counted from the state document
+   the skipped advance read. Check this step before the next
    one so that a skipped advance with a load failure reads as broken and asleep
    rather than as broken and awake.
 3. **Broken.** `failed` is greater than zero. At least one plugin failed or one
    manifest would not load. Read the run log named by `run_id` — unless
    `skipped_reason` is set, in which case there is no log and the failure is a
    manifest that would not import.
-4. **Waiting.** `gated` or `refused` is greater than zero and `failed` is zero.
+4. **Waiting.** `pending_gates` or `refused` is greater than zero and `failed`
+   is zero.
    Plugins are holding — at a session approval gate, or on a content approval
    the runtime declined to fire. Whether that pages you is your call — it
    is the same distinction `warpline advance --strict` makes at the exit code,
-   and it covers both fields for the same reason.
+   and it covers both fields for the same reason. `gated` is not the field to
+   key on here: it counts only what this advance parked, so it reads `0` on
+   every later tick while the same gate waits.
 
-   Read `refused` on its own terms. A non-zero `gated` usually means a human has
+   Read `refused` on its own terms. A non-zero `pending_gates` means a human has
    not answered yet; a non-zero `refused` means a human already did, and the
    send still did not happen. Either the answer stopped applying (a marked fire
    never confirmed, `indeterminate`; the window closed, `outside_window`; the
    approved bytes moved or were erased, `content_moved`), or the runtime could not record the
    send in its own state and so did not make it (`mark_unavailable`,
    `mark_uncertain`). A fleet that refuses every send on every advance for a week is a fleet doing
-   nothing, and `failed` and `gated` both stay `0` throughout. This field is the
+   nothing, and `failed` and `pending_gates` both stay `0` throughout. This field is the
    only thing in the document that shows it. `warpline advance --json` carries
    the reason for each refusal; this file carries the count.
-5. **Healthy.** Recent, `failed` is zero, `gated` is zero, `refused` is zero,
-   `skipped_reason` is `null`.
+5. **Healthy.** Recent, `failed`, `pending_gates` and `refused` are zero, and
+   `skipped_reason` is `null`. `gated` is then zero too.
 
-A healthy file, an all-gated file and an all-refused file differ in `gated` and
-`refused` and nowhere else, which is what makes the three tellable apart by
-those two fields alone.
+A healthy file, an all-gated file and an all-refused file are told apart by
+`pending_gates` and `refused` on every tick. `gated` and `status` tell an
+all-gated file apart only on the tick that parked its gates. On every later tick
+while they wait, both read as a healthy file's do.
 
 Two operator notes. Set your staleness threshold from your own timer interval,
 not from a number in this document — the runtime does not know how often you run
