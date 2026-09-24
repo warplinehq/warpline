@@ -699,6 +699,28 @@ describe('the heartbeat lease', () => {
     expect(late).toBe(0)
   })
 
+  /**
+   * An advance that throws past its `finally` never calls stop. The interval
+   * must not be what keeps that process alive.
+   */
+  it('never holds a process open on its own', async () => {
+    const lockTs = join(import.meta.dir, '..', 'lock.ts')
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        '-e',
+        `const { startHeartbeat } = await import(${JSON.stringify(lockTs)}); startHeartbeat('unused', 'run-1', { intervalMs: 5, refresh: async () => true })`,
+      ],
+      { stdout: 'ignore', stderr: 'pipe' },
+    )
+    const exited = await Promise.race([
+      child.exited,
+      new Promise<'alive'>((r) => setTimeout(() => r('alive'), 4000)),
+    ])
+    if (exited === 'alive') child.kill()
+    expect(exited).toBe(0)
+  })
+
   it('keeps going after a refresh that throws', async () => {
     const { startHeartbeat } = await import('../lock.js')
     let calls = 0
