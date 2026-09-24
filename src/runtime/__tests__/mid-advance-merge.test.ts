@@ -38,7 +38,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { _setHome } from '../../lib/paths.js'
@@ -323,6 +323,12 @@ describe('a refused apply that lands mid-advance', () => {
     const s = await refuseMidAdvance()
     expect(s.pending_gates.some((g) => g.plugin === 'prod')).toBe(false)
   })
+
+  test('does not get back the entry the refusal deleted', async () => {
+    const s = await refuseMidAdvance()
+    // Deleted, so the plugin is due again on the next advance.
+    expect(Object.hasOwn(s.plugin_runs, 'prod')).toBe(false)
+  })
 })
 
 test('a denial removed mid-advance stays removed', async () => {
@@ -340,6 +346,45 @@ test('a denial removed mid-advance stays removed', async () => {
   const s = await stored()
   expect(s.plugin_runs.interloper?.status).toBe('gated')
   expect(s.denials).toEqual({})
+})
+
+test('a producer that produced nothing carries forward the Output on disk, not the one this advance read', async () => {
+  // The gate off, so the producer and the nested advance record their runs
+  // rather than parking them. The interloper depends on prod, so this
+  // advance's prod run has finished before the nested advance starts.
+  await writeFile(join(home.stateDir, 'preferences.json'), JSON.stringify({ review_gate: false }))
+  const produce = join(home.root, 'produce')
+  await writePlugin(
+    'prod',
+    manifest('prod'),
+    `
+import { existsSync } from 'node:fs'
+export async function handler() {
+  const artifacts = existsSync(${JSON.stringify(produce)})
+    ? [{ type: 'brief', format: 'text', body: 'produced' }]
+    : []
+  return { status: 'success', phases_completed: ['prod'], phases_failed: [], errors: [],
+    data_freshness: {}, summary: 'prod ran', schema_version: 1, artifacts_produced: artifacts }
+}
+`,
+  )
+  await writeFile(produce, '1')
+  const first = await advance()
+  expect((await stored()).plugin_runs.prod?.last_output?.run_id).toBe(first.run_id)
+  await rm(produce)
+
+  const { script, reportPath } = overlapScript('every', `  writeFileSync(${JSON.stringify(produce)}, '1')`)
+  await interloper(script, { dependencies: ['prod'], timeout_ms: 30000 })
+  const a = await advance(Date.now() + 48 * HOUR)
+  const report = JSON.parse(await readFile(reportPath, 'utf-8'))
+  expect(report.B.ran).toBe(true)
+  expect(report.diskAfterB.plugin_runs.prod.last_output.run_id).toBe(report.B.run_id)
+
+  const s = await stored()
+  // This advance ran prod, so its entry is this advance's, and its run
+  // produced nothing, so the Output is carried from the entry on disk.
+  expect(s.last_run_id).toBe(a.run_id)
+  expect(s.plugin_runs.prod?.last_output?.run_id).toBe(report.B.run_id)
 })
 
 describe('an advance that overlaps this one after a TTL heal', () => {
@@ -403,6 +448,14 @@ describe('an advance that overlaps this one after a TTL heal', () => {
     expect(gateOf(s, 'prod').run_id).toBe(gateOf(report.diskAfterB, 'prod').run_id)
     // Supersession is by plugin, whichever advance parked the gate.
     expect(s.pending_gates.filter((g) => g.plugin === 'interloper').length).toBe(1)
+  })
+
+  test('the content it dropped is not written back', async () => {
+    const { report, s } = await overlap()
+    // This advance did not run prod, so its entry is the one on disk.
+    expect(s.plugin_runs.prod?.last_output?.run_id).toBe(report.B.run_id)
+    expect(await copies()).toBe(0)
+    expect(await filesHolding(home.root, sentinel)).toEqual([])
   })
 
   test('without the heal the nested advance is refused, and the withdrawal stands', async () => {
