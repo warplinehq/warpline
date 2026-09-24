@@ -2253,7 +2253,7 @@ the operator resolves it at the sink rather than guessing here.
 **When the mark's own I/O fails.** The mark sits between a gate that has already
 said fire and a handler that has not been invoked, so its own failure is a
 refusal with a reason of its own rather than an error that ends the advance. On
-either arm there is **no mark and no invocation**: the level loop continues, and
+either arm there is **no invocation**: the level loop continues, and
 the advance still writes its run log, its JSONL rows and its dead-man file, with
 the refused plugin carried on all of them. The two arms are split by where the
 failure happened, not by which error class arrived. A lock that could not be

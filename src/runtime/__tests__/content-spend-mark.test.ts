@@ -679,6 +679,13 @@ describe('the spend mark re-reads erasure under its lock', () => {
  *
  * The handler count is asserted first, for the reason the kill case gives: it
  * is the whole claim.
+ *
+ * **One branch of the rollback is out of reach here.** When the in-memory
+ * state held no record for the plugin, absent stays absent: the rollback
+ * deletes the key instead of assigning. `runAdvance` cannot reach that branch,
+ * because the gate reads the in-memory record to produce the authority that
+ * brings the mark here, so the record is present when the mark runs. The
+ * source assertion below holds it, by checking the delete line.
  */
 describe("the spend mark's own write throwing is mark_uncertain, reached through a namespace spy", () => {
   /**
@@ -765,6 +772,45 @@ describe("the spend mark's own write throwing is mark_uncertain, reached through
     const after = (await readState()).approvals[CONSUMER]
     expect(after.marked_at).not.toBeNull()
     expect(after.confirmed_at).not.toBeNull()
+  })
+
+  test('a mark whose write landed before the throw refuses mark_uncertain, and the next advance refuses indeterminate', async () => {
+    await seedLiveApproval('returns')
+
+    const trap = failTheMarkWrite(true)
+    let result: Awaited<ReturnType<typeof advance>>
+    try {
+      result = await advance()
+    } finally {
+      trap.spy.mockRestore()
+    }
+
+    // The handler never ran. FIRST, because it is the whole claim.
+    expect(firedCount()).toBe(0)
+    expect(result.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'mark_uncertain' }])
+    expect(trap.trips()).toBe(1)
+
+    const { text, entry } = runLogOf(result.run_log_path)
+    expect(entry?.status).toBe('refused')
+    expect(entry?.reason).toBe('mark_uncertain')
+    expect(entry?.result_summary).toBe(MARK_UNCERTAIN_SUMMARY)
+    expect(text).not.toContain(WRITE_SENTINEL)
+
+    // The mark landed, and the rolled-back in-memory record must not undo it:
+    // on the unmarked in-memory row of the merge, disk wins. `marked_at` first,
+    // because it is the field an in-memory-wins merge would wipe.
+    const record = (await readState()).approvals[CONSUMER]
+    expect(record.marked_at).not.toBeNull()
+    expect(record.confirmed_at).toBeNull()
+    expect(record.effect_id).toBe(
+      contentEffectId(record.plugin, record.fingerprint, record.marked_at as string),
+    )
+
+    // Whether the bytes shipped is now a question only the sink can answer,
+    // so the next advance refuses and fires nothing.
+    const second = await advance({ now: Date.now() + 60 * 60 * 1000 })
+    expect(firedCount()).toBe(0)
+    expect(second.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'indeterminate' }])
   })
 })
 
@@ -881,6 +927,9 @@ describe('the spend mark is unreachable from the evaluator', () => {
  * print an `error TS` line. The arm's meaning is carried by
  * `docs/runtime-spec.md` § 5's reason table and § 10's crash semantics.
  *
+ * The absent-restore line, `delete state.approvals[plugin]`, is pinned only
+ * here, because no advance can reach the branch it sits on.
+ *
  * Every enumeration below throws rather than returning empty, and the green
  * assertion is paired with a control over a DOCTORED copy of the real body. A
  * scan whose window arithmetic quietly stopped matching reads identical to a
@@ -941,6 +990,14 @@ describe('the write arm and its rollback are still written', () => {
         'the catch around writeEngineState no longer restores state.approvals[plugin] — left marked, the end-of-run merge promotes a mark nothing observed land, turning a recoverable retry into a permanent indeterminate',
       )
     }
+    // The other half of the restore. The assignment above only covers a record
+    // that was present, and no advance can reach the branch where it was not,
+    // so this line is the only thing that holds it.
+    if (!innerLines.some((l) => l.includes('delete state.approvals[plugin]'))) {
+      offenders.push(
+        'the catch around writeEngineState no longer restores an absent record as absent — the rollback would put back an own key holding undefined where there was no key, and every end-of-run reader of the record dereferences it',
+      )
+    }
     const outerLines = body.slice(outer + 1, outer + 1 + OUTER_WINDOW)
     if (!outerLines.some((l) => l.includes('mark_unavailable'))) {
       offenders.push(
@@ -977,6 +1034,11 @@ describe('the write arm and its rollback are still written', () => {
    */
   test('the same checker reports a body whose mark_uncertain line was removed', () => {
     const doctored = without(bodyOf('markContentApprovalSpent'), 'mark_uncertain')
+    expect(offendersIn(doctored)).not.toEqual([])
+  })
+
+  test('the same checker reports a body whose absent-restore line was removed', () => {
+    const doctored = without(bodyOf('markContentApprovalSpent'), 'delete state.approvals')
     expect(offendersIn(doctored)).not.toEqual([])
   })
 
