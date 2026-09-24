@@ -151,7 +151,7 @@ describe('main([advance]) end to end', () => {
     expect(stderr).toBe('')
     expect(code).toBe(0)
     expect(stdout).toContain('alpha: completed')
-    expect(stdout).toContain('Gated: 0  Refused: 0  Failed: 0  Exit: 0')
+    expect(stdout).toContain('Gated: 0  Pending gates: 0  Refused: 0  Failed: 0  Exit: 0')
   })
 
   /**
@@ -801,7 +801,7 @@ describe('main([advance, --json])', () => {
     // Enumerated rather than spot-checked. This document is parsed outside this
     // repository, and a field added to it is a field somebody's detector can
     // start reading — the ones carrying free text are the ones that leak. It
-    // carries a run id, a status, four integers, a code, the plugin list the
+    // carries a run id, a status, five integers, a code, the plugin list the
     // human rendering is built from — a name and a state token each — and the
     // refusal list, a plugin name and a closed-enum reason each. No summary, no
     // output, no path.
@@ -809,6 +809,7 @@ describe('main([advance, --json])', () => {
       'exit_code',
       'failed',
       'gated',
+      'pending_gates',
       'plugins',
       'pruned',
       'refused',
@@ -932,7 +933,7 @@ export async function handler() {
     const { stdout } = await capture(() => main(['advance']))
 
     expect(stdout).toContain('alpha: completed')
-    expect(stdout).toContain('Gated: 0  Refused: 0  Failed: 0  Exit: 0')
+    expect(stdout).toContain('Gated: 0  Pending gates: 0  Refused: 0  Failed: 0  Exit: 0')
     expect(() => JSON.parse(stdout)).toThrow()
   })
 
@@ -983,10 +984,47 @@ export async function handler() {
     // second walk beside the mapper's would have to agree with it here.
     expect(doc.gated).toBe(deadMan.gated)
     expect(doc.failed).toBe(deadMan.failed)
+    expect(doc.pending_gates).toBe(deadMan.pending_gates)
     // Non-vacuous: the fixture really is gated, so this is not two zeroes
     // agreeing with each other.
     expect(doc.gated).toBe(1)
     expect(doc.failed).toBe(0)
+    expect(doc.pending_gates).toBe(1)
+  })
+
+  /**
+   * `--strict --json` on a tick that parked nothing, while an earlier gate
+   * still waits. Without `pending_gates` in the document, `exit_code: 1` would
+   * sit beside `gated`, `failed` and `refused` all at `0`, with nothing in the
+   * same document to explain it.
+   */
+  test("a later advance's --json document carries pending_gates while a gate parked earlier still waits", async () => {
+    await writePlugin(home, 'producer', {
+      autonomy_level: 'supervised',
+      side_effects: ['sends_email'],
+      ttl_hours: 24,
+    })
+    await grantApproval('producer', 4 * 60 * 60 * 1000, join(home.root, '.session-approval'))
+
+    const parking = soleDocument((await capture(() => main(['advance', '--json']))).stdout)
+    expect(parking.gated).toBe(1)
+    expect(parking.pending_gates).toBe(1)
+    expect(parking.exit_code).toBe(0)
+
+    const later = await capture(() => main(['advance', '--json']))
+    const laterDoc = soleDocument(later.stdout)
+    expect(later.code).toBe(0)
+    expect(laterDoc.gated).toBe(0)
+    expect(laterDoc.pending_gates).toBe(1)
+    expect(laterDoc.plugins).toEqual([{ name: 'producer', state: 'skipped' }])
+
+    const strict = await capture(() => main(['advance', '--json', '--strict']))
+    const strictDoc = soleDocument(strict.stdout)
+    expect(strict.code).toBe(1)
+    expect(strictDoc.exit_code).toBe(1)
+    expect(strictDoc.gated).toBe(0)
+    expect(strictDoc.pending_gates).toBe(1)
+    expect(strictDoc.pending_gates).toBe((await readDeadMan()).pending_gates)
   })
 
   test('--json --strict on a gated fleet returns 1 and the document says 1 too', async () => {
