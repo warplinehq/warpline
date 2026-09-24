@@ -38,7 +38,7 @@
  * Writes only into a temp home and two temp paths beside it. Nothing under the
  * repository is touched.
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -46,6 +46,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { contentEffectId, proposalFingerprint, runAdvance } from '../engine.js'
+import * as store from '../engine-state-store.js'
 import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 import { defaultEngineState } from '../../schemas/engine-state.js'
@@ -654,6 +655,120 @@ describe('the spend mark re-reads erasure under its lock', () => {
 })
 
 /**
+ * The spend mark's own write throwing is `mark_uncertain`, and the rollback
+ * after it is what decides the next advance.
+ *
+ * `mark_uncertain` is returned only when `writeEngineState` throws with the
+ * lock already held and the read already done. No filesystem lever reaches
+ * that window, and the source assertion further down says why. A spy does. The
+ * seam is `spyOn` on the `engine-state-store` module namespace: Bun propagates
+ * a namespace spy to `engine.ts`'s named import of the writer, which is the
+ * same propagation `invoke-plugin-retry.test.ts` already relies on.
+ *
+ * **The trap trips on the mark's own payload shape and on nothing else**: the
+ * consumer's record present as an own key, `marked_at` set, `confirmed_at`
+ * null. It is a one-shot, because when the mark's write lands the end-of-run
+ * write carries that same shape (disk wins over the rolled-back in-memory
+ * record), and a second trip there would fail the advance for a reason these
+ * cases are not about. The trip count is asserted to be exactly 1, so a trap
+ * that never fired cannot read as a pass.
+ *
+ * **The spy is restored in `finally`, before any assertion runs.** Bun runs
+ * every test file in one process, and an assertion that threw with the writer
+ * still mocked would change what the next file observes.
+ *
+ * The handler count is asserted first, for the reason the kill case gives: it
+ * is the whole claim.
+ */
+describe("the spend mark's own write throwing is mark_uncertain, reached through a namespace spy", () => {
+  /**
+   * The operator string the engine authors for this reason, spelled out for the
+   * reason `MARK_UNAVAILABLE_SUMMARY` gives: a test that rebuilds the string it
+   * is checking agrees with the implementation by construction.
+   */
+  const MARK_UNCERTAIN_SUMMARY =
+    `refused (mark_uncertain): the spend mark for '${CONSUMER}' failed while writing, so nothing ` +
+    'was sent and whether the mark landed is unknown — the next advance may refuse with ' +
+    'indeterminate'
+
+  /** The spy's error message. It must never reach a persisted artifact. */
+  const WRITE_SENTINEL = 'WARPLINE_MARK_WRITE_SPY_SENTINEL'
+
+  /**
+   * Make the mark's own write throw once.
+   *
+   * `landed` decides which half of the arm is exercised: false throws before
+   * the real write runs, true lets the real write land and then throws. Every
+   * other call goes to the real writer unchanged, so the end-of-run write
+   * really lands.
+   */
+  function failTheMarkWrite(landed: boolean) {
+    // Read BEFORE `spyOn`: afterwards the namespace property is the mock.
+    const realWrite = store.writeEngineState
+    let trips = 0
+    const spy = spyOn(store, 'writeEngineState').mockImplementation(async (payload, path) => {
+      const record = Object.hasOwn(payload.approvals, CONSUMER) ? payload.approvals[CONSUMER] : undefined
+      if (trips === 0 && record !== undefined && record.marked_at !== null && record.confirmed_at === null) {
+        trips += 1
+        if (landed) await realWrite(payload, path)
+        throw new Error(WRITE_SENTINEL)
+      }
+      return realWrite(payload, path)
+    })
+    return { spy, trips: () => trips }
+  }
+
+  /** The advance's run log, as text and as the consumer's entry. */
+  function runLogOf(runLogPath: string) {
+    const text = readFileSync(runLogPath, 'utf-8')
+    const runLog = JSON.parse(text) as {
+      plugin_entries: { plugin: string; status: string; reason?: string; result_summary: string }[]
+    }
+    return { text, entry: runLog.plugin_entries.find((e) => e.plugin === CONSUMER) }
+  }
+
+  test('a mark whose write never landed refuses mark_uncertain, rolls the record back, and the next advance fires', async () => {
+    await seedLiveApproval('returns')
+
+    const trap = failTheMarkWrite(false)
+    let result: Awaited<ReturnType<typeof advance>>
+    try {
+      result = await advance()
+    } finally {
+      trap.spy.mockRestore()
+    }
+
+    // The handler never ran. FIRST, because it is the whole claim.
+    expect(firedCount()).toBe(0)
+    expect(result.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'mark_uncertain' }])
+    // In reach: the throw came from the mark's write and nowhere else.
+    expect(trap.trips()).toBe(1)
+
+    const { text, entry } = runLogOf(result.run_log_path)
+    expect(entry?.status).toBe('refused')
+    expect(entry?.reason).toBe('mark_uncertain')
+    // `toBe` and not `toContain`: an appended error message fails this.
+    expect(entry?.result_summary).toBe(MARK_UNCERTAIN_SUMMARY)
+    expect(text).not.toContain(WRITE_SENTINEL)
+
+    // Rolled back, so the end-of-run merge lets the unmarked disk record win.
+    // `marked_at` first: it is the field a missing rollback leaves set.
+    const record = (await readState()).approvals[CONSUMER]
+    expect(record.marked_at).toBeNull()
+    expect(record.effect_id).toBeNull()
+    expect(record.confirmed_at).toBeNull()
+
+    // Nothing landed and nothing was sent, so the next advance retries and fires.
+    const second = await advance({ now: Date.now() + 60 * 60 * 1000 })
+    expect(firedCount()).toBe(1)
+    expect(second.refused_plugins).toEqual([])
+    const after = (await readState()).approvals[CONSUMER]
+    expect(after.marked_at).not.toBeNull()
+    expect(after.confirmed_at).not.toBeNull()
+  })
+})
+
+/**
  * The module-level declaration named `name`, as its own lines.
  *
  * Module scope rather than inside one `describe`, because two suites below read
@@ -741,10 +856,9 @@ describe('the spend mark is unreachable from the evaluator', () => {
 /**
  * The write arm and its rollback are still WRITTEN.
  *
- * This is a source assertion rather than a behavioural one, and the reason is a
- * limit rather than a preference. `mark_uncertain` is returned only when
- * `writeEngineState` throws with the lock already held and the read already
- * done, and no in-process lever reaches that window:
+ * `mark_uncertain` is returned only when `writeEngineState` throws with the lock
+ * already held and the read already done. The filesystem levers cannot reach
+ * that window:
  *
  * - `pathsForStateFile` puts `.state.lock` in the state document's own
  *   directory, so every permission change that would break the write breaks the
@@ -754,14 +868,18 @@ describe('the spend mark is unreachable from the evaluator', () => {
  * - `atomicWriteText`'s temp name carries `Math.random()`, so no pre-created
  *   path and no pre-made read-only file can single the write out either.
  *
- * So the arm is verified here by source assertion, and by `tsc` through
- * `markRefusalDetail`'s exhaustive `switch` over `MarkRefusal` — removing an arm
- * there makes `bun run typecheck` print an `error TS` line. Both are WEAKER than
- * a behavioural case: they assert the arm is present, never that it behaves. The
- * arm's meaning is carried by `docs/runtime-spec.md` § 5's reason table and
- * § 10's crash semantics. What this stops is a refactor deleting the rollback
- * with the whole suite green, which is worth having precisely because nothing
- * else would notice.
+ * A module-namespace spy on the writer does reach it, and the cases above use
+ * one to drive the arm through a real advance. What this source assertion still
+ * adds is narrower. It names WHICH line went missing, where a behavioural
+ * failure names a symptom on disk. And it does not depend on the spy seam
+ * staying available: a refactor that took the write out of the spy's reach
+ * would cost the behavioural cases their trigger, and this scan would still
+ * read the lines.
+ *
+ * The arm is also held by `tsc` through `markRefusalDetail`'s exhaustive
+ * `switch` over `MarkRefusal` — removing an arm there makes `bun run typecheck`
+ * print an `error TS` line. The arm's meaning is carried by
+ * `docs/runtime-spec.md` § 5's reason table and § 10's crash semantics.
  *
  * Every enumeration below throws rather than returning empty, and the green
  * assertion is paired with a control over a DOCTORED copy of the real body. A
