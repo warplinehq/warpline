@@ -16,7 +16,9 @@ export const WarplineLockSchema = z.object({
    * bun process whose PID is dead moments later — a numeric PID there makes
    * every liveness check classify the live run's lock as stale (and clean
    * it mid-run). Null opts out of the liveness check; the two-hour window
-   * since the last heartbeat still expires abandoned locks.
+   * still expires abandoned locks. Only an advance refreshes the heartbeat, so
+   * for such a lock the window runs from `acquired_at`, however long the
+   * session holding it runs.
    */
   pid: z.number().nullable(),
   /**

@@ -2670,7 +2670,10 @@ or gone, is healed two hours after its last refresh. A lock with no
 not a date, or lies more than two hours ahead of the reading machine's clock:
 that is a wrong value, not a clock that runs fast, and trusting it would keep
 the lock from ever healing. A holder whose clock runs ahead by less than that
-keeps its lease, and is healed that much later.
+keeps its lease, and is healed that much later. Only an advance refreshes the
+heartbeat. A lock an orchestrator session takes through a short-lived process
+is never refreshed, so it expires two hours after `acquired_at`, however long
+the session runs.
 
 **The refresh never writes a lock this run does not hold.** It reads the lock
 back, compares the run id, and renames a new copy into place, so a reader never
