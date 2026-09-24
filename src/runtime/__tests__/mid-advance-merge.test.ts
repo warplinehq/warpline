@@ -203,12 +203,12 @@ ${script}
  * The script for an interloper that runs a second, nested advance while this
  * one is mid-run. `before` runs first, inside the handler. The nested advance
  * runs 48 hours ahead, so everything it can run is stale. A marker file makes
- * the interloper a no-op inside that advance. With `aged` set to `every`, every
- * `*_at` field of this advance's run lock is moved three hours back first, so
- * the nested advance heals it by the two-hour window. With `none`, the nested
- * advance is refused. Either way the outcome goes to a report the case reads.
+ * the interloper a no-op inside that advance. `aged` names the fields of this
+ * advance's run lock moved three hours back first: `every` `*_at` field, so the
+ * nested advance heals it by the two-hour window, only `acquired_at`, or
+ * `none`. Either way the outcome goes to a report the case reads.
  */
-function overlapScript(aged: 'every' | 'none', before = ''): { script: string; reportPath: string } {
+function overlapScript(aged: 'every' | 'acquired_at' | 'none', before = ''): { script: string; reportPath: string } {
   const reportPath = join(home.root, 'interloper-report.json')
   const marker = join(home.root, 'interloper-ran')
   const lockPath = join(home.stateDir, '.lock')
@@ -221,9 +221,10 @@ function overlapScript(aged: 'every' | 'none', before = ''): { script: string; r
   const report = {}
 ${before}
   const lock = JSON.parse(readFileSync(${JSON.stringify(lockPath)}, 'utf-8'))
-  if (${JSON.stringify(aged)} === 'every') {
+  const aged = ${JSON.stringify(aged)}
+  if (aged !== 'none') {
     const old = new Date(Date.now() - 3 * 3600000).toISOString()
-    for (const k of Object.keys(lock)) if (k.endsWith('_at')) lock[k] = old
+    for (const k of Object.keys(lock)) if (k.endsWith('_at') && (aged === 'every' || k === aged)) lock[k] = old
     writeFileSync(${JSON.stringify(lockPath)}, JSON.stringify(lock, null, 2))
   }
   try {
@@ -411,7 +412,7 @@ describe('an advance that overlaps this one after a TTL heal', () => {
   }
 
   /** Withdraws sender's approval mid-advance, then runs the nested advance. */
-  function withdrawThenOverlap(aged: 'every' | 'none'): { script: string; reportPath: string } {
+  function withdrawThenOverlap(aged: 'every' | 'acquired_at' | 'none'): { script: string; reportPath: string } {
     return overlapScript(
       aged,
       `
@@ -473,6 +474,41 @@ describe('an advance that overlaps this one after a TTL heal', () => {
     expect('body' in copy).toBe(false)
     expect(copy.erased_at).toBe(report.erasedAt)
     expect(await filesHolding(home.root, sentinel)).toEqual([])
+  })
+
+  test('a running advance refreshes its heartbeat', async () => {
+    // Every 20 ms instead of every minute. The interloper holds the advance
+    // until the heartbeat has moved, and throws if it never does.
+    const { _setHeartbeatInterval } = await import('../lock.js')
+    _setHeartbeatInterval(20)
+    try {
+      await interloper(`
+  const lockPath = ${JSON.stringify(join(home.stateDir, '.lock'))}
+  const deadline = Date.now() + 2000
+  let lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  while (lock.heartbeat_at === undefined || lock.heartbeat_at === lock.acquired_at) {
+    if (Date.now() > deadline) throw new Error('the heartbeat never moved')
+    await new Promise((r) => setTimeout(r, 10))
+    lock = JSON.parse(readFileSync(lockPath, 'utf-8'))
+  }
+`)
+      await advance()
+    } finally {
+      _setHeartbeatInterval(null)
+    }
+    expect((await stored()).plugin_runs.interloper?.status).toBe('gated')
+  })
+
+  test('a holder whose heartbeat is fresh is not healed, however old its acquired_at', async () => {
+    const runG = await setup()
+    const { script, reportPath } = withdrawThenOverlap('acquired_at')
+    await interloper(script, { timeout_ms: 30000 })
+    await advance()
+    const report = JSON.parse(await readFile(reportPath, 'utf-8'))
+    // This advance is alive and its heartbeat is fresh, so the nested advance
+    // is refused. Aging every clock heals it, in the cases above.
+    expect(report.B).toEqual({ ran: false, error: 'AdvanceLockedError' })
+    expect(gateOf(await stored(), 'prod').run_id).toBe(runG)
   })
 })
 

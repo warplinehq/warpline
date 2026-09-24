@@ -23,7 +23,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
 import { _setHome, lockPath } from '../../lib/paths.js'
@@ -220,6 +220,23 @@ describe('runAdvance takes the run lock and gives it back', () => {
     const second = await runAdvance(advanceOptions())
     expect(second.status).toBe('complete')
     expect(existsSync(lockPath())).toBe(false)
+  })
+
+  /**
+   * The order in the `finally`, read off the source. A heartbeat refresh still
+   * in flight at the release would write the lock back, held by a run that has
+   * ended, and every later advance would be refused for two hours. That the
+   * stop waits for a refresh in flight is pinned in `lock.test.ts`. This pins
+   * that the release waits for the stop, which no advance in a test lives long
+   * enough to reach by timing.
+   */
+  test('the heartbeat is stopped and awaited before the lock is released', () => {
+    const source = readFileSync(join(import.meta.dir, '..', 'engine.ts'), 'utf-8')
+    const stop = 'await stopHeartbeat()'
+    const release = 'await releaseLock(resolvedLockPath, heldLock.run_id)'
+    expect(source.split(stop).length - 1).toBe(1)
+    expect(source.split(release).length - 1).toBe(1)
+    expect(source.indexOf(stop)).toBeLessThan(source.indexOf(release))
   })
 })
 

@@ -540,6 +540,147 @@ describe('releaseLock', () => {
 })
 
 /**
+ * The heartbeat lease.
+ *
+ * The holder refreshes `heartbeat_at` while it runs, and the two-hour window is
+ * measured from it, so a holder that is alive is never healed and one that
+ * stopped refreshing still is. The staleness cases run on the fixed clock the
+ * rest of this file uses. The heartbeat cases inject the refresh, so a refresh
+ * can be held in flight on purpose rather than hoped for.
+ *
+ * The refresh and the heartbeat are imported inside each case, so a build
+ * without them fails those cases by name and the rest of this file still runs.
+ */
+describe('the heartbeat lease', () => {
+  /** Acquired three hours before NOW. */
+  const old: WarplineLock = {
+    acquired_at: '2026-04-03T09:00:00Z',
+    run_id: 'run-1',
+    mode: 'advance',
+    pid: process.pid,
+  }
+
+  it('does not heal a lock whose heartbeat is fresh, however old its acquired_at', () => {
+    expect(isLockStale({ ...old, heartbeat_at: '2026-04-03T11:59:00Z' })).toBe(false)
+  })
+
+  it('heals a lock whose heartbeat is older than two hours', () => {
+    expect(isLockStale({ ...old, acquired_at: '2026-04-03T08:00:00Z', heartbeat_at: '2026-04-03T09:00:00Z' })).toBe(true)
+  })
+
+  it('measures a lock an older build wrote, with no heartbeat, from acquired_at', () => {
+    expect(isLockStale(old)).toBe(true)
+    expect(isLockStale({ ...old, acquired_at: '2026-04-03T11:50:00Z' })).toBe(false)
+  })
+
+  it('writes a heartbeat equal to acquired_at when it acquires', async () => {
+    const lockPath = tmpLock()
+    const lock = await acquireLock(lockPath, 'advance')
+    expect(lock.heartbeat_at).toBe(lock.acquired_at)
+    expect((await readLock(lockPath))?.heartbeat_at).toBe(lock.acquired_at)
+    await unlink(lockPath)
+  })
+
+  it('refreshes the heartbeat of its own lock and nothing else', async () => {
+    const { refreshLock } = await import('../lock.js')
+    const lockPath = tmpLock()
+    const lock = await acquireLock(lockPath, 'advance')
+    setSystemTime(new Date('2026-04-03T13:00:00Z'))
+    expect(await refreshLock(lockPath, lock.run_id)).toBe(true)
+    expect(await readLock(lockPath)).toEqual({ ...lock, heartbeat_at: '2026-04-03T13:00:00.000Z' })
+    await unlink(lockPath)
+  })
+
+  it('never writes a lock another run holds', async () => {
+    const { refreshLock } = await import('../lock.js')
+    const lockPath = tmpLock()
+    await acquireLock(lockPath, 'advance')
+    const before = await readFile(lockPath, 'utf-8')
+    setSystemTime(new Date('2026-04-03T13:00:00Z'))
+    expect(await refreshLock(lockPath, 'another-run')).toBe(false)
+    expect(await readFile(lockPath, 'utf-8')).toBe(before)
+    await unlink(lockPath)
+  })
+
+  it('never writes a lock that is gone', async () => {
+    const { refreshLock } = await import('../lock.js')
+    const lockPath = tmpLock()
+    expect(await refreshLock(lockPath, 'run-1')).toBe(false)
+    expect(await readLock(lockPath)).toBeNull()
+  })
+
+  /**
+   * The release runs only after this resolves. A refresh that read the lock as
+   * this run's and renamed after the release would put the lock back, held by
+   * a run that has ended.
+   */
+  it('stops only once a refresh already in flight has settled', async () => {
+    const { startHeartbeat } = await import('../lock.js')
+    let started!: () => void
+    const running = new Promise<void>((r) => (started = r))
+    let finish!: () => void
+    const held = new Promise<void>((r) => (finish = r))
+    const stop = startHeartbeat('unused', 'run-1', {
+      intervalMs: 5,
+      refresh: async () => {
+        started()
+        await held
+        return true
+      },
+    })
+    await running
+    let stopped = false
+    const stopping = stop().then(() => {
+      stopped = true
+    })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(stopped).toBe(false)
+    finish()
+    await stopping
+    expect(stopped).toBe(true)
+  })
+
+  it('keeps going after a refresh that throws', async () => {
+    const { startHeartbeat } = await import('../lock.js')
+    let calls = 0
+    let twice!: () => void
+    const second = new Promise<void>((r) => (twice = r))
+    const stop = startHeartbeat('unused', 'run-1', {
+      intervalMs: 5,
+      refresh: async () => {
+        calls += 1
+        if (calls === 2) twice()
+        if (calls === 1) throw new Error('EIO')
+        return true
+      },
+    })
+    await second
+    await stop()
+    expect(calls).toBeGreaterThanOrEqual(2)
+  })
+
+  it('stops for good the first time the lock is not its own', async () => {
+    const { startHeartbeat } = await import('../lock.js')
+    let calls = 0
+    let first!: () => void
+    const called = new Promise<void>((r) => (first = r))
+    const stop = startHeartbeat('unused', 'run-1', {
+      intervalMs: 5,
+      refresh: async () => {
+        calls += 1
+        first()
+        return false
+      },
+    })
+    await called
+    // Twenty intervals. A heartbeat that kept going would have called again.
+    await new Promise((r) => setTimeout(r, 100))
+    await stop()
+    expect(calls).toBe(1)
+  })
+})
+
+/**
  * The raw machine identifier reaches no byte of the home.
  *
  * Built presence-first on purpose. A leak detector that only asserts absence is
