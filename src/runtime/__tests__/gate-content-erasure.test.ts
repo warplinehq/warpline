@@ -408,30 +408,38 @@ test('applying a gate after its content was erased keeps it erased, and the gate
   expect(lastOutputOf(await stored(), 'prod')).toEqual(erased)
 })
 
-test('an overlapping erasure is not undone by this advance writing its gate copy back', async () => {
+test('a withdrawal that lands mid-advance is not undone by this advance writing its copies back', async () => {
   await advance()
   expect(await cli(['prod'])).toBe(0)
   expect(await cli(['sender', '--content', '--not-after', wallClockUtc(Date.now() + HOUR)])).toBe(0)
+  expect(await copies()).toBe(2)
 
-  // Stands in for another advance whose end-of-run write lands while this one
-  // is mid-run: it erases prod's body and sweeps the binding. Installed only
-  // now, so it runs on the next advance and never before. It hashes the body it
-  // reads, so its source never carries the sentinel.
-  const stamp = '2026-09-23T00:00:00.000Z'
+  // A real `approve sender --content --remove`, landing mid-advance. Installed
+  // only now, so it runs on the next advance and never before. It checks on
+  // disk that its own write erased both copies, and records the stamp it
+  // wrote, so the case below cannot pass on a withdrawal that missed.
+  const approvePath = fileURLToPath(new URL('../../cli/approve.ts', import.meta.url))
+  const stampPath = join(home.root, 'withdrawal-stamp')
   await writePlugin(
     'interloper',
     manifest('interloper', { ttl_hours: 1 }),
     `
 import { readFileSync, writeFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
 export async function handler() {
-  const p = ${JSON.stringify(statePath)}
-  const doc = JSON.parse(readFileSync(p, 'utf-8'))
-  const { body, ...rest } = doc.plugin_runs.prod.last_output
-  doc.plugin_runs.prod.last_output = { ...rest, erased_at: ${JSON.stringify(stamp)},
-    body_sha256: createHash('sha256').update(body).digest('hex') }
-  doc.approvals = {}
-  writeFileSync(p, JSON.stringify(doc))
+  const { run } = await import(${JSON.stringify(approvePath)})
+  const out = process.stdout.write
+  const err = process.stderr.write
+  process.stdout.write = () => true
+  process.stderr.write = () => true
+  let code
+  try { code = await run(['sender', '--content', '--remove']) }
+  finally { process.stdout.write = out; process.stderr.write = err }
+  if (code !== 0) throw new Error('withdrawal exited ' + code)
+  const doc = JSON.parse(readFileSync(${JSON.stringify(statePath)}, 'utf-8'))
+  const copy = doc.pending_gates.find((g) => g.plugin === 'prod').plugin_result.artifacts_produced.at(-1)
+  if (copy.body !== undefined || copy.erased_at === undefined) throw new Error('the gate copy was not erased')
+  if (doc.plugin_runs.prod.last_output.body !== undefined) throw new Error('last_output was not erased')
+  writeFileSync(${JSON.stringify(stampPath)}, copy.erased_at)
   return { status: 'success', phases_completed: ['interloper'], phases_failed: [], errors: [],
     data_freshness: {}, summary: 'interloper ran', schema_version: 1, artifacts_produced: [] }
 }
@@ -441,10 +449,11 @@ export async function handler() {
   await advance(Date.now() + 2 * HOUR)
   expect(await filesHolding(home.root, sentinel)).toEqual([])
   const s = await stored()
+  expect(s.plugin_runs.interloper?.status).toBe('gated')
   const last = lastOutputOf(s, 'prod')
   expect('body' in last).toBe(false)
-  // The overlapping write's record, kept by the one-way rule.
-  expect(last.erased_at).toBe(stamp)
+  // The withdrawal's record, not one this advance wrote.
+  expect(last.erased_at).toBe(await readFile(stampPath, 'utf-8'))
   expect(last.body_sha256).toBe(sha256Hex(sentinel))
   const gate = gateOf(s, 'prod')
   expect(gate.applied_at).not.toBeNull()
@@ -694,7 +703,7 @@ export async function handler() {
   expect(s.plugin_runs.prod?.last_run_at).toBe(gate.run_completed_at!)
 })
 
-test('an apply that lands mid-advance on a gate that ages out during it keeps the producer entry the apply wrote', async () => {
+test('an apply that lands mid-advance on a gate that ages out during it keeps the entry and the spent marker the apply wrote', async () => {
   const { GATE_MAX_AGE_MS } = await import('../engine.js')
   await advance()
   const parked = gateOf(await stored(), 'prod')
@@ -703,7 +712,8 @@ test('an apply that lands mid-advance on a gate that ages out during it keeps th
   // Moved back to three seconds short of the gate ceiling, one instant for the
   // gate and the entry as the park writes it. The apply lands inside those
   // three seconds, or the interloper throws. It then holds the advance until
-  // the ceiling has passed, so the advance drops the gate it read as pending.
+  // the ceiling has passed, so the gate this advance read as pending is past
+  // it. The applied one on disk is not: a marker ages from `applied_at`.
   const completedMs = Date.now() - GATE_MAX_AGE_MS + 3000
   const completedAt = new Date(completedMs).toISOString()
   const stampPath = await installMidAdvanceApply(false, completedMs + GATE_MAX_AGE_MS + 500)
@@ -722,6 +732,8 @@ test('an apply that lands mid-advance on a gate that ages out during it keeps th
   // The apply's terminal status and anchor stay.
   expect(s.plugin_runs.prod?.status).toBe(parked.plugin_result.status)
   expect(s.plugin_runs.prod?.last_run_at).toBe(completedAt)
-  // What stays open: the spent marker is not brought back.
-  expect(s.pending_gates.some((x) => x.plugin === 'prod')).toBe(false)
+  // The spent marker stays, so a second `approve prod` still finds it.
+  const marker = gateOf(s, 'prod')
+  expect(marker.run_id).toBe(parked.run_id)
+  expect(marker.applied_at).toBe(await readFile(stampPath, 'utf-8'))
 })
