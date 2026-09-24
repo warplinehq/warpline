@@ -390,17 +390,15 @@ export async function withoutStateBackups<T>(fn: () => Promise<T>): Promise<T> {
  * `atomicWriteText` rather than `atomicWriteJson` only to keep the trailing
  * newline this has always written; the bytes are unchanged.
  *
- * Serialising concurrent writers is a separate, partly-closed problem.
- * `cli/deny.ts` now takes `withStateLock` around its read-modify-write, and
+ * Serialising concurrent writers is a separate problem. `cli/deny.ts` now
+ * takes `withStateLock` around its read-modify-write, and
  * `board/state-manager.ts` always did. `runAdvance` still reads the whole
  * document at the top and writes it at the end, so its window spans plugin
  * execution, and holding the lock across that would block the board for the
  * length of a run. So its end-of-run write re-reads this document inside the
- * lock and applies the advance's changes onto that fresh read. Every field the
- * advance did not change is written as the fresh read holds it, and
- * `pending_gates` is the fresh read's with the advance's parked gates added.
- * `plugin_runs` is still the advance's own copy, and the window is still open
- * for it — tracked in #25.
+ * lock and applies the advance's own changes onto that fresh read, field by
+ * field (#25). Every field the advance did not change, and the `plugin_runs`
+ * entry of every plugin it did not run, is written as the fresh read holds it.
  *
  * `approvals` is merged per key rather than taken from the fresh read, because
  * the advance writes it too. Both of `engine.ts`'s writes — the mid-run spend

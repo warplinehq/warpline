@@ -1068,6 +1068,41 @@ function mergeApprovals(
 }
 
 /**
+ * The `plugin_runs` this advance writes: the fresh read's, with the entry of
+ * every plugin this advance ran written over it.
+ *
+ * | plugin                  | entry written |
+ * |-------------------------|---------------|
+ * | ran in this advance     | this advance's, with `last_output` decided again against the fresh entry |
+ * | not run in this advance | **the fresh read's**, absence included |
+ *
+ * A plugin this advance did not run is written as the fresh read holds it, so
+ * the entry an apply wrote, an erasure, and the delete a refused apply made all
+ * stay. A plugin it did run gets this advance's entry, even over a newer run
+ * another advance wrote after a TTL heal of this advance's run lock.
+ *
+ * **The Output is carried from the fresh entry, never from this advance's
+ * copy.** `lastOutputOf` runs again here with the result the run returned. A
+ * run that produced an Output writes it. A run that produced nothing carries
+ * what the fresh read holds: an Output another advance wrote meanwhile, or an
+ * erased record, which stays erased. The carry-forward this advance's copy made
+ * mid-run is what its dependents read, and it is not what gets written.
+ */
+function mergePluginRuns(
+  disk: EngineState['plugin_runs'],
+  memory: EngineState['plugin_runs'],
+  ran: ReadonlyMap<string, StoredSkillResult | null>,
+): EngineState['plugin_runs'] {
+  const merged: EngineState['plugin_runs'] = { ...disk }
+  for (const [plugin, result] of ran) {
+    const { last_output: _carried, ...entry } = memory[plugin]!
+    const fresh = Object.hasOwn(disk, plugin) ? disk[plugin] : undefined
+    merged[plugin] = { ...entry, ...lastOutputOf(result, fresh) }
+  }
+  return merged
+}
+
+/**
  * The `pending_gates` this advance writes: the gates the fresh read holds that
  * survive, followed by the gates this advance parked.
  *
@@ -2568,6 +2603,16 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
      * plugin's real `SkillResult` is still in scope.
      */
     const parked_gates: PendingGate[] = []
+    /**
+     * The plugins this advance ran and wrote a `plugin_runs` entry for, each
+     * with the result it returned, or null when its invocation threw. Filled at
+     * the three write sites below and read once, by the end-of-run write, which
+     * writes these entries over the fresh read and every other entry as the
+     * fresh read holds it (`mergePluginRuns`). Tracked by write site, never by
+     * timestamp: another advance's entries post-date this one's start too, and
+     * an apply's entry is dated at its gated run's completion.
+     */
+    const ranThisAdvance = new Map<string, StoredSkillResult | null>()
     const plugin_entries: RunLog['plugin_entries'] = []
 
     // Seeded BEFORE the overall-status block below, and the ordering is the
@@ -3021,6 +3066,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               duration_ms: failedElapsed,
               ...lastOutputOf(null, priorThrownEntry),
             }
+            ranThisAdvance.set(pluginName, null)
             await emitPluginFailed(pluginName, errMsg, run_id, eventsPath)
             onPluginEnd?.(pluginName, 'failed', failedElapsed, errMsg)
             return
@@ -3133,6 +3179,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 // where it was.
                 ...lastOutputOf(result, priorGatedEntry),
               }
+              ranThisAdvance.set(pluginName, result)
 
               // -- Park the REAL result ------------------------------------
               // Built here, where `result` is in scope, rather than
@@ -3231,6 +3278,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // has never been one.
             ...lastOutputOf(result, priorAutonomousEntry),
           }
+          ranThisAdvance.set(pluginName, result)
         }),
       )
 
@@ -3314,24 +3362,21 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // change is written as that read holds it: `denials`, `completed_tasks`,
     // `extensions`, and any other top-level key. Every writer that can land
     // while this advance runs takes the same lock, so the read holds what they
-    // wrote, and a denial, a `deny --remove` or a board write that landed
-    // mid-advance is kept. Onto that floor go the fields this advance changed:
-    // its run id and clocks, its tier changes by task id (`mergeTierChanges`),
-    // the gates it parked (`mergePendingGates`), and `approvals` by the table
-    // on `mergeApprovals`. The gates that survive are decided over the fresh
-    // read, so a gate a denial or a refused apply discarded mid-advance stays
-    // gone, and one applied mid-advance keeps its spent marker.
+    // wrote. Onto that floor go the fields this advance changed, each by its
+    // own rule: its run id and clocks, the entries of the plugins it ran
+    // (`mergePluginRuns`), the gates it parked (`mergePendingGates`), its tier
+    // changes by task id (`mergeTierChanges`), and `approvals` by the table on
+    // `mergeApprovals`. So a denial, a `deny --remove`, an apply, a refused
+    // apply, a withdrawal and a board write that landed mid-advance are all
+    // kept, and so is any content one of them erased. That closes the window of
+    // #25 for this write.
     //
-    // `plugin_runs` is still this advance's own in-memory copy, so the window
-    // of #25 is still open for it, which is where `engine-state-store.ts` files
-    // it. Two narrow reconciles from the fresh read are the exceptions, each
-    // for the reason given at its loop below. An apply that landed mid-advance
-    // keeps that run's entry while this advance's is still the parked one. An
-    // erased `last_output` is kept over this advance's body for the same run.
-    // An erased `last_output` of another run is still written over, an entry a
-    // refused apply deleted is still written back, and so is this advance's
-    // `last_output` of a gate an overlapping advance dropped, after this
-    // advance's run lock was healed by its two-hour TTL.
+    // What stays, and is accepted: after a TTL heal of this advance's run lock,
+    // a second advance can run beside this one. Neither erases what the other
+    // wrote for a plugin it did not run. For a plugin both ran, the one that
+    // writes last wins, even when its run is the older one, and a gate either
+    // parks supersedes the other's by plugin. Keeping the newer run would
+    // compare clocks from two hosts.
     //
     // `approvals` takes a per-key rule rather than the floor, because this
     // advance writes it too, and so does another ATTACHMENT. One home can be
@@ -3400,7 +3445,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         last_run_id: run_id,
         last_run_at: new Date().toISOString(),
         last_interaction_at: state.last_interaction_at,
-        plugin_runs: state.plugin_runs,
+        plugin_runs: mergePluginRuns(disk.plugin_runs, state.plugin_runs, ranThisAdvance),
         pending_gates: mergePendingGates(disk.pending_gates, parked_gates, Date.now()),
         ...mergeTierChanges(disk, archivedTaskIds, autoDeferrals, tierStamp),
         // `confirmed_at` is written HERE and nowhere else — the second half of
@@ -3408,43 +3453,6 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         // one. Everything about which fires are in the set, and why a `failed`
         // return is not, is on `confirmContentMarks`.
         approvals: mergeApprovals(disk.approvals, confirmContentMarks(state.approvals, confirmedContentFires)),
-      }
-      // An apply can land while this advance runs, because `approve <plugin>`
-      // takes the state lock and this advance holds none across its plugins.
-      // The applied gate is already the fresh read's, above. The plugin's
-      // `plugin_runs` entry from the fresh read replaces this advance's too,
-      // but only while this advance's entry is still the `gated` one that
-      // run's park wrote, because the park stamps one instant into both that
-      // entry's `last_run_at` and the gate's `run_completed_at`. A newer run
-      // this advance made stays. This runs first, so the erasure reconcile
-      // below and the release write both see the entry as applied.
-      //
-      // Erasure is one-way. An overlapping advance may have erased a body this
-      // advance still holds in memory, and swept the binding that released it,
-      // so the merge above drops this advance's copy of that binding too.
-      // Written back, the body would have nothing left to erase it again. So
-      // an erased record on disk for the same run wins over the in-memory body.
-      for (const d of disk.pending_gates) {
-        if (d.applied_at === null) continue
-        const entry = Object.hasOwn(merged.plugin_runs, d.plugin) ? merged.plugin_runs[d.plugin] : undefined
-        const gatedByThisRun = entry?.status === 'gated' && entry.last_run_at === d.run_completed_at
-        if (gatedByThisRun && Object.hasOwn(disk.plugin_runs, d.plugin)) {
-          merged.plugin_runs[d.plugin] = disk.plugin_runs[d.plugin]!
-        }
-      }
-      for (const [plugin, run] of Object.entries(merged.plugin_runs)) {
-        const onDisk = Object.hasOwn(disk.plugin_runs, plugin)
-          ? disk.plugin_runs[plugin]!.last_output
-          : undefined
-        const mine = run.last_output
-        if (
-          onDisk?.erased_at !== undefined &&
-          mine?.body !== undefined &&
-          mine.run_id !== undefined &&
-          mine.run_id === onDisk.run_id
-        ) {
-          merged.plugin_runs[plugin] = { ...run, last_output: onDisk }
-        }
       }
       eraseReleasedContent(merged.plugin_runs, merged.pending_gates, merged.approvals, plugins, approvalNow)
       merged.approvals = sweepExpiredApprovals(merged.approvals, merged.plugin_runs, plugins, approvalNow)
@@ -3884,7 +3892,8 @@ export function findPendingGate(state: EngineState, plugin: string): PendingGate
  * back, because nothing would be left to erase it again: the binding that
  * released it is swept. The same write erases the gate's copy
  * (`eraseGateCopies`), so the marker it becomes holds no bytes. The end-of-run
- * reconcile in `runAdvance` keeps an erased record by the same rule.
+ * write never puts a body back over an erased record either
+ * (`mergePluginRuns`).
  *
  * `opts.manifests` is required rather than optional, and the whole `opts`
  * default is gone with it. The discard's carve-out below asks
