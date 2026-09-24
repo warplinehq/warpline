@@ -753,6 +753,26 @@ describe('a lock somebody else holds', () => {
     expect(await readdir(home.runsDir)).toEqual([])
   })
 
+  test('an unreadable lock is 75 and never promises a heal that does not come', async () => {
+    await writePlugin(home, 'alpha')
+    await writeFile(lock(), 'not a lock')
+
+    const { code, stdout, stderr } = await capture(() => main(['advance']))
+
+    expect(code).toBe(75)
+    expect(stdout).toBe('')
+    expect(stderr).toContain('could not be read back as a lock')
+    expect(stderr).toContain('Nothing ran and nothing was written')
+    // The acquire never breaks a file it could not read, so the heal wording
+    // the other arms carry would send the operator to wait for nothing.
+    expect(stderr).not.toContain('last heartbeat')
+    expect(stderr).not.toContain('next scheduled tick retries')
+    expect(stderr).toContain('never breaks it')
+    expect(stderr).toContain('by hand')
+    expect(await readFile(lock(), 'utf8')).toBe('not a lock')
+    expect(await readdir(home.runsDir)).toEqual([])
+  })
+
   test('a lock older than two hours heals and the advance runs', async () => {
     await writePlugin(home, 'alpha')
     await writeLock({
