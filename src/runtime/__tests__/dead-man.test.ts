@@ -32,7 +32,7 @@
  * places is how the file and the monitor start disagreeing about one advance.
  */
 import { describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:test'
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { applyPendingGate, findPendingGate, loadPluginManifests, runAdvance } from '../engine.js'
@@ -472,6 +472,52 @@ describe('a gate still waiting from an earlier advance', () => {
     expect(result.run_log_path).toBe('')
     // Non-vacuous: the gate is still in the document, unapplied, so a count
     // over the raw array would read 1.
+    expect(state.pending_gates).toHaveLength(1)
+    expect(state.pending_gates[0]?.applied_at).toBeNull()
+
+    expect(doc.pending_gates).toBe(0)
+    expect(advanceExitCode(result, { strict: true })).toBe(0)
+  })
+
+  // A gate for a plugin this advance did not load waits on nobody: `approve`
+  // and `deny` both refuse a name with no loaded manifest, so no command can
+  // clear it. Counting it would page `--strict` on every tick until the
+  // ceiling drops it. `alpha` stays installed so the root is not empty.
+  async function parkThenUninstall(): Promise<void> {
+    await writeWaitingProducer()
+    await writePlugin('alpha')
+    await advance()
+    expect((await readDeadMan()).pending_gates).toBe(1)
+    await rm(join(ctx.pluginsDir, 'producer'), { recursive: true })
+  }
+
+  test('a gate for a plugin that is no longer installed is not counted', async () => {
+    await parkThenUninstall()
+
+    const result = await advance()
+    const doc = await readDeadMan()
+    const state = await readEngineState(statePath)
+
+    expect(result.status).toBe('complete')
+    // Non-vacuous: the merge kept the orphan gate, unapplied, so a count that
+    // ignored what loaded would read 1.
+    expect(state.pending_gates).toHaveLength(1)
+    expect(state.pending_gates[0]?.plugin).toBe('producer')
+    expect(state.pending_gates[0]?.applied_at).toBeNull()
+
+    expect(doc.pending_gates).toBe(0)
+    expect(advanceExitCode(result, { strict: true })).toBe(0)
+  })
+
+  test('a gate for a plugin that is no longer installed is not counted on a skipped advance either', async () => {
+    await parkThenUninstall()
+    await writePreferences({ quiet_hours: windowAroundNow() })
+
+    const result = await advance()
+    const doc = await readDeadMan()
+    const state = await readEngineState(statePath)
+
+    expect(result.run_log_path).toBe('')
     expect(state.pending_gates).toHaveLength(1)
     expect(state.pending_gates[0]?.applied_at).toBeNull()
 
