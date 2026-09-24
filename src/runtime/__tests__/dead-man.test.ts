@@ -20,7 +20,7 @@
  * standing, because a stale file is precisely the signal an operator needs.
  *
  * The key-enumeration case asserts the exact top-level key set. The document is
- * a run id, timestamps, a status, a reason token and four integers, and
+ * a run id, timestamps, a status, a reason token and five integers, and
  * nothing else — no plugin summary, no plugin output, no operator
  * configuration value, no path outside the home. This project has twice had to
  * fix a leak where operator values reached a summary field, and a free-text
@@ -35,9 +35,11 @@ import { describe, test, expect, beforeEach, afterEach, afterAll } from 'bun:tes
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { runAdvance } from '../engine.js'
+import { applyPendingGate, findPendingGate, loadPluginManifests, runAdvance } from '../engine.js'
 import type { AdvanceOptions, AdvanceResult } from '../engine.js'
-import { advanceCounts } from '../exit-codes.js'
+import { readEngineState } from '../engine-state-store.js'
+import type { PluginManifest } from '../../schemas/plugin-manifest.js'
+import { advanceCounts, advanceExitCode } from '../exit-codes.js'
 import { grantApproval } from '../approval-gate.js'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
 import { seedContentRefusals } from './helpers/content-refusal.js'
@@ -244,7 +246,12 @@ describe('the dead-man file is written on every arm that returned', () => {
     const doc = await readDeadMan()
     const counts = advanceCounts(result)
 
-    expect({ gated: doc.gated, failed: doc.failed, refused: doc.refused }).toEqual(counts)
+    expect({
+      gated: doc.gated,
+      failed: doc.failed,
+      refused: doc.refused,
+      pending_gates: doc.pending_gates,
+    }).toEqual(counts)
   })
 
   /**
@@ -308,12 +315,168 @@ describe('the dead-man file is written on every arm that returned', () => {
       'completed_at',
       'failed',
       'gated',
+      'pending_gates',
       'pruned',
       'refused',
       'run_id',
       'skipped_reason',
       'status',
     ])
+  })
+})
+
+/**
+ * A standing gate is an unapplied entry in the state document's
+ * `pending_gates`, whichever advance parked it. `gated` counts only what the
+ * advance that wrote the file parked, so on every later tick while the same
+ * gate waits it reads `0`, and a file keyed on it reads healthy while a human
+ * still owes an answer. `pending_gates` is the count that does not forget.
+ *
+ * The second advance in each case must find the plugin NOT due. That is what
+ * `ttl_hours: 24` buys: a plugin that ran again would park again, `gated` would
+ * read `1`, and the case would pass for the wrong reason, which is the exact
+ * blind spot this count exists to close. The required case asserts the plugin
+ * was `skipped` and nothing was parked before it asserts the new contract.
+ *
+ * The applied control is the one case that sees the unapplied filter: a gate
+ * applied and kept as a spent marker is still in the document, and it waits on
+ * nobody.
+ *
+ * Two cases see the quiet-hours arm, which writes no document and so counts
+ * from the one it read. The first proves a gate waiting overnight is counted.
+ * The second proves that arm counts the same set the normal arm writes: a gate
+ * past the gate ceiling is still in the document the quiet arm read, and the
+ * next normal write would drop it, so it is not counted there either.
+ */
+describe('a gate still waiting from an earlier advance', () => {
+  async function writeWaitingProducer(): Promise<void> {
+    await writePlugin('producer', {
+      autonomy_level: 'supervised',
+      side_effects: ['sends_email'],
+      ttl_hours: 24,
+    })
+    await grantApproval('producer', 4 * 60 * 60 * 1000, approvalPath)
+  }
+
+  test('a gate parked on an earlier advance is counted, and --strict reports it', async () => {
+    await writeWaitingProducer()
+
+    const first = await advance()
+    const firstDoc = await readDeadMan()
+    expect(first.gated_plugins).toEqual(['producer'])
+    expect(firstDoc.gated).toBe(1)
+
+    const second = await advance()
+    const secondDoc = await readDeadMan()
+    const state = await readEngineState(statePath)
+
+    // Preconditions first, so a fixture that stopped gating or started
+    // re-running fails here rather than on the contract below.
+    expect(second.plugin_states.get('producer')).toBe('skipped')
+    expect(second.gated_plugins).toEqual([])
+    expect(second.status).toBe('complete')
+    expect(state.pending_gates).toHaveLength(1)
+    expect(state.pending_gates[0]?.applied_at).toBeNull()
+
+    // The parking advance counts it in both fields, and never more parks
+    // than gates still waiting.
+    expect(firstDoc.pending_gates).toBe(1)
+    expect(firstDoc.gated as number).toBeLessThanOrEqual(firstDoc.pending_gates as number)
+
+    // The later advance parked nothing, and the gate is still waiting.
+    expect(secondDoc.gated).toBe(0)
+    expect(secondDoc.pending_gates).toBe(1)
+    expect(advanceExitCode(second)).toBe(0)
+    expect(advanceExitCode(second, { strict: true })).toBe(1)
+  })
+
+  test('an applied gate kept as a spent marker is not counted', async () => {
+    await writeWaitingProducer()
+    await advance()
+
+    const { manifests } = await loadPluginManifests(ctx.pluginsDir)
+    const parked = await readEngineState(statePath)
+    const gate = findPendingGate(parked, 'producer')
+    expect(gate).toBeDefined()
+    const applied = await applyPendingGate(
+      parked,
+      gate as NonNullable<typeof gate>,
+      manifests.get('producer') as PluginManifest,
+      { statePath, manifests, eventsPath },
+    )
+    expect(applied.outcome).toBe('applied')
+
+    const result = await advance()
+    const doc = await readDeadMan()
+    const state = await readEngineState(statePath)
+
+    // Non-vacuous: the marker is still in the document, so a count that
+    // skipped the unapplied filter would read 1 here.
+    expect(state.pending_gates).toHaveLength(1)
+    expect(typeof state.pending_gates[0]?.applied_at).toBe('string')
+
+    expect(doc.pending_gates).toBe(0)
+    expect(advanceExitCode(result, { strict: true })).toBe(0)
+  })
+
+  test('no gate at all reads pending_gates 0, present rather than omitted', async () => {
+    await writePlugin('alpha')
+
+    const result = await advance()
+    const doc = await readDeadMan()
+
+    expect(doc.pending_gates).toBe(0)
+    expect(Object.keys(doc)).toContain('pending_gates')
+    expect(advanceExitCode(result, { strict: true })).toBe(0)
+  })
+
+  test('a gate waiting through quiet hours is counted on the skipped advance', async () => {
+    await writeWaitingProducer()
+    await advance()
+    await writePreferences({ quiet_hours: windowAroundNow() })
+
+    const result = await advance()
+    const doc = await readDeadMan()
+
+    // The early return actually happened.
+    expect(result.run_log_path).toBe('')
+    expect(doc.skipped_reason).toBe('quiet_hours')
+
+    expect(doc.gated).toBe(0)
+    expect(doc.pending_gates).toBe(1)
+    expect(advanceExitCode(result, { strict: true })).toBe(1)
+    expect(advanceExitCode(result)).toBe(0)
+  })
+
+  test('a gate past the gate ceiling is not counted on a skipped advance either', async () => {
+    await writeWaitingProducer()
+    await advance()
+
+    // Age the parked gate past the 23-hour ceiling by hand. The quiet arm
+    // writes nothing, so this is the document it reads.
+    const raw = JSON.parse(await readFile(statePath, 'utf8')) as {
+      pending_gates: Array<Record<string, unknown>>
+    }
+    const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    const aged = raw.pending_gates[0] as Record<string, unknown>
+    aged.run_started_at = dayAgo
+    aged.run_completed_at = dayAgo
+    aged.created_at = dayAgo
+    await writeFile(statePath, JSON.stringify(raw))
+    await writePreferences({ quiet_hours: windowAroundNow() })
+
+    const result = await advance()
+    const doc = await readDeadMan()
+    const state = await readEngineState(statePath)
+
+    expect(result.run_log_path).toBe('')
+    // Non-vacuous: the gate is still in the document, unapplied, so a count
+    // over the raw array would read 1.
+    expect(state.pending_gates).toHaveLength(1)
+    expect(state.pending_gates[0]?.applied_at).toBeNull()
+
+    expect(doc.pending_gates).toBe(0)
+    expect(advanceExitCode(result, { strict: true })).toBe(0)
   })
 })
 

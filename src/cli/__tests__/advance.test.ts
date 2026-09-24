@@ -523,6 +523,42 @@ describe('the advance exit-code matrix, in process', () => {
   })
 
   /**
+   * The gate outlives the advance that parked it, and so does `--strict`'s 1.
+   *
+   * The state document is kept this time, which is the point. `ttl_hours: 24`
+   * keeps the plugin from running again, so the later advances park nothing
+   * and read `skipped`: a fixture that re-parked would pass on `gated` and
+   * prove nothing. `writeGatedFleet` is not used, because its default TTL
+   * makes the plugin due again on every tick.
+   */
+  test('a later advance under --strict returns 1 while a gate parked earlier still waits', async () => {
+    await writePlugin(home, 'producer', {
+      autonomy_level: 'supervised',
+      side_effects: ['sends_email'],
+      ttl_hours: 24,
+    })
+    await grantApproval('producer', 4 * 60 * 60 * 1000, join(home.root, '.session-approval'))
+
+    const parking = await capture(() => main(['advance']))
+    expect(parking.code).toBe(0)
+    expect(parking.stdout).toContain('producer: gated')
+
+    const lenient = await capture(() => main(['advance']))
+    expect(lenient.code).toBe(0)
+    expect(lenient.stdout).toContain('producer: skipped')
+
+    const strict = await capture(() => main(['advance', '--strict']))
+    expect(strict.stdout).toContain('producer: skipped')
+    expect(strict.code).toBe(1)
+
+    const deadMan = JSON.parse(
+      await readFile(join(home.stateDir, 'last-successful-advance'), 'utf8'),
+    ) as Record<string, unknown>
+    expect(deadMan.gated).toBe(0)
+    expect(deadMan.pending_gates).toBe(1)
+  })
+
+  /**
    * A failed load is `1`, and `--strict` moves nothing.
    *
    * Two test bodies rather than two advances in one body, and the reason is

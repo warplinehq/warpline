@@ -201,7 +201,7 @@ describe('advanceCounts', () => {
     expect(counts.failed).toBe(
       [...result.plugin_states.values()].filter((s) => s === 'failed').length,
     )
-    expect(counts).toEqual({ gated: 1, failed: 0, refused: 0 })
+    expect(counts).toEqual({ gated: 1, failed: 0, refused: 0, pending_gates: 1 })
   })
 
   test('counts a load failure as failed', async () => {
@@ -210,7 +210,7 @@ describe('advanceCounts', () => {
 
     const counts = advanceCounts(await advance())
 
-    expect(counts).toEqual({ gated: 0, failed: 1, refused: 0 })
+    expect(counts).toEqual({ gated: 0, failed: 1, refused: 0, pending_gates: 0 })
   })
 })
 
@@ -253,7 +253,7 @@ describe('a content refusal in the account of an advance', () => {
 
     const counts = advanceCounts(await advance())
 
-    expect(counts).toEqual({ gated: 0, failed: 0, refused: 2 })
+    expect(counts).toEqual({ gated: 0, failed: 0, refused: 2, pending_gates: 0 })
   })
 
   test('a refusal beside a failure is 1 without --strict — a failure still outranks', async () => {
