@@ -1160,15 +1160,16 @@ function mergePendingGates(disk: PendingGate[], parked: PendingGate[], now: numb
  * read holds them. The tier block in `runAdvance` decides them over its own
  * copy, and this is where they land.
  *
- * | change                                 | written when the fresh read holds     |
- * |----------------------------------------|---------------------------------------|
- * | archive (`suspended`)                  | the task, not archived                |
- * | auto-deferral (`degraded`, `extended`) | the task, with no deferral of its own |
+ * | change                                 | written when the fresh read holds                   |
+ * |----------------------------------------|-----------------------------------------------------|
+ * | archive (`suspended`)                  | the task, not archived                              |
+ * | auto-deferral (`degraded`, `extended`) | the task, not archived, with no deferral of its own |
  *
  * A task the fresh read no longer holds was completed while the advance ran,
- * and nothing is written for it. Everything else in both arrays is the fresh
- * read's, so a task the board created, completed or deferred mid-advance stays
- * as the board left it.
+ * and nothing is written for it. One it holds archived is not open either: the
+ * tier block never defers an archived task, and neither does the merge.
+ * Everything else in both arrays is the fresh read's, so a task the board
+ * created, completed or deferred mid-advance stays as the board left it.
  */
 function mergeTierChanges(
   disk: EngineState,
@@ -1176,7 +1177,7 @@ function mergeTierChanges(
   autoDeferrals: EngineState['deferrals'],
   archivedAt: string,
 ): Pick<EngineState, 'task_aging' | 'deferrals'> {
-  const open = new Set(disk.task_aging.map((t) => t.task_id))
+  const open = new Set(disk.task_aging.filter((t) => !t.archived_at).map((t) => t.task_id))
   const deferred = new Set(disk.deferrals.map((d) => d.task_id))
   return {
     task_aging: disk.task_aging.map((t) =>

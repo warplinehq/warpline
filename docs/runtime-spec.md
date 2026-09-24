@@ -2853,7 +2853,7 @@ top-level key. What the advance did change goes on top, each by its own rule.
 | `plugin_runs` | the entry of each plugin it ran | the advance's entry for each plugin it ran, and the fresh read's for every other plugin, absence included. `last_output` is decided again against the fresh entry (§ `last_output`) |
 | `pending_gates` | the gates it parked | the fresh read's gates that survive (§ 10, "Applying a gate", step 1), then the gates it parked |
 | `approvals` | the marks and confirmations of its content fires | merged per key (below) |
-| `task_aging`, `deferrals` | the tasks its tier archived or auto-deferred | changed by task id, and only while the fresh read still holds the task open |
+| `task_aging`, `deferrals` | the tasks its tier archived or auto-deferred | changed by task id, and only while the fresh read still holds the task open, not archived. An auto-deferral also needs the task to have no deferral of its own |
 
 The release rule (§ `approvals`, "Expiry and deletion") then runs over the
 merged document, and the expiry sweep after it.
