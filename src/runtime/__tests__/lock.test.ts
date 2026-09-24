@@ -657,6 +657,48 @@ describe('the heartbeat lease', () => {
     expect(stopped).toBe(true)
   })
 
+  /**
+   * The case above holds the only refresh there is. A tick that queued a
+   * second one behind a slow first would leave `stop` waiting on the wrong
+   * one, and the slow one would rename after the release.
+   */
+  it('skips a tick while a refresh is in flight, so none settles after stop', async () => {
+    const { startHeartbeat } = await import('../lock.js')
+    let calls = 0
+    let active = 0
+    let most = 0
+    let late = 0
+    let released = false
+    let started!: () => void
+    const running = new Promise<void>((r) => (started = r))
+    let finish!: () => void
+    const held = new Promise<void>((r) => (finish = r))
+    const stop = startHeartbeat('unused', 'run-1', {
+      intervalMs: 5,
+      refresh: async () => {
+        calls += 1
+        active += 1
+        most = Math.max(most, active)
+        if (calls === 1) {
+          started()
+          await held
+        }
+        active -= 1
+        if (released) late += 1
+        return true
+      },
+    })
+    await running
+    // Six intervals with the first refresh still held.
+    await new Promise((r) => setTimeout(r, 30))
+    setTimeout(finish, 20)
+    await stop()
+    released = true
+    await new Promise((r) => setTimeout(r, 40))
+    expect(most).toBe(1)
+    expect(late).toBe(0)
+  })
+
   it('keeps going after a refresh that throws', async () => {
     const { startHeartbeat } = await import('../lock.js')
     let calls = 0
