@@ -251,8 +251,14 @@ function mergeFixture(): string {
   // --no-commit is what lets the results land in the merge commit itself. Its
   // output is dropped for the reason `blobAt` drops git's stderr: "stopped
   // before committing as requested" is this fixture working, and a suite that
-  // prints git chatter trains its reader to skim git chatter.
-  execFileSync('git', ['merge', '--no-ff', '--no-commit', 'side'], { cwd: root, env: GIT_ENV, stdio: 'ignore' })
+  // prints git chatter trains its reader to skim git chatter. The identity is
+  // passed as `commit` passes it: a merge needs one even with --no-commit, and
+  // a CI runner has no hostname for git to guess one from.
+  execFileSync(
+    'git',
+    ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'merge', '--no-ff', '--no-commit', 'side'],
+    { cwd: root, env: GIT_ENV, stdio: 'ignore' },
+  )
   stage(root, RESULT.path, RESULT.body)
   commit(root, 'the merge that also adds the results')
 
