@@ -442,6 +442,18 @@ export async function run(
       // error already carries. The holder is named by the error's own message,
       // which has the two arms a nullable holder needs — a process id, or an
       // orchestrator session. Do not reconstruct either of them here.
+      //
+      // An unreadable holder gets its own tail. The acquire refuses such a file
+      // and never breaks it, so the heal wording would send the operator to
+      // wait for a tick that never clears it.
+      if (err instanceof Error && err.name === 'AdvanceLockedError' && (err as { unreadable?: unknown }).unreadable === true) {
+        process.stderr.write(
+          `warpline advance: ${err.message} Nothing ran and nothing was written. An ` +
+            `advance never breaks it, so no later tick clears it. Delete it by hand once ` +
+            `you know no advance is running; see docs/runtime-spec.md § 12.\n`,
+        )
+        return 75
+      }
       if (err instanceof Error && err.name === 'AdvanceLockedError') {
         process.stderr.write(
           `warpline advance: ${err.message} Nothing ran and nothing was written — another ` +

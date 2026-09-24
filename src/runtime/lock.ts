@@ -264,7 +264,12 @@ export function isLockStale(lock: WarplineLock, read: MachineIdReader = readMach
 export class AdvanceLockedError extends Error {
   readonly lockPath: string
   readonly pid: number | null
-  constructor(lockPath: string, pid: number | null, detail?: string) {
+  /**
+   * The holder could not be read back as a lock. The acquire never breaks such
+   * a file, so a message promising a heal must not be appended to this one.
+   */
+  readonly unreadable: boolean
+  constructor(lockPath: string, pid: number | null, detail?: string, unreadable = false) {
     super(
       detail ??
         (pid === null
@@ -274,6 +279,7 @@ export class AdvanceLockedError extends Error {
     this.name = 'AdvanceLockedError'
     this.lockPath = lockPath
     this.pid = pid
+    this.unreadable = unreadable
   }
 }
 
@@ -291,7 +297,8 @@ function lockedError(lockPath: string, held: WarplineLock | null): AdvanceLocked
     return new AdvanceLockedError(
       lockPath,
       null,
-      `Run lock at ${lockPath} is held by a file that could not be read back as a lock; refusing rather than breaking it.`
+      `Run lock at ${lockPath} is held by a file that could not be read back as a lock; refusing rather than breaking it.`,
+      true
     )
   }
   return new AdvanceLockedError(lockPath, held.pid)
