@@ -1051,11 +1051,26 @@ describe('the write arm and its rollback are still written', () => {
    * it never actually damaged — a positive control that is itself blind.
    */
   function without(body: readonly string[], symbol: string): string[] {
+    const at = onlyLineNaming(body, symbol)
+    return body.filter((_, i) => i !== at)
+  }
+
+  /**
+   * The body with the single line naming `symbol` commented out, indentation
+   * kept. Still valid TypeScript, so `tsc` has nothing to say about it, and the
+   * most common way a line gets switched off.
+   */
+  function commentedOut(body: readonly string[], symbol: string): string[] {
+    const at = onlyLineNaming(body, symbol)
+    return body.map((l, i) => (i === at ? l.replace(/^(\s*)/, '$1// ') : l))
+  }
+
+  function onlyLineNaming(body: readonly string[], symbol: string): number {
     const hits = body.flatMap((l, i) => (l.includes(symbol) ? [i] : []))
     if (hits.length !== 1) {
       throw new Error(`blind control: ${hits.length} lines name ${symbol}, expected exactly 1`)
     }
-    return body.filter((_, i) => i !== hits[0])
+    return hits[0]!
   }
 
   test('the shipped body names the arm, the rollback and the outer refusal', () => {
@@ -1076,6 +1091,15 @@ describe('the write arm and its rollback are still written', () => {
   test('the same checker reports a body whose absent-restore line was removed', () => {
     const doctored = without(bodyOf('markContentApprovalSpent'), 'delete state.approvals')
     expect(offendersIn(doctored)).not.toEqual([])
+  })
+
+  /**
+   * The line is pinned only here, so the scan has to read code and not text: a
+   * commented-out line still names what the check looks for.
+   */
+  test('the same checker reports a body whose absent-restore line was commented out', () => {
+    const doctored = commentedOut(bodyOf('markContentApprovalSpent'), 'delete state.approvals')
+    expect(offendersIn(doctored)).toEqual([expect.stringContaining('absent record as absent')])
   })
 
   test('a body naming no writer throws rather than reporting clean', () => {
