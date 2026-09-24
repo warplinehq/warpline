@@ -719,6 +719,14 @@ describe('a lock somebody else holds', () => {
     expect(stdout).toBe('')
     expect(stderr).toContain(String(process.pid))
     expect(stderr).toContain('Nothing ran and nothing was written')
+    // The clock the heal reads is the holder's last heartbeat, or when the lock
+    // was taken if it has none, never the lock's age as such. The dead-process
+    // heal needs the lock and this machine to carry the same known host
+    // identifier.
+    expect(stderr).toContain('last heartbeat')
+    expect(stderr).toContain('from when it was taken')
+    expect(stderr).toContain('host identifier')
+    expect(stderr).not.toContain('hours old')
     // The refusal left the home as it found it: the holder's lock is untouched
     // and no run appeared under it.
     expect(existsSync(lock())).toBe(true)
@@ -738,6 +746,9 @@ describe('a lock somebody else holds', () => {
     // operator nothing.
     expect(stderr).not.toContain('null')
     expect(stderr).toContain('Nothing ran and nothing was written')
+    // An orchestrator-held lock never carries a heartbeat, so this is the clock
+    // that governs it.
+    expect(stderr).toContain('from when it was taken')
     expect(existsSync(lock())).toBe(true)
     expect(await readdir(home.runsDir)).toEqual([])
   })
