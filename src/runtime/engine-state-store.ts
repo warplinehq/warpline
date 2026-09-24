@@ -395,14 +395,16 @@ export async function withoutStateBackups<T>(fn: () => Promise<T>): Promise<T> {
  * `board/state-manager.ts` always did. `runAdvance` still reads the whole
  * document at the top and writes it at the end, so its window spans plugin
  * execution, and holding the lock across that would block the board for the
- * length of a run. Closing it means applying the advance's changes as deltas
- * onto a fresh read inside the lock — tracked in #25, and still open for
- * `plugin_runs`, `pending_gates` and `last_run_id`.
+ * length of a run. So its end-of-run write re-reads this document inside the
+ * lock and applies the advance's changes onto that fresh read. Every field the
+ * advance did not change is written as the fresh read holds it. `plugin_runs`
+ * and `pending_gates` are still the advance's own copies, and the window is
+ * still open for them — tracked in #25.
  *
- * `approvals` is the ONE subtree that window no longer spans. Both of
- * `engine.ts`'s writes — the mid-run spend mark and the end-of-run write —
- * re-read this document inside the state lock and merge that subtree per key,
- * because `approvals` is the only part of it another ATTACHMENT writes.
+ * `approvals` is merged per key rather than taken from the fresh read, because
+ * the advance writes it too. Both of `engine.ts`'s writes — the mid-run spend
+ * mark and the end-of-run write — re-read this document inside the state lock
+ * and merge that subtree per key, because another ATTACHMENT writes it as well.
  *
  * `cli/approve.ts` IS a writer of this document: `--content` records the
  * approval, `--content --remove` withdraws it, and answering a parked gate

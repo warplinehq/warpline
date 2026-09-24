@@ -2782,16 +2782,24 @@ not close issue #25. An advance reads the engine state document at the top and
 writes it at the end, a window that spans plugin execution, and it holds no state
 lock across that window — holding one there would block the board for the length
 of a run. Closing #25 means applying the advance's changes as deltas onto a fresh
-read taken inside the state lock, which this runtime does not do for
-`plugin_runs`, `pending_gates` or `last_run_id`, and which is tracked as future
-work rather than implied here to be done.
+read taken inside the state lock. The end-of-run write does that for every field
+but `plugin_runs` and `pending_gates`, which are still the advance's own copies.
+For those two, #25 is open.
 
-**`approvals` is the one subtree that window no longer spans.** Both of the
-advance's writes to it — the spend mark taken before a content-approved handler
-runs, and the single end-of-run write — take the state lock, re-read the document
-inside it, and merge that subtree per key. The two regions are sequential and
-never nested. `approvals` gets this and the rest of the document does not because
-it is the only part another attachment writes: one home can be attached from
+**Every field the advance does not change comes from the fresh read.** The
+end-of-run write takes the state lock, re-reads the document inside it, and
+writes `denials`, `completed_tasks`, `extensions` and any other top-level key as
+that read holds them. So a denial, a `deny --remove` or a board write that lands
+while the advance runs is kept. Onto that the advance writes its own run id and
+clocks, and its tier changes: a task its tier archived or auto-deferred is
+changed by task id, and only while the fresh read still holds it open.
+
+**`approvals` is merged per key.** Both of the advance's writes to it — the
+spend mark taken before a content-approved handler runs, and the single
+end-of-run write — take the state lock, re-read the document inside it, and
+merge that subtree per key. The two regions are sequential and never nested.
+`approvals` gets a per-key rule rather than the fresh read because the advance
+writes it too, and so does another attachment: one home can be attached from
 several machines, so a `warpline approve --content` lands at an instant the
 advance cannot predict.
 

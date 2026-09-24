@@ -1068,6 +1068,40 @@ function mergeApprovals(
 }
 
 /**
+ * This advance's tier changes, applied by task id onto the tasks as the fresh
+ * read holds them. The tier block in `runAdvance` decides them over its own
+ * copy, and this is where they land.
+ *
+ * | change                                 | written when the fresh read holds     |
+ * |----------------------------------------|---------------------------------------|
+ * | archive (`suspended`)                  | the task, not archived                |
+ * | auto-deferral (`degraded`, `extended`) | the task, with no deferral of its own |
+ *
+ * A task the fresh read no longer holds was completed while the advance ran,
+ * and nothing is written for it. Everything else in both arrays is the fresh
+ * read's, so a task the board created, completed or deferred mid-advance stays
+ * as the board left it.
+ */
+function mergeTierChanges(
+  disk: EngineState,
+  archivedTaskIds: ReadonlySet<string>,
+  autoDeferrals: EngineState['deferrals'],
+  archivedAt: string,
+): Pick<EngineState, 'task_aging' | 'deferrals'> {
+  const open = new Set(disk.task_aging.map((t) => t.task_id))
+  const deferred = new Set(disk.deferrals.map((d) => d.task_id))
+  return {
+    task_aging: disk.task_aging.map((t) =>
+      archivedTaskIds.has(t.task_id) && !t.archived_at ? { ...t, archived_at: archivedAt } : t,
+    ),
+    deferrals: [
+      ...disk.deferrals,
+      ...autoDeferrals.filter((d) => open.has(d.task_id) && !deferred.has(d.task_id)),
+    ],
+  }
+}
+
+/**
  * Drop every approval whose fire window has closed, except the did-it-ship
  * evidence and a closed binding whose content erasure was deferred.
  *
@@ -3185,24 +3219,31 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       engineStatus = 'partial'
     }
 
-    // -- Tier-based task mutations ---------------
+    // -- Tier-based task changes ---------------
+    // Decided here, over this advance's copy of the tasks, and applied inside
+    // the end-of-run lock below, by task id, onto the tasks as the fresh read
+    // holds them (`mergeTierChanges`). Nothing here changes that copy. It is
+    // not what gets written, and a task the board completed while this advance
+    // ran is still in it.
+    const tierStamp = new Date().toISOString()
+    const archivedTaskIds = new Set<string>()
+    const autoDeferrals: EngineState['deferrals'] = []
     if (currentTier === 'suspended') {
       // Soft-archive info-severity tasks that aren't already archived
       for (const task of state.task_aging) {
         if (task.severity === 'info' && !task.archived_at) {
-          task.archived_at = new Date().toISOString()
+          archivedTaskIds.add(task.task_id)
         }
       }
     } else if (currentTier === 'degraded' || currentTier === 'extended') {
       // Auto-defer info-severity tasks: critical + warning stay active
-      const now = new Date().toISOString()
       const existingDeferralIds = new Set(state.deferrals.map(d => d.task_id))
       for (const task of state.task_aging) {
         if (task.severity === 'info' && !existingDeferralIds.has(task.task_id) && !task.archived_at) {
-          state.deferrals.push({
+          autoDeferrals.push({
             task_id: task.task_id,
             reason: `Auto-deferred: ${currentTier} tier`,
-            deferred_at: now,
+            deferred_at: tierStamp,
             expires_at: new Date(Date.now() + 7 * 86_400_000).toISOString(),
           })
         }
@@ -3210,31 +3251,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     }
 
     // 8. Write updated state (with pending_gates)
-    const updatedState: EngineState & { pending_gates?: unknown[] } = {
-      ...state,
-      // Migrate-on-write, and the ONLY site there is.
-      //
-      // The spread above carries `schema_version` straight through from the
-      // read, so without this line a v1 document read by a v2 build is written
-      // back as v1 and the home never advances — there was no migration site
-      // at all, only a constant that nothing stamped.
-      //
-      // Here rather than in `writeEngineState`: that helper is also how the
-      // board writes state, on four paths that never read the home version, so
-      // migration there would stamp a layout version nothing had validated.
-      // The advance is the one writer that read both versions on the way in.
-      schema_version: ENGINE_STATE_MAX_SCHEMA_VERSION,
-      // `confirmed_at` is written HERE and nowhere else — the second half of
-      // the two-field mark, and the reason the mark is two fields rather than
-      // one. Everything about which fires are in the set, and why a `failed`
-      // return is not, is on `confirmContentMarks`.
-      approvals: confirmContentMarks(state.approvals, confirmedContentFires),
-      last_run_id: run_id,
-      last_run_at: new Date().toISOString(),
-    }
-
-    // Add pending_gates to state for gated plugins. Assembled in the gated arm
-    // above, where the plugin's real result is still in hand.
+    //
+    // The gates this advance parked, assembled in the gated arm above where the
+    // plugin's real result is still in hand, are added to the gates that
+    // survive.
     //
     // **An APPLIED gate survives the advance.** `applyPendingGate` marks rather
     // than deletes precisely so a second `approve` finds the gate and refuses
@@ -3274,24 +3294,28 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       const clock = g.applied_at ?? g.run_completed_at
       return clock !== null && new Date(clock).getTime() > gateFloorMs
     })
-    ;(updatedState as Record<string, unknown>)['pending_gates'] = [
-      ...survivors,
-      ...parked_gates,
-    ]
 
     // The single end-of-run write, and the second of this file's two locked
     // regions — sequential with the spend mark's, never nested (see
     // `lockStateDocument`).
     //
-    // Everything except `approvals` is still the advance's own in-memory state,
-    // spread above: this closes the read-modify-write window of #25 for that ONE
-    // subtree and leaves the general case — `plugin_runs`, `pending_gates`,
-    // `last_run_id` — open, which is where `engine-state-store.ts` files it.
-    // Three narrow reconciles from the fresh read are the exceptions, each for
-    // the reason given at its loop below. An apply that landed mid-advance is
-    // kept: the applied gate, if this advance still holds it as pending, and
-    // that run's `plugin_runs` entry while it is still the parked one. An
-    // erased `last_output` is kept over this advance's
+    // **It starts from the fresh read, not from this advance's copy.** The
+    // document is re-read inside the lock, and every field this advance did not
+    // change is written as that read holds it: `denials`, `completed_tasks`,
+    // `extensions`, and any other top-level key. Every writer that can land
+    // while this advance runs takes the same lock, so the read holds what they
+    // wrote, and a denial, a `deny --remove` or a board write that landed
+    // mid-advance is kept. Onto that floor go the fields this advance changed:
+    // its run id and clocks, its tier changes by task id (`mergeTierChanges`),
+    // and `approvals` by the table on `mergeApprovals`.
+    //
+    // `plugin_runs` and `pending_gates` are still this advance's own in-memory
+    // copies, so the window of #25 is still open for them, which is where
+    // `engine-state-store.ts` files it. Three narrow reconciles from the fresh
+    // read are the exceptions, each for the reason given at its loop below. An
+    // apply that landed mid-advance is kept: the applied gate, if this advance
+    // still holds it as pending, and that run's `plugin_runs` entry while it is
+    // still the parked one. An erased `last_output` is kept over this advance's
     // body for the same run. Erased bytes in an applied gate's copy are not
     // written back with a body while the fresh read still holds that gate.
     // An applied gate an overlapping advance dropped, after this advance's run
@@ -3301,13 +3325,14 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // another writer discarded mid-advance is still written back.
     // Closing the general case is a change of its own.
     //
-    // `approvals` is the subtree that needs it because it is the only one
-    // another ATTACHMENT writes. One home can be attached from several machines,
-    // so an `approve --content` lands at an instant this process cannot predict,
-    // and the window it lands in is as wide as the run — hours, in the shape
-    // this runtime is built for. The rule applied per key is the five-row table
-    // on `mergeApprovals`, the same one the mid-run mark implements; two prose
-    // statements of one rule is how two writers come to disagree.
+    // `approvals` takes a per-key rule rather than the floor, because this
+    // advance writes it too, and so does another ATTACHMENT. One home can be
+    // attached from several machines, so an `approve --content` lands at an
+    // instant this process cannot predict, and the window it lands in is as
+    // wide as the run — hours, in the shape this runtime is built for. The rule
+    // applied per key is the five-row table on `mergeApprovals`, the same one
+    // the mid-run mark implements; two prose statements of one rule is how two
+    // writers come to disagree.
     //
     // The re-read is INSIDE the lock, and it has to be: a read outside it is a
     // read of a document a concurrent writer may replace before this write
@@ -3340,8 +3365,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // bindings the erasure matches, by run or by fingerprint, and after it
     // there would be nothing left to say which content was released. It writes
     // `plugin_runs` entries and the copies applied gates hold in `pending_gates`,
-    // both this advance's own in-memory state, so the floor rule above does not
-    // apply to it.
+    // in the document this write is about to persist.
     //
     // **No `catch` around this write, and that is load-bearing.** A spend mark
     // that failed on storage (`mark_unavailable`, `mark_uncertain`) exits `0`
@@ -3351,7 +3375,32 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // `catch` and those faults go quiet: revisit `advanceExitCode` first.
     await lockStateDocument(stateDir, async () => {
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
-      const merged = mergeApprovals(disk.approvals, updatedState.approvals)
+      const merged: EngineState = {
+        ...disk,
+        // Migrate-on-write, and the ONLY site there is.
+        //
+        // The spread above carries `schema_version` straight through from the
+        // read, so without this line a v1 document read by a v2 build is written
+        // back as v1 and the home never advances — there was no migration site
+        // at all, only a constant that nothing stamped.
+        //
+        // Here rather than in `writeEngineState`: that helper is also how the
+        // board writes state, on four paths that never read the home version, so
+        // migration there would stamp a layout version nothing had validated.
+        // The advance is the one writer that read both versions on the way in.
+        schema_version: ENGINE_STATE_MAX_SCHEMA_VERSION,
+        last_run_id: run_id,
+        last_run_at: new Date().toISOString(),
+        last_interaction_at: state.last_interaction_at,
+        plugin_runs: state.plugin_runs,
+        pending_gates: [...survivors, ...parked_gates],
+        ...mergeTierChanges(disk, archivedTaskIds, autoDeferrals, tierStamp),
+        // `confirmed_at` is written HERE and nowhere else — the second half of
+        // the two-field mark, and the reason the mark is two fields rather than
+        // one. Everything about which fires are in the set, and why a `failed`
+        // return is not, is on `confirmContentMarks`.
+        approvals: mergeApprovals(disk.approvals, confirmContentMarks(state.approvals, confirmedContentFires)),
+      }
       // An apply can land while this advance runs, because `approve <plugin>`
       // takes the state lock and this advance holds none across its plugins.
       // Written back from memory, the gate would read pending again with its
@@ -3389,23 +3438,23 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // Written back, that copy would keep its body until the gate ceiling.
       for (const d of disk.pending_gates) {
         if (d.applied_at === null) continue
-        const i = updatedState.pending_gates.findIndex(
+        const i = merged.pending_gates.findIndex(
           (g) => g.plugin === d.plugin && g.run_id === d.run_id && g.applied_at === null,
         )
         if (i !== -1) {
-          updatedState.pending_gates[i] = d
+          merged.pending_gates[i] = d
         }
-        const entry = Object.hasOwn(updatedState.plugin_runs, d.plugin) ? updatedState.plugin_runs[d.plugin] : undefined
+        const entry = Object.hasOwn(merged.plugin_runs, d.plugin) ? merged.plugin_runs[d.plugin] : undefined
         const gatedByThisRun = entry?.status === 'gated' && entry.last_run_at === d.run_completed_at
         if (gatedByThisRun && Object.hasOwn(disk.plugin_runs, d.plugin)) {
-          updatedState.plugin_runs[d.plugin] = disk.plugin_runs[d.plugin]!
+          merged.plugin_runs[d.plugin] = disk.plugin_runs[d.plugin]!
         }
         for (const o of d.plugin_result.artifacts_produced) {
           if (!('erased_at' in o) || o.erased_at === undefined) continue
-          eraseGateCopies(updatedState.pending_gates, d.plugin, o.body_sha256!, o.erased_at)
+          eraseGateCopies(merged.pending_gates, d.plugin, o.body_sha256!, o.erased_at)
         }
       }
-      for (const [plugin, run] of Object.entries(updatedState.plugin_runs)) {
+      for (const [plugin, run] of Object.entries(merged.plugin_runs)) {
         const onDisk = Object.hasOwn(disk.plugin_runs, plugin)
           ? disk.plugin_runs[plugin]!.last_output
           : undefined
@@ -3416,13 +3465,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           mine.run_id !== undefined &&
           mine.run_id === onDisk.run_id
         ) {
-          updatedState.plugin_runs[plugin] = { ...run, last_output: onDisk }
-          eraseGateCopies(updatedState.pending_gates, plugin, onDisk.body_sha256!, onDisk.erased_at)
+          merged.plugin_runs[plugin] = { ...run, last_output: onDisk }
+          eraseGateCopies(merged.pending_gates, plugin, onDisk.body_sha256!, onDisk.erased_at)
         }
       }
-      eraseReleasedContent(updatedState.plugin_runs, updatedState.pending_gates, merged, plugins, approvalNow)
-      updatedState.approvals = sweepExpiredApprovals(merged, updatedState.plugin_runs, plugins, approvalNow)
-      await writeEngineState(updatedState as EngineState, stateDir)
+      eraseReleasedContent(merged.plugin_runs, merged.pending_gates, merged.approvals, plugins, approvalNow)
+      merged.approvals = sweepExpiredApprovals(merged.approvals, merged.plugin_runs, plugins, approvalNow)
+      await writeEngineState(merged, stateDir)
       // The home's layout version, stamped beside the document it describes and
       // inside the same lock, so the two halves of the migration cannot land
       // apart. `stateDir` is the state FILE path, so its grandparent is the home
