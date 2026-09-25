@@ -215,13 +215,16 @@ async function domainVocabulary(root: string, terms: string[] = TERMS): Promise<
 const HANDLER_EXPORT = /^export\s+(?:async\s+)?(?:const|let|function|class|interface|type)\s+(\w+)/gm
 
 /**
- * Offenders among the bundled examples' identifiers: every manifest's input
- * and output keys and every name its `handler.ts` exports, matched with the
- * same term list and the same segment matcher as the published surface.
- * Offenders read `examples/plugins/<dir>: <identifier>`, sorted and unique.
+ * Offenders among the bundled examples' identifiers: every plugin's directory
+ * and manifest name, every manifest's input and output keys and every name its
+ * `handler.ts` exports, matched with the same term list and the same segment
+ * matcher as the published surface. Offenders read
+ * `examples/plugins/<dir>: <identifier>`, sorted and unique.
  *
  * Blind in the same three ways as the helper above, and red in all three: an
  * empty term list, no examples tree, and a tree that yields no identifier.
+ * Red per directory too: one with no `manifest.ts` or no `handler.ts`, or a
+ * manifest that exports no `manifest` with a name, is never skipped.
  */
 async function exampleVocabulary(root: string, terms: string[] = TERMS): Promise<string[]> {
   if (terms.length === 0) throw new Error('blind: the vocabulary term list is empty')
@@ -235,14 +238,18 @@ async function exampleVocabulary(root: string, terms: string[] = TERMS): Promise
     .map((e) => e.name)
   for (const dir of dirs) {
     const manifestPath = join(pluginsRoot, dir, 'manifest.ts')
-    if (!existsSync(manifestPath)) continue
-    const { manifest } = (await import(pathToFileURL(manifestPath).href)) as {
-      manifest?: { inputs?: object; outputs?: object }
-    }
-    for (const key of Object.keys(manifest?.inputs ?? {})) identifiers.push({ dir, name: key })
-    for (const key of Object.keys(manifest?.outputs ?? {})) identifiers.push({ dir, name: key })
     const handlerPath = join(pluginsRoot, dir, 'handler.ts')
-    if (!existsSync(handlerPath)) continue
+    if (!existsSync(manifestPath)) throw new Error(`blind: examples/plugins/${dir} has no manifest.ts`)
+    if (!existsSync(handlerPath)) throw new Error(`blind: examples/plugins/${dir} has no handler.ts`)
+    const { manifest } = (await import(pathToFileURL(manifestPath).href)) as {
+      manifest?: { name?: unknown; inputs?: object; outputs?: object }
+    }
+    if (typeof manifest?.name !== 'string') {
+      throw new Error(`blind: examples/plugins/${dir}/manifest.ts exports no named manifest`)
+    }
+    identifiers.push({ dir, name: dir }, { dir, name: manifest.name })
+    for (const key of Object.keys(manifest.inputs ?? {})) identifiers.push({ dir, name: key })
+    for (const key of Object.keys(manifest.outputs ?? {})) identifiers.push({ dir, name: key })
     for (const m of readFileSync(handlerPath, 'utf8').matchAll(HANDLER_EXPORT)) identifiers.push({ dir, name: m[1]! })
   }
   if (identifiers.length === 0) throw new Error(`blind: no example identifiers under ${root}`)
@@ -396,11 +403,55 @@ describe('no example identifier carries the source runtime vocabulary', () => {
     }
   })
 
-  test('an examples tree with no identifiers is red, not a clean bill of health', async () => {
+  // WR-09. The plugin's own name is what `scaffold --from` copies first.
+  test('a plugin name carrying the vocabulary is reported, by its directory and its manifest name', async () => {
     const root = fixture({
-      'examples/plugins/empty/manifest.ts': "export const manifest = { name: 'empty' }\n",
-      'examples/plugins/empty/handler.ts': '// nothing exported\n',
+      'examples/plugins/trial-watch/manifest.ts':
+        "export const manifest = { name: 'trial-watch', inputs: { feed_url: {} }, outputs: { report: {} } }\n",
+      'examples/plugins/trial-watch/handler.ts': 'export const handler = async () => null\n',
+      'examples/plugins/watcher/manifest.ts':
+        "export const manifest = { name: 'converted-watch', inputs: { feed_url: {} }, outputs: { report: {} } }\n",
+      'examples/plugins/watcher/handler.ts': 'export const handler = async () => null\n',
     })
+    try {
+      expect(await exampleVocabulary(root)).toEqual([
+        'examples/plugins/trial-watch: trial-watch',
+        'examples/plugins/watcher: converted-watch',
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a directory with no manifest.ts is red, naming the directory, never skipped', async () => {
+    const root = fixture({
+      'examples/plugins/clean/manifest.ts':
+        "export const manifest = { name: 'clean', inputs: { feed_url: {} }, outputs: { model: {} } }\n",
+      'examples/plugins/clean/handler.ts': 'export async function handler() { return null }\n',
+      'examples/plugins/orphan/handler.ts': 'export function trialWindow() { return 0 }\n',
+    })
+    try {
+      await expect(exampleVocabulary(root)).rejects.toThrow(/blind: examples\/plugins\/orphan has no manifest\.ts/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a manifest exported under another name is red, never an empty contribution', async () => {
+    const root = fixture({
+      'examples/plugins/renamed/manifest.ts':
+        "export const pluginManifest = { name: 'renamed', inputs: { conversion_rate: {} } }\n",
+      'examples/plugins/renamed/handler.ts': 'export const handler = async () => null\n',
+    })
+    try {
+      await expect(exampleVocabulary(root)).rejects.toThrow(/blind: examples\/plugins\/renamed\/manifest\.ts exports no named manifest/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('an examples tree with no example directories is red, not a clean bill of health', async () => {
+    const root = fixture({ 'examples/plugins/README.md': 'nothing here\n' })
     try {
       await expect(exampleVocabulary(root)).rejects.toThrow(/blind: no example identifiers/)
     } finally {

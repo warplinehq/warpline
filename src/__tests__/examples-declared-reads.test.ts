@@ -145,8 +145,12 @@ describe('example handlers read only what they declare', () => {
     expect((await undeclaredReads(REPO_ROOT)).offenders).toEqual([])
   })
 
-  test('at least three example directories were scanned, so the check above is not vacuous', async () => {
-    expect((await undeclaredReads(REPO_ROOT)).scanned).toBeGreaterThanOrEqual(3)
+  // WR-09. A floor of three against twenty-odd directories let all but three
+  // go unread. Every directory is a plugin the check must have read.
+  test('every example directory was scanned, so the check above is not vacuous', async () => {
+    const dirs = readdirSync(join(REPO_ROOT, EXAMPLES), { withFileTypes: true }).filter((e) => e.isDirectory())
+    expect(dirs.length).toBeGreaterThanOrEqual(3)
+    expect((await undeclaredReads(REPO_ROOT)).scanned).toBe(dirs.length)
   })
 
   test('the exemption is load-bearing: without it exactly the anomaly-issue read is an offender', async () => {
