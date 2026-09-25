@@ -374,6 +374,30 @@ describe('the guard goes red on a planted default', () => {
     )
   })
 
+  test('an array default passes only when every element is a placeholder or allowlisted', async () => {
+    const list = (value: unknown[]) => ({ type: 'array', required: false, default: value })
+    await withFixture(
+      {
+        ...CLEAN_TRIO,
+        'fixture-array': {
+          mixed: list(['https://feeds.example.test/a', PLANTED]),
+          clean: list(['https://feeds.example.test/a', 'your-feed']),
+        },
+      },
+      async (root) => {
+        const { offenders } = await defaultOffenders(root)
+        expect(offenders).toEqual(["fixture-array: input 'mixed' default is not a recognisable placeholder"])
+        expect(offenders.join('\n')).not.toContain(PLANTED)
+        // One allowlisted element admits that element and nothing more.
+        const admitting = [
+          ...ALLOWLIST,
+          { plugin: 'fixture-array', key: 'mixed', value: PLANTED, reason: 'planted to prove one allowlisted element admits one element' },
+        ]
+        expect((await defaultOffenders(root, admitting)).offenders).toEqual([])
+      },
+    )
+  })
+
   test('an absent examples tree is an offender rather than a thrown exception', async () => {
     await withFixture({}, async (root) => {
       const { offenders } = await defaultOffenders(root)

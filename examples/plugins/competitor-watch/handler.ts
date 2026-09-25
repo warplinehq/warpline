@@ -52,9 +52,9 @@ export function normalise(text: string): string {
  * common leading and trailing lines are dropped, and what is left of
  * `before` is emitted as `- ` lines, then what is left of `after` as `+ `
  * lines. Each line is cut to MAX_LINE_CHARS and at most `maxLines` are kept.
- * ponytail: one hunk between the first and last differing line, so two edits
- * far apart report everything between them; an LCS line diff is the upgrade
- * when multi-hunk reports matter.
+ * ponytail: one hunk, no LCS line diff; two edits far apart report everything
+ * between the first and last differing line. An LCS diff is the upgrade when
+ * multi-hunk reports matter.
  */
 export function diffLines(before: string, after: string, maxLines: number): { lines: string[]; truncated: boolean } {
   const a = before === '' ? [] : before.split('\n')
