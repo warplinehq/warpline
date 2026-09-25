@@ -200,4 +200,28 @@ describe('the cadence example under runAdvance', () => {
     expect(pluginRuns()['cadence-send']?.status).toBe('success')
     expect(ledger()).toEqual(RECIPIENTS.map((to, i) => [`c-${i + 1}:1`, to]))
   })
+
+  test('a partial send retries at the same bytes to exactly the unrecorded recipients', async () => {
+    await advance()
+    await approveByContent()
+    const approvedBody = pluginRuns()['cadence-plan']?.last_output?.body
+
+    const first = mailStub(4)
+    await advance()
+
+    expect(first).toHaveLength(4)
+    expect(pluginRuns()['cadence-send']?.status).toBe('partial')
+    expect(ledger()).toEqual(RECIPIENTS.slice(0, 3).map((to, i) => [`c-${i + 1}:1`, to]))
+
+    // The partial run spent the approval. Approving the unchanged outbox again
+    // re-arms it, and `force` lifts cadence-send's TTL so the gate is reached.
+    await approveByContent()
+    const retry = mailStub()
+    await advance({ force: true })
+
+    expect(pluginRuns()['cadence-plan']?.last_output?.body).toBe(approvedBody)
+    expect(retry.map((c) => c.to)).toEqual(['c-4@example.com', 'c-5@example.com'])
+    expect(pluginRuns()['cadence-send']?.status).toBe('success')
+    expect(ledger()).toEqual(RECIPIENTS.map((to, i) => [`c-${i + 1}:1`, to]))
+  })
 })
