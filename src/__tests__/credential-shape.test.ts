@@ -35,7 +35,7 @@
  * written anywhere but the case's temp home.
  */
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _setHome } from '../lib/paths.js'
@@ -55,6 +55,8 @@ interface Carrier {
   readonly seed?: (home: string) => void
   readonly dependencyRuns?: Readonly<Record<string, DependencyRun | null>>
   readonly witness: CapabilityGrantWitness
+  /** A file under the home the handler writes on success, which a 401 must leave unwritten. */
+  readonly ledger?: string
 }
 
 const CARRIERS: readonly Carrier[] = [
@@ -64,7 +66,58 @@ const CARRIERS: readonly Carrier[] = [
     args: {},
     witness: { granted: false, reason: 'manual-run' },
   },
+  {
+    plugin: 'graph-sync',
+    secret: 'GRAPH_SYNC_TOKEN',
+    args: {},
+    seed: (home) => {
+      mkdirSync(join(home, 'state'), { recursive: true })
+      writeFileSync(join(home, 'state', 'records.json'), JSON.stringify({ records: [{ id: 'r-1' }] }))
+    },
+    witness: { granted: false, reason: 'manual-run' },
+  },
+  {
+    plugin: 'ledger-runner',
+    secret: 'LEDGER_QUOTES_TOKEN',
+    args: { instruments: ['example-instrument'] },
+    witness: { granted: false, reason: 'manual-run' },
+    ledger: 'state/ledger.json',
+  },
+  {
+    plugin: 'cadence-send',
+    secret: 'CADENCE_MAIL_TOKEN',
+    args: {},
+    // The content witness, the arm an operator's `approve --content` produces,
+    // because it is the one an advance hands this plugin. The dependency
+    // member is ungated, so the outbox reaches the handler under any witness.
+    dependencyRuns: {
+      'cadence-plan': {
+        status: 'success',
+        last_output: {
+          type: 'outbox',
+          format: 'json',
+          body: JSON.stringify({
+            outbox: [{
+              id: 'c-1:1',
+              contact_id: 'c-1',
+              step: 1,
+              to: 'c-1@example.com',
+              subject: 'Hello',
+              body: 'First note',
+              due_at: '2026-01-01T09:00:00.000Z',
+            }],
+            review_tasks: [],
+          }),
+        },
+      },
+    },
+    witness: { granted: true, via: 'content-approval', fingerprint: 'credential-shape', effectId: 'credential-shape' },
+    ledger: 'state/cadence-send.sent.json',
+  },
 ]
+
+/** The examples that reach no credentialed API, pinned so a token added to one is a decision someone saw. */
+const NON_CARRIERS = ['competitor-watch', 'cadence-replies', 'cadence-plan', 'candidate-propose', 'candidate-promote']
 
 /** Run `fn` in a fresh temp home, both home instances pointed at it; restore both and remove it. */
 async function inHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
@@ -138,6 +191,8 @@ describe('the credential shape, over every token-carrying example', () => {
         // Non-empty first, so the header check below can't pass over no requests.
         expect(seen.length).toBeGreaterThan(0)
         for (const header of seen) expect(header).toBe(`Bearer ${tokenFor(c)}`)
+        // Written here, so its absence after a 401 is the handler's doing and not a path that never existed.
+        if (c.ledger !== undefined) expect(existsSync(join(home, c.ledger))).toBe(true)
       })
     })
 
@@ -149,6 +204,7 @@ describe('the credential shape, over every token-carrying example', () => {
         expect(res.result.errors[0]?.code).toBe('auth_failure')
         expect(res.result.errors[0]?.message).toContain(c.secret)
         expect(JSON.stringify(res)).not.toContain(tokenFor(c))
+        if (c.ledger !== undefined) expect(existsSync(join(home, c.ledger))).toBe(false)
       })
     })
 
@@ -164,4 +220,14 @@ describe('the credential shape, over every token-carrying example', () => {
       })
     }
   }
+
+  test('each carrier declares exactly its one _TOKEN, and the non-carriers declare none', async () => {
+    const secretsOf = async (plugin: string): Promise<unknown> =>
+      ((await import(join(EXAMPLES, plugin, 'manifest.ts'))) as { manifest: { secrets: unknown } }).manifest.secrets
+    for (const c of CARRIERS) {
+      expect(c.secret).toMatch(/_TOKEN$/)
+      expect(await secretsOf(c.plugin)).toEqual([c.secret])
+    }
+    for (const plugin of NON_CARRIERS) expect(await secretsOf(plugin)).toEqual([])
+  })
 })
