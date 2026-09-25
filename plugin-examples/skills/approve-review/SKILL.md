@@ -64,19 +64,23 @@ close.
    of the window. Anything other than an explicit yes ends the skill here.
    Silence, "probably", "looks fine I guess" and a question back are not a yes.
 5. **Approve.** Run
-   `warpline approve <plugin> --content --not-after <YYYY-MM-DDTHH:mm>`. The
-   time is read as UTC. When the operator gave a local time, add
+   `warpline approve <plugin> --content --not-before <YYYY-MM-DDTHH:mm> --not-after <YYYY-MM-DDTHH:mm>`,
+   with `--not-before` at least five minutes from now. The command binds
+   whatever bytes the producer holds when it runs, which may not be the ones
+   you showed, so the window must not open until step 6 has checked them. Both
+   times are read as UTC. When the operator gave a local time, add
    `--zone <iana>`, for example `--zone Europe/London`.
 6. **Compare.** The command prints the bytes it bound, between two delimiters.
    Compare them with what you showed. It renders control characters as
    visible `\xNN` escapes, so an escape there stands for the character you
    showed. If anything else differs, run
-   `warpline approve <plugin> --content --remove` at once, and tell the
-   operator the producer moved between your read and the approval. Then start
-   again from step 2.
-7. **Say what happens next.** A later advance ships exactly those bytes, once,
-   without asking again. If the producer's bytes change before then, the
-   approval stops applying and the plugin is skipped.
+   `warpline approve <plugin> --content --remove` at once, before the window
+   opens, and tell the operator the producer moved between your read and the
+   approval. Then start again from step 2. If you can't finish the comparison
+   before the window opens, remove the approval the same way and start again.
+7. **Say what happens next.** Once the window opens, a later advance ships
+   exactly those bytes, once, without asking again. If the producer's bytes
+   change before then, the approval stops applying and the plugin is skipped.
 
 When a send fails, one of two things has happened, and the operator needs to
 know which.

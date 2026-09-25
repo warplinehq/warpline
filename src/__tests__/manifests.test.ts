@@ -263,6 +263,19 @@ describe('the shipped manifests', () => {
     expect(prohibitionOffenders(REPO_ROOT, EXAMPLES_SKILLS_DIR)).toEqual([])
   })
 
+  // WR-06. `approve --content` binds whatever the producer holds when it runs,
+  // so the comparison must finish before the window opens: an advance between
+  // an open approval and its comparison could ship bytes nobody was shown.
+  test('approve-review opens the window only after it has compared the bound bytes', () => {
+    const skill = read(join(EXAMPLES_SKILLS_DIR, 'approve-review', 'SKILL.md'))
+    const approve = skill.indexOf('5. **Approve.**')
+    const compare = skill.indexOf('6. **Compare.**')
+    expect(approve).toBeGreaterThan(-1)
+    expect(compare).toBeGreaterThan(approve)
+    expect(skill.slice(approve, compare)).toContain('--not-before')
+    expect(skill.slice(compare)).toMatch(/--remove[^.]*before the window\s+opens/)
+  })
+
   test("every marketplace entry's version matches its plugin.json", () => {
     expect(marketplaceVersionOffenders(REPO_ROOT)).toEqual([])
   })

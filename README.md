@@ -187,8 +187,9 @@ candidates `candidate-propose` chose. A session grant never runs them, not even
 `warpline-examples` plugin of this repository's Claude Code marketplace
 ([plugin-examples](https://github.com/warplinehq/warpline/tree/main/plugin-examples)),
 shows you those bytes first and runs
-`warpline approve <plugin> --content --not-after <when>` only on an explicit
-yes. A send that stops part-way is `partial`, a rejected token on the first
+`warpline approve <plugin> --content --not-before <soon> --not-after <when>`
+only on an explicit yes. The window opens a few minutes out, so the skill can
+check the bytes the command bound before anything can ship them. A send that stops part-way is `partial`, a rejected token on the first
 email included, and re-approving the unchanged Output retries it, skipping what
 already went. The operational risk to watch is a first request that throws, a
 dropped connection for example: it may have delivered, so it leaves the
