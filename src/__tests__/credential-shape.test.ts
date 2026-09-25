@@ -1,6 +1,8 @@
 /**
- * The credential shape, held out and proven over every token-carrying example
- * at once, through the runtime path an adopter's advance takes.
+ * The credential shape, held out and proven over every single-token example at
+ * once, through the runtime path an adopter's advance takes. A census over the
+ * examples directory holds every other example to a list: no credential, or
+ * excluded here with its reason.
  *
  * The shape was decided before any of these examples was written, so the
  * examples answer to it and not the other way round. One environment variable
@@ -38,7 +40,7 @@
  * written anywhere but the case's temp home.
  */
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _setHome } from '../lib/paths.js'
@@ -122,8 +124,21 @@ const CARRIERS: readonly Carrier[] = [
   },
 ]
 
-/** The examples that reach no credentialed API, pinned so a token added to one is a decision someone saw. */
-const NON_CARRIERS = ['competitor-watch', 'cadence-replies', 'cadence-plan', 'candidate-propose', 'candidate-promote']
+/**
+ * The examples that read no credential, pinned so a token added to one is a
+ * decision someone saw: each declares no secret and its handler reads no env.
+ */
+const NON_CARRIERS = [
+  'announce-fanout', 'anomaly-watch', 'cadence-plan', 'cadence-replies', 'candidate-promote', 'candidate-propose',
+  'competitor-watch', 'daily-digest', 'derived-summary', 'draft-writer', 'feed-monitor', 'feed-triage',
+  'github-poll', 'metrics-rollup', 'note-intake',
+]
+
+/** Examples that carry a credential in a shape this file does not drive, each with the reason. */
+const EXCLUDED: Readonly<Record<string, string>> = {
+  'link-enrich': 'three secrets, one per source, so the one-token shape above does not fit; its own handler.test.ts sends each token to its own source\'s authorization header and checks the result and the written file for all three',
+  'anomaly-issue': 'reads GITHUB_TOKEN without declaring it on secrets, under the exemption examples-declared-reads.test.ts holds with its reason, so the runtime has no secret to pre-flight and the refusal cases here cannot apply',
+}
 
 /** Run `fn` in a fresh temp home, both home instances pointed at it; restore both and remove it. */
 async function inHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
@@ -158,17 +173,20 @@ async function withSecret<T>(name: string, value: string | undefined, fn: () => 
 
 /**
  * A `fetch` that answers every request with `status` and records the
- * authorization header each one carried. The success body satisfies every
- * carrier at once: `rows` for search-console, `value` for ledger-runner, and
- * the other two read no body.
+ * authorization header each one carried, and everything else it carried: the
+ * URL and the body, so "nowhere else" is checked where a token could go. The
+ * success body satisfies every carrier at once: `rows` for search-console,
+ * `value` for ledger-runner, and the other two read no body.
  */
 function stub(status: 200 | 401) {
   const seen: (string | null)[] = []
-  const impl = async (_input: unknown, init?: RequestInit) => {
+  const elsewhere: string[] = []
+  const impl = async (input: unknown, init?: RequestInit) => {
     seen.push(new Headers(init?.headers).get('authorization'))
+    elsewhere.push(String(input), String(init?.body ?? ''))
     return { ok: status === 200, status, json: async () => (status === 200 ? { rows: [], value: 1 } : {}), text: async () => '' }
   }
-  return { seen, impl }
+  return { seen, elsewhere, impl }
 }
 
 /** One invocation of `c` through the runtime, in `home`, under `status`, with the secret as given. */
@@ -180,7 +198,7 @@ async function invoke(c: Carrier, home: string, status: 200 | 401, value: string
   try {
     const res = await withSecret(c.secret, value, () =>
       invokePlugin(c.plugin, c.args, { pluginsDir: EXAMPLES, dependencyRuns: c.dependencyRuns }, c.witness))
-    return { res, seen: recorder.seen }
+    return { res, seen: recorder.seen, elsewhere: recorder.elsewhere }
   } finally {
     globalThis.fetch = real
   }
@@ -192,11 +210,13 @@ describe('the credential shape, over every token-carrying example', () => {
   for (const c of CARRIERS) {
     test(`${c.plugin}: the declared secret reaches the API as a Bearer header`, async () => {
       await inHome(async (home) => {
-        const { res, seen } = await invoke(c, home, 200, tokenFor(c))
+        const { res, seen, elsewhere } = await invoke(c, home, 200, tokenFor(c))
         expect(res.result.status).toBe('success')
         // Non-empty first, so the header check below can't pass over no requests.
         expect(seen.length).toBeGreaterThan(0)
         for (const header of seen) expect(header).toBe(`Bearer ${tokenFor(c)}`)
+        // And nowhere else: not in any URL, not in any request body.
+        for (const part of elsewhere) expect(part).not.toContain(tokenFor(c))
         // Written here, so its absence after a 401 is the handler's doing and not a path that never existed.
         if (c.ledger !== undefined) expect(existsSync(join(home, c.ledger))).toBe(true)
       })
@@ -258,6 +278,18 @@ describe('the credential shape, over every token-carrying example', () => {
       expect(c.secret).toMatch(/_TOKEN$/)
       expect(await secretsOf(c.plugin)).toEqual([c.secret])
     }
-    for (const plugin of NON_CARRIERS) expect(await secretsOf(plugin)).toEqual([])
+    for (const plugin of NON_CARRIERS) {
+      expect(await secretsOf(plugin)).toEqual([])
+      expect(readFileSync(join(EXAMPLES, plugin, 'handler.ts'), 'utf-8')).not.toContain('process.env')
+    }
+  })
+
+  // WR-08. The lists above are hand-kept, so the claim "every token-carrying
+  // example" holds only if nothing on disk escapes all of them.
+  test('every example directory is a carrier, a non-carrier or excluded with a reason, exactly once', () => {
+    const dirs = readdirSync(EXAMPLES, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()
+    const listed = [...CARRIERS.map((c) => c.plugin), ...NON_CARRIERS, ...Object.keys(EXCLUDED)].sort()
+    expect(listed).toEqual(dirs)
+    for (const reason of Object.values(EXCLUDED)) expect(reason.length).toBeGreaterThan(40)
   })
 })

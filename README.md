@@ -169,12 +169,13 @@ runs that file, and the default `.warpline/` home is a dot-directory that
 project (`WARPLINE_HOME=./warpline-home`) is on that project's discovery path,
 and its own `bun test` will run the copied file.
 
-Four examples carry a credential: `search-console`, `graph-sync`,
-`ledger-runner` and `cadence-send`. Each names one `*_TOKEN` on `secrets` and
-sends it only as an `Authorization: Bearer` header, and only over https or
-plain http to localhost. Until it is set, the
-runtime refuses the run and names the variable, and that refusal is the
-first-run demo. To watch one work against a stub, run its test from your home
+Six examples carry a credential. Four name one `*_TOKEN` on `secrets`:
+`search-console`, `graph-sync`, `ledger-runner` and `cadence-send`. Each sends
+it only as an `Authorization: Bearer` header, and only over https or plain
+http to localhost. `link-enrich` names three the same way, one per source, and
+`anomaly-issue` reads `GITHUB_TOKEN` without declaring it. Until a declared
+token is set, the runtime refuses the run and names the variable, and that
+refusal is the first-run demo. To watch one work against a stub, run its test from your home
 with Bun: `bun test ./.warpline/plugins/<name>/handler.test.ts` on a default
 install (the leading `./` makes Bun read it as a path, not a name filter).
 Refreshing the token is yours, for example a job that rewrites the variable
