@@ -81,16 +81,17 @@ close.
 When a send fails, one of two things has happened, and the operator needs to
 know which.
 
-A send that stops part-way is `partial`. Some emails went out and cannot be
-unsent, so the approval is spent. To retry, re-approve the unchanged Output.
-The send ledger skips what already went.
+A send that stops part-way is `partial`. The approval is spent, whether some
+emails went out or the mail API refused the first one, a rejected token for
+example. To retry, re-approve the unchanged Output. The send ledger skips what
+already went.
 
-A send that fails before anything went out is different. A rejected token does
-it, or a token left unset under a real advance. The approval was marked and
-never confirmed, and its state is `indeterminate`. The runtime can't prove
-nothing left, so `warpline approve` refuses to write over it, and no verb
-clears it. Report it to the operator plainly. Don't try to repair the state
-document.
+A send that fails is different. A first request that throws does it, a dropped
+connection for example, or a token left unset under a real advance. The
+approval was marked and never confirmed, and its state is `indeterminate`. The
+runtime can't prove nothing left, so `warpline approve` refuses to write over
+it, and no verb clears it. Report it to the operator plainly. Don't try to
+repair the state document.
 
 ## What you must NOT do
 

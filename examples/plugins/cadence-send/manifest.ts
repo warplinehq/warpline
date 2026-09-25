@@ -20,16 +20,19 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * crash between a send and its mark can send that one email twice. Nothing
  * narrower is possible without the mail API's help.
  *
- * It stops at the first failure. When some emails went out first, the run is
- * `partial` and the approval is spent. Re-approve the unchanged outbox and the
- * retry sends only what the ledger has not recorded. It fires on the first
- * advance after this plugin's one-hour TTL lapses, or sooner when cadence-plan
- * re-runs. A failure before any email went out, a rejected token for example,
- * leaves the approval `indeterminate`, and nothing clears that.
+ * It stops at the first failure. When it knows what went out, the run is
+ * `partial` and the approval is spent: after some emails, or after a non-2xx
+ * answer to the first one, a rejected token for example. Re-approve the
+ * unchanged outbox and the retry sends only what the ledger has not recorded.
+ * It fires on the first advance after this plugin's one-hour TTL lapses, or
+ * sooner when cadence-plan re-runs. A first request that throws, a dropped
+ * connection for example, may have delivered that email. That run is `failed`,
+ * it leaves the approval `indeterminate`, and nothing clears that.
  *
  * It stops itself with a quarter of `timeout_ms` left, and a request still out
- * when the budget runs out is aborted. That run is `partial` too, so the retry
- * above applies, and the aborted email may already have gone and go again. It
+ * when the budget runs out is aborted. The aborted email may already have gone,
+ * so it counts as a request that threw: `partial` after earlier sends, and the
+ * retry may send it again, or `failed` when it was the first. It
  * stops early because the runtime's own timeout records the run `failed`,
  * whatever went out first, and that leaves the approval `indeterminate`.
  *

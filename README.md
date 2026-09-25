@@ -187,10 +187,11 @@ candidates `candidate-propose` chose. A session grant never runs them, not even
 ([plugin-examples](https://github.com/warplinehq/warpline/tree/main/plugin-examples)),
 shows you those bytes first and runs
 `warpline approve <plugin> --content --not-after <when>` only on an explicit
-yes. A send that stops part-way is `partial`, and re-approving the unchanged
-Output retries it, skipping what already went. A send that fails before
-anything went out, a rejected token for example, leaves the approval
-`indeterminate`, and no verb clears it. On a default install
+yes. A send that stops part-way is `partial`, a rejected token on the first
+email included, and re-approving the unchanged Output retries it, skipping what
+already went. The operational risk to watch is a first request that throws, a
+dropped connection for example: it may have delivered, so it leaves the
+approval `indeterminate`, and no verb clears it. On a default install
 (`review_gate: true`) the level-0 producers are recorded `gated` and the run
 stops there until you review them.
 

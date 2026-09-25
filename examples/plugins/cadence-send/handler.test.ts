@@ -190,11 +190,11 @@ describe('cadence-send stops at the first failure and retries only what is unrec
     })
   })
 
-  test('a failure on the first email fails the run and writes no ledger', async () => {
+  test('a refused first email is partial, not failed, and writes no ledger', async () => {
     await withHome(async (home) => {
       const { impl, calls } = recorder(failOn(1))
       const result = await withFetch(impl, () => invoke(planOf(OUTBOX)))
-      expect(result.status).toBe('failed')
+      expect(result.status).toBe('partial')
       expect(result.errors?.[0]?.code).toBe('dependency_unavailable')
       expect(calls).toHaveLength(1)
       await expect(stat(LEDGER(home))).rejects.toThrow()
@@ -321,11 +321,11 @@ describe('cadence-send can only send what it was shown', () => {
  * value never resolved at all.
  */
 describe('cadence-send credentials', () => {
-  test('a 401 on the first email fails the run with auth_failure naming the secret', async () => {
+  test('a 401 on the first email is partial with auth_failure naming the secret', async () => {
     await withHome(async () => {
       const { impl } = recorder(failOn(1, 401))
       const result = await withFetch(impl, () => invoke(planOf(OUTBOX)))
-      expect(result.status).toBe('failed')
+      expect(result.status).toBe('partial')
       expect(result.errors?.[0]?.code).toBe('auth_failure')
       expect(result.errors?.[0]?.message).toContain('CADENCE_MAIL_TOKEN')
     })
@@ -362,7 +362,7 @@ describe('cadence-send credentials', () => {
         results.push(await withFetch(impl, () => invoke(planOf(OUTBOX))))
         expect((calls[0]!.init.headers as Record<string, string>)['authorization']).toBe(`Bearer ${TOKEN}`)
       }
-      expect(results.map((r) => r.status)).toEqual(['failed', 'partial', 'success'])
+      expect(results.map((r) => r.status)).toEqual(['partial', 'partial', 'success'])
       for (const result of results) {
         expect(JSON.stringify(result)).not.toContain(TOKEN)
         expect(JSON.stringify(result)).not.toContain('Bearer')

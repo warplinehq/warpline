@@ -303,4 +303,26 @@ describe('the cadence example under runAdvance', () => {
     expect(retry.map((c) => c.to)).toEqual(RECIPIENTS.slice(sentFirst))
     expect(ledger()).toEqual(RECIPIENTS.map((to, i) => [`c-${i + 1}:1`, to]))
   })
+
+  // WR-02. A `failed` content fire reads `indeterminate`, and nothing clears
+  // that. A non-2xx answer on the first email means nothing went out, so the
+  // run must spend the approval and leave a re-approved retry open.
+  test('a refused first email spends the approval, and a re-approved retry sends all five', async () => {
+    await advance()
+    await approveByContent()
+    const first = mailStub(1)
+
+    await advance()
+
+    expect(first).toHaveLength(1)
+    expect(pluginRuns()['cadence-send']?.status).toBe('partial')
+    expect(existsSync(ledgerPath())).toBe(false)
+
+    await approveByContent()
+    const retry = mailStub()
+    await advance({ force: true })
+
+    expect(retry.map((c) => c.to)).toEqual(RECIPIENTS)
+    expect(pluginRuns()['cadence-send']?.status).toBe('success')
+  })
 })

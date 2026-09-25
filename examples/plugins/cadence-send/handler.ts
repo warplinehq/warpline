@@ -123,6 +123,8 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
   let already = 0
   let error: SkillError | null = null
   let stoppedAt: string | null = null
+  // True only when the stop was a request that threw: that email may have gone.
+  let inDoubt = false
   for (const email of outbox) {
     const key = JSON.stringify([email.id, email.to])
     if (recorded.has(key)) {
@@ -161,6 +163,7 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
         ? makeSkillError('timeout', `aborted sending ${email.id}, which may have gone out`, { impact: 'HIGH', retryable: false })
         : makeSkillError('dependency_unavailable', `request failed sending ${email.id}`, { impact: 'HIGH', retryable: false })
       stoppedAt = email.id
+      inDoubt = true
       break
     } finally {
       clearTimeout(timer)
@@ -191,7 +194,12 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
 
   const summary = `${manifest.name}: sent ${sent} of ${outbox.length} (${already} already sent)`
     + (error ? `; stopped at ${stoppedAt}: ${error.message}` : '')
-  if (sent === 0 && error !== null) {
+  // `failed` leaves the approval `indeterminate`, and nothing clears that. It
+  // is the right answer only when an email may have gone out unrecorded. A
+  // non-2xx answer means that email was not sent, so a stop that sent nothing
+  // is `partial` like any other: the approval is spent, and re-approving the
+  // unchanged outbox retries it.
+  if (sent === 0 && error !== null && inDoubt) {
     return skillFailure(error.code, summary, { ...FAILED, errors: [error] })
   }
   const result = skillOk(summary, {
@@ -202,6 +210,6 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
       ? `Sent email cannot be recalled; state/${manifest.name}.sent.json lists each email id and recipient that went out`
       : undefined,
   })
-  // No builder emits `partial`, and some sent then a stop is exactly that.
+  // No builder emits `partial`, and a stop part-way is exactly that.
   return error === null ? result : { ...result, status: 'partial' }
 }
