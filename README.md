@@ -33,12 +33,16 @@ warpline plan — preview only; nothing was executed.
 Grant: none — plugins with side effects would be SKIPPED this run
 Plugins: /tmp/warpline-demo/plugins
 
-Due (7):
+Due (10):
 
   announce-fanout (level 0)
     llm_handoff: may hand judgment to the LLM ([needs-llm])
     (no declared side effects)
   anomaly-watch (level 0)
+    (no declared side effects)
+  cadence-replies (level 0)
+    (no declared side effects)
+  candidate-propose (level 0)
     (no declared side effects)
   derived-summary (level 0)
     (no declared side effects)
@@ -47,13 +51,15 @@ Due (7):
     (no declared side effects)
   metrics-rollup (level 0)
     (no declared side effects)
+  cadence-plan (level 1)
+    (no declared side effects)
   daily-digest (level 1)
     (no declared side effects)
   feed-triage (level 1)
     llm_handoff: may hand judgment to the LLM ([needs-llm])
     (no declared side effects)
 
-Not due (9):
+Not due (11):
 
   competitor-watch — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
@@ -75,6 +81,10 @@ Not due (9):
   anomaly-issue — unapproved: side effects require session approval
     creates_issue: ⚠ unapproved — would be SKIPPED this run
     external_api: ⚠ unapproved — would be SKIPPED this run
+  candidate-promote — unapproved: no content approval on file for 'candidate-promote'
+    modifies_file: ⚠ unapproved — would be SKIPPED this run
+  cadence-send — unapproved: no content approval on file for 'cadence-send'
+    sends_email: ⚠ unapproved — would be SKIPPED this run
 ```
 <!-- /generated -->
 
