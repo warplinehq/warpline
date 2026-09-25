@@ -110,7 +110,9 @@ Each producer returns an inline `body`, never a `path`: `warpline approve
 file name rather than bytes they saw. The body carries no run timestamp and
 sorts its arrays, because a byte that changes on every run moves the
 fingerprint, and an approval over it never applies. The record already carries
-the run's currency in `produced_at` and `run_id`.
+the run's currency in `produced_at` and `run_id`. A producer run that has
+nothing to produce returns an empty body, never no Output: with no Output the
+runtime carries the last one forward, and an approval over it still fires.
 
 #### `llm_handoff` — whether your plugin may hand judgment to the LLM
 

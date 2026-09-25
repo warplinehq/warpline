@@ -234,14 +234,16 @@ describe('cadence-plan refuses what it cannot plan from', () => {
     })
   })
 
-  test('a missing contacts file plans nothing, on the success arm', async () => {
+  test('a missing contacts file plans nothing, on the success arm, and still records the reply', async () => {
     await withHome(async (home) => {
       await mkdir(join(home, 'state'), { recursive: true })
       await writeFile(join(home, 'state', 'steps.json'), JSON.stringify({ steps: STEPS }))
-      const result = await invoke(contextWith(repliesOf([])))
+      const result = await invoke(contextWith(repliesOf(['c-2'])))
       expect(result.status).toBe('success')
       expect(result.summary).toContain("'contacts_path'")
-      expect(result.artifacts_produced ?? []).toHaveLength(0)
+      // An empty outbox, not no Output: no Output would leave an approved one live.
+      expect(JSON.parse(bodyOf(result))).toEqual({ outbox: [], review_tasks: [] })
+      expect(JSON.parse(await readFile(STOPPED(home), 'utf-8'))).toEqual({ stopped: ['c-2'] })
     })
   })
 

@@ -13,9 +13,13 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * prevented by `cadence-send`'s own ledger, never here.
  *
  * A reply stops a contact for good. The stop is written to this plugin's own
- * state before anything else, so a contact whose reply dropped off the replies
- * list later stays stopped. The reply becomes a review task in the body, as
- * data for a person to act on. Nothing here hands off.
+ * state before the contacts and steps are read, so a contact whose reply
+ * dropped off the replies list later stays stopped. The reply becomes a review
+ * task in the body, as data for a person to act on. Nothing here hands off.
+ *
+ * A run with nothing to plan, a missing contacts or steps file for example,
+ * outputs an empty outbox. It never outputs nothing: the runtime would carry
+ * the last outbox forward, and one already approved would still be sent.
  *
  * The body carries no run timestamp and every list in it is sorted. Re-running
  * before the send fires reproduces the same bytes, so the approval stays live.

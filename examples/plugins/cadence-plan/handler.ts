@@ -129,12 +129,21 @@ function badStep(list: unknown[]): number {
 export const handler: CapabilityHandlerFn = async (manifest, args, _signal, capabilities) => {
   const FAILED = { phases_failed: [manifest.name], impact: 'HIGH' as const, retryable: false }
   const fail = (message: string) => skillFailure('parse_error', `${manifest.name}: ${message}`, FAILED)
-  const nothing = (why: string) => skillOk(`${manifest.name}: ${why}`, { phases_completed: [manifest.name] })
+  // An empty outbox, never no Output. With no Output the runtime carries the
+  // last one forward, and an outbox already approved would still be sent,
+  // to a contact who has replied since.
+  const EMPTY = JSON.stringify({ outbox: [], review_tasks: [] })
+  const nothing = (why: string) => skillOk(`${manifest.name}: ${why}`, {
+    phases_completed: [manifest.name],
+    artifacts_produced: [{ type: 'outbox', format: 'json', body: EMPTY }],
+  })
 
   // Reply detection first. With no reply list there is no plan: an email
   // queued without it could go to somebody who already answered.
   const record = capabilities.dependencies.lastOutput(capabilities.caller, 'cadence-replies')
-  if (record === null || record.body === undefined) return nothing('no data from cadence-replies yet — nothing to plan')
+  // Never produced, so this plugin never produced either: no Output to replace.
+  if (record === null) return skillOk(`${manifest.name}: no data from cadence-replies yet — nothing to plan`, { phases_completed: [manifest.name] })
+  if (record.body === undefined) return nothing('the cadence-replies Output is not held inline — nothing to plan')
   let replied: unknown
   try {
     replied = (JSON.parse(record.body) as { replied?: unknown } | null)?.replied
@@ -144,6 +153,23 @@ export const handler: CapabilityHandlerFn = async (manifest, args, _signal, capa
   if (!Array.isArray(replied) || !replied.every((r) => typeof r === 'string')) {
     return fail("cadence-replies' Output is not a replies list — refusing to plan without reply detection")
   }
+
+  // Own state, derived from the manifest name. Unreadable is never read as
+  // empty: an empty stopped list would message every contact who replied.
+  const stoppedPath = join(warplineHome(), 'state', `${manifest.name}.stopped.json`)
+  let stored: string[]
+  try {
+    const raw = await readJsonOrNull<{ stopped?: unknown }>(stoppedPath)
+    if (raw === null) stored = []
+    else if (typeof raw === 'object' && Array.isArray(raw.stopped) && raw.stopped.every((s) => typeof s === 'string')) stored = raw.stopped
+    else throw new Error('not a stopped list')
+  } catch {
+    return fail('the stopped list is unreadable — refusing to plan (it would message contacts who replied)')
+  }
+  // Written before the contacts and steps are read: a detected reply is
+  // permanent even on a run that goes on to plan nothing.
+  const merged = [...new Set([...stored, ...replied])].sort()
+  if (JSON.stringify(merged) !== JSON.stringify(stored)) await atomicWriteJson(stoppedPath, { stopped: merged })
 
   // Configured paths are refused by key, and no arm below names the value.
   const read = async (key: string, field: string): Promise<{ list: unknown[] } | { done: ReturnType<typeof fail> }> => {
@@ -183,23 +209,7 @@ export const handler: CapabilityHandlerFn = async (manifest, args, _signal, capa
     seen.add(c.id)
   }
 
-  // Own state, derived from the manifest name. Unreadable is never read as
-  // empty: an empty stopped list would message every contact who replied.
-  const stoppedPath = join(warplineHome(), 'state', `${manifest.name}.stopped.json`)
-  let stored: string[]
-  try {
-    const raw = await readJsonOrNull<{ stopped?: unknown }>(stoppedPath)
-    if (raw === null) stored = []
-    else if (typeof raw === 'object' && Array.isArray(raw.stopped) && raw.stopped.every((s) => typeof s === 'string')) stored = raw.stopped
-    else throw new Error('not a stopped list')
-  } catch {
-    return fail('the stopped list is unreadable — refusing to plan (it would message contacts who replied)')
-  }
-
   const { outbox, review_tasks, stop } = planOutbox(contacts, steps, replied, stored, new Date())
-
-  // Written first: a detected reply is permanent whatever happens next.
-  if (JSON.stringify(stop) !== JSON.stringify(stored)) await atomicWriteJson(stoppedPath, { stopped: stop })
 
   const body = JSON.stringify({ outbox, review_tasks })
   // ponytail: a named failure, not truncation. Truncating would starve: the

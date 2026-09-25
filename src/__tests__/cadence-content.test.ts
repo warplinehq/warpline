@@ -32,7 +32,7 @@
  * a `warpline/...` self-reference resolved from the file's real location.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { runAdvance, type AdvanceOptions } from '../runtime/engine.js'
 import { createTestHome, type TestHome } from '../runtime/__tests__/helpers/create-test-home.js'
@@ -223,5 +223,27 @@ describe('the cadence example under runAdvance', () => {
     expect(retry.map((c) => c.to)).toEqual(['c-4@example.com', 'c-5@example.com'])
     expect(pluginRuns()['cadence-send']?.status).toBe('success')
     expect(ledger()).toEqual(RECIPIENTS.map((to, i) => [`c-${i + 1}:1`, to]))
+  })
+
+  // CR-01. A plan run with nothing to plan used to return no Output, so the
+  // runtime carried the approved outbox forward and cadence-send shipped it,
+  // to a contact who had just replied. The reply must win, and must stick.
+  test('a plan run with no contacts file replaces the approved outbox, so a contact who replied is not emailed', async () => {
+    await advance()
+    await approveByContent()
+    const stateDir = join(ctx.root, 'state')
+    writeFileSync(join(stateDir, 'replies.json'), JSON.stringify({ replies: [{ contact_id: 'c-1' }] }))
+    rmSync(join(stateDir, 'contacts.json'))
+    const calls = mailStub()
+
+    await advance({ force: true })
+
+    expect(calls.map((c) => c.to)).not.toContain('c-1@example.com')
+    expect(calls).toHaveLength(0)
+    expect(pluginRuns()['cadence-plan']?.status).toBe('success')
+    const body = pluginRuns()['cadence-plan']?.last_output?.body
+    expect(JSON.parse(body!)).toEqual({ outbox: [], review_tasks: [] })
+    const stopped = JSON.parse(readFileSync(join(stateDir, 'cadence-plan.stopped.json'), 'utf-8')) as { stopped: string[] }
+    expect(stopped.stopped).toEqual(['c-1'])
   })
 })
