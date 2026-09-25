@@ -32,7 +32,7 @@
  * a `warpline/...` self-reference resolved from the file's real location.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { runAdvance, type AdvanceOptions } from '../runtime/engine.js'
 import { createTestHome, type TestHome } from '../runtime/__tests__/helpers/create-test-home.js'
@@ -130,8 +130,12 @@ async function approveByContent(): Promise<string> {
   return stdout
 }
 
-/** Swaps `globalThis.fetch` for a recorder; call number `failOn` answers 500. */
-function mailStub(failOn?: number): Call[] {
+/**
+ * Swaps `globalThis.fetch` for a recorder; call number `failOn` answers 500.
+ * With `delayMs`, every call answers that late and honours its abort signal,
+ * the way a real fetch does.
+ */
+function mailStub(failOn?: number, delayMs = 0): Call[] {
   const calls: Call[] = []
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const headers = (init?.headers ?? {}) as Record<string, string>
@@ -141,10 +145,38 @@ function mailStub(failOn?: number): Call[] {
       authorization: headers.authorization,
       to: (JSON.parse(String(init?.body)) as { to: string }).to,
     })
-    if (calls.length === failOn) return { ok: false, status: 500 } as Response
+    const n = calls.length
+    if (delayMs > 0) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, delayMs)
+        init?.signal?.addEventListener('abort', () => {
+          clearTimeout(timer)
+          reject(new DOMException('The operation was aborted', 'AbortError'))
+        }, { once: true })
+      })
+    }
+    if (n === failOn) return { ok: false, status: 500 } as Response
     return { ok: true, status: 202, json: async () => ({}) } as unknown as Response
   }) as typeof fetch
   return calls
+}
+
+/**
+ * Replaces the cadence-send symlink with a copy that re-exports the shipped
+ * handler under the shipped manifest with a short `timeout_ms`, so a test can
+ * reach the runtime's timeout without waiting a minute.
+ */
+function shortTimeoutSend(timeoutMs: number): void {
+  const dir = join(ctx.pluginsDir, 'cadence-send')
+  const shipped = join(REPO_ROOT, 'examples', 'plugins', 'cadence-send')
+  unlinkSync(dir)
+  mkdirSync(dir)
+  writeFileSync(join(dir, 'handler.ts'), `export { handler } from ${JSON.stringify(join(shipped, 'handler.ts'))}\n`)
+  writeFileSync(join(dir, 'manifest.ts'), [
+    `import { manifest as shipped } from ${JSON.stringify(join(shipped, 'manifest.ts'))}`,
+    `export const manifest = { ...shipped, timeout_ms: ${timeoutMs} }`,
+    '',
+  ].join('\n'))
 }
 
 interface PluginRun {
@@ -245,5 +277,30 @@ describe('the cadence example under runAdvance', () => {
     expect(JSON.parse(body!)).toEqual({ outbox: [], review_tasks: [] })
     const stopped = JSON.parse(readFileSync(join(stateDir, 'cadence-plan.stopped.json'), 'utf-8')) as { stopped: string[] }
     expect(stopped.stopped).toEqual(['c-1'])
+  })
+
+  // WR-01. The runtime's timeout wins its race against the handler and records
+  // the run `failed`, whatever went out first, and a failed content fire reads
+  // `indeterminate` for good. cadence-send has to stop itself before that.
+  test('a send that runs out of time stops itself first: partial, and the rest go on a re-approved retry', async () => {
+    shortTimeoutSend(2_000)
+    await advance()
+    await approveByContent()
+    const first = mailStub(undefined, 500)
+
+    await advance()
+
+    expect(pluginRuns()['cadence-send']?.status).toBe('partial')
+    const sentFirst = ledger().length
+    expect(sentFirst).toBeGreaterThan(0)
+    expect(sentFirst).toBeLessThan(5)
+    expect(first.length).toBeLessThan(5)
+
+    await approveByContent()
+    const retry = mailStub()
+    await advance({ force: true })
+
+    expect(retry.map((c) => c.to)).toEqual(RECIPIENTS.slice(sentFirst))
+    expect(ledger()).toEqual(RECIPIENTS.map((to, i) => [`c-${i + 1}:1`, to]))
   })
 })

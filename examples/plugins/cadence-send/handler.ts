@@ -112,6 +112,13 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
   }
   const recorded = new Set(pairs.map((p) => JSON.stringify(p)))
 
+  // The runtime's timeout records the run `failed` whatever went out first,
+  // and a failed content fire leaves the approval `indeterminate` for good. So
+  // this plugin stops itself a quarter of `timeout_ms` early and reports what
+  // it sent. Each request is bounded by what is left of that budget too.
+  // ponytail: a fixed quarter; a per-send estimate is the upgrade if it bites.
+  const deadline = Date.now() + (manifest.timeout_ms ?? 60_000) * 0.75
+
   let sent = 0
   let already = 0
   let error: SkillError | null = null
@@ -122,11 +129,19 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
       already += 1
       continue
     }
+    const left = deadline - Date.now()
+    if (left <= 0) {
+      error = makeSkillError('timeout', `time budget spent before ${email.id}`, { impact: 'HIGH', retryable: false })
+      stoppedAt = email.id
+      break
+    }
+    const budget = new AbortController()
+    const timer = setTimeout(() => budget.abort(), left)
     let res: Response
     try {
       res = await fetch(`${base}/send`, {
         method: 'POST',
-        signal,
+        signal: AbortSignal.any([signal, budget.signal]),
         // A redirect would carry the authorization header to wherever it points.
         redirect: 'error',
         headers: {
@@ -142,11 +157,13 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
       // throwing would lose the partial result, so it is reported instead.
       // The thrown message is dropped: a fetch error embeds the request URL.
       if (signal.aborted && sent === 0) throw err
-      error = signal.aborted
-        ? makeSkillError('timeout', `aborted sending ${email.id}`, { impact: 'HIGH', retryable: false })
+      error = signal.aborted || budget.signal.aborted
+        ? makeSkillError('timeout', `aborted sending ${email.id}, which may have gone out`, { impact: 'HIGH', retryable: false })
         : makeSkillError('dependency_unavailable', `request failed sending ${email.id}`, { impact: 'HIGH', retryable: false })
       stoppedAt = email.id
       break
+    } finally {
+      clearTimeout(timer)
     }
     if (res.status === 401 || res.status === 403) {
       error = makeSkillError('auth_failure', `${secret} was rejected (HTTP ${res.status}) sending ${email.id}`, { impact: 'HIGH', retryable: false })

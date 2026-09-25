@@ -27,6 +27,12 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * re-runs. A failure before any email went out, a rejected token for example,
  * leaves the approval `indeterminate`, and nothing clears that.
  *
+ * It stops itself with a quarter of `timeout_ms` left, and a request still out
+ * when the budget runs out is aborted. That run is `partial` too, so the retry
+ * above applies, and the aborted email may already have gone and go again. It
+ * stops early because the runtime's own timeout records the run `failed`,
+ * whatever went out first, and that leaves the approval `indeterminate`.
+ *
  * The credential is one environment variable, the name on `secrets`, sent as a
  * Bearer header and nowhere else. Refreshing it is the adopter's job.
  */
