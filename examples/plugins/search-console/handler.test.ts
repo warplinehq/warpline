@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { CapabilityContext } from 'warpline/unstable-capabilities'
 import { OutputRecordSchema } from 'warpline/schemas/skill-result'
-import { handler, weekWindows, type Row } from './handler.js'
+import { compareWeeks, handler, weekWindows, type Row } from './handler.js'
 import { manifest } from './manifest.js'
 
 /** The handler is four-parameter; a test hands it a context it never reads. */
@@ -194,4 +194,188 @@ describe('search-console', () => {
       expect((await readdir(home, { recursive: true })).sort()).toEqual(before)
     })
   })
+})
+
+describe('search-console edges and refusals', () => {
+  test('a key absent last week is new with last week read as 0, and a tie on clicks goes to the key that sorts first', () => {
+    const deltas = compareWeeks([{ key: 'b', clicks: 5, impressions: 9 }, { key: 'a', clicks: 5, impressions: 1 }], [], 1)
+    expect(deltas).toEqual([{ key: 'a', clicks: triple(5, 0), impressions: triple(1, 0), new: true }])
+  })
+
+  test('a key named __proto__ is a key like any other', () => {
+    const rows = JSON.parse('[{"key":"__proto__","clicks":2,"impressions":3}]') as Row[]
+    expect(compareWeeks(rows, rows, 5)).toEqual([{ key: '__proto__', clicks: triple(2, 2), impressions: triple(3, 3), new: false }])
+    expect(compareWeeks(rows, [], 5)[0]?.new).toBe(true)
+  })
+
+  test('a 401 fails the run as auth_failure naming the secret, stops there, and carries neither the token nor the header', async () => {
+    await withHome(async () => {
+      const { impl, calls } = fakeFetch((n) => (n === 2 ? status(401) : undefined))
+      const result = await withFetch(impl, () => invoke())
+
+      expect(result.status).toBe('failed')
+      expect(result.errors?.[0]?.code).toBe('auth_failure')
+      expect(result.errors?.[0]?.message).toContain('SEARCH_CONSOLE_TOKEN')
+      expect(calls).toHaveLength(2)
+      expect((calls[1]!.init.headers as Record<string, string>)['authorization']).toBe(`Bearer ${TOKEN}`)
+      const serialised = JSON.stringify(result)
+      expect(serialised).not.toContain(TOKEN)
+      expect(serialised).not.toContain('Bearer')
+      expect(result.artifacts_produced ?? []).toHaveLength(0)
+    })
+  })
+
+  test('a 403 is an auth_failure too', async () => {
+    await withHome(async () => {
+      const { impl } = fakeFetch((n) => (n === 1 ? status(403) : undefined))
+      const result = await withFetch(impl, () => invoke())
+      expect(result.errors?.[0]?.code).toBe('auth_failure')
+      expect(result.errors?.[0]?.message).toContain('HTTP 403')
+    })
+  })
+
+  test('a 500 on one request fails the run, naming the dimension and the week and not the URL', async () => {
+    await withHome(async () => {
+      const { impl, calls } = fakeFetch((n) => (n === 3 ? status(500) : undefined))
+      const result = await withFetch(impl, () => invoke())
+
+      expect(result.status).toBe('failed')
+      expect(result.errors?.[0]?.code).toBe('dependency_unavailable')
+      expect(result.errors?.[0]?.message).toContain('HTTP 500 for the page rows of the current week')
+      expect(calls).toHaveLength(3)
+      expect(JSON.stringify(result)).not.toContain('search.example.com')
+    })
+  })
+
+  test('a fetch that throws fails as request failed, and an abort goes back to the runtime', async () => {
+    await withHome(async () => {
+      const { impl } = fakeFetch((n) => (n === 4 ? new TypeError('Unable to connect to https://api.search.example.com/v1/query') : undefined))
+      const result = await withFetch(impl, () => invoke())
+      expect(result.errors?.[0]?.code).toBe('dependency_unavailable')
+      expect(result.errors?.[0]?.message).toContain('request failed for the page rows of the previous week')
+      expect(JSON.stringify(result)).not.toContain('search.example.com')
+
+      const aborting = new AbortController()
+      const rejecting = (async () => {
+        aborting.abort()
+        throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+      }) as unknown as typeof fetch
+      await expect(withFetch(rejecting, () => invoke(ARGS, aborting.signal))).rejects.toThrow()
+    })
+  })
+
+  for (const [label, value] of [['unset', undefined], ['empty', '']] as const) {
+    test(`a token that is ${label} fails as auth_failure naming ${SECRET}, before any request`, async () => {
+      await withHome(async () => {
+        const { impl, calls } = fakeFetch()
+        const result = await withFetch(impl, () => invoke())
+        expect(result.status).toBe('failed')
+        expect(result.errors?.[0]?.code).toBe('auth_failure')
+        expect(result.errors?.[0]?.message).toContain('SEARCH_CONSOLE_TOKEN')
+        expect(calls).toHaveLength(0)
+      }, { [SECRET]: value })
+    })
+  }
+
+  test('an input of the wrong shape is refused by key, before any request', async () => {
+    const cases: [Record<string, unknown>, string][] = [
+      [{ top_n: 0 }, 'top_n'],
+      [{ top_n: 1.5 }, 'top_n'],
+      [{ top_n: '3' }, 'top_n'],
+      [{ api_base: 'ftp://x' }, 'api_base'],
+      [{ api_base: 'not a url' }, 'api_base'],
+      [{ site_url: '' }, 'site_url'],
+    ]
+    await withHome(async () => {
+      for (const [override, key] of cases) {
+        const { impl, calls } = fakeFetch()
+        const result = await withFetch(impl, () => invoke({ ...ARGS, ...override }))
+        expect(result.status).toBe('failed')
+        expect(result.errors?.[0]?.code).toBe('parse_error')
+        expect(result.errors?.[0]?.message).toContain(`'${key}'`)
+        expect(calls).toHaveLength(0)
+      }
+    })
+  })
+
+  test('the manifest defaults stand in for inputs the caller left out', async () => {
+    await withHome(async () => {
+      const { impl, calls } = fakeFetch()
+      const result = await withFetch(impl, () => invoke({}))
+      expect(result.status).toBe('success')
+      expect(calls[0]!.url).toBe('https://search.example.com/v1/query')
+      expect(calls[0]!.body.site_url).toBe('https://your-site.example.com/')
+      expect(report(result).queries).toHaveLength(4)
+    })
+  })
+
+  test('rows that are not the contract shape fail as parse_error naming the dimension and the week', async () => {
+    const bad = [
+      okRows([{ key: 'x', clicks: 'many', impressions: 1 }]),
+      okRows([{ key: 'x', clicks: Number.NaN, impressions: 1 }]),
+      okRows('rows'),
+      { ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected token') } },
+      { ok: true, status: 200, json: async () => null },
+    ]
+    await withHome(async () => {
+      for (const answer of bad) {
+        const { impl } = fakeFetch((n) => (n === 2 ? answer : undefined))
+        const result = await withFetch(impl, () => invoke())
+        expect(result.status).toBe('failed')
+        expect(result.errors?.[0]?.code).toBe('parse_error')
+        expect(result.errors?.[0]?.message).toContain('the query rows of the previous week')
+      }
+    })
+  })
+
+  test('a report over the Output cap fails by name and points at top_n', async () => {
+    const many = (n: number) => Array.from({ length: n }, (_, i) => ({ key: `query number ${i} ${'x'.repeat(40)}`, clicks: i, impressions: i }))
+    await withHome(async () => {
+      const { impl } = fakeFetch((n) => (n <= 2 ? okRows(many(500)) : undefined))
+      const result = await withFetch(impl, () => invoke({ ...ARGS, top_n: 500 }))
+      expect(result.status).toBe('failed')
+      expect(result.errors?.[0]?.code).toBe('parse_error')
+      expect(result.errors?.[0]?.message).toContain('Output cap')
+      expect(result.errors?.[0]?.message).toContain('top_n')
+    })
+  })
+})
+
+/**
+ * The site and the endpoint arrive from `<home>/config/search-console.json`
+ * and every result lands in the run log, so no arm names the value it was
+ * handed. Checked on the raw handler return: `invokePlugin` scrubs secrets on
+ * its way out, so a check through it would pass for the wrong reason.
+ */
+describe('search-console config value disclosure', () => {
+  const SITE = 'https://site-do-not-echo-5b2a.example.com/'
+  const BASE = 'https://api-do-not-echo-7c3e.example.com/v1'
+  const SENTINEL_ARGS = { site_url: SITE, api_base: BASE, top_n: 7 }
+
+  const arms: [string, (n: number) => Answer | Error | undefined, Record<string, unknown>][] = [
+    ['success', () => undefined, SENTINEL_ARGS],
+    ['401', (n) => (n === 1 ? status(401) : undefined), SENTINEL_ARGS],
+    ['500', (n) => (n === 2 ? status(500) : undefined), SENTINEL_ARGS],
+    ['thrown fetch', (n) => (n === 3 ? new TypeError(`Unable to connect to ${BASE}/query`) : undefined), SENTINEL_ARGS],
+    ['invalid input', () => undefined, { ...SENTINEL_ARGS, top_n: -1 }],
+  ]
+  for (const [arm, override, args] of arms) {
+    test(`neither the site nor the endpoint reaches the result on the ${arm} arm`, async () => {
+      await withHome(async () => {
+        const { impl, calls } = fakeFetch(override)
+        const result = await withFetch(impl, () => invoke(args))
+        if (arm === 'success') {
+          // Presence at the sink first: the values did reach the request.
+          expect(result.status).toBe('success')
+          expect(calls[0]!.url).toBe(`${BASE}/query`)
+          expect(calls[0]!.body.site_url).toBe(SITE)
+        } else {
+          expect(result.status).toBe('failed')
+        }
+        expect(JSON.stringify(result)).not.toContain('do-not-echo')
+        expect(result.summary).not.toContain('7 queries')
+        expect(JSON.stringify(result)).not.toContain(TOKEN)
+      })
+    })
+  }
 })
