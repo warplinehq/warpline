@@ -281,6 +281,32 @@ describe('ledger-runner keeps what it had', () => {
       expect(await ledgerText(home)).toBeNull()
     })
   })
+
+  // WR-04. By the time the handler sees this abort the runtime has recorded a
+  // timeout, so the ledger it says was never written must not be written.
+  test('an abort while reading the last body rejects the run and leaves the ledger as it was', async () => {
+    await withHome(async (home) => {
+      await seedRaw(home, JSON.stringify({ values: { 'example-a': { value: 1, as_of: PRIOR } } }))
+      const before = await ledgerText(home)
+      const aborting = new AbortController()
+      let k = 0
+      const impl = (async () => {
+        k += 1
+        const last = k === THREE.length
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            if (!last) return { value: 5 }
+            aborting.abort()
+            throw Object.assign(new Error('The operation was aborted'), { name: 'AbortError' })
+          },
+        }
+      }) as unknown as typeof fetch
+      await expect(withFetch(impl, () => invoke({ instruments: THREE, api_base: BASE }, aborting.signal))).rejects.toThrow()
+      expect(await ledgerText(home)).toBe(before)
+    })
+  })
 })
 
 describe('ledger-runner credentials', () => {

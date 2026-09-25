@@ -156,7 +156,9 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, _capa
     let quote: unknown
     try {
       quote = await res.json()
-    } catch {
+    } catch (err) {
+      // An abort mid-body is the runtime's timeout or cancellation, as above.
+      if (signal.aborted) throw err
       quote = undefined
     }
     if (!isRecord(quote) || typeof quote.value !== 'number' || !Number.isFinite(quote.value)) {
@@ -181,7 +183,9 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, _capa
 
   // The only write in this file. The atomic writer creates the parent and
   // swaps a finished temp file in for the target, so a crash mid-write
-  // leaves the old ledger, never half of a new one.
+  // leaves the old ledger, never half of a new one. Not after an abort: the
+  // runtime has already recorded this run as one that wrote nothing.
+  if (signal.aborted) throw signal.reason
   await atomicWriteJson(ledgerAbs, { values })
 
   const listed = failures.slice(0, MAX_LISTED_ERRORS)
