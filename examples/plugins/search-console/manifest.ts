@@ -39,7 +39,7 @@ export const manifest = PluginManifestSchema.parse({
       type: 'string',
       required: true,
       default: 'https://your-site.example.com/',
-      description: 'The property to report on; sent to the API in each request and never written into the result',
+      description: 'The property to report on; sent to the API in each request and kept out of the summary. The page keys in the report are the full URLs the API returns, so they carry the site',
     },
     api_base: {
       type: 'string',

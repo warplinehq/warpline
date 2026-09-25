@@ -19,8 +19,9 @@ import { skillFailure, skillOk } from 'warpline/unstable-result'
  *   "queries": [Delta], "pages": [Delta] }
  *
  * Nothing is written anywhere. The site and the endpoint are configured
- * values, so neither reaches the result, and the token reaches the
- * authorization header and nothing else.
+ * values, so neither reaches the summary, and the token reaches the
+ * authorization header and nothing else. The report body is the API's own
+ * data: a page key is the full URL the API returned, so it carries the site.
  */
 export interface Window { start: string; end: string }
 export interface Row { key: string; clicks: number; impressions: number }

@@ -378,4 +378,19 @@ describe('search-console config value disclosure', () => {
       })
     })
   }
+
+  // WR-07. A page row's key is the API's own data, a full URL under the site,
+  // and it goes into the report as it came. Only the summary is kept clear.
+  test('a page key under the site goes into the report verbatim, and never into the summary', async () => {
+    await withHome(async () => {
+      const page = `${SITE}pricing`
+      const { impl } = fakeFetch((n) => (n === 3 ? okRows([{ key: page, clicks: 5, impressions: 50 }]) : n === 4 ? okRows([]) : undefined))
+      const result = await withFetch(impl, () => invoke(SENTINEL_ARGS))
+      expect(result.status).toBe('success')
+      expect(report(result).pages.map((p: { key: string }) => p.key)).toEqual([page])
+      expect(result.summary).not.toContain('do-not-echo')
+      // The input's own description must not promise otherwise.
+      expect(manifest.inputs.site_url?.description).not.toContain('never written into the result')
+    })
+  })
 })
