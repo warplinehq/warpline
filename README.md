@@ -153,6 +153,10 @@ Worked examples in [examples/plugins/](examples/plugins/):
 | `link-enrich` | Fan in from three sources with per-source isolation — one refused source is a `partial` run that names it, every source refused is a failure; credentials are names on `secrets` |
 | `draft-writer` | Config-heavy writer — every adopter choice is a declared input with a placeholder default, three reference files named by path and refused outside the home, the drafting handed off |
 | `announce-fanout` | Config-heavy fan-out — channels, calls to action and a cadence as declared inputs, per-channel isolation, the per-channel rewrite handed off |
+| `competitor-watch` | Watch pages you depend on — fetch each declared target, keep a normalised snapshot, report new, changed with a capped line diff, unchanged or failed; the defaults are three upstream runtimes' tag feeds, so a first run shows real data |
+| `search-console` | Derive over one Bearer token — week-over-week clicks and impressions for the top queries and pages of a declared site; persists nothing |
+| `graph-sync` | Idempotent per record — upsert by id so a re-run overwrites, one failing record isolated to its own error, every record failing is a failure |
+| `ledger-runner` | Write a product file — read declared instruments, rewrite the ledger atomically, report attempted against succeeded; a failed instrument keeps its last value |
 | `cadence-replies` → `cadence-plan` → `cadence-send` | Content approval, sending — a reply seam you replace with your inbox reader, a plan that works out each contact's due step from time and stops a contact who replied, and a `sends_email` sender that ships only the outbox an operator approved with `warpline approve cadence-send --content`, once per recipient |
 | `candidate-propose` → `candidate-promote` | Content approval, promoting — at most three candidates a week, each proposal replacing the last, appended to a file only when an operator approves those exact bytes |
 
@@ -164,6 +168,16 @@ runs that file, and the default `.warpline/` home is a dot-directory that
 `bun test` does not descend into; a home placed as a plain directory inside a
 project (`WARPLINE_HOME=./warpline-home`) is on that project's discovery path,
 and its own `bun test` will run the copied file.
+
+Four examples carry a credential: `search-console`, `graph-sync`,
+`ledger-runner` and `cadence-send`. Each names one `*_TOKEN` on `secrets` and
+sends it only as an `Authorization: Bearer` header. Until it is set, the
+runtime refuses the run and names the variable, and that refusal is the
+first-run demo. To watch one work against a stub, run its test from your home
+with Bun: `bun test ./.warpline/plugins/<name>/handler.test.ts` on a default
+install (the leading `./` makes Bun read it as a path, not a name filter).
+Refreshing the token is yours, for example a job that rewrites the variable
+before an advance.
 
 The two content-approval examples ship nothing until an operator approves the
 exact bytes their producer made: the outbox `cadence-plan` wrote, or the
