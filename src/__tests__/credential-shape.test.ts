@@ -214,6 +214,30 @@ describe('the credential shape, over every token-carrying example', () => {
       })
     })
 
+    // WR-05. One mistyped `api_base` must not put the token on the wire in clear.
+    test(`${c.plugin}: the token goes over cleartext http to loopback only`, async () => {
+      const cases = [
+        ['http://api.example.com/v1', false],
+        ['http://127.0.0.1:8080/v1', true],
+        ['http://localhost/v1', true],
+        ['http://[::1]/v1', true],
+      ] as const
+      for (const [api_base, allowed] of cases) {
+        await inHome(async (home) => {
+          const { res, seen } = await invoke({ ...c, args: { ...c.args, api_base } }, home, 200, tokenFor(c))
+          if (allowed) {
+            expect(res.result.status).toBe('success')
+            expect(seen.length).toBeGreaterThan(0)
+          } else {
+            expect(res.result.status).toBe('failed')
+            expect(res.result.errors[0]?.code).toBe('parse_error')
+            expect(res.result.summary).toContain("'api_base'")
+            expect(seen).toHaveLength(0)
+          }
+        })
+      }
+    })
+
     for (const [label, value] of [['unset', undefined], ['empty', '']] as const) {
       test(`${c.plugin}: an ${label} secret is refused by name before the handler runs`, async () => {
         await inHome(async (home) => {

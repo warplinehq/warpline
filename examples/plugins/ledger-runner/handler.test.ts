@@ -447,14 +447,14 @@ describe('ledger-runner refusals', () => {
     })
   })
 
-  test('an api_base that is not an http(s) URL is refused by key', async () => {
+  test('an api_base that is not an https URL, or http to localhost, is refused by key', async () => {
     for (const api_base of ['ftp://quotes.example.com/v1', 'not a url', 42]) {
       await withHome(async () => {
         const { impl, calls } = stubQuotes()
         const result = await withFetch(impl, () => invoke({ instruments: THREE, api_base }))
 
         expect(result.status).toBe('failed')
-        expect(result.summary).toBe("ledger-runner: input 'api_base' must be an http(s) URL")
+        expect(result.summary).toBe("ledger-runner: input 'api_base' must be an https URL, or http to localhost")
         expect(calls).toHaveLength(0)
       })
     }

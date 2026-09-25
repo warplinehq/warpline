@@ -171,7 +171,8 @@ and its own `bun test` will run the copied file.
 
 Four examples carry a credential: `search-console`, `graph-sync`,
 `ledger-runner` and `cadence-send`. Each names one `*_TOKEN` on `secrets` and
-sends it only as an `Authorization: Bearer` header. Until it is set, the
+sends it only as an `Authorization: Bearer` header, and only over https or
+plain http to localhost. Until it is set, the
 runtime refuses the run and names the variable, and that refusal is the
 first-run demo. To watch one work against a stub, run its test from your home
 with Bun: `bun test ./.warpline/plugins/<name>/handler.test.ts` on a default

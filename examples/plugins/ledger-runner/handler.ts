@@ -51,11 +51,16 @@ function configured(manifest: PluginManifest, args: Record<string, unknown>, key
   return args[key] !== undefined ? args[key] : manifest.inputs[key]?.default
 }
 
+/**
+ * An https URL, or plain http to this machine only: every request carries the
+ * token, and a mistyped scheme must not send it in clear to another host.
+ */
 function httpBase(value: unknown): string | null {
   if (typeof value !== 'string') return null
   try {
-    const { protocol } = new URL(value)
-    return protocol === 'http:' || protocol === 'https:' ? value.replace(/\/+$/, '') : null
+    const { protocol, hostname } = new URL(value)
+    const loopback = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+    return protocol === 'https:' || (protocol === 'http:' && loopback) ? value.replace(/\/+$/, '') : null
   } catch {
     return null
   }
@@ -92,7 +97,7 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, _capa
     return fail('parse_error', "input 'ledger_path' must be a relative path under the warpline home with no '..' segment")
   }
   const base = httpBase(configured(manifest, args, 'api_base'))
-  if (base === null) return fail('parse_error', "input 'api_base' must be an http(s) URL")
+  if (base === null) return fail('parse_error', "input 'api_base' must be an https URL, or http to localhost")
 
   // The secret's name comes from the manifest, so a copy that gives it another
   // name needs no edit here. The runtime refuses an unset one before the
