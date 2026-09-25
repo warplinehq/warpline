@@ -21,8 +21,8 @@
  * was measured not to reach a handler (a run under it wrote into the preload's
  * home, not the swapped one).
  *
- * No act reaches the network. Three examples make outbound requests, and each
- * act over one of them stubs `globalThis.fetch` and restores it in the same
+ * No act reaches the network. The examples that make outbound requests are
+ * each run under a stub of `globalThis.fetch`, restored in the same
  * `finally` — the mechanism their own `handler.test.ts` files use.
  */
 import { describe, expect, test } from 'bun:test'
@@ -38,6 +38,8 @@ import { handler as anomalyIssue } from '../../examples/plugins/anomaly-issue/ha
 import { manifest as anomalyIssueManifest } from '../../examples/plugins/anomaly-issue/manifest.js'
 import { handler as anomalyWatch } from '../../examples/plugins/anomaly-watch/handler.js'
 import { manifest as anomalyWatchManifest } from '../../examples/plugins/anomaly-watch/manifest.js'
+import { handler as competitorWatch } from '../../examples/plugins/competitor-watch/handler.js'
+import { manifest as competitorWatchManifest } from '../../examples/plugins/competitor-watch/manifest.js'
 import { handler as dailyDigest } from '../../examples/plugins/daily-digest/handler.js'
 import { manifest as dailyDigestManifest } from '../../examples/plugins/daily-digest/manifest.js'
 import { handler as derivedSummary } from '../../examples/plugins/derived-summary/handler.js'
@@ -50,12 +52,18 @@ import { handler as feedTriage } from '../../examples/plugins/feed-triage/handle
 import { manifest as feedTriageManifest } from '../../examples/plugins/feed-triage/manifest.js'
 import { handler as githubPoll } from '../../examples/plugins/github-poll/handler.js'
 import { manifest as githubPollManifest } from '../../examples/plugins/github-poll/manifest.js'
+import { handler as graphSync } from '../../examples/plugins/graph-sync/handler.js'
+import { manifest as graphSyncManifest } from '../../examples/plugins/graph-sync/manifest.js'
+import { handler as ledgerRunner } from '../../examples/plugins/ledger-runner/handler.js'
+import { manifest as ledgerRunnerManifest } from '../../examples/plugins/ledger-runner/manifest.js'
 import { handler as linkEnrich } from '../../examples/plugins/link-enrich/handler.js'
 import { manifest as linkEnrichManifest } from '../../examples/plugins/link-enrich/manifest.js'
 import { handler as metricsRollup } from '../../examples/plugins/metrics-rollup/handler.js'
 import { manifest as metricsRollupManifest } from '../../examples/plugins/metrics-rollup/manifest.js'
 import { handler as noteIntake } from '../../examples/plugins/note-intake/handler.js'
 import { manifest as noteIntakeManifest } from '../../examples/plugins/note-intake/manifest.js'
+import { handler as searchConsole } from '../../examples/plugins/search-console/handler.js'
+import { manifest as searchConsoleManifest } from '../../examples/plugins/search-console/manifest.js'
 
 const EXAMPLES = join(import.meta.dir, '..', '..', 'examples', 'plugins')
 
@@ -159,6 +167,15 @@ const ISSUE_URL = `https://github.com/${REPO}/issues/1`
 
 const okJson = (body: unknown) => async () => ({ ok: true, status: 201, json: async () => body })
 const okText = (body: string) => async () => ({ ok: true, status: 200, text: async () => body })
+/**
+ * The last Output's inline body, read as JSON. Parsed at the boundary the
+ * engine parses at, and `undefined` when there is no Output or it carries a
+ * path, so an act narrows on it before it reads a field.
+ */
+function lastBody<T>(result: unknown): T | undefined {
+  const record = SkillResultSchema.parse(result).artifacts_produced.at(-1)
+  return record?.body === undefined ? undefined : JSON.parse(record.body) as T
+}
 /** A date `days` ago as YYYY-MM-DD, in UTC. */
 const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10)
 
@@ -201,6 +218,27 @@ const REGISTRY: readonly ShapeEntry[] = [
       const prior = readJson<{ observed_at: string }>(join(home, 'state', 'anomaly-watch.last.json'))
       const second = await anomalyWatch(anomalyWatchManifest, {}, signal(), CONTEXT)
       return second.summary !== first.summary && second.summary.includes(prior.observed_at)
+    },
+  },
+  {
+    shape: 2,
+    example: 'competitor-watch',
+    // Twice in ONE home, the page growing a line in between. The first run
+    // keeps a snapshot; the second compares against it and reports the new
+    // line as a diff. A handler that stopped reading its snapshot back would
+    // call the target `new` again, and this is false.
+    act: async (home) => {
+      const pages = ['first line', 'first line\nsecond line']
+      let served = 0
+      const run = () => withFetch(async () => okText(pages[served++] ?? '')(), () =>
+        competitorWatch(competitorWatchManifest, { targets: ['https://watch.example.test/one'] }, signal(), CONTEXT))
+      const first = await run()
+      const kept = existsSync(join(home, 'state', 'competitor-watch.last.json'))
+      const second = await run()
+      const report = lastBody<{ targets: { status: string; diff?: string[] }[] }>(second)
+      if (report === undefined) return false
+      return first.status === 'success' && kept && second.status === 'success'
+        && report.targets[0]?.status === 'changed' && (report.targets[0].diff ?? []).includes('+ second line')
     },
   },
   {
@@ -278,6 +316,25 @@ const REGISTRY: readonly ShapeEntry[] = [
       const result = await derivedSummary(derivedSummaryManifest, {}, signal(), CONTEXT)
       const after = await snapshotHome(home)
       return result.status === 'success' && after.join('\n') === before.join('\n')
+    },
+  },
+  {
+    shape: 5,
+    example: 'search-console',
+    // Derived from an API and kept nowhere: the manifest's own defaults
+    // configure the run, the stubbed rows come back as the report, and the
+    // home is byte-for-byte what it was. A handler that cached its answer
+    // under the home would still report, and this is false.
+    act: async (home) => {
+      const rows = { rows: [{ key: 'example query', clicks: 3, impressions: 9 }] }
+      const before = await snapshotHome(home)
+      const result = await withEnv('SEARCH_CONSOLE_TOKEN', 'placeholder-token', () =>
+        withFetch(okJson(rows), () => searchConsole(searchConsoleManifest, {}, signal(), CONTEXT)))
+      const after = await snapshotHome(home)
+      const report = lastBody<{ queries: { key: string }[] }>(result)
+      if (report === undefined) return false
+      return result.status === 'success' && report.queries[0]?.key === 'example query'
+        && after.join('\n') === before.join('\n')
     },
   },
   {
@@ -447,6 +504,44 @@ const REGISTRY: readonly ShapeEntry[] = [
       return result.status === 'success' && ledger.filed.errors === ISSUE_URL
     },
   },
+  {
+    shape: 7,
+    example: 'graph-sync',
+    // Three records, the API refusing the second: true only if the run is a
+    // success AND the counts say three tried, two landed, one failed. A loop
+    // that let one refusal take the rest down, or failed the whole run over
+    // it, makes this false.
+    act: async (home) => {
+      seed(home, 'state/records.json', { records: [{ id: 'r-1' }, { id: 'r-2' }, { id: 'r-3' }] })
+      const perRecord = async (url: unknown) =>
+        String(url).endsWith('/records/r-2') ? { ok: false, status: 500 } : { ok: true, status: 200 }
+      const result = await withEnv('GRAPH_SYNC_TOKEN', 'placeholder-token', () =>
+        withFetch(perRecord, () => graphSync(graphSyncManifest, {}, signal(), CONTEXT)))
+      const report = lastBody<{ attempted: number; succeeded: number; failed: number }>(result)
+      if (report === undefined) return false
+      return result.status === 'success' && report.attempted === 3 && report.succeeded === 2 && report.failed === 1
+    },
+  },
+  {
+    shape: 7,
+    example: 'ledger-runner',
+    // Three instruments, the quote API refusing the middle one: true only if
+    // the run is a success AND the ledger it wrote holds exactly the two that
+    // answered. A handler that dropped the write, or wrote a value for the
+    // refused one, makes this false.
+    act: async (home) => {
+      const perQuote = async (url: unknown) =>
+        String(url).endsWith('/quotes/example-b')
+          ? { ok: false, status: 500, json: async () => ({}) }
+          : { ok: true, status: 200, json: async () => ({ value: 1 }) }
+      const result = await withEnv('LEDGER_QUOTES_TOKEN', 'placeholder-token', () =>
+        withFetch(perQuote, () =>
+          ledgerRunner(ledgerRunnerManifest, { instruments: ['example-a', 'example-b', 'example-c'] }, signal(), CONTEXT)))
+      if (result.status !== 'success') return false
+      const ledger = readJson<{ values: Record<string, unknown> }>(join(home, 'state', 'ledger.json'))
+      return Object.keys(ledger.values).sort().join(',') === 'example-a,example-c'
+    },
+  },
 ]
 
 // ── The assertions ───────────────────────────────────────────────────────
@@ -465,10 +560,10 @@ async function performAll(): Promise<Map<string, boolean>> {
 }
 
 /**
- * The roster is closed at twelve. A thirteenth directory is a deliberate edit
- * to this number, with its registry entry beside it, never a silent drift.
+ * The roster is closed at this number. One more directory is a deliberate edit
+ * to it, with its registry entry beside it, never a silent drift.
  */
-const EXAMPLE_COUNT = 12
+const EXAMPLE_COUNT = 16
 
 describe('the shape registry', () => {
   test('at least three example directories exist, so an empty glob cannot pass the checks below', () => {
@@ -502,8 +597,8 @@ describe('the shape registry', () => {
   })
 
   test('every shape from 1 to 7 is covered by an example whose act was performed', async () => {
-    // Coverage, not distinctness: twelve examples cannot carry seven distinct
-    // ids, so shapes are shared and a superset check is the right shape — an
+    // Coverage, not distinctness: more examples than shapes means shapes are
+    // shared, and a superset check is the right shape — an
     // equality on a sorted array would also go red on an unrelated shape 8.
     // Computed only from acts that returned TRUE and only over non-partial
     // entries, so neither a declared label nor a partial act can cover a
