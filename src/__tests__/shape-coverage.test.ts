@@ -38,6 +38,16 @@ import { handler as anomalyIssue } from '../../examples/plugins/anomaly-issue/ha
 import { manifest as anomalyIssueManifest } from '../../examples/plugins/anomaly-issue/manifest.js'
 import { handler as anomalyWatch } from '../../examples/plugins/anomaly-watch/handler.js'
 import { manifest as anomalyWatchManifest } from '../../examples/plugins/anomaly-watch/manifest.js'
+import { handler as cadencePlan } from '../../examples/plugins/cadence-plan/handler.js'
+import { manifest as cadencePlanManifest } from '../../examples/plugins/cadence-plan/manifest.js'
+import { handler as cadenceReplies } from '../../examples/plugins/cadence-replies/handler.js'
+import { manifest as cadenceRepliesManifest } from '../../examples/plugins/cadence-replies/manifest.js'
+import { handler as cadenceSend } from '../../examples/plugins/cadence-send/handler.js'
+import { manifest as cadenceSendManifest } from '../../examples/plugins/cadence-send/manifest.js'
+import { handler as candidatePromote } from '../../examples/plugins/candidate-promote/handler.js'
+import { manifest as candidatePromoteManifest } from '../../examples/plugins/candidate-promote/manifest.js'
+import { handler as candidatePropose } from '../../examples/plugins/candidate-propose/handler.js'
+import { manifest as candidateProposeManifest } from '../../examples/plugins/candidate-propose/manifest.js'
 import { handler as competitorWatch } from '../../examples/plugins/competitor-watch/handler.js'
 import { manifest as competitorWatchManifest } from '../../examples/plugins/competitor-watch/manifest.js'
 import { handler as dailyDigest } from '../../examples/plugins/daily-digest/handler.js'
@@ -173,11 +183,60 @@ const okText = (body: string) => async () => ({ ok: true, status: 200, text: asy
  * path, so an act narrows on it before it reads a field.
  */
 function lastBody<T>(result: unknown): T | undefined {
-  const record = SkillResultSchema.parse(result).artifacts_produced.at(-1)
+  const record = lastRecord(result)
   return record?.body === undefined ? undefined : JSON.parse(record.body) as T
+}
+/**
+ * The last Output record, parsed at the boundary the engine parses at:
+ * `artifacts_produced` also admits a bare string, which normalises to a path
+ * Output there. `undefined` when there is none, which is also the narrowing a
+ * `mintContext` call needs before it can deliver the record.
+ */
+function lastRecord(result: unknown) {
+  return SkillResultSchema.parse(result).artifacts_produced.at(-1)
 }
 /** A date `days` ago as YYYY-MM-DD, in UTC. */
 const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10)
+
+/**
+ * The cadence fixtures at their manifests' default paths: three contacts
+ * enrolled three days ago, one step due on enrolment, and `c-2` has replied.
+ */
+function seedCadence(home: string): void {
+  const enrolled_at = new Date(Date.now() - 3 * 86_400_000).toISOString()
+  seed(home, 'state/replies.json', { replies: [{ contact_id: 'c-2' }] })
+  seed(home, 'state/contacts.json', {
+    contacts: [1, 2, 3].map((n) => ({ id: `c-${n}`, email: `c-${n}@example.com`, enrolled_at })),
+  })
+  seed(home, 'state/steps.json', { steps: [{ offset_days: 0, subject: 'Hello', body: 'Registry note' }] })
+}
+
+/**
+ * cadence-replies run for real, its record minted into cadence-plan's
+ * context, and cadence-plan run for real on it. `undefined` when the producer
+ * returned no Output, so a consumer act cannot run on nothing.
+ */
+async function runCadencePlan() {
+  const replied = lastRecord(await cadenceReplies(cadenceRepliesManifest, {}, signal(), CONTEXT))
+  if (replied === undefined) return undefined
+  const context = mintContext(
+    {
+      manifest: cadencePlanManifest,
+      dependencyRuns: { 'cadence-replies': { status: 'success', last_output: replied } },
+    },
+    { granted: false, reason: 'manual-run' },
+  ).context
+  return cadencePlan(cadencePlanManifest, {}, signal(), context)
+}
+
+/** Ten candidates, `cand-01`..`cand-10`, each scored by its number. */
+const POOL = {
+  candidates: Array.from({ length: 10 }, (_, i) => ({
+    id: `cand-${String(i + 1).padStart(2, '0')}`,
+    title: `Example candidate ${i + 1}`,
+    score: i + 1,
+  })),
+}
 
 const REGISTRY: readonly ShapeEntry[] = [
   {
@@ -304,6 +363,83 @@ const REGISTRY: readonly ShapeEntry[] = [
     },
   },
   {
+    shape: 3,
+    example: 'cadence-plan',
+    // Built from a declared dependency's Output, delivered by the runtime's own
+    // mint: cadence-replies runs first and for real, and its record is the only
+    // way the plan learns who replied. True only if the replier is stopped and
+    // turned into a review task, and the other two get their due step. A plan
+    // that ignored the reply list would queue c-2 too, and this is false.
+    act: async (home) => {
+      seedCadence(home)
+      const result = await runCadencePlan()
+      if (result === undefined || result.status !== 'success') return false
+      const plan = lastBody<{ outbox: { id: string }[]; review_tasks: { contact_id: string }[] }>(result)
+      if (plan === undefined) return false
+      return plan.outbox.map((e) => e.id).join(',') === 'c-1:1,c-3:1'
+        && plan.review_tasks.map((t) => t.contact_id).join(',') === 'c-2'
+    },
+  },
+  {
+    shape: 3,
+    example: 'cadence-send',
+    // The chain end to end: cadence-replies and cadence-plan run for real,
+    // each record minted into the next, and cadence-send is minted under the
+    // content witness, the arm an operator's `approve --content` produces.
+    // True only if the stub saw one send per email in the outbox, and the
+    // ledger marks each one. A sender that read anything but the approved
+    // outbox, or skipped the ledger, makes this false.
+    act: async (home) => {
+      seedCadence(home)
+      const planned = await runCadencePlan()
+      const record = planned === undefined ? undefined : lastRecord(planned)
+      if (record?.body === undefined) return false
+      const emails = (JSON.parse(record.body) as { outbox: unknown[] }).outbox.length
+      const context = mintContext(
+        {
+          manifest: cadenceSendManifest,
+          dependencyRuns: { 'cadence-plan': { status: 'success', last_output: record } },
+        },
+        { granted: true, via: 'content-approval', fingerprint: 'act-fingerprint', effectId: 'act-effect' },
+      ).context
+      let calls = 0
+      const accepted = async () => {
+        calls += 1
+        return { ok: true, status: 202 }
+      }
+      const result = await withEnv('CADENCE_MAIL_TOKEN', 'placeholder-token', () =>
+        withFetch(accepted, () => cadenceSend(cadenceSendManifest, {}, signal(), context)))
+      if (result.status !== 'success') return false
+      const ledger = readJson<{ sent: unknown[] }>(join(home, 'state', 'cadence-send.sent.json'))
+      return emails === 2 && calls === emails && ledger.sent.length === emails
+    },
+  },
+  {
+    shape: 3,
+    example: 'candidate-promote',
+    // The proposal candidate-propose returned, run for real and minted under
+    // the content witness, is exactly what lands in the promoted file, in
+    // proposal order. A promoter that read the pool itself, or appended
+    // nothing, makes this false.
+    act: async (home) => {
+      seed(home, 'state/candidates.json', POOL)
+      const record = lastRecord(await candidatePropose(candidateProposeManifest, {}, signal(), CONTEXT))
+      if (record?.body === undefined) return false
+      const proposed = (JSON.parse(record.body) as { candidates: { id: string }[] }).candidates.map((c) => c.id)
+      const context = mintContext(
+        {
+          manifest: candidatePromoteManifest,
+          dependencyRuns: { 'candidate-propose': { status: 'success', last_output: record } },
+        },
+        { granted: true, via: 'content-approval', fingerprint: 'act-fingerprint', effectId: 'act-effect' },
+      ).context
+      const result = await candidatePromote(candidatePromoteManifest, {}, signal(), context)
+      if (result.status !== 'success') return false
+      const promoted = readJson<{ promoted: { id: string }[] }>(join(home, 'state', 'promoted.json'))
+      return proposed.length === 3 && promoted.promoted.map((c) => c.id).join(',') === proposed.join(',')
+    },
+  },
+  {
     shape: 5,
     example: 'derived-summary',
     // Derives its answer from a source already under the home and keeps
@@ -334,6 +470,40 @@ const REGISTRY: readonly ShapeEntry[] = [
       const report = lastBody<{ queries: { key: string }[] }>(result)
       if (report === undefined) return false
       return result.status === 'success' && report.queries[0]?.key === 'example query'
+        && after.join('\n') === before.join('\n')
+    },
+  },
+  {
+    shape: 5,
+    example: 'cadence-replies',
+    // Derived from a file already under the home and kept nowhere: the reply
+    // list comes back as the Output and the home is byte-for-byte what it was.
+    // A stub that cached what it read would still report, and this is false.
+    act: async (home) => {
+      seed(home, 'state/replies.json', { replies: [{ contact_id: 'c-2' }] })
+      const before = await snapshotHome(home)
+      const result = await cadenceReplies(cadenceRepliesManifest, {}, signal(), CONTEXT)
+      const after = await snapshotHome(home)
+      const report = lastBody<{ replied: string[] }>(result)
+      if (report === undefined) return false
+      return result.status === 'success' && report.replied.join(',') === 'c-2'
+        && after.join('\n') === before.join('\n')
+    },
+  },
+  {
+    shape: 5,
+    example: 'candidate-propose',
+    // Ten in the pool, three out, nothing kept: the proposal is capped and the
+    // home is byte-for-byte what it was. A proposer that kept a history of
+    // what it proposed, or flooded past the cap, makes this false.
+    act: async (home) => {
+      seed(home, 'state/candidates.json', POOL)
+      const before = await snapshotHome(home)
+      const result = await candidatePropose(candidateProposeManifest, {}, signal(), CONTEXT)
+      const after = await snapshotHome(home)
+      const proposal = lastBody<{ candidates: unknown[] }>(result)
+      if (proposal === undefined) return false
+      return result.status === 'success' && proposal.candidates.length === 3
         && after.join('\n') === before.join('\n')
     },
   },
@@ -563,7 +733,7 @@ async function performAll(): Promise<Map<string, boolean>> {
  * The roster is closed at this number. One more directory is a deliberate edit
  * to it, with its registry entry beside it, never a silent drift.
  */
-const EXAMPLE_COUNT = 16
+const EXAMPLE_COUNT = 21
 
 describe('the shape registry', () => {
   test('at least three example directories exist, so an empty glob cannot pass the checks below', () => {

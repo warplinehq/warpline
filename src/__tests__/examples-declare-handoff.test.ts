@@ -89,7 +89,7 @@ describe('example plugins that hand off declare llm_handoff', () => {
   test('the census names the handing-off examples, from a full scan', async () => {
     const result = await offenders(REPO_ROOT)
     expect(result.handingOff).toEqual(['announce-fanout', 'draft-writer', 'feed-triage'])
-    expect(result.scanned).toBeGreaterThanOrEqual(12)
+    expect(result.scanned).toBeGreaterThanOrEqual(21)
   })
 
   test('the guard names a planted undeclared plugin and passes the others', async () => {
