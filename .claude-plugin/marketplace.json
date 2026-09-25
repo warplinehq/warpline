@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "warpline",
-  "description": "The Claude Code on-ramp to warpline: companion skills that pick up [needs-llm] handoffs.",
+  "description": "The Claude Code on-ramp to warpline: companion skills that pick up [needs-llm] handoffs, and one that walks an operator through approving a bundled example's bytes.",
   "owner": { "name": "Adnan", "email": "adnan@kernel.associates" },
   "plugins": [
     {
@@ -10,6 +10,13 @@
       "source": "./plugin",
       "category": "productivity",
       "version": "0.3.4"
+    },
+    {
+      "name": "warpline-examples",
+      "description": "Companion skill for warpline's bundled content-approval examples: approve-review shows an operator the exact bytes cadence-send or candidate-promote would ship, and runs warpline approve --content only on an explicit yes.",
+      "source": "./plugin-examples",
+      "category": "productivity",
+      "version": "0.1.0"
     }
   ]
 }

@@ -1,0 +1,9 @@
+{
+  "name": "warpline-examples",
+  "description": "Companion skill for warpline's bundled content-approval examples: approve-review shows an operator the exact bytes cadence-send or candidate-promote would ship, and runs warpline approve --content only on an explicit yes. Installs the skill only; the warpline runtime is a separate npm package.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Adnan",
+    "email": "adnan@kernel.associates"
+  }
+}
