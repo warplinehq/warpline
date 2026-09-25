@@ -75,8 +75,10 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, _capa
   // Shape first, before any read or request. No arm quotes a configured
   // value: each names the input key and the rule it broke.
   const instruments = configured(manifest, args, 'instruments')
-  if (!Array.isArray(instruments) || !instruments.every((i) => typeof i === 'string' && i !== '')) {
-    return fail('parse_error', "input 'instruments' must be a list of non-empty strings")
+  // `.` and `..` too: encodeURIComponent leaves them alone and the URL parser
+  // resolves them, so the read would leave `/quotes/` with the token attached.
+  if (!Array.isArray(instruments) || !instruments.every((i) => typeof i === 'string' && i !== '' && i !== '.' && i !== '..')) {
+    return fail('parse_error', "input 'instruments' must be a list of non-empty strings, none of them '.' or '..'")
   }
   if (instruments.length === 0) {
     // NOT a bare `skipped`: a prefix-less `skipped` is persisted as `failed`,

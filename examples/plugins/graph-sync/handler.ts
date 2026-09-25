@@ -100,6 +100,11 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, _capa
     if (r === null || typeof r !== 'object' || Array.isArray(r) || typeof r.id !== 'string' || r.id === '') {
       return fail('parse_error', `record ${i + 1} in the records file has no string id`)
     }
+    // encodeURIComponent leaves `.` alone and the URL parser resolves dot
+    // segments, so `..` would PUT this record, token and all, to `<base>/`.
+    if (r.id === '.' || r.id === '..') {
+      return fail('parse_error', `record ${i + 1} in the records file has an id that is a path segment`)
+    }
     if (Object.hasOwn(seen, r.id)) {
       return fail('parse_error', `record id '${r.id}' appears twice in the records file — nothing was sent`)
     }

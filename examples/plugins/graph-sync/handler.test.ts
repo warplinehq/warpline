@@ -240,6 +240,23 @@ describe('graph-sync', () => {
     }
   })
 
+  // WR-03. encodeURIComponent leaves `.` alone and the URL parser resolves dot
+  // segments, so `..` would PUT this record to `<base>/`, a resource nobody named.
+  test('an id of . or .. is refused by its position before any call', async () => {
+    for (const id of ['.', '..']) {
+      await withHome(async (home) => {
+        await seedRecords(home, [{ id: 'r-1' }, { id }])
+        const { impl, calls } = stubApi()
+        const result = await withFetch(impl, () => invoke())
+
+        expect(result.status).toBe('failed')
+        expect(result.errors?.[0]?.code).toBe('parse_error')
+        expect(result.summary).toBe('graph-sync: record 2 in the records file has an id that is a path segment')
+        expect(calls).toHaveLength(0)
+      })
+    }
+  })
+
   test('an empty records list is a success counting nothing, with no call', async () => {
     await withHome(async (home) => {
       await seedRecords(home, [])

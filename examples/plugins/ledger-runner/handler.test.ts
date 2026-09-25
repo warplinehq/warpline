@@ -353,7 +353,8 @@ describe('ledger-runner refusals', () => {
   })
 
   test('an instruments input that is not a list of non-empty strings is refused by key', async () => {
-    for (const instruments of ['example-a', [''], ['example-a', 7], [null], { a: 1 }]) {
+    // `.` and `..` (WR-03): the URL parser would resolve them out of `/quotes/`.
+    for (const instruments of ['example-a', [''], ['example-a', 7], [null], { a: 1 }, ['example-a', '..'], ['.']]) {
       await withHome(async () => {
         const { impl, calls } = stubQuotes()
         const result = await withFetch(impl, () => invoke({ instruments, api_base: BASE }))
