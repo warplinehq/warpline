@@ -259,7 +259,8 @@ describe('a scaffolded example changes behaviour on config alone', () => {
       const deps = { 'cadence-replies': output('replies', { replied: [] }) }
       const first = await run(home, 'cadence-plan', { deps })
       expect(first.result.status).toBe('success')
-      expect(outputOf(first)).toBeUndefined()
+      // An empty outbox, never no Output: no Output would leave an approved one live.
+      expect(outputOf(first)).toEqual({ outbox: [], review_tasks: [] })
 
       seed(home, 'data/contacts-in.json', {
         contacts: [
