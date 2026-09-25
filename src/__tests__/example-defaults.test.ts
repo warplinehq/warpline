@@ -13,7 +13,8 @@
  * "Placeholder" is a concrete predicate, written out below, not a reviewer's
  * impression. Everything a non-empty string default can be that the predicate
  * does not recognise is an offender, and the only way past it is the
- * allowlist, where every entry carries a written reason.
+ * allowlist, where every entry carries a written reason. An array default is
+ * checked element by element, and an allowlist entry admits one element.
  *
  * Offender strings name the plugin directory and the input key and NEVER the
  * value. This file's own failure output lands in a public CI log.
@@ -51,6 +52,24 @@ const ALLOWLIST: readonly AllowlistEntry[] = [
     key: 'repo',
     value: 'warplinehq/warpline',
     reason: 'a real repository, and the one this package ships from — the quickstart polls itself, so the value is public by construction',
+  },
+  {
+    plugin: 'competitor-watch',
+    key: 'targets',
+    value: 'https://github.com/nodejs/node/tags.atom',
+    reason: 'the public tag feed of an upstream runtime an adopter plausibly depends on, fetched read-only; it names no company as a rival',
+  },
+  {
+    plugin: 'competitor-watch',
+    key: 'targets',
+    value: 'https://github.com/oven-sh/bun/tags.atom',
+    reason: 'the public tag feed of the runtime this package itself runs on, fetched read-only; a dependency watched, not a rival named',
+  },
+  {
+    plugin: 'competitor-watch',
+    key: 'targets',
+    value: 'https://github.com/denoland/deno/tags.atom',
+    reason: 'the public tag feed of a third upstream runtime, fetched read-only, so a first run shows real release data and names no rival',
   },
 ]
 
@@ -111,7 +130,9 @@ function hostOf(value: string): string | null {
 
 /**
  * A path under the adopter's own home is a placeholder by construction:
- * no leading separator, no drive letter, no `..` segment. It also has to look
+ * no leading separator, no drive letter or URL scheme, no `..` segment. The
+ * scheme matters: `https://host/feed.atom` splits into segments ending in an
+ * extension and would otherwise pass as a path. It also has to look
  * like a path — at least one separator and an extension on the last segment
  * — or `owner/repo` and `some-team/some-project` would slip through as paths,
  * which is precisely what the allowlist exists to decide. ponytail: a
@@ -119,7 +140,7 @@ function hostOf(value: string): string | null {
  * allowlist entry; widen this clause if one ever ships.
  */
 function isRelativePath(value: string): boolean {
-  if (/^[\\/]/.test(value) || /^[A-Za-z]:/.test(value)) return false
+  if (/^[\\/]/.test(value) || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) return false
   const segments = value.split(/[\\/]/)
   if (segments.length < 2 || segments.includes('..')) return false
   return /\.[A-Za-z0-9]+$/.test(segments[segments.length - 1] ?? '')
@@ -192,9 +213,11 @@ export async function defaultOffenders(root: string, allowlist: readonly Allowli
         offenders.push(`${plugin}: input '${key}' default carries a private term`)
         continue
       }
-      const admitted = allowlist.some((a) => a.plugin === plugin && a.key === key && a.value === value)
-      if (admitted) continue
-      if (!isPlaceholder(value)) offenders.push(`${plugin}: input '${key}' default is not a recognisable placeholder`)
+      const admitted = (v: unknown) => allowlist.some((a) => a.plugin === plugin && a.key === key && a.value === v)
+      const passes = Array.isArray(value) && value.length > 0
+        ? value.every((el) => admitted(el) || isPlaceholder(el))
+        : admitted(value) || isPlaceholder(value)
+      if (!passes) offenders.push(`${plugin}: input '${key}' default is not a recognisable placeholder`)
     }
   }
   return { offenders, scanned }
@@ -268,9 +291,12 @@ describe('example manifest defaults are placeholders', () => {
     expect((await defaultOffenders(REPO_ROOT)).scanned).toBeGreaterThanOrEqual(3)
   })
 
-  test('the allowlist is load-bearing: without it the shipped github-poll default is an offender', async () => {
+  test('the allowlist is load-bearing: without it the shipped github-poll and competitor-watch defaults are offenders', async () => {
     const { offenders } = await defaultOffenders(REPO_ROOT, [])
-    expect(offenders).toEqual(["github-poll: input 'repo' default is not a recognisable placeholder"])
+    expect(offenders).toEqual([
+      "competitor-watch: input 'targets' default is not a recognisable placeholder",
+      "github-poll: input 'repo' default is not a recognisable placeholder",
+    ])
     // Every entry admits exactly one value and says why.
     for (const entry of ALLOWLIST) expect(entry.reason.length).toBeGreaterThan(20)
   })
@@ -315,7 +341,7 @@ describe('the guard goes red on a planted default', () => {
     })
   })
 
-  test('each clause of the predicate admits its case, and the two non-cases are offenders', async () => {
+  test('each clause of the predicate admits its case, and the three non-cases are offenders', async () => {
     const input = (value: unknown) => ({ type: 'string', required: false, default: value })
     await withFixture(
       {
@@ -333,12 +359,16 @@ describe('the guard goes red on a planted default', () => {
           home_relative: input('state/metrics.json'),
           absolute_path: input('/srv/acme/metrics/prod.json'),
           bare_pair: input('acme-corp/widgets'),
+          // Splits on '/' into segments ending in an extension, so it looks
+          // like a home-relative path to a check that ignores the scheme.
+          file_url: input('https://metrics.acme-internal.net/v1/series.json'),
         },
       },
       async (root) => {
         expect((await defaultOffenders(root)).offenders).toEqual([
           "fixture-clauses: input 'absolute_path' default is not a recognisable placeholder",
           "fixture-clauses: input 'bare_pair' default is not a recognisable placeholder",
+          "fixture-clauses: input 'file_url' default is not a recognisable placeholder",
         ])
       },
     )
