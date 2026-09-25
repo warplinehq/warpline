@@ -92,9 +92,9 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, _capa
   const base = httpBase(configured(manifest, args, 'api_base'))
   if (base === null) return fail('parse_error', "input 'api_base' must be an http(s) URL")
 
-  // The secret's name comes from the manifest, so a copy that renames it needs
-  // no edit here. The runtime refuses an unset one before the handler runs;
-  // this arm is for a host that calls the handler directly.
+  // The secret's name comes from the manifest, so a copy that gives it another
+  // name needs no edit here. The runtime refuses an unset one before the
+  // handler runs; this arm is for a host that calls the handler directly.
   const secret = manifest.secrets[0] ?? 'the token named on secrets'
   const token = process.env[secret]
   if (!token) return fail('auth_failure', `${secret} is not set`)
@@ -178,8 +178,8 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, _capa
   }
 
   // The only write in this file. The atomic writer creates the parent and
-  // renames a temp file over the target, so a crash mid-write leaves the old
-  // ledger, never half of a new one.
+  // swaps a finished temp file in for the target, so a crash mid-write
+  // leaves the old ledger, never half of a new one.
   await atomicWriteJson(ledgerAbs, { values })
 
   const listed = failures.slice(0, MAX_LISTED_ERRORS)
