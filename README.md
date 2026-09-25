@@ -153,6 +153,8 @@ Worked examples in [examples/plugins/](examples/plugins/):
 | `link-enrich` | Fan in from three sources with per-source isolation — one refused source is a `partial` run that names it, every source refused is a failure; credentials are names on `secrets` |
 | `draft-writer` | Config-heavy writer — every adopter choice is a declared input with a placeholder default, three reference files named by path and refused outside the home, the drafting handed off |
 | `announce-fanout` | Config-heavy fan-out — channels, calls to action and a cadence as declared inputs, per-channel isolation, the per-channel rewrite handed off |
+| `cadence-replies` → `cadence-plan` → `cadence-send` | Content approval, sending — a reply seam you replace with your inbox reader, a plan that works out each contact's due step from time and stops a contact who replied, and a `sends_email` sender that ships only the outbox an operator approved with `warpline approve cadence-send --content`, once per recipient |
+| `candidate-propose` → `candidate-promote` | Content approval, promoting — at most three candidates a week, each proposal replacing the last, appended to a file only when an operator approves those exact bytes |
 
 Copy any of them into your own home as a starting point:
 `npx warpline scaffold my-plugin --from <example>` copies the directory with
@@ -162,6 +164,21 @@ runs that file, and the default `.warpline/` home is a dot-directory that
 `bun test` does not descend into; a home placed as a plain directory inside a
 project (`WARPLINE_HOME=./warpline-home`) is on that project's discovery path,
 and its own `bun test` will run the copied file.
+
+The two content-approval examples ship nothing until an operator approves the
+exact bytes their producer made: the outbox `cadence-plan` wrote, or the
+candidates `candidate-propose` chose. A session grant never runs them, not even
+`warpline approve --all`. The companion skill `approve-review`, in the
+`warpline-examples` plugin of this repository's Claude Code marketplace
+([plugin-examples](https://github.com/warplinehq/warpline/tree/main/plugin-examples)),
+shows you those bytes first and runs
+`warpline approve <plugin> --content --not-after <when>` only on an explicit
+yes. A send that stops part-way is `partial`, and re-approving the unchanged
+Output retries it, skipping what already went. A send that fails before
+anything went out, a rejected token for example, leaves the approval
+`indeterminate`, and no verb clears it. On a default install
+(`review_gate: true`) the level-0 producers are recorded `gated` and the run
+stops there until you review them.
 
 Authoring guide: [docs/plugin-authoring.md](docs/plugin-authoring.md).
 

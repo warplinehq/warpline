@@ -99,6 +99,19 @@ out — a batch of invoices, a digest, a filing. Choose `'session'` for everythi
 else, including anything whose payload is only known at fire time: there is
 nothing to approve in advance, so the content class has nothing to bind to.
 
+Two bundled examples are the worked cases.
+[`cadence-send`](../examples/plugins/cadence-send/manifest.ts) ships the outbox
+[`cadence-plan`](../examples/plugins/cadence-plan/handler.ts) produced, and
+[`candidate-promote`](../examples/plugins/candidate-promote/manifest.ts)
+appends the candidates
+[`candidate-propose`](../examples/plugins/candidate-propose/handler.ts) chose.
+Each producer returns an inline `body`, never a `path`: `warpline approve
+--content` refuses a path Output, because the operator would be approving a
+file name rather than bytes they saw. The body carries no run timestamp and
+sorts its arrays, because a byte that changes on every run moves the
+fingerprint, and an approval over it never applies. The record already carries
+the run's currency in `produced_at` and `run_id`.
+
 #### `llm_handoff` — whether your plugin may hand judgment to the LLM
 
 Optional, `false` by default, and the default is right for a plugin that

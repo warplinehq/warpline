@@ -351,17 +351,29 @@ ignored.
 | `review_gate` | `true` | Treat every `autonomous` plugin as `supervised`: it runs, is recorded `gated`, and the run stops after its level — whether or not it declares side effects. A result that is `failed` is not parked: it is recorded `failed` and the run continues. Independent of the side-effect gate, which applies regardless |
 | `quiet_hours` | `null` (off) | When set to `{ start, end }` (`HH:MM`, defaulting to `22:00`–`07:00` for the omitted field), nothing notifies or executes inside the window |
 
-On a default install over the twelve bundled examples, with no grant, this is
-what the first advance does (the README carries the `warpline plan` render it
-is read from). Six plugins are due at level 0 — `announce-fanout`,
-`anomaly-watch`, `derived-summary`, `draft-writer`, `metrics-rollup` and
-`note-intake` — every one `autonomous` with no declared side effects, and every
-one is still recorded `gated`, so the run stops after level 0 and neither
-`daily-digest` nor `feed-triage`, both at level 1 because each declares a
-dependency, runs until they are reviewed.
-The other four — `feed-monitor`, `github-poll`, `link-enrich` and
-`anomaly-issue` — declare side effects and are skipped as unapproved before
-the review gate is reached, until a session grant covers them.
+On a default install over the bundled examples, eighteen of them in
+twenty-one plugin directories, with no grant, this is what the first advance
+does (the README carries the `warpline plan` render it is read from). Seven
+plugins are due at level 0 — `announce-fanout`, `anomaly-watch`,
+`cadence-replies`, `candidate-propose`, `derived-summary`, `draft-writer` and
+`metrics-rollup` — every one `autonomous` with no declared side effects, and
+every one is still recorded `gated`, so the run stops after level 0. The three
+due at level 1 — `cadence-plan`, `daily-digest` and `feed-triage`, each there
+because it declares a dependency — do not run until the level-0 results are
+reviewed.
+Eight more — `anomaly-issue`, `competitor-watch`, `feed-monitor`,
+`github-poll`, `graph-sync`, `ledger-runner`, `link-enrich` and
+`search-console` — declare side effects and are skipped as unapproved before
+the review gate is reached, until a session grant covers them. `note-intake` is
+not due at all: its schedule is `manual`, which only the `manual` profile or
+`warpline run` reaches.
+
+The last two, `cadence-send` and `candidate-promote`, are content class. A
+session grant never makes them run, not even a wildcard one. Only
+`warpline approve <plugin> --content` over the exact bytes their producer made
+does, and until then each is skipped with no content approval on file, before
+the review gate is reached. Once approved, a content-class plugin is not itself
+parked by the review gate: the content approval was the review.
 
 A fresh install has no quiet window at all — the `22:00`/`07:00` above are the
 field defaults *inside* an object the operator has to add. Once one is set, it
