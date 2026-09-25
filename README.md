@@ -53,15 +53,25 @@ Due (7):
     llm_handoff: may hand judgment to the LLM ([needs-llm])
     (no declared side effects)
 
-Not due (5):
+Not due (9):
 
+  competitor-watch — unapproved: side effects require session approval
+    external_api: ⚠ unapproved — would be SKIPPED this run
   feed-monitor — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
   github-poll — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
+  graph-sync — unapproved: side effects require session approval
+    external_api: ⚠ unapproved — would be SKIPPED this run
+    writes_db: ⚠ unapproved — would be SKIPPED this run
+  ledger-runner — unapproved: side effects require session approval
+    external_api: ⚠ unapproved — would be SKIPPED this run
+    modifies_file: ⚠ unapproved — would be SKIPPED this run
   link-enrich — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
   note-intake — schedule 'manual': requires profile 'manual'
+  search-console — unapproved: side effects require session approval
+    external_api: ⚠ unapproved — would be SKIPPED this run
   anomaly-issue — unapproved: side effects require session approval
     creates_issue: ⚠ unapproved — would be SKIPPED this run
     external_api: ⚠ unapproved — would be SKIPPED this run
