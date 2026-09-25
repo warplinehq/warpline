@@ -144,4 +144,24 @@ describe('the candidate example under runAdvance', () => {
     expect(approved).toEqual(expected as Candidate[])
     expect(JSON.parse(await readFile(promotedPath(), 'utf-8'))).toEqual({ promoted: expected })
   })
+
+  test('an approval followed by a changed proposal is skipped and nothing is appended', async () => {
+    await seedPool([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    await advance()
+    const approved = (await proposedBody()).candidates
+    await approveByContent()
+
+    // A new pool whose top three share nothing with the approved three. `force`
+    // lifts candidate-propose's one-week TTL so it proposes again now; the
+    // freshness gate runs before the approval gate.
+    await seedPool([20, 30, 40], 'next')
+    const result = await advance({ force: true })
+
+    const moved = (await proposedBody()).candidates
+    expect(moved.map((c) => c.id)).toEqual(['next-03', 'next-02', 'next-01'])
+    expect(moved).not.toEqual(approved)
+    expect(result.refused_plugins).toContainEqual({ plugin: 'candidate-promote', reason: 'content_moved' })
+    expect(result.plugin_states.get('candidate-promote')).toBe('skipped')
+    expect(existsSync(promotedPath())).toBe(false)
+  })
 })
