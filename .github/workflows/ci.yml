@@ -158,10 +158,11 @@ jobs:
   # deterministic, and covering what the validator provably does not see (a
   # `source` pointing nowhere, the skills that actually ship).
   #
-  # Two invocations, both mandatory. Once marketplace.json exists at the
+  # Three invocations, all mandatory. Once marketplace.json exists at the
   # repository root, directory mode there validates only the marketplace
   # manifest — so the very commit that made this repo a marketplace is the one
-  # that would otherwise have stopped guarding the plugin manifest.
+  # that would otherwise have stopped guarding the plugin manifest. Each plugin
+  # directory (./plugin and ./plugin-examples) is therefore validated on its own.
   manifests:
     runs-on: ubuntu-latest
     # Advisory on purpose: see the reasoning above.
@@ -176,3 +177,5 @@ jobs:
         run: claude plugin validate --strict .
       - name: validate the plugin manifest
         run: claude plugin validate --strict ./plugin
+      - name: validate the examples plugin manifest
+        run: claude plugin validate --strict ./plugin-examples

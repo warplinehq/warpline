@@ -21,6 +21,12 @@
  * a non-empty array). That symmetry is what makes "this check goes red" provable
  * rather than assumed. Fixture roots live under `tmpdir()` and are removed in a
  * `finally` — tests never write inside the repository.
+ *
+ * The marketplace lists a second plugin, `warpline-examples`, and it carries its
+ * own version so a push of its skill can be corrected forward without cutting a
+ * runtime release. That is why `versionOffenders` (parity with package.json)
+ * covers `plugin/` only, and why `marketplaceVersionOffenders` checks every
+ * entry against its own plugin.json instead.
  */
 import { describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -33,9 +39,14 @@ const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf8')
 const MARKETPLACE_MANIFEST = '.claude-plugin/marketplace.json'
 const PLUGIN_MANIFEST = 'plugin/.claude-plugin/plugin.json'
 const SKILLS_DIR = 'plugin/skills'
+const PLUGIN_EXAMPLES_MANIFEST = 'plugin-examples/.claude-plugin/plugin.json'
+const EXAMPLES_SKILLS_DIR = 'plugin-examples/skills'
 
 /** What ships. Two, and the payload measured 12 KB against a 100 KB ceiling. */
 const SHIPPED_SKILLS = ['feed-triage', 'needs-llm']
+
+/** What the examples plugin ships: the one skill that walks a content approval. */
+const SHIPPED_EXAMPLE_SKILLS = ['approve-review']
 
 const PROHIBITION_HEADING = '## What you must NOT do'
 const SIDE_EFFECTS = 'side effect'
@@ -62,7 +73,7 @@ function loadJson(root: string, rel: string): Loaded {
   }
 }
 
-// ── The five assertions ──────────────────────────────────────────────────
+// ── The six assertions ───────────────────────────────────────────────────
 
 /** Assertion 1 — the hand-maintained plugin version must match package.json. */
 export function versionOffenders(root: string): string[] {
@@ -113,28 +124,28 @@ export function sourceOffenders(root: string): string[] {
  * gate: the marketplace entry's `skills[]` array is inert under a subdirectory
  * source, so what is on disk here is what a stranger's session loads.
  */
-export function skillDirOffenders(root: string): string[] {
-  const dir = join(root, SKILLS_DIR)
-  if (!existsSync(dir)) return [`${SKILLS_DIR}/: missing`]
+export function skillDirOffenders(root: string, dir = SKILLS_DIR, shipped = SHIPPED_SKILLS): string[] {
+  const abs = join(root, dir)
+  if (!existsSync(abs)) return [`${dir}/: missing`]
 
-  const found = readdirSync(dir, { withFileTypes: true })
+  const found = readdirSync(abs, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort()
 
-  return found.join(', ') === SHIPPED_SKILLS.join(', ')
+  return found.join(', ') === shipped.join(', ')
     ? []
-    : [`${SKILLS_DIR}/ holds [${found.join(', ')}], expected exactly [${SHIPPED_SKILLS.join(', ')}]`]
+    : [`${dir}/ holds [${found.join(', ')}], expected exactly [${shipped.join(', ')}]`]
 }
 
-/** Assertion 4 — both shipped skills must carry their prohibition section. */
-export function prohibitionOffenders(root: string): string[] {
-  const dir = join(root, SKILLS_DIR)
-  if (!existsSync(dir)) return [`${SKILLS_DIR}/: missing`]
+/** Assertion 4 — every shipped skill must carry its prohibition section. */
+export function prohibitionOffenders(root: string, dir = SKILLS_DIR): string[] {
+  const abs = join(root, dir)
+  if (!existsSync(abs)) return [`${dir}/: missing`]
 
   const offenders: string[] = []
-  for (const entry of readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory())) {
-    const rel = join(SKILLS_DIR, entry.name, 'SKILL.md')
+  for (const entry of readdirSync(abs, { withFileTypes: true }).filter((e) => e.isDirectory())) {
+    const rel = join(dir, entry.name, 'SKILL.md')
     if (!existsSync(join(root, rel))) {
       offenders.push(`${rel}: missing`)
       continue
@@ -153,9 +164,44 @@ export function prohibitionOffenders(root: string): string[] {
 
 /** Assertion 5 — a manifest that is absent or unparseable is an offender. */
 export function manifestParseOffenders(root: string): string[] {
-  return [MARKETPLACE_MANIFEST, PLUGIN_MANIFEST, 'package.json']
+  return [MARKETPLACE_MANIFEST, PLUGIN_MANIFEST, PLUGIN_EXAMPLES_MANIFEST, 'package.json']
     .map((rel) => loadJson(root, rel).offender)
     .filter((offender): offender is string => Boolean(offender))
+}
+
+/**
+ * Assertion 6 — every marketplace entry declares a version, and it is the one
+ * its source's plugin.json declares. The validator does not compare the two.
+ */
+export function marketplaceVersionOffenders(root: string): string[] {
+  const manifest = loadJson(root, MARKETPLACE_MANIFEST)
+  if (manifest.offender) return [manifest.offender]
+
+  const offenders: string[] = []
+  const entries = Array.isArray(manifest.value?.plugins) ? (manifest.value.plugins as unknown[]) : []
+  for (const raw of entries) {
+    const entry = raw as { name?: unknown; source?: unknown; version?: unknown }
+    const label = typeof entry.name === 'string' ? entry.name : '(unnamed entry)'
+    if (typeof entry.version !== 'string' || entry.version === '') {
+      offenders.push(`${label}: no version`)
+      continue
+    }
+    if (typeof entry.source !== 'string') {
+      offenders.push(`${label}: no source`)
+      continue
+    }
+    const rel = join(entry.source, '.claude-plugin', 'plugin.json')
+    const plugin = loadJson(root, rel)
+    if (plugin.offender) {
+      offenders.push(`${label}: ${plugin.offender}`)
+      continue
+    }
+    const declared = plugin.value?.version
+    if (declared !== entry.version) {
+      offenders.push(`${label}: marketplace declares ${entry.version}, ${rel} declares ${String(declared)}`)
+    }
+  }
+  return offenders
 }
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
@@ -207,6 +253,18 @@ describe('the shipped manifests', () => {
 
   test('every manifest parses', () => {
     expect(manifestParseOffenders(REPO_ROOT)).toEqual([])
+  })
+
+  test('plugin-examples/skills/ holds exactly the one skill that ships', () => {
+    expect(skillDirOffenders(REPO_ROOT, EXAMPLES_SKILLS_DIR, SHIPPED_EXAMPLE_SKILLS)).toEqual([])
+  })
+
+  test('the approve-review SKILL.md carries its prohibition section', () => {
+    expect(prohibitionOffenders(REPO_ROOT, EXAMPLES_SKILLS_DIR)).toEqual([])
+  })
+
+  test("every marketplace entry's version matches its plugin.json", () => {
+    expect(marketplaceVersionOffenders(REPO_ROOT)).toEqual([])
   })
 
   // The runtime dependency set is one package, and it stays one. A new
@@ -280,6 +338,69 @@ describe('each check goes red on its own violation', () => {
         const offenders = prohibitionOffenders(root)
         expect(offenders).not.toEqual([])
         expect(offenders.join('\n')).toContain('feed-triage')
+      },
+    )
+  })
+
+  test('a second directory under plugin-examples/skills/ is caught', () => {
+    withFixture(
+      {},
+      [...SHIPPED_EXAMPLE_SKILLS.map((s) => join(EXAMPLES_SKILLS_DIR, s)), join(EXAMPLES_SKILLS_DIR, 'a-second-skill')],
+      (root) => {
+        const offenders = skillDirOffenders(root, EXAMPLES_SKILLS_DIR, SHIPPED_EXAMPLE_SKILLS)
+        expect(offenders).not.toEqual([])
+        expect(offenders.join('\n')).toContain('a-second-skill')
+      },
+    )
+  })
+
+  test('an approve-review SKILL.md with its prohibition section stripped is caught', () => {
+    const rel = join(EXAMPLES_SKILLS_DIR, 'approve-review', 'SKILL.md')
+    const stripped = read(rel).split(PROHIBITION_HEADING)[0] as string
+    withFixture({ [rel]: stripped }, [], (root) => {
+      const offenders = prohibitionOffenders(root, EXAMPLES_SKILLS_DIR)
+      expect(offenders).not.toEqual([])
+      expect(offenders.join('\n')).toContain('approve-review')
+    })
+  })
+
+  test('a marketplace entry at 0.9.9 over a plugin.json at 0.1.0 is caught', () => {
+    const manifest = realMarketplace()
+    const plugins = (manifest.plugins as Record<string, unknown>[]).map((p) =>
+      p.name === 'warpline-examples' ? { ...p, version: '0.9.9' } : p,
+    )
+    withFixture(
+      {
+        [MARKETPLACE_MANIFEST]: JSON.stringify({ ...manifest, plugins }),
+        [PLUGIN_MANIFEST]: read(PLUGIN_MANIFEST),
+        [PLUGIN_EXAMPLES_MANIFEST]: read(PLUGIN_EXAMPLES_MANIFEST),
+      },
+      [],
+      (root) => {
+        const offenders = marketplaceVersionOffenders(root)
+        expect(offenders).not.toEqual([])
+        expect(offenders.join('\n')).toContain('0.9.9')
+        expect(offenders.join('\n')).toContain('warpline-examples')
+      },
+    )
+  })
+
+  test('a marketplace entry with no version is caught by name', () => {
+    const manifest = realMarketplace()
+    const plugins = (manifest.plugins as Record<string, unknown>[]).map((p) => {
+      if (p.name !== 'warpline-examples') return p
+      const { version: _dropped, ...rest } = p
+      return rest
+    })
+    withFixture(
+      {
+        [MARKETPLACE_MANIFEST]: JSON.stringify({ ...manifest, plugins }),
+        [PLUGIN_MANIFEST]: read(PLUGIN_MANIFEST),
+        [PLUGIN_EXAMPLES_MANIFEST]: read(PLUGIN_EXAMPLES_MANIFEST),
+      },
+      [],
+      (root) => {
+        expect(marketplaceVersionOffenders(root)).toEqual(['warpline-examples: no version'])
       },
     )
   })
