@@ -20,10 +20,15 @@
  * gate, the lock module and the doctrine document. A guard that fires
  * sixty-five false reds on its first day gets an ignore comment bolted to it
  * and stops being obeyed, which `docs.test.ts` already names as a failure mode
- * in its own comments. So the surface here is exactly three things, all of them
+ * in its own comments. So the surface here is exactly four things. Three are
  * reachable by a consumer through the `exports` map: schema shape keys,
  * manifest field names (a schema shape, so the same enumeration reaches them),
- * and exported symbol names.
+ * and exported symbol names. The fourth is the bundled examples' declared
+ * input and output keys and the names their `handler.ts` exports, because
+ * `examples/` ships in the tarball and `scaffold --from` makes an example's
+ * names an adopter's names. ponytail: Output body field names assembled inside
+ * a handler are not enumerated; an AST pass over object literals is the
+ * upgrade if one ever leaks.
  *
  * **The term list is committed here, in this file.** The sibling
  * confidentiality guard reads a gitignored local-only list and degrades to an
@@ -46,9 +51,10 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
@@ -205,6 +211,49 @@ async function domainVocabulary(root: string, terms: string[] = TERMS): Promise<
   return [...offenders].sort()
 }
 
+/** A value, function, class or type a handler exports, read from its source. */
+const HANDLER_EXPORT = /^export\s+(?:async\s+)?(?:const|let|function|class|interface|type)\s+(\w+)/gm
+
+/**
+ * Offenders among the bundled examples' identifiers: every manifest's input
+ * and output keys and every name its `handler.ts` exports, matched with the
+ * same term list and the same segment matcher as the published surface.
+ * Offenders read `examples/plugins/<dir>: <identifier>`, sorted and unique.
+ *
+ * Blind in the same three ways as the helper above, and red in all three: an
+ * empty term list, no examples tree, and a tree that yields no identifier.
+ */
+async function exampleVocabulary(root: string, terms: string[] = TERMS): Promise<string[]> {
+  if (terms.length === 0) throw new Error('blind: the vocabulary term list is empty')
+  const vocab = vocabulary(terms)
+  const pluginsRoot = join(root, 'examples', 'plugins')
+  if (!existsSync(pluginsRoot)) throw new Error(`blind: no examples tree under ${root}`)
+
+  const identifiers: { dir: string; name: string }[] = []
+  const dirs = readdirSync(pluginsRoot, { withFileTypes: true })
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+  for (const dir of dirs) {
+    const manifestPath = join(pluginsRoot, dir, 'manifest.ts')
+    if (!existsSync(manifestPath)) continue
+    const { manifest } = (await import(pathToFileURL(manifestPath).href)) as {
+      manifest?: { inputs?: object; outputs?: object }
+    }
+    for (const key of Object.keys(manifest?.inputs ?? {})) identifiers.push({ dir, name: key })
+    for (const key of Object.keys(manifest?.outputs ?? {})) identifiers.push({ dir, name: key })
+    const handlerPath = join(pluginsRoot, dir, 'handler.ts')
+    if (!existsSync(handlerPath)) continue
+    for (const m of readFileSync(handlerPath, 'utf8').matchAll(HANDLER_EXPORT)) identifiers.push({ dir, name: m[1]! })
+  }
+  if (identifiers.length === 0) throw new Error(`blind: no example identifiers under ${root}`)
+
+  const offenders = new Set<string>()
+  for (const { dir, name } of identifiers) {
+    if (vocab.test(name)) offenders.add(`examples/plugins/${dir}: ${name}`)
+  }
+  return [...offenders].sort()
+}
+
 /** A minimal package whose shape the helper can read, built under `tmpdir()`. */
 function fixture(files: Record<string, string>): string {
   const root = mkdtempSync(join(tmpdir(), 'warpline-vocab-'))
@@ -319,5 +368,56 @@ describe('the guard fails when it cannot see', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('no example identifier carries the source runtime vocabulary', () => {
+  test('the real examples tree is clean', async () => {
+    expect(await exampleVocabulary(REPO_ROOT)).toEqual([])
+  })
+
+  test('a planted input key and a planted exported name are each reported, and a clean example is not', async () => {
+    const root = fixture({
+      'examples/plugins/planted/manifest.ts':
+        "export const manifest = { name: 'planted', inputs: { conversion_rate: {} }, outputs: { report: {} } }\n",
+      'examples/plugins/planted/handler.ts':
+        'export const handler = async () => null\n' + 'export function trialWindow() { return 0 }\n',
+      'examples/plugins/clean/manifest.ts':
+        "export const manifest = { name: 'clean', inputs: { feed_url: {} }, outputs: { model: {} } }\n",
+      'examples/plugins/clean/handler.ts': 'export async function handler() { return null }\n',
+    })
+    try {
+      expect(await exampleVocabulary(root)).toEqual([
+        'examples/plugins/planted: conversion_rate',
+        'examples/plugins/planted: trialWindow',
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('an examples tree with no identifiers is red, not a clean bill of health', async () => {
+    const root = fixture({
+      'examples/plugins/empty/manifest.ts': "export const manifest = { name: 'empty' }\n",
+      'examples/plugins/empty/handler.ts': '// nothing exported\n',
+    })
+    try {
+      await expect(exampleVocabulary(root)).rejects.toThrow(/blind: no example identifiers/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a root with no examples tree is red, not a clean bill of health', async () => {
+    const root = fixture({ 'package.json': PKG })
+    try {
+      await expect(exampleVocabulary(root)).rejects.toThrow(/blind: no examples tree/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('an empty term list is red, not a skip', async () => {
+    await expect(exampleVocabulary(REPO_ROOT, [])).rejects.toThrow(/blind: the vocabulary term list is empty/)
   })
 })
