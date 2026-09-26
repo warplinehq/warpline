@@ -9,7 +9,7 @@
       "description": "Companion skills for warpline's [needs-llm] handoffs — needs-llm scans delegated runs, feed-triage does the judgment. Installs the skills only; the warpline runtime itself is a separate npm package.",
       "source": "./plugin",
       "category": "productivity",
-      "version": "0.3.4"
+      "version": "0.4.0"
     },
     {
       "name": "warpline-examples",
