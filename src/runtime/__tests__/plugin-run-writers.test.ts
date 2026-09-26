@@ -22,6 +22,16 @@
  * a row that no longer matches is red too. The two planted controls prove each
  * form is reported and that the recognised writers are not.
  *
+ * **Each routed row names the run it stamps.** An entry's `run_id` changes
+ * only when a run writes its own result, so no write moves it back to an
+ * earlier run's. `stamp` is the exact third argument the row's `lastOutputOf`
+ * call passes, and a routed write stamping anything else is reported. A row
+ * whose stamp is outside `OWN_RUN_STAMPS` is a writer that records a run other
+ * than the one writing. The census reads that off the stamp, so there is no
+ * flag to leave off, and every such row must have a driver in
+ * `SUPERSEDED_BY_A_LATER_RUN` proving it refuses an entry a later run wrote.
+ * Today that is the gate apply, which stamps the run that parked the gate.
+ *
  * **Syntactic, no type checker**, the `no-approval-gate-from-content.test.ts`
  * precedent. A runs map is recognised by what the source says: any
  * `<x>.plugin_runs` or `<x>['plugin_runs']`, and any name bound to one inside
@@ -29,6 +39,14 @@
  * and a whole state document elsewhere. The helper takes its source texts
  * rather than reading them, so the identical code runs against the real tree
  * and against in-memory fixtures.
+ *
+ * **The limit that follows for the stamp.** It is compared as source text, not
+ * as the value it is bound to. A name that reads as the writer's own run but
+ * holds another passes as own: a local such as `const run_id = prior.run_id`,
+ * or a parameter named `runId` that a caller fills with a parked run. Today's
+ * writers are each driven by a behavioural case that compares the stamp with
+ * the run that ran, which catches it for them. A new writer's binding is
+ * outside the census's reach.
  *
  * **Every enumeration throws rather than returning empty.** An empty scan is
  * "did not look", and it would report clean.
@@ -165,6 +183,12 @@ interface Recognised {
   readonly form: Form
   readonly count: number
   readonly shape?: Shape
+  /**
+   * For a `routed` row, the exact source text of the third argument every
+   * `lastOutputOf(…)` call spread at that site passes: the run the write
+   * stamps. A routed row that names none is refused as "did not look".
+   */
+  readonly stamp?: string
 }
 
 /**
@@ -173,13 +197,22 @@ interface Recognised {
  */
 const RECOGNISED: readonly Recognised[] = [
   // The thrown, gated and autonomous arms.
-  { file: 'src/runtime/engine.ts', site: 'runAdvance', form: 'assign', count: 3, shape: 'routed' },
+  { file: 'src/runtime/engine.ts', site: 'runAdvance', form: 'assign', count: 3, shape: 'routed', stamp: 'run_id' },
   // The end-of-run document's `plugin_runs: mergePluginRuns(…)`.
   { file: 'src/runtime/engine.ts', site: 'runAdvance', form: 'key', count: 1 },
-  { file: 'src/runtime/engine.ts', site: 'applyPendingGate', form: 'assign', count: 1, shape: 'routed' },
+  // The one writer that stamps a run other than its own: the run that parked
+  // the gate.
+  {
+    file: 'src/runtime/engine.ts',
+    site: 'applyPendingGate',
+    form: 'assign',
+    count: 1,
+    shape: 'routed',
+    stamp: 'gate.run_id',
+  },
   // The refused apply's removal, which makes the plugin due again.
   { file: 'src/runtime/engine.ts', site: 'applyPendingGate', form: 'delete', count: 1 },
-  { file: 'src/runtime/engine.ts', site: 'mergePluginRuns', form: 'assign', count: 1, shape: 'routed' },
+  { file: 'src/runtime/engine.ts', site: 'mergePluginRuns', form: 'assign', count: 1, shape: 'routed', stamp: 'runId' },
   // The fresh-read floor `{ ...disk }`, and the typed local it initialises.
   { file: 'src/runtime/engine.ts', site: 'mergePluginRuns', form: 'spread', count: 1 },
   { file: 'src/runtime/engine.ts', site: 'mergePluginRuns', form: 'alias', count: 1 },
@@ -323,6 +356,13 @@ function runsMapWriteOffenders(
   if (sources.size === 0) throw new Error('blind: the source enumeration is empty')
   if (!sources.has('src/runtime/engine.ts')) {
     throw new Error('blind: the source enumeration lacks src/runtime/engine.ts, where every writer lives')
+  }
+  // An unstated stamp is "did not look": the write would be accepted whatever
+  // run it records.
+  for (const row of allowlist) {
+    if (row.shape === 'routed' && row.stamp === undefined) {
+      throw new Error(`blind: routed row ${row.site} names no stamp`)
+    }
   }
 
   const parsed = [...sources].map(([file, text]) => ({
@@ -576,6 +616,24 @@ function runsMapWriteOffenders(
     return first !== undefined && ts.isSpreadAssignment(first) && !namesAny(v, new Set(['run_id']))
   }
 
+  /**
+   * The first run a routed value stamps other than `stamp`, as source text, or
+   * undefined when every `lastOutputOf` call it spreads passes `stamp`.
+   */
+  const strayStamp = (value: ts.Expression | undefined, stamp: string): string | undefined => {
+    if (value === undefined) return undefined
+    const v = unwrap(value)
+    if (!ts.isObjectLiteralExpression(v)) return undefined
+    for (const p of v.properties) {
+      if (!ts.isSpreadAssignment(p)) continue
+      const e = unwrap(p.expression)
+      if (!ts.isCallExpression(e) || calleeText(e.expression) !== 'lastOutputOf') continue
+      const text = e.arguments[2]?.getText() ?? '<nothing>'
+      if (text !== stamp) return text
+    }
+    return undefined
+  }
+
   const offenders: string[] = []
   const accepted = new Map<Recognised, number>()
   const misshapen = new Map<Recognised, number>()
@@ -588,6 +646,12 @@ function runsMapWriteOffenders(
     }
     if (row.shape !== undefined && !shapeHolds(row.shape, m.value)) {
       offenders.push(`${where}: ${m.why}, and its value is not the ${row.shape} shape`)
+      misshapen.set(row, (misshapen.get(row) ?? 0) + 1)
+      continue
+    }
+    const stray = row.stamp === undefined ? undefined : strayStamp(m.value, row.stamp)
+    if (stray !== undefined) {
+      offenders.push(`${where}: ${m.why}, and it stamps ${stray} where its row stamps ${row.stamp}`)
       misshapen.set(row, (misshapen.get(row) ?? 0) + 1)
       continue
     }
@@ -690,6 +754,67 @@ function fixture(opts: { plant?: string; module?: string; engine?: string } = {}
   ])
 }
 
+// ── The writers that record a run other than their own ─────────────────────
+
+/** The names a writer's own run goes by: `runAdvance`'s and `mergePluginRuns`'s. */
+const OWN_RUN_STAMPS: ReadonlySet<string> = new Set(['run_id', 'runId'])
+
+type Driver = () => Promise<void>
+
+/**
+ * The driver of every row that stamps a run other than the writer's own. The
+ * rows are selected by their stamp and never flagged by hand, so a new one
+ * cannot leave the flag off. Throws on a selected row with no driver, before
+ * any driver runs, and throws when nothing is selected, since an empty
+ * selection is "did not look".
+ */
+function supersessionCases(rows: readonly Recognised[], drivers: Readonly<Record<string, Driver>>): Driver[] {
+  const foreign = rows.filter((r) => r.stamp !== undefined && !OWN_RUN_STAMPS.has(r.stamp))
+  if (foreign.length === 0) throw new Error('blind: no row stamps a run other than its own')
+  return foreign.map((r) => {
+    const key = `${r.file}#${r.site}`
+    if (!Object.hasOwn(drivers, key)) {
+      throw new Error(
+        `no supersession case for ${r.site}: a writer that records a run other than its own must prove it refuses an entry a later run wrote`,
+      )
+    }
+    return drivers[key]!
+  })
+}
+
+/**
+ * One driver per writer that records a run other than its own, keyed
+ * `<file>#<site>`. Each proves the writer refuses an entry a later run wrote,
+ * and keeps that entry as the later run left it.
+ */
+const SUPERSEDED_BY_A_LATER_RUN: Readonly<Record<string, Driver>> = {
+  'src/runtime/engine.ts#applyPendingGate': async () => {
+    const h = await setup({ review_gate: true })
+    const parked = await advance(h)
+    expect((await persisted(h))['run_id']).toBe(parked.run_id)
+
+    // A later run whose invocation throws parks nothing, so the gate is still
+    // pending, and the entry is that later run's.
+    await mkdir(join(h.root, 'config', `${PLUGIN}.json`), { recursive: true })
+    const later = await advance(h, { force: true })
+    const failed = await persisted(h)
+    expect(failed.status).toBe('failed')
+    expect(failed['run_id']).toBe(later.run_id)
+    expect(failed.last_output?.run_id).toBe(parked.run_id)
+
+    const applied = await approve([PLUGIN])
+    expect(applied.code, applied.output).toBe(1)
+    expect(applied.output).toContain('ran again after this result was parked')
+
+    const kept = await persisted(h)
+    expect(kept['run_id']).toBe(later.run_id)
+    expect(kept.status).toBe('failed')
+    expect(kept.last_output?.run_id).toBe(parked.run_id)
+    const state = JSON.parse(await readFile(join(h.stateDir, 'engine-state.json'), 'utf-8')) as EngineState
+    expect(state.pending_gates.filter((g) => g.plugin === PLUGIN && g.applied_at === null)).toEqual([])
+  },
+}
+
 describe('every writer of a run entry records the run that wrote it', () => {
   test('an autonomous run records its own run', async () => {
     const h = await setup()
@@ -771,6 +896,44 @@ export function sideDoor(state: EngineState, p: string, r: unknown, t: string, i
       expect(offenders, `${plant ?? module}`).toHaveLength(1)
       expect(offenders[0]!, `${plant ?? module}`).toStartWith(`${form} at `)
     }
+
+    // A routed write that stamps an earlier run. The shape rule looks only at
+    // property assignments, never at a read such as `prior!.run_id!`, so only
+    // the stamp rule can report this one.
+    const misStamped = runsMapWriteOffenders(
+      fixture({
+        plant: "state.plugin_runs[p] = { last_run_at: 't', status: 'success', ...lastOutputOf(r, prior, prior!.run_id!) }",
+      }),
+      RECOGNISED,
+    )
+    expect(misStamped).toHaveLength(1)
+    expect(misStamped[0]!).toStartWith('assign at ')
+    expect(misStamped[0]!).toContain('where its row stamps run_id')
+  })
+
+  test('every writer that records a run other than its own refuses an entry a later run wrote', async () => {
+    for (const drive of supersessionCases(RECOGNISED, SUPERSEDED_BY_A_LATER_RUN)) await drive()
+  })
+
+  test("a row stamping a run other than the writer's own is refused until it has a supersession case", () => {
+    const row: Recognised = {
+      file: 'src/runtime/engine.ts',
+      site: 'sideDoor',
+      form: 'assign',
+      count: 1,
+      shape: 'routed',
+      stamp: 'prior.run_id',
+    }
+    expect(() => supersessionCases([...RECOGNISED, row], SUPERSEDED_BY_A_LATER_RUN)).toThrow(
+      'no supersession case for sideDoor',
+    )
+    const withDriver = { ...SUPERSEDED_BY_A_LATER_RUN, 'src/runtime/engine.ts#sideDoor': async () => {} }
+    expect(() => supersessionCases([...RECOGNISED, row], withDriver)).not.toThrow()
+
+    // The two "did not look" throws the real tree never reaches.
+    expect(() => supersessionCases([], {})).toThrow('blind: no row stamps a run other than its own')
+    const unstamped = RECOGNISED.map((r) => (r.site === 'mergePluginRuns' && r.shape === 'routed' ? { ...r, stamp: undefined } : r))
+    expect(() => runsMapWriteOffenders(fixture(), unstamped)).toThrow('names no stamp')
   })
 
   test('the census recognises the writers as they look once they all route through one place', () => {

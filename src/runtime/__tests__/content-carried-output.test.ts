@@ -13,6 +13,14 @@
  * approval outlives the run that should have replaced it and the consumer ships
  * bytes nobody is proposing any more.
  *
+ * **A third route to the same cause: a stale gate apply.** A gated run parks an
+ * Output, a later run of the producer fails and parks nothing, and the entry
+ * names that later run with the parked Output carried. Applying the old gate
+ * afterwards would stamp the entry with the parked run again, which makes the
+ * carried bytes read current and re-arms an approval over them. The apply is
+ * refused instead, because an entry's `run_id` changes only when a run writes
+ * its own result.
+ *
  * **Fixture plugins, not a shipped example.** The cadence example met this
  * first, and its producer now returns an empty outbox on a quiet run rather
  * than no Output. That fix is right and it stays, but it masks this route: the
@@ -346,5 +354,46 @@ describe('a content consumer fires only on the Output its producer last produced
     expect(reasons[0]).toStartWith(
       'refused (content_moved): the approved content moved or was erased between the gate and the spend mark',
     )
+  })
+})
+
+describe('a gate applied after its producer ran again does not re-arm the bytes it parked', () => {
+  test('the apply is refused, and the content consumer still does not ship those bytes', async () => {
+    await writeFile(join(home.stateDir, 'preferences.json'), JSON.stringify({ review_gate: true }))
+
+    // The producer parks its Output, and the consumer is not reached behind a
+    // parked level.
+    const first = await advance()
+    expect((await readState()).plugin_runs[PRODUCER]!.status).toBe('gated')
+    await approveWhatWasRead()
+
+    // A later producer run throws: its config path is a directory. It parks
+    // nothing, so the gate is still pending, and the entry is the failed run's
+    // with the parked Output carried.
+    await mkdir(join(home.root, 'config', `${PRODUCER}.json`), { recursive: true })
+    const second = await advance({ force: true })
+    const failed = (await readState()).plugin_runs[PRODUCER]!
+    expect(failed.status).toBe('failed')
+    expect(failed.run_id).toBe(second.run_id)
+    expect(failed.last_output?.run_id).toBe(first.run_id)
+    // Held back behind its dependency's failed run, which the dependency gate
+    // checks before the approval.
+    expect(firedCount()).toBe(0)
+
+    const applied = await approve([PRODUCER])
+    // No force: the producer is fresh and does not run.
+    await advance()
+
+    // Before the fix the stale apply wrote the parked run and the gate's
+    // `success` over the later failure. The hold lifted, the bytes read
+    // current, and the approval, whose fingerprint still matched, fired. What
+    // stops it now is that the entry is never re-stamped to the parked run.
+    expect(firedCount()).toBe(0)
+    const kept = (await readState()).plugin_runs[PRODUCER]!
+    expect(kept.run_id).toBe(second.run_id)
+    expect(kept.status).toBe('failed')
+    expect(kept.last_output?.run_id).toBe(first.run_id)
+    expect(applied.code).toBe(1)
+    expect(applied.stderr).toContain('ran again after this result was parked')
   })
 })
