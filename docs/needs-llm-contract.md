@@ -162,9 +162,10 @@ spends its content approval, even though it shipped nothing. The operator
 re-approves before it can fire again. `runtime-spec.md` § 10 says why that is
 the safer of the two choices. An undeclared handoff is refused, which makes it a
 failed fire, so the approval is left indeterminate, as `runtime-spec.md` § 10
-describes. The handoff was refused before anything could ship, so the operator
-answers it not shipped with `warpline resolve <plugin> --not-shipped <effect-id>`
-and then re-approves. Declaring `llm_handoff: true` is the fix.
+describes. The handler ran before the handoff was refused, so check the sink
+with the effect id as for any failed fire. When nothing arrived, answer it with
+`warpline resolve <plugin> --not-shipped <effect-id>` and re-approve. Declaring
+`llm_handoff: true` is the fix.
 
 ## Why the plugin does not call the model itself
 
