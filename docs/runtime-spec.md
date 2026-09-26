@@ -2433,10 +2433,14 @@ id and found that nothing shipped. It is its own verb and not a mode of
   while holding both, so no fire can be marked between the check and the write.
   A lock file that cannot be read back as a lock is refused too, because whether
   an advance is firing cannot be told. A stale lock (§ 12) does not block: that
-  is the crashed advance the verb exists for. The cost is waiting for the
-  running advance to end, and after a crash on a machine that cannot identify
-  itself, for the two-hour window. `resolve` never writes, heals or removes the
-  lock.
+  is the crashed advance the verb exists for. The exception is a stale lock this
+  machine can see is still held by a live process. Handlers run in-process, so
+  an advance suspended mid-send, blocked in a handler or asleep with the machine
+  stops its heartbeat while its fire can still land. So when the lock names this
+  machine's host and its pid is alive, `resolve` refuses whatever the lock's
+  age. The cost is waiting for the running advance to end, and after a crash on
+  a machine that cannot identify itself, for the two-hour window. `resolve`
+  never writes, heals or removes the lock.
 - It writes `not_shipped_at`, the instant of the answer, and keeps `marked_at`
   and `effect_id` as they were. It never writes `confirmed_at`, which stays the
   advance's account of a fire it saw finish.

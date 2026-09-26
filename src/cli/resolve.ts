@@ -47,7 +47,10 @@
  * marked between this check and this write. A lock that cannot be read is
  * refused, because could-not-look is not looked-and-found-nothing. A stale
  * lock does not block: a holder silent past the two-hour window, or a dead pid
- * on this machine, is the crashed advance the verb exists for. The cost: the
+ * on this machine, is the crashed advance the verb exists for. The exception is
+ * a silent holder this machine can see is still alive: a suspended or blocked
+ * advance stops its heartbeat while its fire can still land, so a live pid on
+ * this machine blocks whatever the lock's age. The cost: the
  * operator waits for the running advance to end, and after a crash on a
  * machine that cannot identify itself, for the two-hour window. The one
  * residual is the run-lock overlap the runtime spec names, where a healed
@@ -76,7 +79,7 @@ import {
   writeEngineState,
 } from '../runtime/engine-state-store.js'
 import type { EngineState } from '../schemas/engine-state.js'
-import { isLockStale, readLock } from '../runtime/lock.js'
+import { deriveHost, isLockStale, isProcessAlive, readLock } from '../runtime/lock.js'
 import { engineStatePath, lockPath as runLockPath, pluginsDir } from '../lib/paths.js'
 
 const USAGE = `Usage: warpline resolve <plugin> --not-shipped <effect-id>
@@ -132,7 +135,17 @@ export async function run(argv: string[]): Promise<number> {
     // marked fire may still be in flight, and none can open before the write.
     // Only `acquired_at` is printed: a runtime-written instant, never a path.
     const held = await readLock(runLockPath())
-    if (held !== null && !isLockStale(held)) {
+    // `isLockStale` is the heal predicate: it answers on age before it reads
+    // the pid. A live holder on this machine can go silent past the window,
+    // suspended or blocked in a handler, with its fire still able to land, so
+    // here a pid this machine can see alive outranks the age.
+    const aliveHere =
+      held !== null &&
+      held.pid !== null &&
+      held.host != null &&
+      held.host === deriveHost() &&
+      isProcessAlive(held.pid)
+    if (held !== null && (aliveHere || !isLockStale(held))) {
       process.stderr.write(
         `An advance is running (it took the run lock at ${held.acquired_at}), so a fire it marked ` +
           `may still be in flight and the sink cannot answer for it yet. Resolve it after the ` +
