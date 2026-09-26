@@ -2389,7 +2389,10 @@ approval and a `--remove` are refused, naming the plugin, the `effect_id` and
 the `marked_at` instant, and pointing at `warpline resolve`, the one gesture
 that answers it. A fresh approval would erase the open question rather than
 answer it, and re-arm a send that may already have gone out; a removal would
-destroy the only evidence that a send may have landed. A record whose
+destroy the only evidence that a send may have landed. For a record with no
+`effect_id`, marked by a build that recorded none, both refusals say instead
+that nothing can answer it and only a hand edit of the state document clears it.
+A record whose
 `confirmed_at` is set, or that was answered not shipped, is a state report
 rather than an open question, and re-approves and removes normally.
 
@@ -2402,6 +2405,20 @@ id and found that nothing shipped. It is its own verb and not a mode of
 - It answers only a record whose standing (`approvalStanding`) is
   `indeterminate`, and only when the typed effect id equals the record's
   `effect_id` exactly. The answer binds to that one fire.
+- It refuses while an advance is running. A run lock (§ 12) held by a live
+  advance means the fire that advance marked may still be in flight, because
+  the mark reaches the disk before the handler runs and the advance's own write
+  comes after it. An answer given in between would be overwritten by that write
+  if the fire failed, dropped if it succeeded, and turned into a double send by
+  a re-approval if the process died after the send landed. The lock is read
+  inside the state lock and before the record, and an advance marks a fire only
+  while holding both, so no fire can be marked between the check and the write.
+  A lock file that cannot be read back as a lock is refused too, because whether
+  an advance is firing cannot be told. A stale lock (§ 12) does not block: that
+  is the crashed advance the verb exists for. The cost is waiting for the
+  running advance to end, and after a crash on a machine that cannot identify
+  itself, for the two-hour window. `resolve` never writes, heals or removes the
+  lock.
 - It writes `not_shipped_at`, the instant of the answer, and keeps `marked_at`
   and `effect_id` as they were. It never writes `confirmed_at`, which stays the
   advance's account of a fire it saw finish.
@@ -2412,9 +2429,13 @@ id and found that nothing shipped. It is its own verb and not a mode of
   answered record whole, as it replaces a spent one, and `--remove` withdraws
   it normally.
 - Every other case is refused with exit `1` and the document byte-unchanged:
-  no record for the plugin (looked up as an own property), a record that is not
+  a run lock held by a live advance, or one that cannot be read back as a lock;
+  no record for the plugin (looked up as an own property, and the refusal does
+  not repeat the name given), a record that is not
   `indeterminate` (unmarked, confirmed, or already answered), a record marked
-  by a build that recorded no effect id, an effect id that does not match (the
+  by a build that recorded no effect id (only a hand edit of the state document
+  clears such a record, and the refusal says so), an effect id that does not
+  match (the
   refusal prints the recorded id and never echoes the typed one), no
   `--not-shipped` value, other than exactly one plugin, or any other flag.
   Every check that reads the document runs inside the state lock, before any
@@ -3005,9 +3026,14 @@ this advance took and saw land.
 The advance's copy of a record it did not mark is a read taken at its start, so
 it can only be older than the disk. That holds for a record an earlier advance
 marked, too. So an operator's re-approval (`warpline approve <plugin>
---content`), answer (`warpline resolve <plugin> --not-shipped <effect-id>`) or
-removal (`warpline approve <plugin> --content --remove`) that lands mid-advance
-on a record this advance did not mark is kept. A record this advance marked is never replaced by absence:
+--content`) or removal (`warpline approve <plugin> --content --remove`) that
+lands mid-advance on a record this advance did not mark is kept. An answer does
+not land mid-advance, because `warpline resolve` refuses while a live advance
+holds the run lock (§ 10). The record it would answer and the advance could
+still overwrite is the one that advance marked, whose fire may still be in
+flight. Only the overlap below lets an answer land while an advance runs, and
+then the merge rule keeps it for any record that advance did not mark.
+A record this advance marked is never replaced by absence:
 it is the runtime's account of a fire it began, and with `confirmed_at` it is
 the evidence that the fire finished.
 
@@ -3017,7 +3043,8 @@ advance can run beside it. The heartbeat makes that reachable only when the
 holder stopped refreshing for two hours, or when an older build that ignores
 the heartbeat is attached to the same home. Each writes under the state lock,
 so neither erases what the other wrote for a plugin it did not run, or a gate it
-did not supersede.
+did not supersede. While the older advance runs on without its lock, `resolve`
+cannot see it, which is the same residual.
 For a plugin both ran, the advance that writes last wins, even when its run is
 the older one, and a gate either one parks supersedes the other's gate for the
 same plugin. Only a parked gate supersedes. A run one advance recorded does not,
@@ -3031,11 +3058,12 @@ The `deny` verb and the board write the engine state document, under the state
 lock. So does `approve --content`, which records the approval, and `approve
 --content --remove`, which withdraws it — both under the same lock.
 So does `approve <plugin>` when it answers a parked gate, applying it or
-discarding it, under the same lock. So does the advance itself, twice, under
+discarding it, under the same lock. So does `warpline resolve`, which answers
+an indeterminate fire, under the same lock. So does the advance itself, twice, under
 the same lock: its spend mark and its end-of-run write. `approve`'s Grant path
 writes the session-approval file instead, `.session-approval` at the root of the
 home, and writes no state document at all. The state lock serialises all of
-them. The run lock only keeps a second advance out.
+them. The run lock only keeps a second advance out, and makes `resolve` wait (§ 10).
 
 ## 13. The dead-man file
 

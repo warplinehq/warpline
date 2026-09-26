@@ -185,11 +185,22 @@ const BODY_END = '----- end approved bytes -----'
  * It names the plugin, the effect id and the instant of the mark and NOTHING
  * else — no producer name, no window bound, and never a byte of the approved
  * content. The effect id is the operator's handle at the sink, which is where
- * the open question is actually settled; it is null only on a record marked by
- * a runtime that predates the id, and saying so beats printing the word null.
+ * the open question is actually settled. It is null only on a record marked by
+ * a runtime that predates the id, and then the sentence names the hand edit
+ * instead, because `warpline resolve`, the verb it would otherwise point at,
+ * refuses such a record.
  */
 function markedUnconfirmed(plugin: string, approval: Approval): string {
-  const effect = approval.effect_id === null ? '(none recorded)' : approval.effect_id
+  if (approval.effect_id === null) {
+    return (
+      `${plugin} was marked at ${approval.marked_at} and never confirmed, by a build that recorded ` +
+      `no effect id, so the runtime cannot tell whether those bytes shipped and there is nothing ` +
+      `to check the sink with or to answer against: neither this command nor 'warpline resolve' ` +
+      `can clear it. Only a hand edit of <home>/state/engine-state.json clears the record, once ` +
+      `you are sure of the sink. Nothing was written.\n`
+    )
+  }
+  const effect = approval.effect_id
   return (
     `${plugin} was marked at ${approval.marked_at} and never confirmed, so the runtime does not ` +
     `know whether those bytes shipped. Resolve it at the sink using effect id ${effect} first: ` +

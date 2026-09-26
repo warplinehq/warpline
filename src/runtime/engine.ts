@@ -1101,7 +1101,7 @@ function lockStateDocument<T>(statePath: string, fn: () => Promise<T>): Promise<
  * |------------------------|------------------------|--------|
  * | on disk only           | —                      | **keep the disk record** (another attachment approved mid-advance) |
  * | in memory              | yes                    | **memory wins**, over the disk and over absence (the mark this advance took, progressed) |
- * | in memory              | no                     | **disk wins**, absence included (an approve, an answer or a removal that landed mid-advance) |
+ * | in memory              | no                     | **disk wins**, absence included (an approve or a removal that landed mid-advance) |
  *
  * `marked` is the one discriminator: the plugins whose spend mark this advance
  * took and saw land. The advance's copy of any other record is a read taken at
@@ -3620,8 +3620,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // the mid-run mark implements; two prose statements of one rule is how two
     // writers come to disagree. This advance's copy wins only for the records
     // it marked (`markedThisAdvance`). Every other record is written as the
-    // fresh read holds it, so an approve, an answer or a removal that landed
-    // mid-advance is kept, even over a record an earlier advance marked.
+    // fresh read holds it, so an approve or a removal that landed mid-advance
+    // is kept, even over a record an earlier advance marked. An answer does not
+    // land mid-advance: `warpline resolve` refuses while the run lock is held.
     //
     // The re-read is INSIDE the lock, and it has to be: a read outside it is a
     // read of a document a concurrent writer may replace before this write

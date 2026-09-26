@@ -29,8 +29,30 @@
  * inside the state lock, so a refused command leaves the document
  * byte-unchanged. "Indeterminate" is never re-derived here: the verb reads
  * `approvalStanding`, the one authority read, and answers only what it calls
- * `indeterminate`. The typed effect id is compared and never echoed or stored:
- * it is operator text, and the refusal prints the recorded id instead.
+ * `indeterminate`. No operator-typed text is echoed, the plugin name included:
+ * the typed effect id is compared and never echoed or stored, and the refusal
+ * prints the recorded id instead; the plugin is named only once a record was
+ * found under it.
+ *
+ * **It waits for a running advance.** The mark reaches the disk before the
+ * handler runs, and the advance's own write comes after it, so between the two
+ * the record reads `indeterminate` while the fire may still land. An answer
+ * given then is overwritten by that advance's write if the fire fails (it
+ * marked the record, so its copy wins the merge), dropped if it succeeds, and
+ * turned into a double send if the process dies after the send landed and the
+ * operator re-approves. The run lock is held for exactly that window, so the
+ * verb refuses while a live advance holds it. It reads the lock inside the
+ * state lock and before the document: an advance marks a fire only while
+ * holding the run lock, and only under that state lock, so no fire can be
+ * marked between this check and this write. A lock that cannot be read is
+ * refused, because could-not-look is not looked-and-found-nothing. A stale
+ * lock does not block: a holder silent past the two-hour window, or a dead pid
+ * on this machine, is the crashed advance the verb exists for. The cost: the
+ * operator waits for the running advance to end, and after a crash on a
+ * machine that cannot identify itself, for the two-hour window. The one
+ * residual is the run-lock overlap the runtime spec names, where a healed
+ * advance may still be running without a lock. The verb only reads the lock:
+ * it never writes, heals or removes it.
  *
  * **Validated against the record, not the installed manifests**, on the
  * argument `approve --content --remove` makes: a plugin may be uninstalled
@@ -44,6 +66,7 @@
  *
  * Never terminates the process — it returns a code to the dispatcher.
  */
+import { existsSync } from 'node:fs'
 import { parseArgs } from 'node:util'
 import { approvalStanding, loadPluginManifests } from '../runtime/engine.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
@@ -53,7 +76,8 @@ import {
   writeEngineState,
 } from '../runtime/engine-state-store.js'
 import type { EngineState } from '../schemas/engine-state.js'
-import { engineStatePath, pluginsDir } from '../lib/paths.js'
+import { isLockStale, readLock } from '../runtime/lock.js'
+import { engineStatePath, lockPath as runLockPath, pluginsDir } from '../lib/paths.js'
 
 const USAGE = `Usage: warpline resolve <plugin> --not-shipped <effect-id>
 
@@ -102,6 +126,30 @@ export async function run(argv: string[]): Promise<number> {
   const lockPath = pathsForStateFile(statePath).lockPath
 
   return await withStateLockAt(lockPath, async () => {
+    // The run lock first, before the clock or the document. An advance marks a
+    // fire only while it holds the run lock, and only under the state lock this
+    // callback holds, so a live lock seen here is the one window in which a
+    // marked fire may still be in flight, and none can open before the write.
+    // Only `acquired_at` is printed: a runtime-written instant, never a path.
+    const held = await readLock(runLockPath())
+    if (held !== null && !isLockStale(held)) {
+      process.stderr.write(
+        `An advance is running (it took the run lock at ${held.acquired_at}), so a fire it marked ` +
+          `may still be in flight and the sink cannot answer for it yet. Resolve it after the ` +
+          `advance ends. Nothing was written.\n`,
+      )
+      return 1
+    }
+    // `readLock` says null for an absent file and for one that is not a lock.
+    // Only the first is known to be no advance.
+    if (held === null && existsSync(runLockPath())) {
+      process.stderr.write(
+        `The run lock could not be read back as a lock, so whether an advance is still firing ` +
+          `cannot be told. Nothing was written.\n`,
+      )
+      return 1
+    }
+
     // Read once the lock is held: the standing and the answer instant are
     // about the document this write replaces.
     const now = Date.now()
@@ -115,9 +163,11 @@ export async function run(argv: string[]): Promise<number> {
     }
 
     // Own-property, never a bare index: `resolve toString` must read as absent.
+    // The typed name is not repeated: it is operator text, and nothing was
+    // found under it.
     if (!Object.hasOwn(state.approvals, plugin)) {
       process.stderr.write(
-        `No content approval recorded for ${plugin}, so there is no fire to resolve. ` +
+        `No content approval recorded under that name, so there is no fire to resolve. ` +
           `Nothing was written.\n`,
       )
       return 1
@@ -136,7 +186,8 @@ export async function run(argv: string[]): Promise<number> {
     if (record.effect_id === null) {
       process.stderr.write(
         `${plugin} was marked at ${record.marked_at} by a build that recorded no effect id, ` +
-          `so there is nothing to match an answer against. Nothing was written.\n`,
+          `so there is nothing to match an answer against, and only a hand edit of the state ` +
+          `document clears the record. Nothing was written.\n`,
       )
       return 1
     }
