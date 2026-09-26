@@ -3040,6 +3040,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               // never ran indistinguishable from one that ran and produced
               // nothing — which is the exact confusion this gate exists to end.
               case 'dependency_failed': {
+                // Remembered for its dependents, which `topoSort` puts at
+                // strictly later levels, so no plugin reads a same-level
+                // addition. Still no `plugin_runs` write: the hold lives in
+                // this set for this advance only. Recorded first, before any
+                // I/O or host code runs, so neither can leave the fact the
+                // dependents rely on unrecorded.
+                heldThisAdvance.add(pluginName)
                 const dependencyFailedElapsed = Date.now() - entryStart
                 plugin_entries.push({
                   plugin: pluginName,
@@ -3051,11 +3058,6 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 })
                 await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
                 onPluginEnd?.(pluginName, 'skipped', dependencyFailedElapsed, 'dependency failed')
-                // Remembered for its dependents, which `topoSort` puts at
-                // strictly later levels, so no plugin reads a same-level
-                // addition. Still no `plugin_runs` write: the hold lives in
-                // this set for this advance only.
-                heldThisAdvance.add(pluginName)
                 return
               }
 

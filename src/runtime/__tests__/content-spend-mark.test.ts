@@ -429,7 +429,8 @@ describe('a content approval is marked spent before the handler runs', () => {
    * is not cleared: a `failed` return does not prove the sink never received the
    * bytes — the handler had already written its sentinel before it decided it
    * had failed — and clearing it would re-arm a send that may well have gone
-   * out. The operator resolves it at the sink with the effect id.
+   * out. The operator checks the sink with the effect id and, when nothing
+   * arrived, answers the fire with `warpline resolve`.
    */
   test('a handler returning failed leaves the record marked-unconfirmed', async () => {
     await seedLiveApproval('fails')
@@ -821,7 +822,8 @@ describe("the spend mark's own write throwing is mark_uncertain, reached through
     expect(text).not.toContain(WRITE_SENTINEL)
 
     // The mark landed, and the rolled-back in-memory record must not undo it:
-    // on the unmarked in-memory row of the merge, disk wins. `marked_at` first,
+    // the rolled-back mark leaves the plugin out of the set of records this
+    // advance marked (`markedThisAdvance`), so the disk wins. `marked_at` first,
     // because it is the field an in-memory-wins merge would wipe.
     const record = (await readState()).approvals[CONSUMER]
     expect(record.marked_at).not.toBeNull()
