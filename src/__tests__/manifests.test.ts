@@ -276,6 +276,15 @@ describe('the shipped manifests', () => {
     expect(skill.slice(compare)).toMatch(/--remove[^.]*before the window\s+opens/)
   })
 
+  // `resolve --not-shipped` re-arms a send only the operator can know did not
+  // go out. The prohibition section check above passes without this bullet,
+  // so it is pinned on its own.
+  test('approve-review never runs warpline resolve itself', () => {
+    const skill = read(join(EXAMPLES_SKILLS_DIR, 'approve-review', 'SKILL.md'))
+    const prohibitions = skill.slice(skill.indexOf('## What you must NOT do'))
+    expect(prohibitions).toContain('Never run `warpline resolve` yourself.')
+  })
+
   test("every marketplace entry's version matches its plugin.json", () => {
     expect(marketplaceVersionOffenders(REPO_ROOT)).toEqual([])
   })
