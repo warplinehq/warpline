@@ -915,6 +915,89 @@ export function sideDoor(state: EngineState, p: string, r: unknown, t: string, i
     for (const drive of supersessionCases(RECOGNISED, SUPERSEDED_BY_A_LATER_RUN)) await drive()
   })
 
+  // The superseded refusal is step 2 of applying a gate because both refusals
+  // after it delete the entry, and here the entry is the later run's. So this
+  // gate is superseded AND past its ceiling AND over a dependency that re-ran:
+  // with the check anywhere but first, one of those discards the later run's
+  // entry, `last_output` included. The later run is planted, because a forced
+  // advance would re-run the dependency too and park it under the review gate.
+  test('a superseded gate that has also expired over a moved dependency is refused as superseded, keeps the entry, and says so once', async () => {
+    const h = await setup({ review_gate: true })
+    const UP = 'up'
+    const manifestOf = (name: string, dependencies: string[]) =>
+      `export const manifest = ${JSON.stringify({
+        name,
+        version: '1.0.0',
+        description: name,
+        inputs: {},
+        outputs: { brief: { type: 'json' } },
+        capabilities: [],
+        schedule: 'on_run',
+        autonomy_level: 'autonomous',
+        side_effects: [],
+        approval_class: 'session',
+        ttl_hours: 24,
+        dependencies,
+        timeout_ms: 5000,
+        max_retries: 0,
+        retry_delay_ms: 10,
+        max_parallelism: 1,
+        min_tier: 'suspended',
+      })}`
+    await mkdir(join(h.pluginsDir, UP), { recursive: true })
+    await writeFile(join(h.pluginsDir, UP, 'manifest.ts'), manifestOf(UP, []))
+    await writeFile(
+      join(h.pluginsDir, UP, 'handler.ts'),
+      await readFile(join(h.pluginsDir, PLUGIN, 'handler.ts'), 'utf-8'),
+    )
+    await writeFile(join(h.pluginsDir, PLUGIN, 'manifest.ts'), manifestOf(PLUGIN, [UP]))
+    const statePath = join(h.stateDir, 'engine-state.json')
+    // The dependency ran a minute ago: fresh, so it is not re-run and parks nothing.
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        plugin_runs: { [UP]: { last_run_at: new Date(Date.now() - 60_000).toISOString(), status: 'success' } },
+      }),
+    )
+
+    const parked = await advance(h)
+    expect((await persisted(h)).status).toBe('gated')
+
+    const doc = JSON.parse(await readFile(statePath, 'utf-8')) as EngineState
+    const gate = doc.pending_gates.find((g) => g.plugin === PLUGIN && g.applied_at === null)!
+    expect(gate.run_id).toBe(parked.run_id)
+    // A later run of the plugin wrote the entry, the dependency re-ran after the
+    // gated run started, and the gate completed 30 hours ago, past the 23 h ceiling.
+    doc.plugin_runs[PLUGIN] = { ...doc.plugin_runs[PLUGIN]!, run_id: 'run-later', status: 'failed' }
+    doc.plugin_runs[UP] = { ...doc.plugin_runs[UP]!, last_run_at: new Date(Date.now() + 60_000).toISOString() }
+    gate.run_completed_at = new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString()
+    await writeFile(statePath, JSON.stringify(doc))
+
+    const applied = await approve([PLUGIN])
+    expect(applied.code, applied.output).toBe(1)
+    expect(applied.output).toContain('ran again after this result was parked')
+
+    const kept = await persisted(h)
+    expect(kept['run_id']).toBe('run-later')
+    expect(kept.status).toBe('failed')
+    expect(kept.last_output?.run_id).toBe(parked.run_id)
+
+    // The CLI apply writes the home's default log, under `state/`.
+    const events = (await readFile(join(h.stateDir, 'events.jsonl'), 'utf-8'))
+      .split('\n')
+      .filter((l) => l !== '')
+      .map((l) => JSON.parse(l) as { type: string; metadata_json: string | null })
+    const discards = events
+      .map((e) => ({ type: e.type, meta: JSON.parse(e.metadata_json ?? '{}') as Record<string, unknown> }))
+      .filter((e) => e.meta['event'] === 'gate_invalidated' || e.meta['event'] === 'gate_expired')
+    expect(discards).toEqual([
+      {
+        type: 'notice',
+        meta: { event: 'gate_invalidated', plugin: PLUGIN, run_id: parked.run_id, reason: 'superseded' },
+      },
+    ])
+  })
+
   test("a row stamping a run other than the writer's own is refused until it has a supersession case", () => {
     const row: Recognised = {
       file: 'src/runtime/engine.ts',
