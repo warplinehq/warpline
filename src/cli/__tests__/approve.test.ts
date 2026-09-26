@@ -27,6 +27,7 @@ import {
   proposalFingerprint,
 } from '../../runtime/engine.js'
 import type { EvalContext } from '../../runtime/engine.js'
+import { deriveHost } from '../../runtime/lock.js'
 import { readEngineState } from '../../runtime/engine-state-store.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
@@ -2137,6 +2138,40 @@ describe('warpline approve --content', () => {
     // Stale is not this verb's to heal. The next advance's acquire does that.
     expect(await readFile(lockPath(), 'utf-8')).toBe(lock)
   })
+
+  // A live pid on this machine outranks the age. Handlers run in-process, so a
+  // suspended advance (Ctrl-Z, then `fg`), a blocking handler, or a sleeping
+  // laptop all stop the heartbeat while the fire can still land. The heal path
+  // accepts that cost. A verb whose whole job is "no fire is still in flight"
+  // does not. Skipped only where this machine cannot identify itself, since a
+  // null host is never compared, as `engine.test.ts` skips under root.
+  test.skipIf(deriveHost() === null)(
+    'C29b: a silent run lock held by a live process on this machine still blocks resolving',
+    async () => {
+      await writeContentPair()
+      await seedContentState(true)
+      await putApproval(approvalFor(MARKED))
+      const at = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString()
+      const lock = JSON.stringify({
+        acquired_at: at,
+        heartbeat_at: at,
+        run_id: 'run-lock-planted',
+        mode: 'advance',
+        pid: process.pid,
+        host: deriveHost(),
+      })
+      await writeFile(lockPath(), lock)
+      const before = await approvalsOnDisk()
+
+      const { code, stdout, stderr } = await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id])
+
+      expect({ code, stdout }).toEqual({ code: 1, stdout: '' })
+      expect(stderr).toContain('An advance is running')
+      expect(stderr).toContain('Nothing was written')
+      expect(await approvalsOnDisk()).toBe(before)
+      expect(await readFile(lockPath(), 'utf-8')).toBe(lock)
+    },
+  )
 
   test('C30: resolving a plugin with no record does not echo the name it was given', async () => {
     await writeContentPair()
