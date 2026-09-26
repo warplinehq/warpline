@@ -130,8 +130,9 @@ export const handler: CapabilityHandlerFn = async (manifest, args, _signal, capa
   const FAILED = { phases_failed: [manifest.name], impact: 'HIGH' as const, retryable: false }
   const fail = (message: string) => skillFailure('parse_error', `${manifest.name}: ${message}`, FAILED)
   // An empty outbox, never no Output. With no Output the runtime carries the
-  // last one forward, and an outbox already approved would still be sent,
-  // to a contact who has replied since.
+  // last one forward, and cadence-send refuses to ship it until this plugin
+  // produces again. The empty outbox says "nothing to send" in bytes an
+  // operator can read and approve, and it replaces the old outbox at once.
   const EMPTY = JSON.stringify({ outbox: [], review_tasks: [] })
   const nothing = (why: string) => skillOk(`${manifest.name}: ${why}`, {
     phases_completed: [manifest.name],

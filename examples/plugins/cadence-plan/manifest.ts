@@ -18,8 +18,11 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * task in the body, as data for a person to act on. Nothing here hands off.
  *
  * A run with nothing to plan, a missing contacts or steps file for example,
- * outputs an empty outbox. It never outputs nothing: the runtime would carry
- * the last outbox forward, and one already approved would still be sent.
+ * outputs an empty outbox. It never outputs nothing. With no Output the runtime
+ * carries the last outbox forward, and `cadence-send` refuses to ship it until
+ * this plugin produces again. The empty outbox is kept because it says
+ * "nothing to send" in bytes an operator can read and approve, and it replaces
+ * the old outbox at once.
  *
  * The body carries no run timestamp and every list in it is sorted. Re-running
  * before the send fires reproduces the same bytes, so the approval stays live.

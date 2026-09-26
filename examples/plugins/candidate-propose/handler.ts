@@ -85,8 +85,10 @@ export const handler: CapabilityHandlerFn = async (manifest, args, _signal, _cap
   } catch {
     return fail("the file named by input 'pool_path' is unreadable or not JSON")
   }
-  // An empty proposal, not no Output. With no Output the runtime keeps last
-  // week's proposal as this plugin's latest, and it would stay approvable.
+  // An empty proposal, not no Output. With no Output the runtime carries last
+  // week's proposal forward, and candidate-promote refuses to ship it until
+  // this plugin produces again. The empty proposal says "no candidates" in
+  // bytes an operator can read and approve, and it replaces the old one at once.
   if (raw === null) {
     return skillOk(`${manifest.name}: no pool at the configured path — proposing nothing, which replaces the last proposal`, {
       phases_completed: [manifest.name],

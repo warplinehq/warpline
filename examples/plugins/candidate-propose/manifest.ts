@@ -16,8 +16,10 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * Each proposal replaces the last. That is the `outputs` default, `replace`
  * temporality, and nothing is kept in state, so there is no history to grow
  * and no old proposal to approve by mistake. A missing pool file still emits
- * a proposal, an empty one, because a run with no Output would leave last
- * week's proposal in place and still approvable.
+ * a proposal, an empty one. With no Output the runtime carries last week's
+ * proposal forward, and `candidate-promote` refuses to ship it until this
+ * plugin produces again. The empty proposal says "no candidates" in bytes an
+ * operator can read and approve, and it replaces the old proposal at once.
  *
  * The cap of three is the point, not a tuning knob. A proposer that floods
  * the operator is one nobody reads, so it is a constant in the handler and
