@@ -170,7 +170,12 @@ The builders construct the three results a plugin writes — `skillOk`,
 `schema_version` to the schema's own default. No builder emits `partial`. A
 side-effecting batch that stopped part-way sets it over a built result,
 `{ ...skillOk(summary, overrides), status: 'partial' }`; the bundled
-`anomaly-issue` is the worked case.
+`anomaly-issue` is the worked case. Nothing going out is not part-way: a
+handler that shipped nothing returns `failed`. For a content-class plugin that
+leaves the approval `indeterminate` until the operator checks the sink by
+effect id, answers it with `warpline resolve <plugin> --not-shipped <effect-id>`
+and approves again. Widening `partial` to avoid that state is wrong, because
+consumers read `partial` as "some bytes went out".
 
 Rules the runtime holds you to:
 

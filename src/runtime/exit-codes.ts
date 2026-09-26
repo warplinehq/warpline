@@ -123,8 +123,9 @@ export function advanceCounts(result: AdvanceOutcome): AdvanceCounts {
  *
  * One case stays quiet and leaves stuck state: a write that throws AFTER its
  * rename landed. That advance exits `0`, and the next one refuses with
- * `indeterminate`, which no operator gesture resolves today. It shows through
- * `refused`, `--json`, the dead-man file and `--strict`, and nowhere louder.
+ * `indeterminate`, which the operator answers with `warpline resolve` once the
+ * sink shows nothing shipped. It shows through `refused`, `--json`, the
+ * dead-man file and `--strict`, and nowhere louder.
  *
  * **This decision is coupled to that end-of-run write.** If anyone ever wraps it
  * in a `catch`, storage faults stop failing the advance, both mark reasons
