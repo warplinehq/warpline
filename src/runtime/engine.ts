@@ -826,6 +826,21 @@ export interface EvalContext {
    * docs/runtime-spec.md § "What the dependency gate does not cover".
    */
   dueAtEarlierLevel?: ReadonlySet<string>
+  /**
+   * Plugins an EARLIER LEVEL of this same advance or preview held back for
+   * `dependency_failed`.
+   *
+   * Both callers supply one. `runAdvance` fills it as it goes, in its
+   * `dependency_failed` arm; `plan` fills it at each level boundary from its own
+   * verdicts. A held plugin writes no `plugin_runs` record, so this is the only
+   * place the hold survives into the next level, and without it a dependent two
+   * hops down reads a stale record and runs against it.
+   *
+   * Optional because an evaluation with no earlier level has held nothing. The
+   * two real callers are pinned by behaviour, not by the compiler: the cadence
+   * example under `runAdvance` and `plan.test.ts` Test 2c.
+   */
+  heldAtEarlierLevel?: ReadonlySet<string>
 }
 
 /**
@@ -876,36 +891,6 @@ export interface Gate {
   detail: (g: GateInput) => string
 }
 
-/**
- * The declared dependencies whose LAST RECORDED RUN failed, in the order the
- * manifest declares them.
- *
- * `manifest.dependencies` order and not sorted order, because that is the order
- * the dependency-run projection below already preserves and the order the author
- * wrote; two orderings of the same list is one more place for two answers to
- * disagree.
- *
- * The read is `plugin_runs[d]?.status` and nothing else. There is no second
- * check for "did this dependency legitimately not run": the run record is
- * written only where a run actually happened, so no not-due reason can ever
- * appear in it, and a defensive check would imply a second source of truth for
- * a fact this record already holds alone. Nor is there a roster check for a
- * declared name that is not installed — that would be a second dependency
- * signal, and the case is named in `docs/runtime-spec.md` instead.
- *
- * A name with no entry answers `undefined`, which is not `'failed'`, so a
- * dependency that never ran cannot gate anything. That is also what makes the
- * plain index read safe on an inherited key: `plugin_runs['toString']` answers
- * with a function whose `.status` is `undefined`, and `undefined !== 'failed'`.
- *
- * The second clause is the caller's own projection, and only `plan` supplies
- * one: a dependency this same preview already decided is due is a dependency
- * whose latch this advance is about to overwrite, so reporting its dependent as
- * gated would publish a skip that is not going to happen. The whole `ctx` is
- * taken rather than `ctx.state` because of it — one chokepoint for both the
- * predicate and the detail, so a filtered dependency cannot be dropped from one
- * and named in the other.
- */
 /**
  * The content class's half of the approval entry, as a NAMED module-level
  * function rather than a ternary inside the entry's arrow.
@@ -1784,10 +1769,55 @@ function confirmContentMarks(
   return out
 }
 
-function failedDependencies(manifest: PluginManifest, ctx: EvalContext): string[] {
-  return manifest.dependencies.filter(
+/**
+ * The declared dependencies whose LAST RECORDED RUN failed, and the ones an
+ * earlier level of this same advance held back, in the order the manifest
+ * declares them.
+ *
+ * `manifest.dependencies` order and not sorted order, because that is the order
+ * the dependency-run projection below already preserves and the order the author
+ * wrote; two orderings of the same list is one more place for two answers to
+ * disagree.
+ *
+ * The read is `plugin_runs[d]?.status` and nothing else. There is no second
+ * check for "did this dependency legitimately not run": the run record is
+ * written only where a run actually happened, so no not-due reason can ever
+ * appear in it, and a defensive check would imply a second source of truth for
+ * a fact this record already holds alone. Nor is there a roster check for a
+ * declared name that is not installed — that would be a second dependency
+ * signal, and the case is named in `docs/runtime-spec.md` instead.
+ *
+ * A name with no entry answers `undefined`, which is not `'failed'`, so a
+ * dependency that never ran cannot gate anything. That is also what makes the
+ * plain index read safe on an inherited key: `plugin_runs['toString']` answers
+ * with a function whose `.status` is `undefined`, and `undefined !== 'failed'`.
+ *
+ * The second clause is the caller's own projection, and only `plan` supplies
+ * one: a dependency this same preview already decided is due is a dependency
+ * whose latch this advance is about to overwrite, so reporting its dependent as
+ * gated would publish a skip that is not going to happen. The whole `ctx` is
+ * taken rather than `ctx.state` because of it — one chokepoint for both the
+ * predicate and the detail, so a filtered dependency cannot be dropped from one
+ * and named in the other.
+ *
+ * The held group is the second arm, and it is a fact of THIS advance, not of
+ * the record. A plugin held back for `dependency_failed` writes no run record,
+ * so nothing in `plugin_runs` says it was held: its old record, `success`
+ * included, is still there. That is why the set travels on the context
+ * (`heldAtEarlierLevel`) and why a name in `failed` is never repeated in
+ * `held`. Both groups keep manifest order.
+ */
+function failedDependencies(
+  manifest: PluginManifest,
+  ctx: EvalContext,
+): { failed: string[]; held: string[] } {
+  const failed = manifest.dependencies.filter(
     (d) => ctx.state.plugin_runs[d]?.status === 'failed' && !ctx.dueAtEarlierLevel?.has(d),
   )
+  const held = manifest.dependencies.filter(
+    (d) => ctx.heldAtEarlierLevel?.has(d) === true && !failed.includes(d),
+  )
+  return { failed, held }
 }
 
 /**
@@ -1917,7 +1947,11 @@ export const GATES: readonly Gate[] = [
   // the outcome as well as the reason: the side-effecting consumer gets no run
   // record and its handler is never entered.
   //
-  // What arms it is one status on one existing record, and only that one.
+  // What arms it is one status on one existing record, or a dependency this
+  // advance already held back for this same reason, and only those two. The
+  // second is the second hop: in A → B → C, a B held back writes no record, so
+  // without it C would read B's old record, find no failure, and run against
+  // whatever B last left behind.
   // `skipped` does not: a plain skip and a `[needs-llm]` handoff lead a consumer
   // to the same action, which is to read the carried-forward Output, and gating
   // on it would break every judgment chain in the repository. `gated` does not:
@@ -1928,7 +1962,10 @@ export const GATES: readonly Gate[] = [
   // anything.
   {
     reason: 'dependency_failed',
-    applies: ({ manifest, ctx }) => failedDependencies(manifest, ctx).length > 0,
+    applies: ({ manifest, ctx }) => {
+      const { failed, held } = failedDependencies(manifest, ctx)
+      return failed.length > 0 || held.length > 0
+    },
     // Declared plugin names and one closed enum value. Nothing else may be
     // interpolated here: this string reaches the run log's `result_summary`, the
     // board event and `warpline plan`, all of which are read and shared, and
@@ -1942,10 +1979,17 @@ export const GATES: readonly Gate[] = [
     // string — but the second author already exists and is `emitPluginSkipped`,
     // which formats `${plugin}: skipped — ${reason}`, so the prefix here made
     // the board say `skipped` twice about one plugin.
-    detail: ({ manifest, ctx }) =>
-      `dependency failed — ${failedDependencies(manifest, ctx)
-        .map((d) => `'${d}'`)
-        .join(', ')} last recorded status 'failed'`,
+    //
+    // Two groups, failed first, joined by `; `. A plugin with only failed
+    // dependencies reads byte for byte as it did before the held group existed.
+    detail: ({ manifest, ctx }) => {
+      const { failed, held } = failedDependencies(manifest, ctx)
+      const names = (ds: string[]) => ds.map((d) => `'${d}'`).join(', ')
+      const parts: string[] = []
+      if (failed.length > 0) parts.push(`${names(failed)} last recorded status 'failed'`)
+      if (held.length > 0) parts.push(`${names(held)} held back by a failed dependency`)
+      return `dependency failed — ${parts.join('; ')}`
+    },
   },
 
   // -- Denial: a human already said no to this exact proposal --------
@@ -2668,6 +2712,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
      * an apply's entry is dated at its gated run's completion.
      */
     const ranThisAdvance = new Map<string, StoredSkillResult | null>()
+    /**
+     * The plugins this advance held back for `dependency_failed`. A held plugin
+     * writes no run record, so its dependents at later levels learn of the hold
+     * here and nowhere else (`heldAtEarlierLevel`).
+     */
+    const heldThisAdvance = new Set<string>()
     const plugin_entries: RunLog['plugin_entries'] = []
 
     // Seeded BEFORE the overall-status block below, and the ordering is the
@@ -2694,6 +2744,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // producer, and the fingerprint is computed over that producer's
       // manifest.
       manifests: plugins,
+      heldAtEarlierLevel: heldThisAdvance,
     }
 
     // 7. Execute each level
@@ -2830,6 +2881,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 })
                 await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
                 onPluginEnd?.(pluginName, 'skipped', dependencyFailedElapsed, 'dependency failed')
+                // Remembered for its dependents, which `topoSort` puts at
+                // strictly later levels, so no plugin reads a same-level
+                // addition. Still no `plugin_runs` write: the hold lives in
+                // this set for this advance only.
+                heldThisAdvance.add(pluginName)
                 return
               }
 

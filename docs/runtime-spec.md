@@ -1508,7 +1508,13 @@ The dueness evaluator is a second reader of the record, and the first reader for
 which `status` decides whether a plugin runs at all. A plugin holding a declared
 dependency whose entry here records `failed` is not due, for the reason
 `dependency_failed`, and is recorded `skipped` with a summary naming every such
-dependency in manifest-declared order. Until that gate existed, the dependent ran
+dependency in manifest-declared order. A plugin whose declared dependency an
+earlier level of the same advance held back for this reason is held back too.
+That dependency is named `'<name>' held back by a failed dependency`, after any
+that recorded `failed`, separated by `; `:
+`dependency failed — 'a' last recorded status 'failed'; 'b' held back by a failed dependency`.
+A plugin whose dependencies only recorded `failed` reads exactly as before. Until
+that gate existed, the dependent ran
 and read whatever the failed producer had left behind on an earlier cycle — a
 diff-against-history consumer then reported "no change" for a cycle in which
 nothing was observed, and no field distinguished the two.
@@ -1566,7 +1572,17 @@ extended casually.
 
 #### What the dependency gate does not cover
 
-Five limitations, written down here rather than left for a reader to discover.
+**Transitive within an advance.** In a chain A → B → C, a B held back writes no
+run record, so the hold is not stored. B's own recorded status stays whatever it
+last was, very likely `success`. The hold is derived again on every advance,
+level by level, from A's failed record: B is held because A recorded `failed`,
+and C is held because this advance held B. This holds for every consumer class.
+A chain member that is still fresh is not due, holds nothing, and its dependents
+read its fresh Output, which is what its TTL promises. On upgrade, more plugins
+read `dependency_failed` than before, in every fleet: a scheduler or dashboard
+keyed on skip counts sees the change. No field, status or board event changed.
+
+Four limitations, written down here rather than left for a reader to discover.
 
 **The latch, and how it clears.** The gate reads the LAST run's status, so a
 dependency whose last run failed gates its dependents until it runs again
@@ -1581,12 +1597,6 @@ the worst case — one deleted from the plugin directory outright, whose stale
 `failed` record outlives its manifest and can never be overwritten. A dependent
 declaring a dropped dependency is then gated permanently. Editing
 `engine-state.json` is the only way out.
-
-**One hop only.** In a chain A → B → C, a B gated by this reason writes no run
-record, so B's own recorded status stays whatever it last was — very likely
-`success`. C is therefore not gated, and once C's own freshness window expires it
-runs against B's stale data, which is exactly the failure the gate closes one
-level up. Every one-hop edge is covered; the second hop is not.
 
 **A manifest that never loaded is a blind spot.** A plugin whose `manifest.ts`
 fails to import is recorded as a `failed` run-log entry and a failed engine
@@ -1610,12 +1620,16 @@ from publishing a skip for every dependent on the self-clearing path above, the
 evaluator takes an optional `dueAtEarlierLevel` set — the plugins an earlier
 level of the same preview already found due — and does not gate on a dependency
 in it. Only `plan` supplies one; an advance leaves it undefined, because its
-state is already the answer.
+state is already the answer. The preview derives the second hop from its own
+`dependency_failed` verdicts, so it reports one only where it already reported
+the first, and the direction below is unchanged.
 
 That assumes a due producer clears its latch, which `plan` cannot know. A
 producer that is due and fails again leaves `plan` reporting a dependent **due**
-where the advance skips it. The reverse can no longer happen: the set only ever
-removes a `dependency_failed` verdict, never adds one. The direction is the
+where the advance skips it, and reports that dependent's own dependents due
+where the advance holds them too. The reverse can no longer happen: the due set
+only ever removes a `dependency_failed` verdict, and the held set adds one only
+behind a verdict the advance also reaches. The direction is the
 point. This runtime asks a human to approve side effects on the strength of what
 the preview showed, so a preview that under-states an advance is the input to a
 wrong answer, and one that over-states it is only a plugin that did not run.

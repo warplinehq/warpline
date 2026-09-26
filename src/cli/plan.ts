@@ -169,6 +169,18 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
    * change a verdict, and a set that is what its name says is worth two lines.
    */
   const dueAtEarlierLevel = new Set<string>()
+  /**
+   * Every plugin an earlier level of THIS preview held back for
+   * `dependency_failed`, so its dependents are held back too, as the advance
+   * holds them from its own skips.
+   *
+   * The preview reports a second-hop hold only where its own verdict already
+   * reported the first hop, and those verdicts never report a skip the advance
+   * would not make. So the direction the spec requires, a preview that may
+   * over-state an advance and never under-state it, is unchanged. Filled at the
+   * level boundary, as `dueAtEarlierLevel` is.
+   */
+  const heldAtEarlierLevel = new Set<string>()
 
   const restorePaths = _getPaths()
   _setPaths(pathsForStateFile(statePath, { eventsPath: eventsJsonlPath() }))
@@ -176,12 +188,13 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
     await withoutStateBackups(async () => {
       for (const [level, names] of levels.entries()) {
         const dueThisLevel: string[] = []
+        const heldThisLevel: string[] = []
         // Sorted here so ordering is decided once, in the builder; the renderer
         // sorts defensively but does not own the policy.
         for (const name of [...names].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
           const manifest = manifests.get(name)
           if (!manifest) continue
-          const evaluation = await evaluatePlugin(name, manifest, { ...ctx, dueAtEarlierLevel }, now)
+          const evaluation = await evaluatePlugin(name, manifest, { ...ctx, dueAtEarlierLevel, heldAtEarlierLevel }, now)
           const entry = {
             plugin: name,
             level,
@@ -224,9 +237,13 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
           if (evaluation.due) {
             due.push(entry)
             dueThisLevel.push(name)
-          } else notDue.push({ ...entry, reason: evaluation.reason, detail: evaluation.detail })
+          } else {
+            notDue.push({ ...entry, reason: evaluation.reason, detail: evaluation.detail })
+            if (evaluation.reason === 'dependency_failed') heldThisLevel.push(name)
+          }
         }
         for (const name of dueThisLevel) dueAtEarlierLevel.add(name)
+        for (const name of heldThisLevel) heldAtEarlierLevel.add(name)
       }
     })
   } finally {
