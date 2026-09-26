@@ -279,6 +279,41 @@ describe('the cadence example under runAdvance', () => {
     expect(stopped.stopped).toEqual(['c-1'])
   })
 
+  // The reply reader fails, so the plan is held back and writes no record. Its
+  // last success, and the outbox under the live approval, are still on file.
+  // The approval is unmarked and the bytes still match it, so the only thing
+  // between those five emails and their recipients is the hold reaching the
+  // send, two hops down. Zero calls, and an unmarked approval, prove it did.
+  test('a failing reply reader holds the send back, so a contact who replied is not emailed', async () => {
+    await advance()
+    await approveByContent()
+    const approvedBody = pluginRuns()['cadence-plan']?.last_output?.body
+    // A reply the reader cannot read: the file is not JSON.
+    writeFileSync(join(ctx.root, 'state', 'replies.json'), '{"replies": [{"contact_id": "c-1"}')
+    const calls = mailStub()
+
+    const result = await advance({ force: true })
+
+    expect(calls).toHaveLength(0)
+    expect(pluginRuns()['cadence-replies']?.status).toBe('failed')
+    expect(pluginRuns()['cadence-plan']?.status).toBe('success')
+    expect(pluginRuns()['cadence-plan']?.last_output?.body).toBe(approvedBody)
+    expect(result.plugin_states.get('cadence-send')).toBe('skipped')
+    const log = JSON.parse(readFileSync(result.run_log_path, 'utf-8')) as {
+      plugin_entries: { plugin: string; status: string; result_summary: string }[]
+    }
+    const entry = log.plugin_entries.find((e) => e.plugin === 'cadence-send')
+    expect(entry?.status).toBe('skipped')
+    expect(entry?.result_summary).toBe(
+      "skipped: dependency failed — 'cadence-plan' held back by a failed dependency",
+    )
+    expect(existsSync(ledgerPath())).toBe(false)
+    const state = JSON.parse(readFileSync(join(ctx.stateDir, 'engine-state.json'), 'utf-8')) as {
+      approvals: Record<string, { marked_at: string | null }>
+    }
+    expect(state.approvals['cadence-send']?.marked_at).toBeNull()
+  })
+
   // WR-01. The runtime's timeout wins its race against the handler and records
   // the run `failed`, whatever went out first, and a failed content fire reads
   // `indeterminate` for good. cadence-send has to stop itself before that.

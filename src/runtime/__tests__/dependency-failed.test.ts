@@ -326,6 +326,42 @@ export async function handler(manifest, args, signal, capabilities) {
     expect(entry!.status).toBe('completed')
     expect(await home.persistedRun('consumer')).toBeDefined()
   })
+
+  test('a plugin whose dependency was held back by a failed dependency is held back too', async () => {
+    // A session-class chain, so the hold is shown to be a property of the gate
+    // and not of any approval class. `mid` is held and writes no record, so the
+    // only way `tail` learns of the failure is this advance remembering it.
+    // `both` declares the failed producer and the held one, in that order, so
+    // the detail's two groups and their order are pinned in one string.
+    await home.writePlugin('prod', {
+      outputs: { brief: {} },
+      handlerBody: home.producer('failed'),
+    })
+    await home.writePlugin('mid', { dependencies: ['prod'], handlerBody: CONSUMER })
+    await home.writePlugin('tail', { dependencies: ['mid'], handlerBody: CONSUMER })
+    await home.writePlugin('both', { dependencies: ['prod', 'mid'], handlerBody: CONSUMER })
+
+    await home.setMarker()
+    const r1 = await home.advance()
+
+    // PRESENCE. The cause, before any skip is attributed to it.
+    expect((await home.persistedRun('prod'))?.status).toBe('failed')
+
+    expect((await home.entryFor(r1.run_log_path, 'mid'))?.result_summary).toBe(
+      "skipped: dependency failed — 'prod' last recorded status 'failed'",
+    )
+    expect((await home.entryFor(r1.run_log_path, 'tail'))?.result_summary).toBe(
+      "skipped: dependency failed — 'mid' held back by a failed dependency",
+    )
+    expect((await home.entryFor(r1.run_log_path, 'both'))?.result_summary).toBe(
+      "skipped: dependency failed — 'prod' last recorded status 'failed'; 'mid' held back by a failed dependency",
+    )
+    // None of the three ran, so none has a record. A record for `tail` would
+    // mean it was invoked against whatever `mid` left behind.
+    expect(await home.persistedRun('mid')).toBeUndefined()
+    expect(await home.persistedRun('tail')).toBeUndefined()
+    expect(await home.persistedRun('both')).toBeUndefined()
+  })
 })
 
 /**

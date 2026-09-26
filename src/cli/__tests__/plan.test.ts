@@ -875,6 +875,41 @@ describe('plan ≡ what a run would attempt', () => {
     expect([...attempted].filter((p) => !planned.has(p))).toEqual([])
   })
 
+  /**
+   * The second hop, on both surfaces. `held-root` is seeded failed and fresh,
+   * so it holds still and holds `held-mid` back. `held-mid` writes no record,
+   * so the preview can only hold `held-tail` back from its own verdict about
+   * `held-mid`, which is what the advance does from its own skip. A preview
+   * that read the state document alone would report `held-tail` due, the
+   * advance would skip it, and the equality below would name it.
+   */
+  test('Test 2c: a dependency held back by a failed dependency holds back its dependent in both', async () => {
+    const tolerant = { min_tier: 'suspended' }
+    await writePlugin(home, 'held-root', tolerant)
+    await writePlugin(home, 'held-mid', { ...tolerant, dependencies: ['held-root'] })
+    await writePlugin(home, 'held-tail', { ...tolerant, dependencies: ['held-mid'] })
+    for (const name of ['held-root', 'held-mid', 'held-tail']) await writeHandler(home, name)
+
+    await writeState(home, {
+      // 1 hour into a 24h TTL: fresh, so the advance does not re-run it.
+      'held-root': { last_run_at: new Date(Date.now() - 3_600_000).toISOString(), status: 'failed' },
+    })
+
+    const { statePath, eventsPath } = routeStateManager()
+    const model = await buildPlanModel(Date.now(), 'daily')
+    const attempted = await attemptedByRun(statePath, eventsPath, 'daily')
+
+    const notDue = (n: string) => model.notDue.find((e) => e.plugin === n)
+    expect(notDue('held-mid')?.reason).toBe('dependency_failed')
+    expect(notDue('held-tail')?.reason).toBe('dependency_failed')
+    expect(notDue('held-tail')?.detail).toBe(
+      "dependency failed — 'held-mid' held back by a failed dependency",
+    )
+    expect(attempted.has('held-mid')).toBe(false)
+    expect(attempted.has('held-tail')).toBe(false)
+    expect(model.due.map((e) => e.plugin).sort()).toEqual([...attempted].sort())
+  })
+
   test('Test 3: with no engine-state.json at all, every plugin is never-run, due, and attempted', async () => {
     // createTestHome writes no state file — this is the fresh-install shape an
     // operator hits on their first `warpline plan`, and the case where every
