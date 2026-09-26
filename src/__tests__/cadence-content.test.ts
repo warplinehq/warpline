@@ -22,6 +22,13 @@
  * without it `cadence-send` is skipped as fresh inside its one-hour TTL and
  * the approval gate is never reached.
  *
+ * A stop that sent nothing is the other recovery. The mail API refuses the
+ * first email, so the run is `failed` and the approval reads `indeterminate`:
+ * the runtime cannot see the sink, so it holds every advance after, until the
+ * operator answers the fire. `warpline resolve --not-shipped` with the fire's
+ * effect id is that answer, and a re-approval of the unchanged outbox then
+ * sends all five.
+ *
  * Both home instances are re-rooted. The examples import `warpline/lib/paths`
  * through the package exports into `dist/`, while the engine and the approve
  * verb use `src/`. `_setHome` reaches only the second, so `WARPLINE_HOME` is
@@ -128,6 +135,32 @@ async function approveByContent(): Promise<string> {
     process.stdout.write = realOut
   }
   return stdout
+}
+
+/** `warpline resolve cadence-send --not-shipped <effect-id>`, in-process through the dispatcher, stdout captured. */
+async function resolveNotShipped(effectId: string): Promise<string> {
+  const realOut = process.stdout.write
+  let stdout = ''
+  process.stdout.write = ((chunk: string) => {
+    stdout += chunk
+    return true
+  }) as typeof process.stdout.write
+  try {
+    const { main } = await import('../cli/warpline.js')
+    const code = await main(['resolve', 'cadence-send', '--not-shipped', effectId])
+    expect(code).toBe(0)
+  } finally {
+    process.stdout.write = realOut
+  }
+  return stdout
+}
+
+/** cadence-send's content approval record, as the state document holds it. */
+function approvalRecord(): { marked_at: string | null; confirmed_at: string | null; effect_id: string | null } | undefined {
+  const state = JSON.parse(readFileSync(join(ctx.stateDir, 'engine-state.json'), 'utf-8')) as {
+    approvals: Record<string, { marked_at: string | null; confirmed_at: string | null; effect_id: string | null }>
+  }
+  return state.approvals['cadence-send']
 }
 
 /**
@@ -314,9 +347,10 @@ describe('the cadence example under runAdvance', () => {
     expect(state.approvals['cadence-send']?.marked_at).toBeNull()
   })
 
-  // WR-01. The runtime's timeout wins its race against the handler and records
-  // the run `failed`, whatever went out first, and a failed content fire reads
-  // `indeterminate` for good. cadence-send has to stop itself before that.
+  // The runtime's timeout wins its race against the handler and records the
+  // run `failed`, whatever went out first, and a failed content fire reads
+  // `indeterminate` until the operator answers it. Some emails went out here,
+  // so cadence-send has to stop itself before that and report `partial`.
   test('a send that runs out of time stops itself first: partial, and the rest go on a re-approved retry', async () => {
     shortTimeoutSend(2_000)
     await advance()
@@ -339,10 +373,11 @@ describe('the cadence example under runAdvance', () => {
     expect(ledger()).toEqual(RECIPIENTS.map((to, i) => [`c-${i + 1}:1`, to]))
   })
 
-  // WR-02. A `failed` content fire reads `indeterminate`, and nothing clears
-  // that. A non-2xx answer on the first email means nothing went out, so the
-  // run must spend the approval and leave a re-approved retry open.
-  test('a refused first email spends the approval, and a re-approved retry sends all five', async () => {
+  // Nothing went out, so the run is `failed`, never `partial`. The approval is
+  // left `indeterminate` and every advance refuses it without a call, until
+  // the operator checks the sink and answers the fire by its effect id. Only
+  // then does a re-approval of the unchanged outbox fire again.
+  test('a refused first email fails the run; resolved as not shipped and re-approved, the retry sends all five', async () => {
     await advance()
     await approveByContent()
     const first = mailStub(1)
@@ -350,14 +385,26 @@ describe('the cadence example under runAdvance', () => {
     await advance()
 
     expect(first).toHaveLength(1)
-    expect(pluginRuns()['cadence-send']?.status).toBe('partial')
+    expect(pluginRuns()['cadence-send']?.status).toBe('failed')
     expect(existsSync(ledgerPath())).toBe(false)
+    const record = approvalRecord()
+    expect(record?.marked_at).toEqual(expect.any(String))
+    expect(record?.confirmed_at).toBeNull()
 
+    const held = mailStub()
+    const refused = await advance({ force: true })
+
+    expect(held).toHaveLength(0)
+    expect(refused.refused_plugins).toEqual([{ plugin: 'cadence-send', reason: 'indeterminate' }])
+
+    expect(typeof record?.effect_id).toBe('string')
+    await resolveNotShipped(record!.effect_id!)
     await approveByContent()
     const retry = mailStub()
     await advance({ force: true })
 
     expect(retry.map((c) => c.to)).toEqual(RECIPIENTS)
     expect(pluginRuns()['cadence-send']?.status).toBe('success')
+    expect(ledger()).toEqual(RECIPIENTS.map((to, i) => [`c-${i + 1}:1`, to]))
   })
 })

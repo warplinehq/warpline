@@ -8,11 +8,9 @@
  * examples answer to it and not the other way round. One environment variable
  * per carrier, its name on `secrets` and ending `_TOKEN`. Sent as a Bearer
  * header and nowhere else. No refresh: rewriting the variable is the adopter's
- * job. A 401 stops the run with an `auth_failure` naming the secret. It fails
- * the run, except in cadence-send: there it is `partial`, because a `failed`
- * content fire leaves its approval `indeterminate` for good, and a 401 proves
- * nothing went out. An unset or empty secret refuses the run before the
- * handler is ever called.
+ * job. A 401 fails the run with an `auth_failure` naming the secret, in every
+ * carrier. An unset or empty secret refuses the run before the handler is
+ * ever called.
  *
  * Why `invokePlugin` and not the handler. Each carrier's own `handler.test.ts`
  * already calls its handler with the variable set. What that can't show is the
@@ -62,8 +60,6 @@ interface Carrier {
   readonly witness: CapabilityGrantWitness
   /** A file under the home the handler writes on success, which a 401 must leave unwritten. */
   readonly ledger?: string
-  /** The run status a 401 on the first request gives, when it is not `failed`. */
-  readonly on401?: 'partial'
 }
 
 const CARRIERS: readonly Carrier[] = [
@@ -120,7 +116,6 @@ const CARRIERS: readonly Carrier[] = [
     },
     witness: { granted: true, via: 'content-approval', fingerprint: 'credential-shape', effectId: 'credential-shape' },
     ledger: 'state/cadence-send.sent.json',
-    on401: 'partial',
   },
 ]
 
@@ -226,7 +221,7 @@ describe('the credential shape, over every token-carrying example', () => {
       await inHome(async (home) => {
         const { res, seen } = await invoke(c, home, 401, tokenFor(c))
         expect(seen.length).toBeGreaterThan(0)
-        expect(res.result.status).toBe(c.on401 ?? 'failed')
+        expect(res.result.status).toBe('failed')
         expect(res.result.errors[0]?.code).toBe('auth_failure')
         expect(res.result.errors[0]?.message).toContain(c.secret)
         expect(JSON.stringify(res)).not.toContain(tokenFor(c))
