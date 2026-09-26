@@ -41,6 +41,13 @@
  * opposite regression — a merge written the other way round, letting disk win
  * everything — which a test suite that only covered the red would not catch.
  *
+ * **An answer never lands mid-advance.** Of the three operator writes to a
+ * record an earlier advance marked (an answer, a re-approval, a removal), two
+ * land while the advance is parked and are kept. The answer is refused while
+ * any live advance holds the run lock, and is taken once it ends, so it has no
+ * merge to survive. The last describe pins why: the one record the advance
+ * could still overwrite is the one it marked, whose fire may still be landing.
+ *
  * Writes only into a temp home and one temp directory beside it. Nothing under
  * the repository is touched.
  */
@@ -85,11 +92,29 @@ const RESULT = `{
     schema_version: 1,
   }`
 
+/** The same, from a handler that says its send did not go out. */
+const FAILED_RESULT = `{
+    status: 'failed',
+    phases_completed: [],
+    phases_failed: ['run'],
+    errors: [{ code: 'dependency_unavailable', message: 'the sink refused', impact: 'HIGH', retryable: false }],
+    data_freshness: {},
+    summary: 'failed',
+    artifacts_produced: [],
+    schema_version: 1,
+  }`
+
 let home: TestHome
 /** One file per handler invocation, OUTSIDE the home so `cleanup()` cannot make an absence true for the wrong reason. */
 let firedDir: string
 /** The sender's handler blocks until this exists. The wedge. */
 let releasePath: string
+/**
+ * The advance a case parked and has not finished yet. A case that goes red
+ * before its `finish()` would otherwise leave that advance polling in the
+ * background, holding a lock in a home the next case no longer uses.
+ */
+let parked: Promise<unknown> | null = null
 
 const outputOf = (body: string): OutputRecord => ({ type: 'brief', format: 'json', body })
 
@@ -144,7 +169,7 @@ async function writeProducer(): Promise<void> {
  */
 async function writeConsumer(
   name: string,
-  opts: { blocks: boolean; ttlHours: number },
+  opts: { blocks: boolean; ttlHours: number; fails?: boolean },
 ): Promise<void> {
   const dir = join(home.pluginsDir, name)
   await mkdir(dir, { recursive: true })
@@ -187,7 +212,7 @@ async function writeConsumer(
 import { randomUUID } from 'node:crypto'
 export async function handler() {
   writeFileSync(${JSON.stringify(firedDir)} + '/${name}-' + randomUUID(), 'the effect fired')
-${block}  return ${RESULT}
+${block}  return ${opts.fails === true ? FAILED_RESULT : RESULT}
 }
 `,
   )
@@ -236,10 +261,12 @@ function approvalFor(state: EngineState, plugin: string): Approval {
  */
 async function seedHome(opts: {
   sibling?: 'absent' | 'installed' | 'installed-and-approved'
+  /** The sender returns `failed` once the wedge opens, leaving its mark unconfirmed. */
+  senderFails?: boolean
 } = {}): Promise<void> {
   const sibling = opts.sibling ?? 'absent'
   await writeProducer()
-  await writeConsumer(SENDER, { blocks: true, ttlHours: 0.001 })
+  await writeConsumer(SENDER, { blocks: true, ttlHours: 0.001, fails: opts.senderFails })
   if (sibling !== 'absent') await writeConsumer(SIBLING, { blocks: false, ttlHours: 24 })
 
   const state = defaultEngineState()
@@ -376,11 +403,13 @@ async function waitFor(predicate: () => boolean, what: string, ms = 15_000): Pro
 /** Park the advance inside the sender's handler and hand back the two halves. */
 async function wedgeOpen(): Promise<{ finish: () => Promise<EngineState> }> {
   const running = advance()
+  parked = running
   await waitFor(() => firedCount(SENDER) >= 1, 'the advance never entered the wedged handler')
   return {
     finish: async () => {
       writeFileSync(releasePath, 'go')
       await running
+      parked = null
       return readState()
     },
   }
@@ -401,6 +430,11 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  if (parked !== null) {
+    writeFileSync(releasePath, 'go')
+    await parked.catch(() => undefined)
+    parked = null
+  }
   // Restored unconditionally: the override is process-global and a home left
   // pointing at a removed temp dir leaks into whatever file bun runs next.
   _setHome(null)
@@ -513,26 +547,37 @@ describe('the advance merges approvals rather than overwriting them', () => {
   // The three cases below share one shape. The sibling's record is marked on
   // disk BEFORE the wedge opens, so the advance reads it marked at its start,
   // as an earlier advance left it, and never marks it itself: the sibling is
-  // fresh and does not fire. While the advance is parked, the operator writes
-  // that record: an answer, a re-approval, a removal. The advance's copy is
-  // the read it took at its start, so it can only be older than the disk, and
-  // writing it back undoes the operator. Nothing sends either way. What is
-  // lost is the operator's write, silently. Only a record THIS advance marked
+  // fresh and does not fire. While the advance is parked, the operator tries
+  // three writes to that record: an answer, a re-approval, a removal. The
+  // answer is refused while the advance runs, because the refusal is on the
+  // run lock and not on the record, and it is taken once the advance ends.
+  // The other two land, and the advance's copy is the read it took at its
+  // start, so it can only be older than the disk: writing it back would undo
+  // the operator. Nothing sends either way. Only a record THIS advance marked
   // may win over the disk, which the four cases above hold in place.
 
-  test('a resolution that lands mid-advance is not undone by the advance', async () => {
+  test('an answer attempted mid-advance is refused, even for a fire that advance did not mark, and is taken once it ends', async () => {
     await seedHome({ sibling: 'installed-and-approved' })
     const effectId = await markSiblingOnDisk({ confirmed: false })
     const wedge = await wedgeOpen()
 
-    const resolved = await runResolve([SIBLING, '--not-shipped', effectId])
-    expect(approveOutcome(resolved)).toEqual([0, ''])
-    // The positive control: the answer is on disk while the advance is parked.
-    expect((await readState()).approvals[SIBLING]?.not_shipped_at).toBeString()
+    const refused = await runResolve([SIBLING, '--not-shipped', effectId])
+    // A copy: bun's `toMatchObject` writes its matchers into the object it was
+    // handed, so the original would no longer hold the output for the lines below.
+    expect({ ...refused }).toMatchObject({ code: 1, output: expect.stringContaining('An advance is running') })
+    expect(refused.output).toContain('Nothing was written')
+    expect(Object.hasOwn((await readState()).approvals[SIBLING]!, 'not_shipped_at')).toBe(false)
 
     const final = await wedge.finish()
 
-    expect(final.approvals[SIBLING]?.not_shipped_at).toBeString()
+    const record = final.approvals[SIBLING]!
+    expect(record.marked_at).not.toBeNull()
+    expect(record.confirmed_at).toBeNull()
+    expect(Object.hasOwn(record, 'not_shipped_at')).toBe(false)
+
+    // The advance is over, so nothing it marked can still be landing.
+    expect(approveOutcome(await runResolve([SIBLING, '--not-shipped', effectId]))).toEqual([0, ''])
+    expect((await readState()).approvals[SIBLING]?.not_shipped_at).toBeString()
     expect(firedCount(SIBLING)).toBe(0)
   })
 
@@ -566,5 +611,67 @@ describe('the advance merges approvals rather than overwriting them', () => {
     // The sender's own mark, taken by this advance, still wins.
     expect(final.approvals[SENDER]?.marked_at).not.toBeNull()
     expect(final.approvals[SENDER]?.confirmed_at).not.toBeNull()
+  })
+})
+
+// The mark lands on disk before the handler runs, and the advance's own write
+// comes after it. Between the two, the disk reads indeterminate while the fire
+// may still land. An answer given then is overwritten by that write if the
+// fire fails, dropped if it succeeds, and a double send if the process dies
+// after the send and the operator re-approves. The refusal is on the run lock
+// because that window is exactly the time an advance holds it.
+describe('resolve waits for the advance that may still be firing', () => {
+  /** The sender's mark as the advance wrote it, read while the handler is parked. */
+  async function senderMark(): Promise<{ markedAt: string; effectId: string }> {
+    const record = (await readState()).approvals[SENDER]
+    // The positive control: the mark landed, so the record does read
+    // indeterminate on disk, and a refusal below is not an absent record.
+    expect(record?.marked_at).toBeString()
+    expect(record?.effect_id).toBeString()
+    return { markedAt: record!.marked_at as string, effectId: record!.effect_id as string }
+  }
+
+  test('the fire the running advance marked cannot be resolved, and the advance confirms it untouched', async () => {
+    await seedHome()
+    const wedge = await wedgeOpen()
+    const { effectId } = await senderMark()
+
+    const refused = await runResolve([SENDER, '--not-shipped', effectId])
+    expect({ ...refused }).toMatchObject({ code: 1, output: expect.stringContaining('An advance is running') })
+    expect(refused.output).not.toContain('Resolved')
+    expect(Object.hasOwn((await readState()).approvals[SENDER]!, 'not_shipped_at')).toBe(false)
+
+    const final = await wedge.finish()
+
+    const record = final.approvals[SENDER]!
+    expect(record.confirmed_at).not.toBeNull()
+    expect(Object.hasOwn(record, 'not_shipped_at')).toBe(false)
+    expect(firedCount(SENDER)).toBe(1)
+  })
+
+  test('a fire the running advance marked and then failed is answered once the advance ends, and the answer stays', async () => {
+    await seedHome({ senderFails: true })
+    const wedge = await wedgeOpen()
+    const { markedAt, effectId } = await senderMark()
+
+    const refused = await runResolve([SENDER, '--not-shipped', effectId])
+    expect({ ...refused }).toMatchObject({ code: 1, output: expect.stringContaining('An advance is running') })
+    expect(Object.hasOwn((await readState()).approvals[SENDER]!, 'not_shipped_at')).toBe(false)
+
+    const final = await wedge.finish()
+
+    const record = final.approvals[SENDER]!
+    expect(record.marked_at).toBe(markedAt)
+    expect(record.confirmed_at).toBeNull()
+    expect(Object.hasOwn(record, 'not_shipped_at')).toBe(false)
+
+    // Now the answer is about a fire that has ended, and the operator checked it.
+    expect(approveOutcome(await runResolve([SENDER, '--not-shipped', effectId]))).toEqual([0, ''])
+    expect((await readState()).approvals[SENDER]?.not_shipped_at).toBeString()
+
+    // A later advance keeps it, and the spent record fires nothing.
+    await advance()
+    expect((await readState()).approvals[SENDER]?.not_shipped_at).toBeString()
+    expect(firedCount(SENDER)).toBe(1)
   })
 })

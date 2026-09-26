@@ -13,7 +13,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
-import { _setHome, sessionApprovalPath } from '../../lib/paths.js'
+import { _setHome, lockPath, sessionApprovalPath } from '../../lib/paths.js'
 import { checkApproval, mergeGrant, MAX_GRANT_WINDOW_MS } from '../../runtime/approval-gate.js'
 import { invokePlugin } from '../../runtime/invoke-plugin.js'
 import {
@@ -1781,7 +1781,7 @@ describe('warpline approve --content', () => {
   // `--remove` is for. The exception is a record marked and never confirmed:
   // absence would destroy the only evidence that a send may have landed, so
   // that one record refuses both withdrawal and re-approval until the operator
-  // resolves it at the sink.
+  // answers it with `warpline resolve`.
 
   /** The approval record every case below starts from, before its overrides. */
   const approvalFor = (over: Record<string, unknown> = {}) => ({
@@ -2063,5 +2063,117 @@ describe('warpline approve --content', () => {
     const removed = await capture('approve', [CONSUMER, '--content', '--remove'])
     expect(removed.code).toBe(0)
     expect(Object.hasOwn((await readState()).approvals, CONSUMER)).toBe(false)
+  })
+  // -- Waiting for the advance that may still be firing ---------------------
+  // The mark reaches the disk before the handler runs, and the advance's own
+  // write comes after it. Between the two the record reads indeterminate while
+  // the fire may still land, and that window is exactly the time an advance
+  // holds the run lock. So an answer waits for the lock, not for the record.
+  // The lock below is planted as another attachment's advance would hold it:
+  // no pid and no host, so only its age can expire it.
+
+  /** A run lock whose holder last spoke `ageMs` ago, as the bytes on disk. */
+  const runLockAged = (ageMs: number): string => {
+    const at = new Date(Date.now() - ageMs).toISOString()
+    return JSON.stringify({
+      acquired_at: at,
+      heartbeat_at: at,
+      run_id: 'run-lock-planted',
+      mode: 'advance',
+      pid: null,
+      host: null,
+    })
+  }
+
+  test('C27: resolving while a live advance holds the run lock is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor(MARKED))
+    const lock = runLockAged(0)
+    await writeFile(lockPath(), lock)
+    const before = await approvalsOnDisk()
+
+    const { code, stdout, stderr } = await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id])
+
+    expect({ code, stdout }).toEqual({ code: 1, stdout: '' })
+    expect(stderr).toContain('An advance is running')
+    expect(stderr).toContain('Nothing was written')
+    expect(await approvalsOnDisk()).toBe(before)
+    // Read, never healed or broken: the lock is the advance's, not this verb's.
+    expect(await readFile(lockPath(), 'utf-8')).toBe(lock)
+  })
+
+  test('C28: resolving while the run lock cannot be read is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor(MARKED))
+    await writeFile(lockPath(), 'not a lock')
+    const before = await approvalsOnDisk()
+
+    const { code, stdout, stderr } = await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id])
+
+    // Could not look is not looked and found nothing.
+    expect({ code, stdout }).toEqual({ code: 1, stdout: '' })
+    expect(stderr).toContain('could not be read back as a lock')
+    expect(stderr).toContain('Nothing was written')
+    expect(await approvalsOnDisk()).toBe(before)
+    expect(await readFile(lockPath(), 'utf-8')).toBe('not a lock')
+  })
+
+  test('C29: a run lock whose holder went silent over two hours ago does not block resolving', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor(MARKED))
+    // Three hours of silence: the crashed advance this verb exists for.
+    const lock = runLockAged(3 * 60 * 60 * 1000)
+    await writeFile(lockPath(), lock)
+
+    const { code, stderr } = await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id])
+
+    expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
+    expect((await readState()).approvals[CONSUMER]!.not_shipped_at).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/,
+    )
+    // Stale is not this verb's to heal. The next advance's acquire does that.
+    expect(await readFile(lockPath(), 'utf-8')).toBe(lock)
+  })
+
+  test('C30: resolving a plugin with no record does not echo the name it was given', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    const before = await approvalsOnDisk()
+    // Operator text with a control byte in it, which would clear a shared
+    // terminal if it were printed back.
+    const typed = 'evil\u001b[2Jname'
+
+    const { code, stderr } = await capture('resolve', [typed, '--not-shipped', MARKED.effect_id])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('no fire to resolve')
+    expect(stderr).not.toContain('\u001b')
+    expect(stderr).not.toContain('evil')
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C31: a record marked with no effect id says only a hand edit clears it, in approve and in resolve', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor({ marked_at: MARKED.marked_at, effect_id: null }))
+    const before = await approvalsOnDisk()
+
+    // Neither verb can clear it, so neither may point at the other.
+    for (const argv of [approveArgs, [CONSUMER, '--content', '--remove']]) {
+      const { code, stderr } = await capture('approve', argv)
+      expect(code).toBe(1)
+      expect(stderr).toContain('hand edit')
+      expect(stderr).toContain('recorded no effect id')
+      expect(stderr).not.toContain('(none recorded)')
+      expect(await approvalsOnDisk()).toBe(before)
+    }
+
+    const { code, stderr } = await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id])
+    expect(code).toBe(1)
+    expect(stderr).toContain('hand edit')
+    expect(await approvalsOnDisk()).toBe(before)
   })
 })
