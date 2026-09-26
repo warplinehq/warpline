@@ -18,10 +18,12 @@ import { checkApproval, mergeGrant, MAX_GRANT_WINDOW_MS } from '../../runtime/ap
 import { invokePlugin } from '../../runtime/invoke-plugin.js'
 import {
   applyPendingGate,
+  approvalStanding,
   denialFingerprint,
   evaluatePlugin,
   findPendingGate,
   GATE_MAX_AGE_MS,
+  loadPluginManifests,
   proposalFingerprint,
 } from '../../runtime/engine.js'
 import type { EvalContext } from '../../runtime/engine.js'
@@ -67,9 +69,15 @@ const FIXTURES = [
   makeManifest('db-writer', ['writes_db']),
 ]
 
-/** Run a subcommand's `run(argv)` with stdout/stderr captured. */
+/**
+ * Run a subcommand's `run(argv)` with stdout/stderr captured.
+ *
+ * `resolve` goes through the dispatcher's `main`, not a module of its own: the
+ * arm that routes it is part of what the cases below pin, and a command the
+ * dispatcher does not know answers "Unknown command" there.
+ */
 async function capture(
-  mod: 'approve' | 'revoke',
+  mod: 'approve' | 'revoke' | 'resolve',
   argv: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const realOut = process.stdout.write
@@ -85,6 +93,11 @@ async function capture(
     return true
   }) as typeof process.stderr.write
   try {
+    if (mod === 'resolve') {
+      const { main } = await import('../warpline.js')
+      const code = await main(['resolve', ...argv])
+      return { code, stdout, stderr }
+    }
     const { run } = mod === 'approve' ? await import('../approve.js') : await import('../revoke.js')
     const code = await run(argv)
     return { code, stdout, stderr }
@@ -1925,5 +1938,130 @@ describe('warpline approve --content', () => {
     expect(stderr).toContain('revoke')
     expect(existsSync(approvalPath)).toBe(false)
     expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  // -- Answering the open question ------------------------------------------
+  // The two refusals above keep a marked, unconfirmed record exactly as it is.
+  // The only thing that moves it is the operator's answer, given after they
+  // checked the sink with the effect id: nothing shipped. The answer is bound
+  // to that one id, it keeps the mark beside it, and it grants nothing, so a
+  // retry still takes a fresh yes over bytes the operator reads again.
+
+  test('C22: resolving with the recorded effect id answers an indeterminate record, which then reads spent', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor(MARKED))
+
+    const { code, stdout } = await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id])
+
+    expect(code).toBe(0)
+    expect(stdout).toContain(MARKED.effect_id)
+    expect(stdout).toContain('not shipped')
+    expect(stdout).toContain('approve them again')
+    const record = (await readState()).approvals[CONSUMER]!
+    expect(record.not_shipped_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/)
+    // The evidence that a fire began stays. The answer sits beside it.
+    expect(record.marked_at).toBe(MARKED.marked_at)
+    expect(record.effect_id).toBe(MARKED.effect_id)
+    // Confirmation is the advance's word about a fire it saw finish. The
+    // operator's answer is a different fact, and it never borrows that field.
+    expect(record.confirmed_at).toBeNull()
+
+    const { manifests } = await loadPluginManifests(join(root, 'plugins'))
+    const state = await readEngineState(statePath)
+    expect(approvalStanding(state, CONSUMER, manifests, Date.now()).standing).toBe('spent')
+  })
+
+  test('C23: resolving with another effect id is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor(MARKED))
+    const before = await approvalsOnDisk()
+    const typed = 'f'.repeat(64)
+
+    const { code, stderr } = await capture('resolve', [CONSUMER, '--not-shipped', typed])
+
+    expect(code).toBe(1)
+    // The recorded id, so the operator can go and look for the right fire.
+    expect(stderr).toContain(MARKED.effect_id)
+    expect(stderr).toContain('does not match')
+    expect(stderr).toContain('Nothing was written')
+    // Never the typed one: it is operator text, compared and never echoed.
+    expect(stderr).not.toContain(typed)
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C24: resolving a record that is not indeterminate is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+
+    // No record at all.
+    const none = await approvalsOnDisk()
+    const missing = await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id])
+    expect(missing.code).toBe(1)
+    expect(missing.stderr).toContain('no fire to resolve')
+    expect(await approvalsOnDisk()).toBe(none)
+
+    // A record that never fired.
+    await putApproval(approvalFor())
+    const unmarked = await approvalsOnDisk()
+    const fresh = await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id])
+    expect(fresh.code).toBe(1)
+    expect(fresh.stderr).toContain('no fire waiting on an answer')
+    expect(await approvalsOnDisk()).toBe(unmarked)
+
+    // A fire the advance saw finish. There is no question left to answer, and
+    // an answer here would contradict the runtime's own record.
+    await putApproval(approvalFor({ ...MARKED, confirmed_at: '2026-09-10T08:30:04.000Z' }))
+    const confirmed = await approvalsOnDisk()
+    const shipped = await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id])
+    expect(shipped.code).toBe(1)
+    expect(shipped.stderr).toContain('no fire waiting on an answer')
+    expect(await approvalsOnDisk()).toBe(confirmed)
+  })
+
+  test('C25: resolving with no effect id, more than one plugin, or another flag is refused, and nothing is written', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor(MARKED))
+    const before = await approvalsOnDisk()
+
+    const bare = await capture('resolve', [CONSUMER])
+    expect(bare.code).toBe(1)
+    expect(bare.stderr).toContain('--not-shipped <effect-id>')
+    expect(await approvalsOnDisk()).toBe(before)
+
+    const two = await capture('resolve', [CONSUMER, 'other-plugin', '--not-shipped', MARKED.effect_id])
+    expect(two.code).toBe(1)
+    expect(two.stderr).toContain('exactly one plugin')
+    expect(await approvalsOnDisk()).toBe(before)
+
+    const extra = await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id, '--remove'])
+    expect(extra.code).toBe(1)
+    expect(extra.stderr).toContain("'--remove'")
+    expect(await approvalsOnDisk()).toBe(before)
+  })
+
+  test('C26: a resolved record can be re-approved, and can be removed', async () => {
+    await writeContentPair()
+    await seedContentState(true)
+    await putApproval(approvalFor(MARKED))
+    expect((await capture('resolve', [CONSUMER, '--not-shipped', MARKED.effect_id])).code).toBe(0)
+
+    // The retry is a second yes over bytes the operator reads again. It
+    // replaces the answered record whole, as it replaces a spent one.
+    const again = await capture('approve', approveArgs)
+    expect(again.code).toBe(0)
+    const record = (await readState()).approvals[CONSUMER]!
+    expect(record.marked_at).toBeNull()
+    expect(record.effect_id).toBeNull()
+    expect(record.confirmed_at).toBeNull()
+    expect(Object.hasOwn(record, 'not_shipped_at')).toBe(false)
+
+    // An answered record is a report, not a question, so it can be withdrawn.
+    await putApproval(approvalFor({ ...MARKED, not_shipped_at: '2026-09-26T10:00:00.000Z' }))
+    const removed = await capture('approve', [CONSUMER, '--content', '--remove'])
+    expect(removed.code).toBe(0)
+    expect(Object.hasOwn((await readState()).approvals, CONSUMER)).toBe(false)
   })
 })
