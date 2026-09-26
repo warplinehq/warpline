@@ -937,6 +937,7 @@ describe('plan ≡ what a run would attempt', () => {
   async function writeContentPair(
     prefix: string,
     producerRun: Record<string, unknown>,
+    approvalOverride: Record<string, unknown> = {},
   ): Promise<{ producer: string; consumer: string }> {
     const tolerant = { min_tier: 'suspended' }
     const producer = `${prefix}-producer`
@@ -1006,6 +1007,7 @@ export async function handler() {
             effect_id: null,
             marked_at: null,
             confirmed_at: null,
+            ...approvalOverride,
           },
         },
       },
@@ -1097,6 +1099,50 @@ export async function handler() {
     expect(planned).toEqual([...attempted].sort())
     expect(planned).toContain(consumer)
     expect(model.due.find((e) => e.plugin === consumer)?.approved).toBe(true)
+  })
+
+  // The hint is narrow on purpose. The condition line promises a fire only
+  // while the approval's own declared producer is due at an earlier level, so
+  // a producer that will not run, or an approval about some other producer,
+  // leaves the consumer refused in the preview as in the advance.
+
+  test('Test 2g: a content consumer over carried bytes whose producer is fresh gets no hint', async () => {
+    const { consumer } = await writeContentPair('fresh', {
+      // A minute old in a 24h TTL: not due, so nothing can re-produce the bytes.
+      last_run_at: new Date(Date.now() - 60_000).toISOString(),
+      run_id: 'run-quiet',
+      last_output: { ...liveOutput(), run_id: 'run-the-operator-read' },
+    })
+    const { statePath, eventsPath } = routeStateManager()
+
+    const model = await buildPlanModel(Date.now())
+    const { stdout } = await capture(() => main(['plan']))
+    const { attempted } = await attemptedByRealRun(statePath, eventsPath)
+
+    expect(model.notDue.find((e) => e.plugin === consumer)?.reason).toBe('unapproved')
+    expect(model.due.map((e) => e.plugin)).not.toContain(consumer)
+    expect(attempted.has(consumer)).toBe(false)
+    expect(stdout).not.toContain('may fire if')
+  })
+
+  test('Test 2h: an approval naming a producer the consumer does not declare gets no hint', async () => {
+    // The declared producer is due, but the approval is about bytes some other
+    // producer proposed. Re-running the declared one cannot make it live.
+    const { consumer } = await writeContentPair(
+      'renamed',
+      { last_output: liveOutput('{"batch":"a different batch nobody approved"}') },
+      { producer: 'retired-producer' },
+    )
+    const { statePath, eventsPath } = routeStateManager()
+
+    const model = await buildPlanModel(Date.now())
+    const { stdout } = await capture(() => main(['plan']))
+    const { attempted } = await attemptedByRealRun(statePath, eventsPath)
+
+    expect(model.notDue.find((e) => e.plugin === consumer)?.reason).toBe('unapproved')
+    expect(model.due.map((e) => e.plugin)).not.toContain(consumer)
+    expect(attempted.has(consumer)).toBe(false)
+    expect(stdout).not.toContain('may fire if')
   })
 
   test('Test 3: with no engine-state.json at all, every plugin is never-run, due, and attempted', async () => {

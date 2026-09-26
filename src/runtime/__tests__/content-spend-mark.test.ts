@@ -51,7 +51,7 @@ import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 import { defaultEngineState } from '../../schemas/engine-state.js'
 import type { EngineState } from '../../schemas/engine-state.js'
-import type { OutputRecord } from '../../schemas/skill-result.js'
+import type { OutputRecord, StoredOutputRecord } from '../../schemas/skill-result.js'
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
@@ -663,6 +663,48 @@ describe('the spend mark re-reads erasure under its lock', () => {
     expect(record.marked_at).toBeNull()
     expect(record.effect_id).toBeNull()
     expect(record.confirmed_at).toBeNull()
+  })
+
+  // The read-time exemption is for the erased record this advance read and has
+  // since produced over. It must not reach a producer erased at read whose disk
+  // entry now names another run: the § 12 overlap, a second advance ran the
+  // producer and that run's Output was then erased. The erased record below is
+  // current for its run, so only the run-identity conjunct refuses it.
+  test('a producer erased at read whose disk entry now names another erased run still refuses content_moved', async () => {
+    await seedLiveApproval('returns')
+    await writeFile(join(home.stateDir, 'preferences.json'), JSON.stringify({ review_gate: false }))
+    const erased = (runId: string): StoredOutputRecord => ({
+      type: 'brief',
+      format: 'json',
+      run_id: runId,
+      erased_at: '2026-09-18T00:00:00.000Z',
+      body_sha256: createHash('sha256').update(APPROVED_BODY, 'utf8').digest('hex'),
+    })
+    // Erased at run A when this advance reads the document.
+    const seeded = await readState()
+    seeded.plugin_runs[PRODUCER] = { ...seeded.plugin_runs[PRODUCER]!, run_id: 'run-A', last_output: erased('run-A') }
+    await writeFile(statePath(), JSON.stringify(seeded))
+
+    const details: string[] = []
+    const result = await advance({
+      now: Date.now() + 25 * 60 * 60 * 1000,
+      onPluginEnd: (plugin, _status, _elapsed, reason) => {
+        if (plugin === PRODUCER) {
+          const doc = JSON.parse(readFileSync(statePath(), 'utf-8')) as EngineState
+          doc.plugin_runs[PRODUCER] = { ...doc.plugin_runs[PRODUCER]!, run_id: 'run-B', last_output: erased('run-B') }
+          writeFileSync(statePath(), JSON.stringify(doc))
+        }
+        if (plugin === CONSUMER && reason !== undefined) details.push(reason)
+      },
+    })
+
+    expect(firedCount()).toBe(0)
+    expect(result.refused_plugins).toEqual([{ plugin: CONSUMER, reason: 'content_moved' }])
+    expect(details).toHaveLength(1)
+    expect(details[0]).toStartWith(
+      'refused (content_moved): the approved content moved or was erased between the gate and the spend mark',
+    )
+    expect((await readState()).approvals[CONSUMER]!.marked_at).toBeNull()
   })
 })
 
