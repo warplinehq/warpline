@@ -915,6 +915,13 @@ export async function run(argv: string[]): Promise<number> {
             `The parked result for ${name} was already applied at ${result.applied_at}. ` +
               `Nothing changed — a result is recorded once.\n`,
           )
+        } else if (result.reason === 'superseded') {
+          // Nothing was deleted, so the plugin is not due again on that
+          // account: its entry is the later run's record.
+          process.stderr.write(
+            `Refused the parked result for ${name}: ${result.detail}\n` +
+              `The gate was discarded, and the later run's record stands. No grant was written.\n`,
+          )
         } else {
           process.stderr.write(
             `Refused the parked result for ${name}: ${result.detail}\n` +

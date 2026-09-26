@@ -1643,9 +1643,10 @@ A supervised plugin's result parked pending a human answer. There is at most
 one entry per plugin, and a fresh park replaces it. An advance that parks
 nothing for the plugin leaves its entry in place, for example when the plugin
 was not due, its result failed, or its invocation threw. So the entry can come
-from an earlier advance than the most recent one (§ 10, "Applying a gate",
-step 4). An entry another writer applied or discarded while an advance ran
-stays as that writer left it (§ 12).
+from an earlier advance than the most recent one, and such an older gate is
+refused as superseded when applied (§ 10, "Applying a gate", step 2). An entry
+another writer applied or discarded while an advance ran stays as that writer
+left it (§ 12).
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -1730,16 +1731,25 @@ does, in order, all decided before anything is written:
    daily engine destroyed the previous day's proposal before anyone could review
    it, and the 23-hour ceiling was unreachable in live operation — a limit only
    a seeded clock could observe.
-2. **A dependency moved** — some dependency's `plugin_runs.last_run_at` is newer
+2. **Superseded** — the plugin's `plugin_runs` entry names a run other than the
+   one that parked this gate, so the plugin ran again after the park. A failed
+   run, or one whose invocation threw, parks nothing, so it does not replace the
+   older gate, but its entry is the plugin's latest record. Refused, the gate is
+   discarded with a `notice` (`gate_invalidated`, reason `superseded`), and the
+   entry is kept as the later run wrote it. Checked before the next two because
+   both delete the entry. Only identity is compared, never order (§ `last_output`).
+   An entry with no `run_id`, written before the field existed, and no entry at
+   all are applied as before.
+3. **A dependency moved** — some dependency's `plugin_runs.last_run_at` is newer
    than `run_started_at`. The parked result was computed against inputs that
    have since changed, so it is refused, the gate is discarded, and a `notice`
    naming the plugin is written.
-3. **Expired** — the gate is older than the earlier of the plugin's `ttl_hours`
+4. **Expired** — the gate is older than the earlier of the plugin's `ttl_hours`
    and 23 hours, measured from `run_completed_at`. Refused and discarded, with a
    `notice`. **This is a state transition the approve verb makes, not something
    a renderer infers**, which is what stops an approval and an expiry racing
    into a double apply.
-4. **Otherwise applied.** The plugin's `plugin_runs` entry is overwritten in
+5. **Otherwise applied.** The plugin's `plugin_runs` entry is overwritten in
    place: `last_run_at` stays at `run_completed_at`, the status becomes the
    result's real terminal status, `run_id` is the run that parked it, and
    `last_output` carries the Output the run already produced. `applied_at` is
@@ -1749,20 +1759,14 @@ does, in order, all decided before anything is written:
    and the binding that released it is gone. The same write erases the gate's
    copy of those bytes.
 
-   That entry is usually the `gated` one the park wrote. It is not when the
-   plugin ran again after the park and that run failed, or its invocation
-   threw: a failed run parks nothing, so it does not supersede the older gate,
-   and the entry is that later run's `failed` one. Applying the older gate then
-   writes its result over the newer failure. This gap is known and open. The
-   approve verb does not check whether the plugin has run since the gate was
-   parked.
+   The entry overwritten is always the one the parking run wrote, because step 2
+   refused any other.
 
-On either refusal the plugin's `plugin_runs` entry is deleted, which leaves it
-due on the next advance. The parked result was never accepted, so there is no
-accepted run to hold the work back; the `gated` entry existed to stop the
-effects re-firing during the hold, and the hold is over. When a later run of the
-plugin failed after the gate was parked (step 4), the entry deleted is that
-later run's, and its `failed` status goes with it.
+On a moved dependency or an expiry (steps 3 and 4) the plugin's `plugin_runs`
+entry is deleted, which leaves it due on the next advance. The parked result was
+never accepted, so there is no accepted run to hold the work back; the `gated`
+entry existed to stop the effects re-firing during the hold, and the hold is
+over.
 
 The delete takes `last_output` with it, and that loss is permanent. The pointer
 lives inside the entry, and the carry-forward described in § `last_output` works
@@ -2208,7 +2212,7 @@ does **not** erase:
   The operator has not answered it yet, and it has its own lifetime
   (§ `pending_gates`).
   Applying it after its content was erased keeps the Output erased
-  and erases that copy (§ "Applying a gate", step 4).
+  and erases that copy (§ "Applying a gate", step 5).
 - anything an applied gate holds that erasure has not released: its other
   Outputs, which no approval binds because a content approval binds only the
   producer's last Output, and
@@ -2479,7 +2483,7 @@ produced nothing carries an Output another advance wrote while it ran, or an
 erased record, which stays erased. A dependent later in the same advance reads
 the advance's own copy, so it can have read an older pointer than the one
 written. One write keeps an erased record instead: applying a gate whose run's
-Output was erased while it was pending (§ "Applying a gate", step 4). Erasure is
+Output was erased while it was pending (§ "Applying a gate", step 5). Erasure is
 one-way.
 
 **Carried, and never shipped.** A carried Output still serves `lastOutput`
@@ -2495,6 +2499,20 @@ the advance started from can read carried while the advance has already run the
 producer again and produced, and the end-of-run write replaces it. Every writer
 of the entry decides `run_id` and `last_output` in one place, so neither can be
 written without the other.
+
+**Only a run's own write moves `run_id`.** An entry's `run_id` changes
+only when a run writes its own result, so no write moves it back to an earlier
+run's. An advance stamps the run it is. The gate apply stamps the run that parked the
+gate, which finishes that run's own write, so it lands only on the entry that
+run left. An entry naming any other run means a later run wrote it, and the
+apply is refused as `superseded` (§ "Applying a gate"). An earlier run's result
+over a later run's would make a carried Output current again and re-arm a
+content approval over bytes the producer no longer proposes. Order is never
+compared, only identity, since § 12 already rejected ordering runs by clocks
+that can come from different hosts. The one place a later write carries the
+older run is § 12's overlap, where each advance still stamps its own run.
+`plugin-run-writers.test.ts` holds every writer to the run its row says it
+stamps.
 
 **Status-blind.** What survives is keyed on the run producing no Output, never
 on how the run ended. A run that threw, a run that returned `failed`, and a run
@@ -3049,7 +3067,8 @@ For a plugin both ran, the advance that writes last wins, even when its run is
 the older one, and a gate either one parks supersedes the other's gate for the
 same plugin. Only a parked gate supersedes. A run one advance recorded does not,
 so a gate the other parked for that plugin stays pending beside it, and an
-`approve` of that gate later writes the gated run's entry over the recorded one.
+`approve` of that gate later is refused as superseded, because the entry names
+the other advance's run.
 Keeping the newer run was rejected: the two runs' clocks can come from different
 hosts.
 

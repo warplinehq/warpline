@@ -40,7 +40,7 @@ import type { RefusalReason } from '../schemas/run-log.js'
  * is why it is a member and not folded into `expired`: the board reader wants
  * to know a human decided, not that a clock ran out.
  */
-export type GateDiscardReason = 'stub' | 'dependency_moved' | 'expired' | 'denied'
+export type GateDiscardReason = 'stub' | 'dependency_moved' | 'expired' | 'denied' | 'superseded'
 
 /**
  * Size cap for events.jsonl (2026-08-19, operator decision).
@@ -200,9 +200,11 @@ export const emitAttemptFailed = (
 /**
  * Emit a notice that a parked gate was thrown away rather than applied.
  *
- * `reason` says which of the three discards happened: a pre-Phase-8 stub found
- * at read time, a dependency that moved since the gated run started, or an
- * expiry. All three leave the plugin due again on the next advance.
+ * `reason` says which discard happened: a stub an older build wrote, found at
+ * read time; a dependency that moved since the gated run started; an expiry; an
+ * operator's denial; or a later run of the plugin, which superseded the parked
+ * result. A moved dependency and an expiry leave the plugin due again on the
+ * next advance. A superseded gate leaves the plugin as its later run left it.
  *
  * Rides `type: 'notice'` for the same reason `emitAttemptFailed` does, and the
  * reason is worth stating in print rather than rediscovering: growing
@@ -338,6 +340,7 @@ const GATE_DISCARD_PROSE: Record<GateDiscardReason, string> = {
   // throw. Pinned against the constant by engine-events.test.ts instead.
   expired: 'older than the earlier of the plugin TTL and 23 hours',
   denied: 'the operator declined it, so the result was dequeued rather than left applyable',
+  superseded: 'the plugin ran again after it was parked, so the result is no longer its latest',
 }
 
 /**

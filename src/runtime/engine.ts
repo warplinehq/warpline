@@ -4074,7 +4074,7 @@ export type GateApplyOutcome =
       summary: string
     }
   | { outcome: 'already_applied'; applied_at: string }
-  | { outcome: 'refused'; reason: 'dependency_moved' | 'expired'; detail: string }
+  | { outcome: 'refused'; reason: 'superseded' | 'dependency_moved' | 'expired'; detail: string }
 
 /**
  * The most recent parked gate for a plugin, applied or not.
@@ -4111,10 +4111,20 @@ export function findPendingGate(state: EngineState, plugin: string): PendingGate
  * a parked result mints no Grant" true by structure rather than by test: there
  * is no code path from here to a grant write.
  *
- * Three refusals, all checked BEFORE anything is written:
+ * Four refusals, all checked BEFORE anything is written:
  *
  *   - **already applied** — the gate carries an `applied_at`. Nothing is
  *     written at all, so a double `approve` cannot double-record.
+ *   - **superseded** — the plugin's entry names a run other than the one that
+ *     parked this gate, so the plugin ran after the park. A failed or thrown
+ *     run parks nothing, so it did not supersede the gate, but the parked
+ *     result is no longer the plugin's latest. Applying it would write an
+ *     earlier run's result over a later run's and make a carried Output current
+ *     again. Checked before the next two because both delete the entry, and
+ *     here the entry is the later run's record, which is kept: the gate is
+ *     discarded and nothing else changes. Identity only, never order. An entry
+ *     with no `run_id` was written before the field existed and is applied as
+ *     before, as is no entry at all.
  *   - **a dependency moved** — some dependency's `last_run_at` is newer than
  *     the gated run's start, so the parked result was computed against inputs
  *     that have since changed.
@@ -4126,8 +4136,8 @@ export function findPendingGate(state: EngineState, plugin: string): PendingGate
  * approval and an expiry racing into a double apply: there is one place that
  * decides, and it decides while holding the state it is about to write.
  *
- * On either refusal the gate is discarded and the plugin's `plugin_runs` entry
- * is deleted, which leaves the plugin due on the next advance. That is the
+ * On a moved dependency or an expiry the gate is discarded and the plugin's
+ * `plugin_runs` entry is deleted, which leaves the plugin due on the next advance. That is the
  * point: the parked result was never accepted, so there is no accepted run to
  * hold it back, and the work should happen again. The `gated` entry existed to
  * stop the effects re-firing during the hold, and the hold is over.
@@ -4290,6 +4300,22 @@ export async function applyPendingGate(
     return { outcome: 'refused', reason, detail }
   }
 
+  const priorApprovedEntry = state.plugin_runs[gate.plugin]
+  // Before the two refusals below, because both delete the entry, and this
+  // entry is a later run's record. Identity, never order.
+  if (priorApprovedEntry?.run_id !== undefined && priorApprovedEntry.run_id !== gate.run_id) {
+    state.pending_gates = state.pending_gates.filter((g) => g !== gate)
+    await writeEngineState(state, opts.statePath)
+    await emitGateInvalidated(gate.plugin, gate.run_id, 'superseded', opts.eventsPath).catch(() => {
+      /* a discard notice that cannot be written must not undo the discard */
+    })
+    return {
+      outcome: 'refused',
+      reason: 'superseded',
+      detail: `'${gate.plugin}' ran again after this result was parked, so it is no longer the plugin's latest run`,
+    }
+  }
+
   const startedMs = new Date(startedAt).getTime()
   const moved = manifest.dependencies.filter((dep) => {
     const last = state.plugin_runs[dep]?.last_run_at
@@ -4316,17 +4342,11 @@ export async function applyPendingGate(
   // completion, not `now` — a later approval must not move when the work
   // happened.
   //
-  // The prior entry read here is usually the `gated` one this same run wrote, so
-  // a gated run that produced no Output has already had the plugin's prior
-  // Output carried through the park — this site reads what is there and carries
-  // it one step further, rather than reconstructing it.
-  //
-  // Not always. A later run of the same plugin that failed, or whose invocation
-  // threw, parked nothing, so it did not supersede this gate, and the entry
-  // here is that later run's. Applying writes this older result over the newer
-  // failure. That gap is known and open: nothing here checks whether the plugin
-  // has run since the gate was parked.
-  const priorApprovedEntry = state.plugin_runs[gate.plugin]
+  // The entry here is always the one the parking run wrote, because the
+  // superseded check above refused any other. So a gated run that produced no
+  // Output has already had the plugin's prior Output carried through the park —
+  // this site reads what is there and carries it one step further, rather than
+  // reconstructing it.
   const priorOut = priorApprovedEntry?.last_output
   // Read here only for the gate copies below. Keeping the erased record in the
   // entry is `lastOutputOf`'s rule, so the write names neither field itself.
@@ -4405,6 +4425,15 @@ export async function applyPendingGate(
  * `runAdvance`, the gate apply, and the end-of-run merge), and
  * `src/runtime/__tests__/plugin-run-writers.test.ts` holds every runs-map
  * mutation in `src/` to that, by source scan as well as by driving the writers.
+ *
+ * **An entry's `run_id` changes only when a run writes its own result.** Every
+ * writer passes the run it is (`run_id` in `runAdvance`, `runId` in
+ * `mergePluginRuns`), except the gate apply, which passes the parking run. It
+ * finishes that run's own write, so it is the one writer that must refuse an
+ * entry naming another run (see `applyPendingGate`, superseded). The census in
+ * `plugin-run-writers.test.ts` holds each writer to the stamp its row names and
+ * demands a supersession case for any writer that stamps a run other than its
+ * own.
  *
  * **An erased record for this same run stays erased.** When the entry being
  * overwritten already holds an erased Output whose `run_id` is `runId`, that
