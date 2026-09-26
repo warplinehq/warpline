@@ -71,6 +71,7 @@ import {
   denialStanding,
   eraseIfReleased,
   findPendingGate,
+  lastOutputIsCurrent,
   loadPluginManifests,
   proposalFingerprint,
 } from '../runtime/engine.js'
@@ -335,6 +336,21 @@ async function approveContent(
       process.stderr.write(
         `${consumer} cannot be approved by content: ${producer}'s last Output was erased ` +
           `when the approval that bound it closed or was withdrawn, so there are no bytes to read. ` +
+          `Run ${producer} again to produce new content. Nothing was written.\n`,
+      )
+      return 1
+    }
+
+    // A carried Output is refused by name too. The producer's latest run
+    // produced none, so what is on file was carried forward from an earlier run
+    // and is not what the producer proposes now. The gate would refuse to ship
+    // it, so binding it would write a yes nothing honours. The predicate is the
+    // gate's own, `lastOutputIsCurrent`. Only the two plugin names are
+    // interpolated.
+    if (!lastOutputIsCurrent(state.plugin_runs[producer])) {
+      process.stderr.write(
+        `${consumer} cannot be approved by content: ${producer}'s latest run produced no Output, ` +
+          `so the bytes on file came from an earlier run and are not what it proposes now. ` +
           `Run ${producer} again to produce new content. Nothing was written.\n`,
       )
       return 1

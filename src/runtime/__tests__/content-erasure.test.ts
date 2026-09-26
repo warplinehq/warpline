@@ -246,7 +246,14 @@ describe('an open binding that matches the bytes holds them, whichever run it na
     const held = await readState()
     expect(held.plugin_runs['prod']!.last_output!.body).toBe(sentinel)
     const standingManifests = new Map(manifests).set('batch-sender', consumer)
-    expect(approvalStanding(held, 'batch-sender', standingManifests, Date.now()).standing).toBe('live')
+    // The open binding still holds the bytes, which is what defers the
+    // erasure. The gate refuses to ship them all the same: the producer's
+    // latest run produced no Output, so they are carried, not what it proposes
+    // now.
+    expect(approvalStanding(held, 'batch-sender', standingManifests, Date.now())).toMatchObject({
+      standing: 'content_moved',
+      carried: true,
+    })
     // Kept, because its erasure was deferred. It is what releases the content.
     expect(held.approvals['second-sender']).toBeDefined()
 
@@ -769,20 +776,30 @@ describe('an approval that has fired binds the bytes it shipped until its window
 
     expect(await cli(['sender', '--content', '--not-after', OPEN, '--zone', 'UTC'])).toBe(0)
 
-    // The consumer fires on r1 while the producer is silent.
+    // While the producer is silent the consumer does not fire: the bytes on
+    // file are carried from r1, not the producer's latest proposal.
     await h.setMarker()
+    const silent = await h.advance()
+    expect(silent.refused_plugins).toEqual([{ plugin: 'sender', reason: 'content_moved' }])
+    expect((await readState()).approvals['sender']!.marked_at).toBeNull()
+
+    // The producer re-produces the same bytes under r2, and the consumer fires
+    // on them.
+    await rm(h.marker)
     await h.advance()
     const fired = await readState()
     expect(fired.approvals['sender']!.confirmed_at).not.toBeNull()
     expect(fired.approvals['sender']!.run_id).toBe(r1)
-    expect(fired.plugin_runs['prod']!.last_output!.run_id).toBe(r1)
+    const r2 = fired.plugin_runs['prod']!.last_output!.run_id!
+    expect(r2).not.toBe(r1)
 
-    // The producer makes the same bytes again, under r3, inside the window.
-    await rm(h.marker)
+    // The producer makes the same bytes again, under r3, after the fire and
+    // inside the window.
     await h.advance()
     const again = await readState()
     const r3 = again.plugin_runs['prod']!.last_output!.run_id!
-    expect(r3).not.toBe(r1)
+    expect(r3).not.toBe(r2)
+    expect(again.approvals['sender']!.confirmed_at).toBe(fired.approvals['sender']!.confirmed_at)
     expect(again.plugin_runs['prod']!.last_output!.body).toBe(sentinel)
     expect(again.approvals['sender']).toBeDefined()
 

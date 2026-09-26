@@ -275,9 +275,26 @@ export const PluginRunSchema = z.object({
    * ended: a throw,
    * a returned `failed`, and a success with an empty `artifacts_produced` are
    * one case. Preserving on only some of them would make this field mean a
-   * fourth thing the sentence above does not say.
+   * fourth thing the sentence above does not say. Whether the Output is this
+   * run's or carried from an earlier one is what `run_id`, below, says.
    */
   last_output: StoredOutputRecordSchema.optional(),
+  /**
+   * The run that wrote this entry. For an applied gate, the run that parked
+   * it, since that is the run whose result the apply records.
+   *
+   * Beside `last_output.run_id` it states whether the Output is this run's or
+   * carried from an earlier one: equal means the latest run produced it, and
+   * different means the latest run produced no Output and the one here was
+   * carried forward. A content-class consumer never ships a carried Output
+   * (runtime-spec § 10, `approvals`), because the producer's latest run
+   * proposed nothing, and bytes it proposed before are a leftover however well
+   * their fingerprint still matches.
+   *
+   * Absent on entries written before the field existed, and such an entry
+   * reads as produced. The producer's next run writes it.
+   */
+  run_id: z.string().optional(),
 })
 export type PluginRun = z.infer<typeof PluginRunSchema>
 

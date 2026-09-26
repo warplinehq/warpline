@@ -111,8 +111,12 @@ file name rather than bytes they saw. The body carries no run timestamp and
 sorts its arrays, because a byte that changes on every run moves the
 fingerprint, and an approval over it never applies. The record already carries
 the run's currency in `produced_at` and `run_id`. A producer run that has
-nothing to produce returns an empty body, never no Output: with no Output the
-runtime carries the last one forward, and an approval over it still fires.
+nothing to produce returns an empty body, never no Output. With no Output the
+runtime carries the last one forward for readers of `lastOutput`, but a
+content-class consumer refuses to ship it (`content_moved`), and `warpline
+approve --content` refuses to bind it until the producer produces again. An
+empty body is how a quiet run says "nothing" in bytes an operator can read and
+approve.
 
 #### `llm_handoff` — whether your plugin may hand judgment to the LLM
 

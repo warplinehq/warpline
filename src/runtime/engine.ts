@@ -554,7 +554,10 @@ export function contentEffectId(
  * an object nobody reads.
  *
  * `erased` is set only by `approvalStanding`'s erased arm, which means the
- * binding was otherwise live.
+ * binding was otherwise live. `carried` is set only by its carried arm: the
+ * binding holds and the bytes match, but they are not what the producer
+ * proposes now, because its latest run produced no Output and they were carried
+ * forward from an earlier one.
  */
 export type ApprovalStanding =
   | { standing: 'none' }
@@ -562,7 +565,7 @@ export type ApprovalStanding =
   | { standing: 'indeterminate'; approval: Approval }
   | { standing: 'outside_window'; approval: Approval }
   | { standing: 'before_window'; approval: Approval }
-  | { standing: 'content_moved'; approval: Approval; erased?: true }
+  | { standing: 'content_moved'; approval: Approval; erased?: true; carried?: true }
   | { standing: 'live'; approval: Approval }
 
 /**
@@ -603,6 +606,16 @@ export function approvalStanding(
     state.plugin_runs[binding.approval.producer]?.last_output?.erased_at !== undefined
   ) {
     return { standing: 'content_moved', approval: binding.approval, erased: true }
+  }
+  // The binding can also hold over bytes the producer no longer proposes. A
+  // producer run that produced no Output carries the last one forward, so the
+  // bytes and their fingerprint are unchanged, and the binding matches them. But
+  // the producer's latest run proposed nothing, and an approval is a yes to its
+  // current proposal, never to a leftover. The entry's `run_id` records which
+  // run wrote it, so the fact survives the advance: the producer is usually
+  // still fresh on the next one and is not re-run to say it again.
+  if (binding.standing === 'live' && !lastOutputIsCurrent(state.plugin_runs[binding.approval.producer])) {
+    return { standing: 'content_moved', approval: binding.approval, carried: true }
   }
   return binding
 }
@@ -963,11 +976,23 @@ function contentGateDetail(g: GateInput): string {
     // manifest, a rewritten dependency) gets the moved sentence, erased record
     // or not. The detail reads nothing out of the state for this.
     case 'content_moved':
-      return s.erased === true
-        ? `unapproved: the approved content was erased — the fingerprint on file ` +
-            `(${s.approval.fingerprint}) still matches, but there are no bytes left to ship`
-        : `unapproved: the approved content has moved — the fingerprint on file ` +
-            `(${s.approval.fingerprint}) is no longer what would ship`
+      if (s.erased === true) {
+        return (
+          `unapproved: the approved content was erased — the fingerprint on file ` +
+          `(${s.approval.fingerprint}) still matches, but there are no bytes left to ship`
+        )
+      }
+      if (s.carried === true) {
+        return (
+          `unapproved: the approved content is not the producer's latest — its latest run ` +
+          `produced no Output, so the fingerprint on file (${s.approval.fingerprint}) names ` +
+          `bytes it no longer proposes`
+        )
+      }
+      return (
+        `unapproved: the approved content has moved — the fingerprint on file ` +
+        `(${s.approval.fingerprint}) is no longer what would ship`
+      )
     case 'live':
       // Unreachable behind the predicate above; written out so the record
       // narrows and so a future arm cannot land here silently.
@@ -1080,7 +1105,8 @@ function mergeApprovals(
  * another advance wrote after a TTL heal of this advance's run lock.
  *
  * **The Output is carried from the fresh entry, never from this advance's
- * copy.** `lastOutputOf` runs again here with the result the run returned. A
+ * copy.** `lastOutputOf` runs again here with the result the run returned and
+ * the advance's run id, which it writes as the entry's `run_id`. A
  * run that produced an Output writes it. A run that produced nothing carries
  * what the fresh read holds: an Output another advance wrote meanwhile, or an
  * erased record, which stays erased. The carry-forward this advance's copy made
@@ -1090,12 +1116,13 @@ function mergePluginRuns(
   disk: EngineState['plugin_runs'],
   memory: EngineState['plugin_runs'],
   ran: ReadonlyMap<string, StoredSkillResult | null>,
+  runId: string,
 ): EngineState['plugin_runs'] {
   const merged: EngineState['plugin_runs'] = { ...disk }
   for (const [plugin, result] of ran) {
     const { last_output: _carried, ...entry } = memory[plugin]!
     const fresh = Object.hasOwn(disk, plugin) ? disk[plugin] : undefined
-    merged[plugin] = { ...entry, ...lastOutputOf(result, fresh) }
+    merged[plugin] = { ...entry, ...lastOutputOf(result, fresh, runId) }
   }
   return merged
 }
@@ -1573,6 +1600,7 @@ async function markContentApprovalSpent(
   eventsPath: string | undefined,
   plugin: string,
   authority: ContentAuthority,
+  runsAtRead: ReadonlyMap<string, string | undefined>,
 ): Promise<MarkRefusal | undefined> {
   // The partition is by CALL SITE, never by an `instanceof` taxonomy: the
   // question is not which error class arrived, it is whether the write had been
@@ -1609,8 +1637,22 @@ async function markContentApprovalSpent(
       // equal. An end-of-run write that erased this producer's content after
       // the gate read it is possible, for example when this advance's run lock
       // expires by its TTL while a second advance runs. So the erasure itself
-      // is checked, before any mark is written.
+      // is checked, before any mark is written. So is such a write leaving the
+      // producer's Output carried: the bytes and the fingerprint are unchanged,
+      // but a later run of the producer produced none, and the gate's
+      // `lastOutputIsCurrent` read was of this advance's copy, not of the disk.
+      //
+      // Only an entry written since this advance read the document counts. The
+      // one it read can be carried and still not say so: this advance ran the
+      // producer after it, the run produced the bytes the gate read, and the
+      // end-of-run write puts that entry over the disk's. Refusing on it would
+      // refuse the first fire after every quiet run, for a fact the advance has
+      // already moved past.
+      const diskRun = disk.plugin_runs[record.producer]
       if (disk.plugin_runs[record.producer]?.last_output?.erased_at !== undefined) return 'content_moved'
+      if (!lastOutputIsCurrent(diskRun) && diskRun?.run_id !== runsAtRead.get(record.producer)) {
+        return 'content_moved'
+      }
       if (record.marked_at !== null) return 'indeterminate'
 
       // `marked_at` IS the fire instant, and the identity is load-bearing: it is
@@ -1711,13 +1753,14 @@ function markRefusalDetail(reason: MarkRefusal, plugin: string, fingerprint: str
         `refused (indeterminate): the content approval for '${plugin}' was already marked spent ` +
         'before this fire could mark it, so the runtime cannot tell whether that fire completed'
       )
-    // One string for both causes: the reason code is shared, and telling them
-    // apart would take a second value out of the locked read.
+    // One string for all three causes: the reason code is shared, and telling
+    // them apart would take a second value out of the locked read.
     case 'content_moved':
       return (
-        `refused (content_moved): the approved content moved or was erased between the gate and ` +
-        `the spend mark — the fingerprint the gate decided on (${fingerprint}) is no longer the ` +
-        `one on file, or the content it names is gone`
+        `refused (content_moved): the approved content moved or was erased ` +
+        `between the gate and the spend mark — the fingerprint the gate decided on ` +
+        `(${fingerprint}) is no longer the one on file, or the content it names is gone or is ` +
+        `no longer its producer's latest Output`
       )
     case 'mark_unavailable':
       return (
@@ -2449,6 +2492,14 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // `eventsPath` is threaded so a stub-gate discard notice lands in this run's
     // event log rather than escaping to the default one.
     const state = await readEngineState(stateDir, { eventsPath })
+    // The run each plugin's entry named when this advance read the document.
+    // The spend mark reads it to tell a carried entry another writer left on
+    // disk since then from the one this advance started from, which its own run
+    // of the producer has already superseded in memory and will overwrite at
+    // the end-of-run write (`markContentApprovalSpent`).
+    const runsAtRead: ReadonlyMap<string, string | undefined> = new Map(
+      Object.entries(state.plugin_runs).map(([plugin, entry]) => [plugin, entry.run_id]),
+    )
 
     // 2a. Compute degradation tier — from PREVIOUS last_interaction_at (before we update it)
     const previousLastInteraction = state.last_interaction_at
@@ -3030,6 +3081,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               eventsPath,
               pluginName,
               ev.content,
+              runsAtRead,
             )
             if (markRefusal !== undefined) {
               // The FSM state, not the run-log status: a refusal leaves it at
@@ -3175,7 +3227,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               last_run_at: new Date().toISOString(),
               status: 'failed',
               duration_ms: failedElapsed,
-              ...lastOutputOf(null, priorThrownEntry),
+              ...lastOutputOf(null, priorThrownEntry, run_id),
             }
             ranThisAdvance.set(pluginName, null)
             await emitPluginFailed(pluginName, errMsg, run_id, eventsPath)
@@ -3288,7 +3340,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 // gated run produced its Outputs before the gate saw them — and
                 // a gated run that produced none leaves the plugin's prior Output
                 // where it was.
-                ...lastOutputOf(result, priorGatedEntry),
+                ...lastOutputOf(result, priorGatedEntry, run_id),
               }
               ranThisAdvance.set(pluginName, result)
 
@@ -3387,7 +3439,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // last_output: this run's Output when it produced one, the plugin's
             // prior Output when it did not, and absent — not null — when there
             // has never been one.
-            ...lastOutputOf(result, priorAutonomousEntry),
+            ...lastOutputOf(result, priorAutonomousEntry, run_id),
           }
           ranThisAdvance.set(pluginName, result)
         }),
@@ -3557,7 +3609,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         last_run_id: run_id,
         last_run_at: new Date().toISOString(),
         last_interaction_at: state.last_interaction_at,
-        plugin_runs: mergePluginRuns(disk.plugin_runs, state.plugin_runs, ranThisAdvance),
+        plugin_runs: mergePluginRuns(disk.plugin_runs, state.plugin_runs, ranThisAdvance, run_id),
         pending_gates: mergePendingGates(disk.pending_gates, parked_gates, Date.now()),
         ...mergeTierChanges(disk, archivedTaskIds, autoDeferrals, tierStamp),
         // `confirmed_at` is written HERE and nowhere else — the second half of
@@ -4198,15 +4250,16 @@ export async function applyPendingGate(
   // has run since the gate was parked.
   const priorApprovedEntry = state.plugin_runs[gate.plugin]
   const priorOut = priorApprovedEntry?.last_output
+  // Read here only for the gate copies below. Keeping the erased record in the
+  // entry is `lastOutputOf`'s rule, so the write names neither field itself.
   const keptErased = priorOut?.erased_at !== undefined && priorOut.run_id === gate.run_id ? priorOut : undefined
   state.plugin_runs[gate.plugin] = {
     last_run_at: completedAt,
     status: gate.plugin_result.status,
     duration_ms: Math.max(0, new Date(completedAt).getTime() - startedMs),
-    // An erased record for this run stays erased. See the docstring.
-    ...(keptErased !== undefined
-      ? { last_output: keptErased }
-      : lastOutputOf(gate.plugin_result, priorApprovedEntry)),
+    // The run that parked it, and an erased record for that run stays erased.
+    // See the docstring.
+    ...lastOutputOf(gate.plugin_result, priorApprovedEntry, gate.run_id),
   }
   // Marked, not deleted. A deleted gate is an invisible one, and the next
   // `approve` would fall through to the Grant path instead of refusing.
@@ -4257,26 +4310,67 @@ export async function applyPendingGate(
  * below, and a consumer that needs to know how the producer's LAST run went
  * asks `lastRun` for it instead of inferring health from this field.
  *
- * Returns an EMPTY object when there is nothing to write, so the key is absent
- * from the JSON rather than present as `null` or `{}` — a reader should not
- * have to tell an unproductive run from a malformed pointer. That contract is
- * unchanged: a plugin that has never produced still carries no key at all.
+ * Leaves `last_output` out when there is nothing to write, so the key is
+ * absent from the JSON rather than present as `null` or `{}` — a reader should
+ * not have to tell an unproductive run from a malformed pointer. That contract
+ * is unchanged: a plugin that has never produced still carries no key at all.
  *
  * "Most recent" is the last element: `artifacts_produced` is written in the
  * order the handler produced them.
+ *
+ * **It decides both halves of the Run-to-Output relationship**, and it is the
+ * only place either is decided. `run_id` is the run that wrote the entry,
+ * `runId`, which for an applied gate is the run that parked it. Beside
+ * `last_output.run_id` it says whether the Output is this run's or carried, and
+ * `lastOutputIsCurrent` reads exactly that. So no writer sets either field
+ * itself: all five spread this (the thrown, gated and autonomous arms in
+ * `runAdvance`, the gate apply, and the end-of-run merge), and
+ * `src/runtime/__tests__/plugin-run-writers.test.ts` holds every runs-map
+ * mutation in `src/` to that, by source scan as well as by driving the writers.
+ *
+ * **An erased record for this same run stays erased.** When the entry being
+ * overwritten already holds an erased Output whose `run_id` is `runId`, that
+ * record is returned, ahead of the run's own Output: erasure is one-way, and
+ * the gate apply is the writer that meets it, applying a gate whose content was
+ * released while it waited (see `applyPendingGate`). A result from the same run
+ * would otherwise write the erased body back.
  */
 function lastOutputOf(
   result: StoredSkillResult | null,
   prior: PluginRun | undefined,
-): { last_output?: StoredOutputRecord } {
+  runId: string,
+): { run_id: string; last_output?: StoredOutputRecord } {
+  const priorOut = prior?.last_output
+  if (priorOut?.erased_at !== undefined && priorOut.run_id === runId) {
+    return { run_id: runId, last_output: priorOut }
+  }
   // `null` is the third caller: an invocation that threw has no result at all,
   // which is the strongest form of "this run produced nothing" and takes the
   // carry-forward for the same reason the other two do. Widened here rather
   // than inlined at that site, so all three writers keep sharing one rule.
   const last = result?.artifacts_produced.at(-1)
-  if (last !== undefined) return { last_output: last }
-  const carried = prior?.last_output
-  return carried === undefined ? {} : { last_output: carried }
+  if (last !== undefined) return { run_id: runId, last_output: last }
+  return priorOut === undefined ? { run_id: runId } : { run_id: runId, last_output: priorOut }
+}
+
+/**
+ * Whether a producer's `last_output` is the Output its latest run produced,
+ * rather than one carried forward across a run that produced none.
+ *
+ * True when there is no entry, no `run_id` on it, no `last_output`, or the two
+ * `run_id`s are equal. An entry written before `run_id` existed reads as
+ * produced: nothing on it can say otherwise, and the producer's next run writes
+ * the field.
+ *
+ * Three readers, one predicate: the content gate (`approvalStanding`'s carried
+ * arm), the spend mark's re-check under its lock (`markContentApprovalSpent`),
+ * and `warpline approve --content`, which refuses to bind a carried Output. A
+ * second copy of this comparison in any of them would be a second answer free
+ * to drift from the first.
+ */
+export function lastOutputIsCurrent(run: PluginRun | undefined): boolean {
+  if (run?.run_id === undefined || run.last_output === undefined) return true
+  return run.last_output.run_id === run.run_id
 }
 
 function getDefaultPluginsDir(): string {

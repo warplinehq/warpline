@@ -748,7 +748,7 @@ wording changes.
 |--------|------------|---------|
 | `indeterminate` | the gate, or the spend mark | A fire was marked and never confirmed, so the runtime cannot tell whether the bytes already shipped |
 | `outside_window` | the gate | The approval window has closed, its zone no longer resolves on this host, or its approval instant cannot be parsed |
-| `content_moved` | the gate, or the spend mark | The approved bytes are no longer what would ship, or the producer's Output that held them has been erased (§ 10, `last_output`) |
+| `content_moved` | the gate, or the spend mark | The approved bytes are no longer what would ship, or the producer's Output that held them has been erased, or the producer's latest run produced no Output (§ 10, `last_output`) |
 | `mark_unavailable` | the spend mark | The mark could not be attempted at all — the state document could not be locked or could not be read — so nothing was written and nothing was sent |
 | `mark_uncertain` | the spend mark | The mark's own write failed, so whether it landed is unknown; nothing was sent either way |
 
@@ -761,8 +761,9 @@ runtime does not know whether the fire already happened.
 second decision, taken after the gate has already said fire, and a refusal from
 one is never a candidate for the other's decision. The mark re-reads the record
 under the state document's lock as its own precondition, so it can answer
-`content_moved` when the record has gone, its fingerprint moved, or the
-producer's Output was erased since the gate read it, and `indeterminate` when
+`content_moved` when the record has gone, its fingerprint moved, the
+producer's Output was erased, or a run of the producer that produced no Output
+was written since the gate read it, and `indeterminate` when
 something else has marked it since. It checks
 `content_moved` first. A consumer holding either of those two reasons cannot
 tell from the reason alone which point refused; the entry's `result_summary`
@@ -1531,6 +1532,7 @@ arrives without a migration step, so it arrives unannounced.
 | `status` | `success` \| `partial` \| `failed` \| `skipped` \| `gated` | How it ended |
 | `duration_ms` | integer, optional | Wall time for the run |
 | `last_output` | Output record, optional | The most recent Output this plugin produced. Its content may have been erased; see § `last_output` |
+| `run_id` | string, optional | The run that wrote the entry; for an applied gate, the run that parked it. A `last_output` whose `run_id` differs was carried forward from an earlier run, because the latest one produced no Output (§ `last_output`). An entry without it, written before the field existed, reads as produced |
 
 `gated` records a supervised plugin that ran and was parked pending approval.
 It is written when the plugin is parked, anchored at the gate's completion
@@ -1739,8 +1741,9 @@ does, in order, all decided before anything is written:
    into a double apply.
 4. **Otherwise applied.** The plugin's `plugin_runs` entry is overwritten in
    place: `last_run_at` stays at `run_completed_at`, the status becomes the
-   result's real terminal status, and `last_output` carries the Output the run
-   already produced. `applied_at` is stamped on the gate. If that Output's
+   result's real terminal status, `run_id` is the run that parked it, and
+   `last_output` carries the Output the run already produced. `applied_at` is
+   stamped on the gate. If that Output's
    content was erased while the gate was pending,
    the erased record stays, because erasure is one-way
    and the binding that released it is gone. The same write erases the gate's
@@ -2013,7 +2016,13 @@ The fields:
   fingerprint does not move when the producer's content is erased (the stored
   `body_sha256` keeps it equal, see `denials`), so the gate reads `erased_at`
   itself, and an approval over erased content refuses with `content_moved`
-  rather than firing on a record with no bytes.
+  rather than firing on a record with no bytes. A producer whose latest run
+  produced no Output refuses with `content_moved` too: the runtime carries its
+  last Output forward, so the bytes and the fingerprint are unchanged, but the
+  producer is no longer proposing them. The check reads the producer's
+  `plugin_runs` entry, whose `run_id` differs from its Output's, rather than
+  anything the advance that ran it noticed, because that producer is usually
+  still fresh on the next advance and is not re-run to say so again.
 - `run_id` — the producer run the approved bytes came from, and the reference a
   retention carve-out protects so the log behind an approval is not pruned out
   from under it. Nullable, because an Output may carry no run id: null says the
@@ -2322,6 +2331,14 @@ closed or was withdrawn, tells the operator to run the producer again, and exits
 checked before the file check above. The refusal for a producer that has never
 produced is unchanged, and in both cases nothing is written.
 
+**A carried Output is refused by name.** When the producer's latest run
+produced no Output, the `last_output` on file was carried forward from an
+earlier run (§ `last_output`), and it is not what the producer proposes now. The
+gate would refuse to ship it, so the command refuses to bind it: it says the
+producer's latest run produced no Output, tells the operator to run the producer
+again, and exits `1` with nothing written. Checked after the erased refusal and
+before the file check. Only the two plugin names are interpolated.
+
 **Withdrawal is validated against the record, not against what is installed.**
 A plugin uninstalled after it was approved is still reachable by name from
 `--remove`; were it checked against the loaded manifests, its record would be
@@ -2388,6 +2405,20 @@ the advance's own copy, so it can have read an older pointer than the one
 written. One write keeps an erased record instead: applying a gate whose run's
 Output was erased while it was pending (§ "Applying a gate", step 4). Erasure is
 one-way.
+
+**Carried, and never shipped.** A carried Output still serves `lastOutput`
+readers, for the reason above. The entry says it is carried: its `run_id` is the
+run that wrote the entry, and it differs from `last_output.run_id` exactly when
+that run produced no Output. A content-class consumer never ships a carried
+Output, and `approve --content` never binds one (§ `approvals`), because the
+producer's latest run proposed nothing and an approval is a yes to its current
+proposal. The gate, the spend mark and `approve --content` read one predicate
+for it. The spend mark reads it on the entry it re-reads under its lock, and
+refuses only an entry written since the advance read the document: the entry
+the advance started from can read carried while the advance has already run the
+producer again and produced, and the end-of-run write replaces it. Every writer
+of the entry decides `run_id` and `last_output` in one place, so neither can be
+written without the other.
 
 **Status-blind.** What survives is keyed on the run producing no Output, never
 on how the run ended. A run that threw, a run that returned `failed`, and a run
@@ -2881,7 +2912,7 @@ top-level key. What the advance did change goes on top, each by its own rule.
 | Field | The advance's change | What is written |
 |-------|----------------------|-----------------|
 | `schema_version`, `last_run_id`, `last_run_at`, `last_interaction_at` | set by the advance | the advance's |
-| `plugin_runs` | the entry of each plugin it ran | the advance's entry for each plugin it ran, and the fresh read's for every other plugin, absence included. `last_output` is decided again against the fresh entry (§ `last_output`) |
+| `plugin_runs` | the entry of each plugin it ran | the advance's entry for each plugin it ran, and the fresh read's for every other plugin, absence included. `last_output` is decided again against the fresh entry, and `run_id` is the advance's (§ `last_output`) |
 | `pending_gates` | the gates it parked | the fresh read's gates that survive (§ 10, "Applying a gate", step 1), then the gates it parked |
 | `approvals` | the marks and confirmations of its content fires | merged per key (below) |
 | `task_aging`, `deferrals` | the tasks its tier archived or auto-deferred | changed by task id, and only while the fresh read still holds the task open, not archived. An auto-deferral also needs the task to have no deferral of its own |

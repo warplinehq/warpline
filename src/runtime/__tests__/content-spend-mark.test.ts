@@ -106,15 +106,14 @@ async function writeProducer(): Promise<void> {
       version: '1.0.0',
       description: 'producer',
       inputs: {},
-      outputs: {},
+      outputs: { brief: { type: 'json' } },
       capabilities: [],
       schedule: 'on_run',
       autonomy_level: 'autonomous',
       side_effects: [],
       approval_class: 'session',
-      // Fresh for a day. A producer that re-runs overwrites its own
-      // `last_output`, and the bytes the approval is bound to would move
-      // underneath the gate before it ever read them.
+      // Fresh for a day, so most cases never re-run it and the gate reads the
+      // seeded bytes.
       ttl_hours: 24,
       dependencies: [],
       timeout_ms: 5000,
@@ -124,7 +123,16 @@ async function writeProducer(): Promise<void> {
       min_tier: 'suspended',
     })}`,
   )
-  await writeFile(join(dir, 'handler.ts'), `export async function handler() {\n  return ${RESULT}\n}\n`)
+  // When it does run (the two cases 25 hours on), it produces the approved
+  // bytes again, so the gate finds the approval live and the case reaches the
+  // spend mark. A run that produced nothing would leave the bytes carried, and
+  // the gate refuses those on its own (`content-carried-output.test.ts`), which
+  // would stop the case short of the mark it exists for.
+  await writeFile(
+    join(dir, 'handler.ts'),
+    `export async function handler() {\n  const result = ${RESULT}\n` +
+      `  return { ...result, artifacts_produced: [${JSON.stringify(outputOf(APPROVED_BODY))}] }\n}\n`,
+  )
 }
 
 /** How the consumer's handler behaves once it has been entered. */
