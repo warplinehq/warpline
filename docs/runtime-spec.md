@@ -762,9 +762,12 @@ second decision, taken after the gate has already said fire, and a refusal from
 one is never a candidate for the other's decision. The mark re-reads the record
 under the state document's lock as its own precondition, so it can answer
 `content_moved` when the record has gone, its fingerprint moved, the
-producer's Output was erased, or a run of the producer that produced no Output
-was written since the gate read it, and `indeterminate` when
-something else has marked it since. It checks
+producer's Output was erased since the advance read the document, or a run of
+the producer that produced no Output was written since the gate read it, and
+`indeterminate` when something else has marked it since. An erased record the
+advance read, ran the producer over and produced again is not refused: the
+gate read the bytes that run produced, and the end-of-run write puts them over
+the erased record. It checks
 `content_moved` first. A consumer holding either of those two reasons cannot
 tell from the reason alone which point refused; the entry's `result_summary`
 says so in prose. `outside_window` is the one reason the mark never produces.
@@ -1637,6 +1640,17 @@ the preview showed, so a preview that under-states an advance is the input to a
 wrong answer, and one that over-states it is only a plugin that did not run.
 Pinned by `plan.test.ts` Test 2b.
 
+The content gate over-states the same way. A content-class consumer whose
+approval reads `content_moved`, for carried, erased or moved bytes, while its
+declared producer is due at an earlier level of the preview, is listed due with
+the line `may fire if '<producer>' re-produces the approved bytes this advance`.
+The producer's run decides the standing, and a preview cannot know what that
+run will produce. The evaluator's verdict stays not-due and carries a hint that
+only `plan` reads, so an advance never fires on it without a content authority.
+A producer that produces other bytes, or none, leaves `plan` reporting the
+consumer due where the advance refuses it `content_moved`. Pinned by
+`plan.test.ts` Tests 2d to 2f.
+
 ### `pending_gates`
 
 A supervised plugin's result parked pending a human answer. There is at most
@@ -2496,7 +2510,10 @@ proposal. The gate, the spend mark and `approve --content` read one predicate
 for it. The spend mark reads it on the entry it re-reads under its lock, and
 refuses only an entry written since the advance read the document: the entry
 the advance started from can read carried while the advance has already run the
-producer again and produced, and the end-of-run write replaces it. Every writer
+producer again and produced, and the end-of-run write replaces it. It treats an
+erased entry the same way, by the erasure the advance saw when it read the
+document, since erasure keeps the entry's run and the run alone cannot tell the
+two apart. Every writer
 of the entry decides `run_id` and `last_output` in one place, so neither can be
 written without the other.
 

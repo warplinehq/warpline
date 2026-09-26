@@ -237,6 +237,19 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
           if (evaluation.due) {
             due.push(entry)
             dueThisLevel.push(name)
+          } else if (evaluation.mayFireIfReproducedBy !== undefined) {
+            // The preview over-states here, as it does for a failed dependency
+            // it expects to clear: a preview that under-states an advance is
+            // the input to a wrong answer. The evaluator's verdict stays
+            // not-due, so this is the preview's decision and never the
+            // advance's. The column reads approved because the approval would
+            // authorise exactly the fire the condition describes.
+            due.push({
+              ...entry,
+              approved: true,
+              condition: `may fire if '${evaluation.mayFireIfReproducedBy}' re-produces the approved bytes this advance`,
+            })
+            dueThisLevel.push(name)
           } else {
             notDue.push({ ...entry, reason: evaluation.reason, detail: evaluation.detail })
             if (evaluation.reason === 'dependency_failed') heldThisLevel.push(name)

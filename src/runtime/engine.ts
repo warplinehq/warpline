@@ -812,8 +812,23 @@ export type EvalResult =
    * call would be a second read of the authority for one fire decision, which
    * is the thing this phase refuses by name. `detail` is the prose for the
    * same fact; this is the machine-readable half.
+   *
+   * `mayFireIfReproducedBy` is present only on a content-class plugin refused
+   * `content_moved` at the approval gate, whose approval's producer is its
+   * declared dependency and is in the context's `dueAtEarlierLevel`. It names
+   * that dependency. The producer's run this advance decides the standing, so
+   * a preview must not report the plugin as certainly not due. It is a hint,
+   * never a verdict: a caller that acts on `due` alone never invokes a
+   * content-class plugin without a content authority. Only `plan` supplies
+   * `dueAtEarlierLevel`, so only `plan` ever sees it.
    */
-  | { due: false; reason: NotDueReason; detail: string; refusal?: RefusalReason }
+  | {
+      due: false
+      reason: NotDueReason
+      detail: string
+      refusal?: RefusalReason
+      mayFireIfReproducedBy?: string
+    }
 
 /** Everything `evaluatePlugin` needs that is not the plugin itself. */
 export interface EvalContext {
@@ -863,6 +878,11 @@ export interface EvalContext {
    * that runs and fails again leaves the run skipping a dependent this preview
    * called due, which is the residual disclosed as the fifth entry under
    * docs/runtime-spec.md § "What the dependency gate does not cover".
+   *
+   * A second reader: the approval gate's `content_moved` refusal. A content
+   * consumer whose declared producer is in this set gets the not-due hint
+   * `mayFireIfReproducedBy`, because the producer's run may put the approved
+   * bytes back. The verdict itself does not change.
    */
   dueAtEarlierLevel?: ReadonlySet<string>
   /**
@@ -1648,6 +1668,7 @@ async function markContentApprovalSpent(
   plugin: string,
   authority: ContentAuthority,
   runsAtRead: ReadonlyMap<string, string | undefined>,
+  erasedAtRead: ReadonlySet<string>,
   markedPlugins: ReadonlySet<string>,
 ): Promise<MarkRefusal | undefined> {
   // The partition is by CALL SITE, never by an `instanceof` taxonomy: the
@@ -1696,8 +1717,18 @@ async function markContentApprovalSpent(
       // end-of-run write puts that entry over the disk's. Refusing on it would
       // refuse the first fire after every quiet run, for a fact the advance has
       // already moved past.
+      //
+      // The erased check follows the same rule. The record the advance read was
+      // already erased and is still the one on disk (same run), and the gate
+      // still said fire, so this advance ran the producer and produced the bytes
+      // the gate read, which its end-of-run write puts over the erased record.
+      // Refusing there is a false refusal for a fact the advance moved past.
+      // Erasure keeps the entry's run, so the run comparison alone cannot tell
+      // that from an erasure written since the read, which must refuse. The
+      // read-time set can. Every other erased disk record still refuses.
       const diskRun = disk.plugin_runs[record.producer]
-      if (disk.plugin_runs[record.producer]?.last_output?.erased_at !== undefined) return 'content_moved'
+      const erasedWhenRead = erasedAtRead.has(record.producer) && diskRun?.run_id === runsAtRead.get(record.producer)
+      if (!erasedWhenRead && diskRun?.last_output?.erased_at !== undefined) return 'content_moved'
       if (!lastOutputIsCurrent(diskRun) && diskRun?.run_id !== runsAtRead.get(record.producer)) {
         return 'content_moved'
       }
@@ -2241,9 +2272,24 @@ export async function evaluatePlugin(
       // there would publish a verdict no gate reached. The standing itself is
       // `none` for every session-class plugin, so that half needs no guard.
       const refusal = gate.reason === 'unapproved' ? refusalFor(contentStanding) : undefined
-      return refusal === undefined
-        ? { due: false, reason: gate.reason, detail }
-        : { due: false, reason: gate.reason, detail, refusal }
+      // The preview's hint, and never the advance's: see `EvalResult`. The
+      // declared name is what it carries, never the record's string.
+      const producer = manifest.dependencies[0]
+      const mayFireIfReproducedBy =
+        gate.reason === 'unapproved' &&
+        contentStanding.standing === 'content_moved' &&
+        producer !== undefined &&
+        producer === contentStanding.approval.producer &&
+        ctx.dueAtEarlierLevel?.has(producer) === true
+          ? producer
+          : undefined
+      return {
+        due: false,
+        reason: gate.reason,
+        detail,
+        ...(refusal === undefined ? {} : { refusal }),
+        ...(mayFireIfReproducedBy === undefined ? {} : { mayFireIfReproducedBy }),
+      }
     }
   }
 
@@ -2556,6 +2602,15 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // the end-of-run write (`markContentApprovalSpent`).
     const runsAtRead: ReadonlyMap<string, string | undefined> = new Map(
       Object.entries(state.plugin_runs).map(([plugin, entry]) => [plugin, entry.run_id]),
+    )
+    // Every plugin whose Output was already erased when this advance read the
+    // document. Erasure keeps the entry's run, so `runsAtRead` alone cannot
+    // tell the erased record this advance started from, and has since produced
+    // over, from an erasure written after the read. The spend mark reads both.
+    const erasedAtRead: ReadonlySet<string> = new Set(
+      Object.entries(state.plugin_runs)
+        .filter(([, entry]) => entry.last_output?.erased_at !== undefined)
+        .map(([plugin]) => plugin),
     )
 
     // 2a. Compute degradation tier — from PREVIOUS last_interaction_at (before we update it)
@@ -3146,6 +3201,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               pluginName,
               ev.content,
               runsAtRead,
+              erasedAtRead,
               markedThisAdvance,
             )
             if (markRefusal !== undefined) {

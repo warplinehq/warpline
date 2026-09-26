@@ -33,7 +33,11 @@ export interface PlanEntry {
   level: number
   /** Declared side effects in manifest declaration order, never re-sorted. */
   sideEffects: string[]
-  /** Live approval state for this plugin, from `checkApproval`. */
+  /**
+   * Live approval state for this plugin. From `checkApproval` for a
+   * session-class plugin. For a content-class plugin it is the approval's
+   * standing, and true on an entry carrying a `condition`.
+   */
   approved: boolean
   /**
    * Present and `true` only when the manifest declares `llm_handoff: true`,
@@ -41,6 +45,12 @@ export interface PlanEntry {
    * that this run will.
    */
   llmHandoff?: boolean
+  /**
+   * Present only when the preview lists the plugin as due on a condition it
+   * cannot check, and absent otherwise, so every other entry renders
+   * byte-identically.
+   */
+  condition?: string
 }
 
 /**
@@ -207,6 +217,7 @@ export function renderPlan(model: PlanModel, now: number): string {
       lines.push(`${INDENT}${entry.plugin} (level ${entry.level})`)
       // Before the zero-effects branch, which ends the entry early.
       if (entry.llmHandoff === true) lines.push(HANDOFF_LINE)
+      if (entry.condition !== undefined) lines.push(`${SUB_INDENT}${entry.condition}`)
       if (entry.sideEffects.length === 0) {
         lines.push(`${SUB_INDENT}(no declared side effects)`)
         continue
