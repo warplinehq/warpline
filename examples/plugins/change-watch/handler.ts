@@ -7,7 +7,7 @@ import { atomicWriteJson, readJsonOrNull } from 'warpline/unstable-fs'
 import { skillFailure, skillOk } from 'warpline/unstable-result'
 
 /**
- * Own state, `<home>/state/competitor-watch.last.json`: the normalised text
+ * Own state, `<home>/state/change-watch.last.json`: the normalised text
  * each declared target had the last time it was fetched, keyed by target.
  * { "https://...": "line one\nline two" }
  *

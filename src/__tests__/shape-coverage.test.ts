@@ -48,8 +48,8 @@ import { handler as candidatePromote } from '../../examples/plugins/candidate-pr
 import { manifest as candidatePromoteManifest } from '../../examples/plugins/candidate-promote/manifest.js'
 import { handler as candidatePropose } from '../../examples/plugins/candidate-propose/handler.js'
 import { manifest as candidateProposeManifest } from '../../examples/plugins/candidate-propose/manifest.js'
-import { handler as competitorWatch } from '../../examples/plugins/competitor-watch/handler.js'
-import { manifest as competitorWatchManifest } from '../../examples/plugins/competitor-watch/manifest.js'
+import { handler as changeWatch } from '../../examples/plugins/change-watch/handler.js'
+import { manifest as changeWatchManifest } from '../../examples/plugins/change-watch/manifest.js'
 import { handler as dailyDigest } from '../../examples/plugins/daily-digest/handler.js'
 import { manifest as dailyDigestManifest } from '../../examples/plugins/daily-digest/manifest.js'
 import { handler as derivedSummary } from '../../examples/plugins/derived-summary/handler.js'
@@ -281,7 +281,7 @@ const REGISTRY: readonly ShapeEntry[] = [
   },
   {
     shape: 2,
-    example: 'competitor-watch',
+    example: 'change-watch',
     // Twice in ONE home, the page growing a line in between. The first run
     // keeps a snapshot; the second compares against it and reports the new
     // line as a diff. A handler that stopped reading its snapshot back would
@@ -290,9 +290,9 @@ const REGISTRY: readonly ShapeEntry[] = [
       const pages = ['first line', 'first line\nsecond line']
       let served = 0
       const run = () => withFetch(async () => okText(pages[served++] ?? '')(), () =>
-        competitorWatch(competitorWatchManifest, { targets: ['https://watch.example.test/one'] }, signal(), CONTEXT))
+        changeWatch(changeWatchManifest, { targets: ['https://watch.example.test/one'] }, signal(), CONTEXT))
       const first = await run()
-      const kept = existsSync(join(home, 'state', 'competitor-watch.last.json'))
+      const kept = existsSync(join(home, 'state', 'change-watch.last.json'))
       const second = await run()
       const report = lastBody<{ targets: { status: string; diff?: string[] }[] }>(second)
       if (report === undefined) return false

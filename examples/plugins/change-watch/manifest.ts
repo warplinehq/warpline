@@ -1,7 +1,7 @@
 import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
 
 /**
- * competitor-watch — example plugin.
+ * change-watch — example plugin.
  *
  * Watch a short list of pages and say what moved since the last run. Each run
  * fetches every declared target, one at a time and in the order declared,
@@ -15,13 +15,13 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * this one plausibly depends on, so a first run against a clean install shows
  * real data. They are release feeds you consume, never rivals, and the example
  * names no company as one. Replace them with the pages you care about through
- * `warpline configure competitor-watch`.
+ * `warpline configure change-watch`.
  *
  * It fetches the declared targets and nothing else. No link found in a body is
  * followed, and every request refuses a redirect, so a target that moves is
  * reported `failed` rather than quietly swapped for wherever it went.
  *
- * The snapshot is this plugin's own state, `state/competitor-watch.last.json`
+ * The snapshot is this plugin's own state, `state/change-watch.last.json`
  * under the warpline home, keyed by target. A first run has none, which is why
  * it reports every target `new`. A snapshot that is not in the shape this
  * plugin writes is refused rather than read as empty.
@@ -30,7 +30,7 @@ import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
  * pages and needs no secret.
  */
 export const manifest = PluginManifestSchema.parse({
-  name: 'competitor-watch',
+  name: 'change-watch',
   version: '1.0.0',
   description: 'Fetch each declared target, keep a normalised snapshot of its text, and report what changed since the last run: new, changed with a capped line diff, unchanged, or failed',
   autonomy_level: 'autonomous',

@@ -153,10 +153,10 @@ async function run(home: string, name: string, opts: RunOptions = {}) {
 }
 
 describe('a scaffolded example changes behaviour on config alone', () => {
-  test('competitor-watch: changing only its config changes what it does', async () => {
-    await scaffolded('competitor-watch', async (home) => {
+  test('change-watch: changing only its config changes what it does', async () => {
+    await scaffolded('change-watch', async (home) => {
       const before = recorder('a page')
-      const first = await run(home, 'competitor-watch', { fetch: before })
+      const first = await run(home, 'change-watch', { fetch: before })
       expect(first.result.status).toBe('success')
       expect(before.requests.map((r) => r.url)).toEqual([
         'https://github.com/nodejs/node/tags.atom',
@@ -164,9 +164,9 @@ describe('a scaffolded example changes behaviour on config alone', () => {
         'https://github.com/denoland/deno/tags.atom',
       ])
 
-      configure(home, 'competitor-watch', { targets: ['https://watch.example.test/configured'] })
+      configure(home, 'change-watch', { targets: ['https://watch.example.test/configured'] })
       const after = recorder('a page')
-      const second = await run(home, 'competitor-watch', { fetch: after })
+      const second = await run(home, 'change-watch', { fetch: after })
       expect(second.result.status).toBe('success')
       expect(after.requests.map((r) => r.url)).toEqual(['https://watch.example.test/configured'])
     })

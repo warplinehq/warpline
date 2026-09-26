@@ -18,7 +18,7 @@ function invoke(args: Record<string, unknown>, signal = new AbortController().si
  * home, so a shared one would let one case compare against what another wrote.
  */
 async function withHome<T>(fn: (home: string) => Promise<T>): Promise<T> {
-  const home = await mkdtemp(join(tmpdir(), 'warpline-competitor-watch-home-'))
+  const home = await mkdtemp(join(tmpdir(), 'warpline-change-watch-home-'))
   const realHome = process.env.WARPLINE_HOME
   process.env.WARPLINE_HOME = home
   try {
@@ -98,7 +98,7 @@ function report(result: { artifacts_produced?: unknown[] }): ReportEntry[] {
   return (JSON.parse(output.body ?? '') as { targets: ReportEntry[] }).targets
 }
 
-describe('competitor-watch reports what changed since the last run', () => {
+describe('change-watch reports what changed since the last run', () => {
   test('a first run in a fresh home reports every target new and keeps a snapshot of each', async () => {
     await withHome(async (home) => {
       const { impl } = recorder({ [ONE]: ok(page('v1.0.0')), [TWO]: ok(page('v2.0.0')), [THREE]: ok(page('v3.0.0')) })
@@ -160,7 +160,7 @@ describe('competitor-watch reports what changed since the last run', () => {
   })
 })
 
-describe('competitor-watch', () => {
+describe('change-watch', () => {
   test('normalise folds line endings, trims each line, collapses inner whitespace and drops empty lines', () => {
     expect(normalise('a  b\r\n\r\n  c\t\td  \r')).toBe('a b\nc d')
   })
@@ -274,12 +274,12 @@ describe('competitor-watch', () => {
 })
 
 /**
- * `targets` arrives from `<home>/config/competitor-watch.json`, a URL can
+ * `targets` arrives from `<home>/config/change-watch.json`, a URL can
  * carry a token, and every field of the result lands in a run log. Each
  * sentinel is shaped to pass the guard above the arm it targets: a non-URL
  * string for the input check, a valid URL for the three arms past it.
  */
-describe('competitor-watch config value disclosure', () => {
+describe('change-watch config value disclosure', () => {
   const SENTINEL = 'do-not-echo-5e1f07'
   const sentinelUrl = `https://${SENTINEL}.test/page`
   const refuse = async (input: unknown) => { throw new TypeError(`Unable to connect to ${String(input)}`) }

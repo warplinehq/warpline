@@ -54,19 +54,19 @@ const ALLOWLIST: readonly AllowlistEntry[] = [
     reason: 'a real repository, and the one this package ships from — the quickstart polls itself, so the value is public by construction',
   },
   {
-    plugin: 'competitor-watch',
+    plugin: 'change-watch',
     key: 'targets',
     value: 'https://github.com/nodejs/node/tags.atom',
     reason: 'the public tag feed of an upstream runtime an adopter plausibly depends on, fetched read-only; it names no company as a rival',
   },
   {
-    plugin: 'competitor-watch',
+    plugin: 'change-watch',
     key: 'targets',
     value: 'https://github.com/oven-sh/bun/tags.atom',
     reason: 'the public tag feed of the runtime this package itself runs on, fetched read-only; a dependency watched, not a rival named',
   },
   {
-    plugin: 'competitor-watch',
+    plugin: 'change-watch',
     key: 'targets',
     value: 'https://github.com/denoland/deno/tags.atom',
     reason: 'the public tag feed of a third upstream runtime, fetched read-only, so a first run shows real release data and names no rival',
@@ -291,10 +291,10 @@ describe('example manifest defaults are placeholders', () => {
     expect((await defaultOffenders(REPO_ROOT)).scanned).toBeGreaterThanOrEqual(3)
   })
 
-  test('the allowlist is load-bearing: without it the shipped github-poll and competitor-watch defaults are offenders', async () => {
+  test('the allowlist is load-bearing: without it the shipped github-poll and change-watch defaults are offenders', async () => {
     const { offenders } = await defaultOffenders(REPO_ROOT, [])
     expect(offenders).toEqual([
-      "competitor-watch: input 'targets' default is not a recognisable placeholder",
+      "change-watch: input 'targets' default is not a recognisable placeholder",
       "github-poll: input 'repo' default is not a recognisable placeholder",
     ])
     // Every entry admits exactly one value and says why.

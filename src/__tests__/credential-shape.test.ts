@@ -125,7 +125,7 @@ const CARRIERS: readonly Carrier[] = [
  */
 const NON_CARRIERS = [
   'announce-fanout', 'anomaly-watch', 'cadence-plan', 'cadence-replies', 'candidate-promote', 'candidate-propose',
-  'competitor-watch', 'daily-digest', 'derived-summary', 'draft-writer', 'feed-monitor', 'feed-triage',
+  'change-watch', 'daily-digest', 'derived-summary', 'draft-writer', 'feed-monitor', 'feed-triage',
   'github-poll', 'metrics-rollup', 'note-intake',
 ]
 

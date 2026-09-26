@@ -361,7 +361,7 @@ every one is still recorded `gated`, so the run stops after level 0. The three
 due at level 1 — `cadence-plan`, `daily-digest` and `feed-triage`, each there
 because it declares a dependency — do not run until the level-0 results are
 reviewed.
-Eight more — `anomaly-issue`, `competitor-watch`, `feed-monitor`,
+Eight more — `anomaly-issue`, `change-watch`, `feed-monitor`,
 `github-poll`, `graph-sync`, `ledger-runner`, `link-enrich` and
 `search-console` — declare side effects and are skipped as unapproved before
 the review gate is reached, until a session grant covers them. `note-intake` is

@@ -61,7 +61,7 @@ Due (10):
 
 Not due (11):
 
-  competitor-watch — unapproved: side effects require session approval
+  change-watch — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
   feed-monitor — unapproved: side effects require session approval
     external_api: ⚠ unapproved — would be SKIPPED this run
@@ -153,7 +153,7 @@ Worked examples in [examples/plugins/](examples/plugins/):
 | `link-enrich` | Fan in from three sources with per-source isolation — one refused source is a `partial` run that names it, every source refused is a failure; credentials are names on `secrets` |
 | `draft-writer` | Config-heavy writer — every adopter choice is a declared input with a placeholder default, three reference files named by path and refused outside the home, the drafting handed off |
 | `announce-fanout` | Config-heavy fan-out — channels, calls to action and a cadence as declared inputs, per-channel isolation, the per-channel rewrite handed off |
-| `competitor-watch` | Watch pages you depend on — fetch each declared target, keep a normalised snapshot, report new, changed with a capped line diff, unchanged or failed; the defaults are three upstream runtimes' tag feeds, so a first run shows real data |
+| `change-watch` | Watch pages you depend on — fetch each declared target, keep a normalised snapshot, report new, changed with a capped line diff, unchanged or failed; the defaults are three upstream runtimes' tag feeds, so a first run shows real data |
 | `search-console` | Derive over one Bearer token — week-over-week clicks and impressions for the top queries and pages of a declared site; persists nothing |
 | `graph-sync` | Idempotent per record — upsert by id so a re-run overwrites, one failing record isolated to its own error, every record failing is a failure |
 | `ledger-runner` | Write a product file — read declared instruments, rewrite the ledger atomically, report attempted against succeeded; a failed instrument keeps its last value |
