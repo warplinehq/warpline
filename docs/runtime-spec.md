@@ -2306,8 +2306,8 @@ both sit above the write and nothing can have been written. A write that threw
 is `mark_uncertain`, because the rename may have landed.
 
 On the `mark_uncertain` arm the in-memory record is restored to the value it
-held before the mark, which puts it on the **unmarked in-memory** row of the
-merge table this section already cites — the row where the disk wins. The disk
+held before the mark, and the plugin is not among those the advance marked, so
+the disk wins in the merge (§ 12, "`approvals` is merged per key"). The disk
 then decides: a write that landed reads `indeterminate` on the next advance, and
 one that did not is retried and fires. Left marked instead, the end-of-run merge
 would promote a mark this process never observed land, which is the runtime
@@ -2991,6 +2991,25 @@ merge that subtree per key. The two regions are sequential and never nested.
 writes it too, and so does another attachment: one home can be attached from
 several machines, so a `warpline approve --content` lands at an instant the
 advance cannot predict.
+
+The rule is the one `plugin_runs` follows: the advance's copy wins only for what
+the advance itself wrote. For `approvals` that is the records whose spend mark
+this advance took and saw land.
+
+| Key | Marked by this advance | What is written |
+|-----|------------------------|-----------------|
+| on disk only | — | the disk record (another attachment approved mid-advance) |
+| in the advance's copy | yes | the advance's record, over the disk and over absence |
+| in the advance's copy | no | the disk record, absence included |
+
+The advance's copy of a record it did not mark is a read taken at its start, so
+it can only be older than the disk. That holds for a record an earlier advance
+marked, too. So an operator's re-approval (`warpline approve <plugin>
+--content`), answer (`warpline resolve <plugin> --not-shipped <effect-id>`) or
+removal (`warpline approve <plugin> --content --remove`) that lands mid-advance
+on a record this advance did not mark is kept. A record this advance marked is never replaced by absence:
+it is the runtime's account of a fire it began, and with `confirmed_at` it is
+the evidence that the fire finished.
 
 **The accepted cost: two advances after a TTL heal.** If an advance's run lock is
 healed by the two-hour window while the advance is still running, a second

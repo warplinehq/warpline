@@ -1097,30 +1097,36 @@ function lockStateDocument<T>(statePath: string, fn: () => Promise<T>): Promise<
  * SAME table governs the end-of-run merge at the tail of `runAdvance`, and both
  * writers cite it rather than restating it.
  *
- * | key present          | in-memory state                       | result |
- * |----------------------|---------------------------------------|--------|
- * | on disk only         | —                                     | **keep the disk record** (another attachment approved mid-advance) |
- * | in memory only, marked-unconfirmed | `marked_at` set, `confirmed_at` null | **keep the in-memory record** (never replaced by absence) |
- * | in memory only, unmarked | `marked_at` null                  | **removal wins** (the operator ran `--remove`) |
- * | both, in-memory marked | `marked_at` set                     | **in-memory wins** (the same record, progressed) |
- * | both, in-memory unmarked | `marked_at` null                  | **disk wins** (a fresher operator write) |
+ * | key present            | marked by this advance | result |
+ * |------------------------|------------------------|--------|
+ * | on disk only           | —                      | **keep the disk record** (another attachment approved mid-advance) |
+ * | in memory              | yes                    | **memory wins**, over the disk and over absence (the mark this advance took, progressed) |
+ * | in memory              | no                     | **disk wins**, absence included (an approve, an answer or a removal that landed mid-advance) |
  *
- * `marked_at !== null` is the one discriminator, which is what collapses the
- * five rows into two loops. A record carrying `confirmed_at` also carries
- * `marked_at`, so it is preserved by the same arm — losing did-it-ship evidence
- * to a mid-advance removal is the repudiation this rule exists to prevent.
+ * `marked` is the one discriminator: the plugins whose spend mark this advance
+ * took and saw land. The advance's copy of any other record is a read taken at
+ * its start, so it can only be older than the disk, and writing it back would
+ * undo whatever an operator wrote since. That holds for a record an earlier
+ * advance marked too: its `marked_at` says nothing about who wrote it last.
+ * It is the rule `mergePluginRuns` follows for runs, where the advance's entry
+ * wins only for a plugin it ran.
+ *
+ * A record this advance marked is never replaced by absence. A record carrying
+ * `confirmed_at` also carries `marked_at`, so it is preserved by the same arm,
+ * and losing did-it-ship evidence to a mid-advance removal is the repudiation
+ * this rule exists to prevent.
  */
 function mergeApprovals(
   disk: EngineState['approvals'],
   memory: EngineState['approvals'],
+  marked: ReadonlySet<string>,
 ): EngineState['approvals'] {
-  // Rows 1 and 5: the disk record is the floor.
+  // Rows 1 and 3: the disk record is the floor.
   const merged: EngineState['approvals'] = { ...disk }
-  // Rows 2 and 4: a marked in-memory record wins over disk and over absence.
-  // Row 3 is what this loop does NOT do — an unmarked in-memory record is
-  // skipped, so a removal that landed on disk stays removed.
-  for (const [plugin, record] of Object.entries(memory)) {
-    if (record.marked_at !== null) merged[plugin] = record
+  // Row 2: a record this advance marked wins over disk and over absence.
+  // Own-property, never a bare index: `toString` must read as absent.
+  for (const plugin of marked) {
+    if (Object.hasOwn(memory, plugin)) merged[plugin] = memory[plugin]!
   }
   return merged
 }
@@ -1642,6 +1648,7 @@ async function markContentApprovalSpent(
   plugin: string,
   authority: ContentAuthority,
   runsAtRead: ReadonlyMap<string, string | undefined>,
+  markedPlugins: ReadonlySet<string>,
 ): Promise<MarkRefusal | undefined> {
   // The partition is by CALL SITE, never by an `instanceof` taxonomy: the
   // question is not which error class arrived, it is whether the write had been
@@ -1719,7 +1726,11 @@ async function markContentApprovalSpent(
       // rather than through `state`, so that path has nothing to roll back.
       const payload: EngineState = {
         ...disk,
-        approvals: mergeApprovals(disk.approvals, { ...state.approvals, [plugin]: marked }),
+        approvals: mergeApprovals(
+          disk.approvals,
+          { ...state.approvals, [plugin]: marked },
+          new Set([...markedPlugins, plugin]),
+        ),
       }
       // Captured before the assignment below, because it is what the rollback
       // puts back. Own-property, as at every other read of this record: the
@@ -1736,14 +1747,16 @@ async function markContentApprovalSpent(
       state.approvals[plugin] = marked
 
       // Below, the write's own failure withdraws the claim above it, because
-      // this process cannot back it. Left marked, `mergeApprovals`'s
-      // marked-in-memory row would promote a mark to the end-of-run write that
-      // may never have landed — the runtime inventing a fact, and turning a
-      // recoverable retry into an `indeterminate` that only the operator can
-      // end, by checking the sink and answering with `warpline resolve`, for a
-      // fire that may never have begun. Restored, the record sits on the
-      // unmarked-in-memory row where DISK WINS: a write that landed reads
-      // `indeterminate` next advance, one that did not retries and fires. The
+      // this process cannot back it. Promoted by the end-of-run write, a mark
+      // that may never have landed would be the runtime inventing a fact, and
+      // turning a recoverable retry into an `indeterminate` that only the
+      // operator can end, by checking the sink and answering with `warpline
+      // resolve`, for a fire that may never have begun. So the in-memory record
+      // is restored, and the caller adds the plugin to the set of marks this
+      // advance took only when this returns `undefined`. Not in that set, the
+      // record is one `mergeApprovals` takes from the disk, and the disk
+      // decides: a write that landed reads `indeterminate` next advance, one
+      // that did not retries and fires. The
       // value is RETURNED and not rethrown, so the lock releases on the normal
       // path and the outer arm — which means "nothing was written" — is not
       // reached by the one case where something may have been. The rationale
@@ -2793,6 +2806,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
      */
     const confirmedContentFires = new Set<string>()
     /**
+     * The content fires this advance MARKED, the mark seen to land. Filled only
+     * when `markContentApprovalSpent` returns `undefined`, and read by both of
+     * this advance's approvals writes: `mergeApprovals` writes the advance's
+     * copy of these records and takes every other one from the disk.
+     */
+    const markedThisAdvance = new Set<string>()
+    /**
      * The gates parked by this advance, assembled inside the gated arm where the
      * plugin's real `SkillResult` is still in scope.
      */
@@ -3126,6 +3146,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               pluginName,
               ev.content,
               runsAtRead,
+              markedThisAdvance,
             )
             if (markRefusal !== undefined) {
               // The FSM state, not the run-log status: a refusal leaves it at
@@ -3160,6 +3181,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               onPluginEnd?.(pluginName, 'skipped', markElapsed, markDetail)
               return
             }
+            // The mark landed, so this advance's copy of the record is the
+            // newest there is, and both approvals writes carry it.
+            markedThisAdvance.add(pluginName)
           }
 
           onPluginStart?.(pluginName)
@@ -3592,9 +3616,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // attached from several machines, so an `approve --content` lands at an
     // instant this process cannot predict, and the window it lands in is as
     // wide as the run — hours, in the shape this runtime is built for. The rule
-    // applied per key is the five-row table on `mergeApprovals`, the same one
+    // applied per key is the three-row table on `mergeApprovals`, the same one
     // the mid-run mark implements; two prose statements of one rule is how two
-    // writers come to disagree.
+    // writers come to disagree. This advance's copy wins only for the records
+    // it marked (`markedThisAdvance`). Every other record is written as the
+    // fresh read holds it, so an approve, an answer or a removal that landed
+    // mid-advance is kept, even over a record an earlier advance marked.
     //
     // The re-read is INSIDE the lock, and it has to be: a read outside it is a
     // read of a document a concurrent writer may replace before this write
@@ -3615,9 +3642,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     //
     // It cannot destroy the mark, which is the one thing this ordering had to be
     // checked against. `confirmContentMarks` ran above, on the in-memory
-    // subtree; a record it stamped is marked, and the merge's marked arm carries
-    // it over disk. The sweep then drops it only if its window has ALSO closed,
-    // and a record confirmed inside this advance is a record whose window was
+    // subtree; a record it stamped is one this advance marked, and the merge
+    // carries this advance's marks over the disk. The sweep then drops it only
+    // if its window has ALSO closed, and a record confirmed inside this advance
+    // is a record whose window was
     // open when the fire was authorised.
     //
     // **The content erasure sits between the merge and the sweep.** It reads
@@ -3661,7 +3689,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         // the two-field mark, and the reason the mark is two fields rather than
         // one. Everything about which fires are in the set, and why a `failed`
         // return is not, is on `confirmContentMarks`.
-        approvals: mergeApprovals(disk.approvals, confirmContentMarks(state.approvals, confirmedContentFires)),
+        approvals: mergeApprovals(
+          disk.approvals,
+          confirmContentMarks(state.approvals, confirmedContentFires),
+          markedThisAdvance,
+        ),
       }
       eraseReleasedContent(merged.plugin_runs, merged.pending_gates, merged.approvals, plugins, approvalNow)
       merged.approvals = sweepExpiredApprovals(merged.approvals, merged.plugin_runs, plugins, approvalNow)
