@@ -11,12 +11,14 @@
 import { describe, test, expect, beforeEach, afterEach, afterAll, setSystemTime } from 'bun:test'
 import { mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { createTestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
 import { denialFingerprint, proposalFingerprint, runAdvance } from '../../runtime/engine.js'
+import type { AdvanceResult } from '../../runtime/engine.js'
 import { grantApproval } from '../../runtime/approval-gate.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
@@ -908,6 +910,193 @@ describe('plan ≡ what a run would attempt', () => {
     expect(attempted.has('held-mid')).toBe(false)
     expect(attempted.has('held-tail')).toBe(false)
     expect(model.due.map((e) => e.plugin).sort()).toEqual([...attempted].sort())
+  })
+
+  /**
+   * A content consumer whose producer this advance runs first.
+   *
+   * The preview cannot know what a producer due this advance will produce, so
+   * it must not decide a content standing that producer's run can change.
+   * Carried, erased and moved bytes are three such standings. In each case
+   * below the producer re-produces the approved bytes, so the consumer fires,
+   * and the preview must say it may.
+   *
+   * A REAL advance, not the dry run above. The consumer declares an effect, and
+   * the dry-run block holds every such plugin out of the attempted set, which
+   * would make the equality vacuous.
+   */
+  const PREVIEW_BODY = '{"batch":"the invoices the operator read"}'
+  const liveOutput = (body = PREVIEW_BODY) => ({ type: 'brief', format: 'json', body })
+
+  /**
+   * `<prefix>-producer`, stale so the preview finds it due and the advance runs
+   * it, and `<prefix>-consumer`, a content-class sender of its bytes with an
+   * open, unmarked approval over `PREVIEW_BODY`. `producerRun` is the cause's
+   * shape, laid over the producer's entry.
+   */
+  async function writeContentPair(
+    prefix: string,
+    producerRun: Record<string, unknown>,
+  ): Promise<{ producer: string; consumer: string }> {
+    const tolerant = { min_tier: 'suspended' }
+    const producer = `${prefix}-producer`
+    const consumer = `${prefix}-consumer`
+    await writePlugin(home, producer, { ...tolerant, outputs: { brief: { type: 'json' } } })
+    await writeHandler(
+      home,
+      producer,
+      `
+export async function handler() {
+  return {
+    status: 'success',
+    phases_completed: ['run'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'produced',
+    artifacts_produced: [{ type: 'brief', format: 'json', body: ${JSON.stringify(PREVIEW_BODY)} }],
+    schema_version: 1,
+  }
+}
+`,
+    )
+    await writePlugin(home, consumer, {
+      ...tolerant,
+      side_effects: ['sends_email'],
+      approval_class: 'content',
+      dependencies: [producer],
+      // Stale on every evaluation, so the consumer reaches the approval gate.
+      ttl_hours: 0.001,
+    })
+    await writeHandler(home, consumer)
+
+    // The fingerprint the operator approved: the live bytes, through the one
+    // entry point the gate uses.
+    const fingerprintState = defaultEngineState()
+    fingerprintState.plugin_runs[producer] = { status: 'success', last_output: liveOutput() } as never
+    const manifest = PluginManifestSchema.parse({
+      name: producer,
+      version: '1.0.0',
+      description: 'producer',
+      autonomy_level: 'autonomous',
+      ttl_hours: 24,
+    })
+
+    await writeState(
+      home,
+      {
+        [producer]: {
+          // 25 hours into a 24h TTL: stale, so due in the preview and run by the advance.
+          last_run_at: new Date(Date.now() - 25 * 3_600_000).toISOString(),
+          status: 'success',
+          ...producerRun,
+        },
+      },
+      {
+        approvals: {
+          [consumer]: {
+            plugin: consumer,
+            producer,
+            fingerprint: proposalFingerprint(fingerprintState, producer, manifest),
+            run_id: 'run-the-operator-read',
+            approved_at: new Date(Date.now() - 30 * 60_000).toISOString(),
+            not_before: null,
+            not_after: '2099-01-01T00:00',
+            zone: 'UTC',
+            effect_id: null,
+            marked_at: null,
+            confirmed_at: null,
+          },
+        },
+      },
+    )
+    return { producer, consumer }
+  }
+
+  /** `attemptedByRun` without `dryRun`, returning the advance's result as well. */
+  async function attemptedByRealRun(
+    statePath: string,
+    eventsPath: string,
+  ): Promise<{ attempted: Set<string>; result: AdvanceResult }> {
+    const attempted = new Set<string>()
+    const result = await runAdvance({
+      pluginsDir: home.pluginsDir,
+      stateDir: statePath,
+      runsDir: home.runsDir,
+      eventsPath,
+      preferencesPath: join(home.stateDir, 'preferences.json'),
+      approvalPath: join(home.root, '.session-approval'),
+      onPluginStart: (plugin) => {
+        attempted.add(plugin)
+      },
+    })
+    return { attempted, result }
+  }
+
+  test('Test 2d: a content consumer over carried bytes whose producer is due is due in both', async () => {
+    const { consumer } = await writeContentPair('carried', {
+      // The producer's latest run produced nothing and carried the approved
+      // bytes forward from the run the operator read.
+      run_id: 'run-quiet',
+      last_output: { ...liveOutput(), run_id: 'run-the-operator-read' },
+    })
+    const { statePath, eventsPath } = routeStateManager()
+
+    const model = await buildPlanModel(Date.now())
+    const { stdout } = await capture(() => main(['plan']))
+    const { attempted } = await attemptedByRealRun(statePath, eventsPath)
+
+    const planned = model.due.map((e) => e.plugin).sort()
+    expect(planned).toEqual([...attempted].sort())
+    expect(planned).toContain(consumer)
+    expect(model.due.find((e) => e.plugin === consumer)?.approved).toBe(true)
+    expect(stdout).toContain("may fire if 'carried-producer' re-produces the approved bytes this advance")
+    // The effect line's skip marker. The grant header says "would be SKIPPED"
+    // whenever no grant exists, and none does here, so the marker is what is
+    // asked about.
+    expect(stdout).not.toContain('⚠ unapproved — would be SKIPPED')
+  })
+
+  test('Test 2e: a content consumer over erased bytes whose producer is due is due in both', async () => {
+    const { consumer } = await writeContentPair('erased', {
+      run_id: 'run-the-operator-read',
+      last_output: {
+        type: 'brief',
+        format: 'json',
+        run_id: 'run-the-operator-read',
+        erased_at: '2026-09-20T00:00:00.000Z',
+        body_sha256: createHash('sha256').update(PREVIEW_BODY, 'utf8').digest('hex'),
+      },
+    })
+    const { statePath, eventsPath } = routeStateManager()
+
+    const model = await buildPlanModel(Date.now())
+    const { attempted, result } = await attemptedByRealRun(statePath, eventsPath)
+
+    const planned = model.due.map((e) => e.plugin).sort()
+    expect(planned).toEqual([...attempted].sort())
+    expect(planned).toContain(consumer)
+    expect(attempted.has(consumer)).toBe(true)
+    expect(model.due.find((e) => e.plugin === consumer)?.approved).toBe(true)
+    // The advance read an erased record, ran the producer over it and
+    // re-produced the approved bytes, so nothing refuses the fire.
+    expect(result.refused_plugins).toEqual([])
+  })
+
+  test('Test 2f: a content consumer over moved bytes whose producer is due is due in both', async () => {
+    const { consumer } = await writeContentPair('moved', {
+      // A batch nobody approved. The producer's run puts the approved one back.
+      last_output: liveOutput('{"batch":"a different batch nobody approved"}'),
+    })
+    const { statePath, eventsPath } = routeStateManager()
+
+    const model = await buildPlanModel(Date.now())
+    const { attempted } = await attemptedByRealRun(statePath, eventsPath)
+
+    const planned = model.due.map((e) => e.plugin).sort()
+    expect(planned).toEqual([...attempted].sort())
+    expect(planned).toContain(consumer)
+    expect(model.due.find((e) => e.plugin === consumer)?.approved).toBe(true)
   })
 
   test('Test 3: with no engine-state.json at all, every plugin is never-run, due, and attempted', async () => {
