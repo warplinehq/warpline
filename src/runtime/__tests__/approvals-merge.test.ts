@@ -26,11 +26,11 @@
  * advance is still parked. That is the positive control this repository has
  * logged six instances of going without.
  *
- * **Two of the four cases are green before the fix, and that is not a
- * weakness.** The merge is a five-row table and the rows disagree with today's
- * behaviour in two places only:
+ * **Two of the first four cases were green before the merge existed, and that
+ * is not a weakness.** The whole-document write and the merge disagree in two
+ * places only:
  *
- *   | row                                            | today  | after |
+ *   | row                                            | before | after |
  *   |------------------------------------------------|--------|-------|
  *   | on disk only (another attachment approved)     | LOST   | kept  |
  *   | in memory only, marked-unconfirmed             | kept   | kept  |
@@ -285,6 +285,19 @@ async function readState(): Promise<EngineState> {
  */
 async function runApprove(argv: string[]): Promise<{ code: number; output: string }> {
   const { run } = await import('../../cli/approve.js')
+  return captured(() => run(argv))
+}
+
+/**
+ * Run `warpline resolve` in-process, through the dispatcher's `main` as the
+ * operator's shell would reach it, with its two streams captured as above.
+ */
+async function runResolve(argv: string[]): Promise<{ code: number; output: string }> {
+  const { main } = await import('../../cli/warpline.js')
+  return captured(() => main(['resolve', ...argv]))
+}
+
+async function captured(command: () => Promise<number>): Promise<{ code: number; output: string }> {
   const realOut = process.stdout.write.bind(process.stdout)
   const realErr = process.stderr.write.bind(process.stderr)
   let output = ''
@@ -295,7 +308,7 @@ async function runApprove(argv: string[]): Promise<{ code: number; output: strin
   process.stdout.write = sink
   process.stderr.write = sink
   try {
-    return { code: await run(argv), output }
+    return { code: await command(), output }
   } finally {
     process.stdout.write = realOut
     process.stderr.write = realErr
@@ -328,6 +341,28 @@ async function rewriteDiskApprovals(
     mutate(state.approvals)
     await writeFile(path, JSON.stringify(state, null, 2) + '\n')
   })
+}
+
+/**
+ * The sibling's record as an earlier advance left it: marked ten minutes ago
+ * under the id the runtime would have computed, and confirmed when asked.
+ * Returns that effect id, which is what an operator reads off the sink.
+ */
+async function markSiblingOnDisk(opts: { confirmed: boolean }): Promise<string> {
+  const markedAt = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+  let effectId = ''
+  await rewriteDiskApprovals((approvals) => {
+    const record = approvals[SIBLING]
+    if (record === undefined) throw new Error('seedHome should have approved the sibling')
+    effectId = contentEffectId(SIBLING, record.fingerprint, markedAt)
+    approvals[SIBLING] = {
+      ...record,
+      effect_id: effectId,
+      marked_at: markedAt,
+      confirmed_at: opts.confirmed ? new Date(Date.now() - 9 * 60 * 1000).toISOString() : null,
+    }
+  })
+  return effectId
 }
 
 async function waitFor(predicate: () => boolean, what: string, ms = 15_000): Promise<void> {
@@ -473,5 +508,63 @@ describe('the advance merges approvals rather than overwriting them', () => {
     expect(record?.effect_id).toBe(
       contentEffectId(record!.plugin, record!.fingerprint, record!.marked_at as string),
     )
+  })
+
+  // The three cases below share one shape. The sibling's record is marked on
+  // disk BEFORE the wedge opens, so the advance reads it marked at its start,
+  // as an earlier advance left it, and never marks it itself: the sibling is
+  // fresh and does not fire. While the advance is parked, the operator writes
+  // that record: an answer, a re-approval, a removal. The advance's copy is
+  // the read it took at its start, so it can only be older than the disk, and
+  // writing it back undoes the operator. Nothing sends either way. What is
+  // lost is the operator's write, silently. Only a record THIS advance marked
+  // may win over the disk, which the four cases above hold in place.
+
+  test('a resolution that lands mid-advance is not undone by the advance', async () => {
+    await seedHome({ sibling: 'installed-and-approved' })
+    const effectId = await markSiblingOnDisk({ confirmed: false })
+    const wedge = await wedgeOpen()
+
+    const resolved = await runResolve([SIBLING, '--not-shipped', effectId])
+    expect(approveOutcome(resolved)).toEqual([0, ''])
+    // The positive control: the answer is on disk while the advance is parked.
+    expect((await readState()).approvals[SIBLING]?.not_shipped_at).toBeString()
+
+    const final = await wedge.finish()
+
+    expect(final.approvals[SIBLING]?.not_shipped_at).toBeString()
+    expect(firedCount(SIBLING)).toBe(0)
+  })
+
+  test('a re-approval over a spent record that lands mid-advance is kept', async () => {
+    await seedHome({ sibling: 'installed-and-approved' })
+    await markSiblingOnDisk({ confirmed: true })
+    const wedge = await wedgeOpen()
+
+    const approved = await runApprove([SIBLING, '--content', '--not-after', FAR_FUTURE, '--zone', ZONE])
+    expect(approveOutcome(approved)).toEqual([0, ''])
+    expect((await readState()).approvals[SIBLING]?.marked_at).toBeNull()
+
+    const final = await wedge.finish()
+
+    expect(final.approvals[SIBLING]?.marked_at).toBeNull()
+    expect(final.approvals[SIBLING]?.confirmed_at).toBeNull()
+  })
+
+  test('a spent record removed mid-advance stays removed', async () => {
+    await seedHome({ sibling: 'installed-and-approved' })
+    await markSiblingOnDisk({ confirmed: true })
+    const wedge = await wedgeOpen()
+
+    const removed = await runApprove([SIBLING, '--content', '--remove'])
+    expect(approveOutcome(removed)).toEqual([0, ''])
+    expect(Object.keys((await readState()).approvals)).toEqual([SENDER])
+
+    const final = await wedge.finish()
+
+    expect(Object.hasOwn(final.approvals, SIBLING)).toBe(false)
+    // The sender's own mark, taken by this advance, still wins.
+    expect(final.approvals[SENDER]?.marked_at).not.toBeNull()
+    expect(final.approvals[SENDER]?.confirmed_at).not.toBeNull()
   })
 })
