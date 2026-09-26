@@ -129,13 +129,30 @@ export const ApprovalSchema = z.object({
   /**
    * The fire this approval was spent on, and the two-field mark that records
    * it. Null until the runtime marks; nothing in this plan writes any of the
-   * three. `marked_at` set with `confirmed_at` still null is the indeterminate
-   * state — the runtime began firing and cannot prove it finished — and it is
-   * deliberately representable rather than collapsed into a single boolean.
+   * three. `marked_at` set, `confirmed_at` still null and `not_shipped_at`
+   * absent is the indeterminate state — the runtime began firing, cannot prove
+   * it finished, and nobody has answered for the sink — and it is deliberately
+   * representable rather than collapsed into a single boolean.
    */
   effect_id: z.string().nullable().default(null),
   marked_at: z.string().nullable().default(null),
   confirmed_at: z.string().nullable().default(null),
+  /**
+   * When the operator, having checked the sink with the effect id, answered
+   * this record's marked fire as not shipped
+   * (`warpline resolve <plugin> --not-shipped <effect-id>`).
+   *
+   * Written by that one command and nothing else, and only over a fire that
+   * was marked and never confirmed. From then on the record reads `spent`: it
+   * fires nothing, and a fresh approval retries. `confirmed_at` stays the
+   * advance's alone, because the two are different facts: the runtime saw a
+   * fire finish, or the operator says one never reached the sink.
+   *
+   * Absent otherwise, and on every record written before the field existed.
+   * The stricter type because the state document is hand-editable and this
+   * read fails closed, as `erased_at` does.
+   */
+  not_shipped_at: z.iso.datetime().optional(),
 })
 export type Approval = z.infer<typeof ApprovalSchema>
 

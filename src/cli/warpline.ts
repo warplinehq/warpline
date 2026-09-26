@@ -48,6 +48,7 @@ Commands:
   run        Invoke a single plugin handler directly
   approve    Grant a side-effect approval for this session
   deny       Record a no, so the next engine tick stops asking
+  resolve    Answer a content fire that was marked and never confirmed: it did not ship
   revoke     Clear the current session approval
 
   --help     Show this message
@@ -115,6 +116,11 @@ export async function main(argv: string[]): Promise<number> {
 
       case 'deny': {
         const { run } = await import('./deny.js')
+        return await run(rest)
+      }
+
+      case 'resolve': {
+        const { run } = await import('./resolve.js')
         return await run(rest)
       }
 

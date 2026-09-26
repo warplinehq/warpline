@@ -2037,10 +2037,19 @@ The fields:
 - `effect_id` — the identity of the fire this approval was spent on. Null until
   the runtime marks.
 - `marked_at` / `confirmed_at` — the two-field mark. `marked_at` set with
-  `confirmed_at` still null is the indeterminate state: the runtime began firing
-  and cannot prove it finished. It is deliberately representable rather than
-  collapsed into one boolean, because "we do not know" is a different answer from
-  "it did not happen".
+  `confirmed_at` still null and `not_shipped_at` absent is the indeterminate
+  state: the runtime began firing and cannot prove it finished, and nobody has
+  answered for the sink. It is deliberately representable rather than collapsed
+  into one boolean, because "we do not know" is a different answer from "it did
+  not happen".
+- `not_shipped_at` — ISO instant the operator, having checked the sink with the
+  effect id, answered the marked fire as not shipped
+  (`warpline resolve <plugin> --not-shipped <effect-id>`, § "Answering an
+  indeterminate fire"). Written by that one command and nothing else, only over
+  a fire marked and never confirmed. From then on the record reads `spent` and
+  fires nothing; a fresh approval retries. Absent otherwise, and on every record
+  written before the field existed. Validated as an ISO instant on read, so a
+  hand-edited value that is not one fails the read closed.
 
 `not_before` and `not_after` are naked wall clocks — `YYYY-MM-DDTHH:mm[:ss]`,
 no trailing `Z` and no numeric offset — resolved against `zone` at fire time,
@@ -2059,7 +2068,7 @@ write another.
 
 A record whose window has closed is **removed from this subtree** at the
 end-of-run state write,
-unless it is marked-unconfirmed or the last row of the table below keeps it.
+unless its fire is marked and unanswered or the last row of the table below keeps it.
 Nothing an operator does is required, and the sweep runs inside every advance.
 
 This is the last of three steps in one deletion policy. All three read the
@@ -2085,8 +2094,9 @@ This is the last of three steps in one deletion policy. All three read the
    after the fire, are held while its window is open and erased when it
    closes. The fire does not rewrite its `run_id`, which stays the run the
    operator read. Two limits are stated, not closed.
-   A marked-unconfirmed approval binds by `run_id` only: the sweep keeps it
-   for good, and binding by fingerprint would erase every later identical
+   A marked approval whose fire is neither confirmed nor answered binds by
+   `run_id` only: the sweep keeps it until the operator answers it, and
+   binding by fingerprint would erase every later identical
    Output at the write that produced it, so bytes it would match only by
    fingerprint are neither held nor released by it. And the fingerprint is
    computed over the producer's manifest as it is now: when the producer is
@@ -2132,7 +2142,8 @@ The one exception:
 | state at expiry | what happens |
 |---|---|
 | `marked_at` null | dropped |
-| `marked_at` set, `confirmed_at` null | **kept** — this is the did-it-ship evidence |
+| `marked_at` set, `confirmed_at` null, `not_shipped_at` absent | **kept** — this is the did-it-ship evidence |
+| `marked_at` set, `confirmed_at` null, `not_shipped_at` set | dropped — the operator answered it not shipped |
 | `confirmed_at` set | dropped |
 | still binds its producer's `last_output`, which keeps its body | **kept** — its erasure was deferred |
 
@@ -2160,7 +2171,10 @@ destroy that account for a send that may well have landed. Keeping it is safe
 because its bound content is erased by the same rule, and it binds by `run_id`
 only, so identical bytes the producer makes later are not erased on its account
 (step 2). The evidence it keeps is the fingerprint and the effect id, never the
-bytes. The operator settles it at the sink using the effect id.
+bytes. The operator settles it at the sink using the effect id, and answers it
+with `warpline resolve` once nothing arrived there. An answered record is swept
+when its window closes, and binds its content by fingerprint as a confirmed one
+does.
 
 A **confirmed** record past its window is dropped, unless the last row of the
 table above keeps it. While that row keeps it, it reads `spent`, and the
@@ -2175,10 +2189,12 @@ case in the last paragraph of this section:
   about the producer, carried forward across a run that produced nothing and
   overwritten by that producer's next Output. Only its content is erased, and
   the record says so with `erased_at`.
-- There is **no operator gesture that resolves an `indeterminate` record**. A
-  marked-unconfirmed approval therefore survives the sweep indefinitely, by
-  design and for want of a verb. It authorises nothing — every advance refuses
-  it with `indeterminate` — but it does not go away on its own.
+- A marked, unanswered record **survives the sweep until the operator answers
+  it** with `warpline resolve`. It authorises nothing — every advance refuses
+  it with `indeterminate` — and it does not go away on its own, because the
+  runtime never clears a mark on a handler's word. An answered record is swept
+  when its window closes, and binds its content by fingerprint as a confirmed
+  one does.
 
 Erasure reaches inline content in the state document and nothing else. What it
 does **not** erase:
@@ -2213,7 +2229,10 @@ question — never fire on a window you cannot read, never delete on one either.
 #### The spend mark
 
 `effect_id`, `marked_at` and `confirmed_at` are written by the ADVANCE and by
-nothing else. No operator command sets any of the three.
+nothing else. No operator command sets any of the three. The operator's answer
+is a fourth field, `not_shipped_at`, written by one operator command,
+`warpline resolve` (§ "Answering an indeterminate fire"), and never by the
+advance.
 
 `marked_at` and `effect_id` are written together, **before the handler is
 invoked** — the only mark-before-effect in the runtime besides the run lock.
@@ -2226,13 +2245,14 @@ and nowhere else.
 Two fields rather than one, because one timestamp cannot express both post-fire
 states. Written before the handler, a single field makes every successful send
 read as unfinished forever and turns a content-approved plugin into a one-shot;
-written after, it loses the crash case entirely. The three states and their
+written after, it loses the crash case entirely. The four states and their
 predicates:
 
 | state | predicate | what the next advance does |
 |---|---|---|
 | not yet fired | `marked_at` null | fires, if the window and the fingerprint still agree |
-| indeterminate | `marked_at` set, `confirmed_at` null | refuses with `indeterminate` — never fires |
+| indeterminate | `marked_at` set, `confirmed_at` null, `not_shipped_at` absent | refuses with `indeterminate` — never fires |
+| answered not shipped | `marked_at` set, `confirmed_at` null, `not_shipped_at` set | ordinary not-due, like spent, naming the answer; approve again to fire |
 | spent | `confirmed_at` set | ordinary not-due, naming the instant it fired |
 
 A handler that returns `failed` leaves the record **indeterminate**, not
@@ -2248,8 +2268,8 @@ re-approves to fire again. This is deliberate. The mark is taken before the
 handler runs, so leaving `skipped` unconfirmed would not leave the approval
 live. It would leave the record marked and unconfirmed, which is
 `indeterminate`, the same as `failed`: a refusal on every later advance, a trip
-to the sink to look for bytes the runtime knows never left, and no gesture that
-clears it. Handing the approval back would mean clearing the mark on the
+to the sink to look for bytes the runtime knows never left, and an answer with
+`warpline resolve` before a re-approval is even accepted. Handing the approval back would mean clearing the mark on the
 handler's word that nothing shipped, which is the trust refused for `failed`
 above.
 
@@ -2271,7 +2291,8 @@ rename atomicity and no `fsync`. The outcome is also not durable until the
 end-of-run write, so a crash after a successful send but before that write reads
 `indeterminate` on the next advance too. That is the conservative and correct
 reading — the runtime genuinely does not know — and the effect id is the remedy:
-the operator resolves it at the sink rather than guessing here.
+the operator checks the sink with it and, when nothing arrived, answers the fire
+with `warpline resolve`, rather than the runtime guessing here.
 
 **When the mark's own I/O fails.** The mark sits between a gate that has already
 said fire and a handler that has not been invoked, so its own failure is a
@@ -2355,7 +2376,7 @@ producer still binds it. Content left to such a holder is erased when that
 holder closes or is withdrawn, as long as it still binds the content then.
 A holder that has fired and confirmed still binds by fingerprint until its window closes.
 The two limits in § "Expiry and deletion" step 2 apply here too: a holder whose
-fire is marked and unconfirmed binds by `run_id` only, and content bound only
+fire is marked, unconfirmed and unanswered binds by `run_id` only, and content bound only
 by fingerprint is not erased once the producer is uninstalled,
 its manifest failed to load, or its `side_effects` changed.
 Re-approving a consumer over an existing record withdraws the old record the
@@ -2363,20 +2384,54 @@ same way, in the same write. When the new record names the same producer, it bin
 producer's current Output and holds it.
 
 **Two refusals protect a marked-unconfirmed record.** For a record with
-`marked_at` set and `confirmed_at` still null, both a fresh approval and a
-`--remove` are refused, naming the plugin, the `effect_id` and the `marked_at`
-instant. A fresh approval would erase the open question rather than answer it,
-and re-arm a send that may already have gone out; a removal would destroy the
-only evidence that a send may have landed. A record whose `confirmed_at` is set
-is a state report rather than an open question, and removes normally.
+`marked_at` set, `confirmed_at` still null and no `not_shipped_at`, both a fresh
+approval and a `--remove` are refused, naming the plugin, the `effect_id` and
+the `marked_at` instant, and pointing at `warpline resolve`, the one gesture
+that answers it. A fresh approval would erase the open question rather than
+answer it, and re-arm a send that may already have gone out; a removal would
+destroy the only evidence that a send may have landed. A record whose
+`confirmed_at` is set, or that was answered not shipped, is a state report
+rather than an open question, and re-approves and removes normally.
 
-**The gap that leaves, stated rather than closed.** There is no operator command
-today that resolves an indeterminate record, so such a record is currently
-permanent: it can be neither re-approved nor removed. That is the conservative
-direction and it is deliberate — the record holds a fingerprint, a producer
-name, a run id and three timestamps, and no payload, so what persists is a
-reference rather than content. The resolution gesture is a later addition made
-on purpose, not something to reach by loosening either refusal.
+**Answering an indeterminate fire (`warpline resolve`).**
+`warpline resolve <plugin> --not-shipped <effect-id>` answers a fire that was
+marked and never confirmed, after the operator checked the sink with its effect
+id and found that nothing shipped. It is its own verb and not a mode of
+`approve`, because it answers a claim about a past fire and grants nothing.
+
+- It answers only a record whose standing (`approvalStanding`) is
+  `indeterminate`, and only when the typed effect id equals the record's
+  `effect_id` exactly. The answer binds to that one fire.
+- It writes `not_shipped_at`, the instant of the answer, and keeps `marked_at`
+  and `effect_id` as they were. It never writes `confirmed_at`, which stays the
+  advance's account of a fire it saw finish.
+- The answered record reads `spent`: it fires nothing, it is not a refusal, and
+  its not-due detail names when the fire was marked and when it was answered.
+  To ship those bytes after all, the operator re-approves them with
+  `approve --content`, over bytes they read again. A re-approval replaces the
+  answered record whole, as it replaces a spent one, and `--remove` withdraws
+  it normally.
+- Every other case is refused with exit `1` and the document byte-unchanged:
+  no record for the plugin (looked up as an own property), a record that is not
+  `indeterminate` (unmarked, confirmed, or already answered), a record marked
+  by a build that recorded no effect id, an effect id that does not match (the
+  refusal prints the recorded id and never echoes the typed one), no
+  `--not-shipped` value, other than exactly one plugin, or any other flag.
+  Every check that reads the document runs inside the state lock, before any
+  mutation.
+- Like `--remove`, it is validated against the record, not against the
+  installed manifests, so the fire of a plugin uninstalled since is still
+  answerable.
+- It writes no board event and no run-log entry. The answer lives in the
+  state document, beside the mark it answers.
+
+The answer is the operator's word about a sink the runtime cannot see, and the
+runtime cannot check it. That is why it is recorded as its own field rather
+than as a confirmation, and why it does not re-arm anything: an answer that
+turns out wrong has cost a retry the operator chose, never a fire the runtime
+chose for them. It erases no content. An answered record binds its producer's
+content by fingerprint until its window closes, as a confirmed one does, and
+the release rule (§ "Expiry and deletion") lets it go then.
 
 ### `last_output`
 
@@ -2604,9 +2659,9 @@ advance's first read with `75`. A lock that was only busy leaves nothing marked
 and nothing sent, and the next tick retries and fires, which is the right
 outcome. One case stays quiet and leaves stuck state: a mark write that fails
 after its rename landed. That advance exits `0`, and the next one refuses with
-`indeterminate`, which no operator gesture resolves today (§ 10). If the
-end-of-run write ever stops failing the advance on a storage fault, this
-decision has to be made again.
+`indeterminate`, which the operator answers with `warpline resolve` once the
+sink shows nothing shipped (§ 10). If the end-of-run write ever stops failing
+the advance on a storage fault, this decision has to be made again.
 
 Without `--strict` the code says `0`, and the count is what tells you a refusal
 happened: `warpline advance --json` carries `refused` and the structured reason

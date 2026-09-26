@@ -233,11 +233,15 @@ npx warpline approve my-plugin
 # the question comes back if what it proposes changes.
 npx warpline deny my-plugin
 
+# Answer a content fire the runtime could not confirm, after the sink shows it
+# did not ship. Takes the effect id the refusal printed; then approve again.
+npx warpline resolve my-plugin --not-shipped <effect-id>
+
 # Clear the session approval
 npx warpline revoke
 ```
 
-Those nine subcommands are the whole CLI surface. `advance` is the one a
+Those ten subcommands are the whole CLI surface. `advance` is the one a
 scheduler calls, and its exit codes are contract surface —
 [the exit code table](docs/runtime-spec.md#11-exit-codes) is what a monitor
 keys on. The same work is also a library call, `runAdvance()` from the package

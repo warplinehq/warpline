@@ -591,7 +591,7 @@ export function approvalStanding(
   // move when content is erased, on purpose: the stored hash keeps it equal, so
   // the compare in `bindingStanding` cannot see erasure. The erasure itself
   // holds content that any open binding for that producer still matches by
-  // fingerprint, unless that binding is marked-unconfirmed, so it does not void
+  // fingerprint, unless that binding's fire is still unanswered, so it does not void
   // a live yes. A binding can still meet erased content: the producer's
   // manifest was absent when the erasure ran, so no fingerprint could hold it,
   // and was installed again later. The answer is `content_moved`, because the
@@ -621,6 +621,26 @@ export function approvalStanding(
 }
 
 /**
+ * Is this record's fire still an open question: marked, never confirmed, and
+ * not answered by the operator?
+ *
+ * The one place that says so, and three readers ask it. `bindingStanding`
+ * reports such a record `indeterminate` and refuses on it. `sweepExpiredApprovals`
+ * keeps it past its window, because it is the only evidence a send may have
+ * landed. `bindsHeldContent` lets it bind by run only, because a record kept
+ * for good must not release every later identical Output.
+ *
+ * The runtime never makes it false on a handler's word. The advance confirms a
+ * fire it saw finish, and the operator answers one they checked at the sink
+ * with `warpline resolve <plugin> --not-shipped <effect-id>`, which writes
+ * `not_shipped_at`. An answered record reads `spent`, is swept when its window
+ * closes, and binds by fingerprint as a confirmed one does.
+ */
+function fireUnanswered(a: Approval): boolean {
+  return a.marked_at !== null && a.confirmed_at === null && a.not_shipped_at === undefined
+}
+
+/**
  * Does the operator's binding hold: marks, window, producer identity,
  * fingerprint?
  *
@@ -641,8 +661,14 @@ function bindingStanding(
   const approval = Object.hasOwn(state.approvals, plugin) ? state.approvals[plugin] : undefined
   if (approval === undefined) return { standing: 'none' }
 
-  if (approval.confirmed_at !== null) return { standing: 'spent', approval }
-  if (approval.marked_at !== null) return { standing: 'indeterminate', approval }
+  // A record that fired, or began to, never authorises another fire. It is
+  // `indeterminate` while nobody knows whether that fire reached the sink, and
+  // `spent` once the advance confirmed it or the operator answered it not
+  // shipped. The predicate is read, not restated, so this and the two
+  // readers that keep and release such records cannot disagree.
+  if (approval.marked_at !== null || approval.confirmed_at !== null) {
+    return fireUnanswered(approval) ? { standing: 'indeterminate', approval } : { standing: 'spent', approval }
+  }
 
   // Both bounds inside the try. A host tz database that no longer knows the
   // zone is the backstop edge, and the conservative direction is refusal: a
@@ -949,6 +975,15 @@ function contentGateDetail(g: GateInput): string {
     case 'none':
       return `unapproved: no content approval on file for '${g.plugin}'`
     case 'spent':
+      // Spent by the operator's answer, not by a confirmed fire. Both instants
+      // are runtime-written; `not_shipped_at` is the answer command's clock,
+      // never a byte the operator typed.
+      if (s.approval.confirmed_at === null && s.approval.not_shipped_at !== undefined) {
+        return (
+          `unapproved: the content fire marked at ${s.approval.marked_at} was answered not shipped ` +
+          `at ${s.approval.not_shipped_at}, so nothing fires on it; approve the bytes again to ship them`
+        )
+      }
       return `unapproved: the content approval was already spent at ${s.approval.confirmed_at}`
     case 'indeterminate':
       return (
@@ -1266,7 +1301,9 @@ function mergeTierChanges(
  * rule; it binds by `run_id` only, so identical bytes the producer makes later
  * are not erased on its account. What it keeps is the fingerprint and the
  * effect id, never the bytes.
- * The operator resolves it at the sink with the effect id.
+ * The operator checks the sink with the effect id and, when nothing arrived,
+ * answers it with `warpline resolve`. An answered record is swept like a
+ * confirmed one.
  *
  * **A closed binding whose content erasure was deferred is kept too.** When an
  * open approval for the same producer still holds the content it binds,
@@ -1291,7 +1328,8 @@ function mergeTierChanges(
  * closes".
  *
  * A CONFIRMED record past its window is dropped, unless the paragraph above
- * keeps it as a deferred binding. While it is kept, it reads `spent`, and the
+ * keeps it as a deferred binding, and so is one the operator answered not
+ * shipped. While it is kept, it reads `spent`, and the
  * state report naming the spent approval is still rendered. Once it is
  * dropped, that report stops being rendered. Said out loud here so it reads as
  * a decision rather than as a surprise.
@@ -1300,9 +1338,10 @@ function mergeTierChanges(
  * `state.plugin_runs[producer].last_output` is kept as a record: it is a fact
  * about the producer, preserved across a run that produced nothing and
  * overwritten by the producer's next Output. Only its content is erased, and
- * the record says so with `erased_at`. And there is still no operator gesture
- * that resolves an `indeterminate` record — so a marked-unconfirmed one
- * survives here indefinitely, by design and for want of a verb. A record whose
+ * the record says so with `erased_at`. A marked, unanswered record survives
+ * here until the operator answers it with `warpline resolve`, by design: the
+ * runtime never clears a mark on a handler's word, and the answer is the one
+ * gesture that ends the question. Unanswered, it stays for good. A record whose
  * zone the host cannot resolve stays too, and so does the content it binds:
  * `windowClosed` never reads that window as closed.
  */
@@ -1314,13 +1353,12 @@ function sweepExpiredApprovals(
 ): EngineState['approvals'] {
   const kept: EngineState['approvals'] = {}
   for (const [plugin, record] of Object.entries(approvals)) {
-    const markedUnconfirmed = record.marked_at !== null && record.confirmed_at === null
     // A closed binding that still binds its producer's held content, by run or
     // by fingerprint. The erasure ran just before this by the same rule, so
     // such a binding is one an open approval for that producer held. Dropping
     // it would leave nothing to erase that content when the holder closes.
     const deferred = bindsHeldContent(record, pluginRuns, manifests)
-    if (!windowClosed(record, now) || markedUnconfirmed || deferred) kept[plugin] = record
+    if (!windowClosed(record, now) || fireUnanswered(record) || deferred) kept[plugin] = record
   }
   return kept
 }
@@ -1423,12 +1461,14 @@ function eraseReleasedContent(
  * approval binds by fingerprint until its window closes: bytes it shipped
  * under a later run than it names, and byte-identical bytes the producer made
  * again after the fire, are held while it is open and released when it
- * closes. `run_id` stays the run the operator read.
+ * closes. `run_id` stays the run the operator read. A fire the operator
+ * answered not shipped binds the same way.
  *
- * The one exception is a fire left marked and unconfirmed, which binds by run
- * only. The sweep keeps that record for good, so a fingerprint arm would
- * release every later identical Output at the write that produced it, and
- * `approve --content` would then refuse.
+ * The one exception is a fire left marked, unconfirmed and unanswered
+ * (`fireUnanswered`), which binds by run only. The sweep keeps that record
+ * until it is answered, so a fingerprint arm would release every later
+ * identical Output at the write that produced it, and `approve --content`
+ * would then refuse.
  *
  * The fingerprint arm needs the producer's manifest as it is now. With the
  * producer uninstalled, its manifest failing to load, or its `side_effects`
@@ -1447,7 +1487,7 @@ function bindsHeldContent(
   const out = Object.hasOwn(pluginRuns, a.producer) ? pluginRuns[a.producer]!.last_output : undefined
   if (out?.body === undefined || out.erased_at !== undefined || out.run_id === undefined) return false
   if (a.run_id === out.run_id) return true
-  if (a.marked_at !== null && a.confirmed_at === null) return false
+  if (fireUnanswered(a)) return false
   const manifest = manifests.get(a.producer)
   return manifest !== undefined && a.fingerprint === denialFingerprint(a.producer, manifest.side_effects, [out])
 }
@@ -1590,7 +1630,8 @@ function eraseGateCopies(pendingGates: PendingGate[], plugin: string, bodySha256
  * single end-of-run write, so a crash after a successful send but before that
  * write also reads `indeterminate` on the next advance. That is the
  * conservative and correct reading — the runtime genuinely does not know — and
- * the effect id is the remedy: the operator resolves it at the sink.
+ * the effect id is the remedy: the operator checks the sink with it and, when
+ * nothing arrived, answers the fire with `warpline resolve`.
  *
  * @returns the refusal to report, or undefined when the mark was taken.
  */
@@ -1698,8 +1739,9 @@ async function markContentApprovalSpent(
       // this process cannot back it. Left marked, `mergeApprovals`'s
       // marked-in-memory row would promote a mark to the end-of-run write that
       // may never have landed — the runtime inventing a fact, and turning a
-      // recoverable retry into a permanent `indeterminate` with no operator
-      // gesture to resolve it. Restored, the record sits on the
+      // recoverable retry into an `indeterminate` that only the operator can
+      // end, by checking the sink and answering with `warpline resolve`, for a
+      // fire that may never have begun. Restored, the record sits on the
       // unmarked-in-memory row where DISK WINS: a write that landed reads
       // `indeterminate` next advance, one that did not retries and fires. The
       // value is RETURNED and not rethrown, so the lock releases on the normal
@@ -1784,8 +1826,10 @@ function markRefusalDetail(reason: MarkRefusal, plugin: string, fingerprint: str
  *
  * A handler returning `failed` is deliberately absent: its record stays
  * marked-unconfirmed and the mark is NOT cleared. FREEZE-06 forbids a re-fire,
- * and a `failed` return does not prove the sink never received the bytes — the
- * operator resolves it at the sink with the effect id.
+ * and a `failed` return does not prove the sink never received the bytes. The
+ * operator checks the sink with the effect id and, when nothing arrived,
+ * answers it with `warpline resolve`; the runtime never clears it on the
+ * handler's word.
  *
  * Every other handler status is in `confirmed`: `success`, `partial` and
  * `skipped`, the last including a [needs-llm] handoff that shipped nothing. So a
@@ -3379,8 +3423,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // `skipped` out of this set would not leave the approval live. It
           // would leave the record marked-unconfirmed, which reads
           // `indeterminate`, like `failed`, and sends the operator to check a
-          // sink for bytes the runtime knows never left, with no gesture that
-          // clears it. Restoring a live approval would mean clearing the mark
+          // sink for bytes the runtime knows never left, and then answer it
+          // with `warpline resolve` before a re-approval is even accepted.
+          // Restoring a live approval would mean clearing the mark
           // on the handler's word that nothing shipped, which is the trust
           // refused for `failed`. That is a new design, not an edit here.
           if (finalStatus === 'completed' && ev.content !== undefined) {
