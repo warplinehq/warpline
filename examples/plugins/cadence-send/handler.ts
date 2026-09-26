@@ -118,9 +118,9 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
   const recorded = new Set(pairs.map((p) => JSON.stringify(p)))
 
   // The runtime's timeout records the run `failed` whatever went out first,
-  // and a failed content fire leaves the approval `indeterminate` for good. So
-  // this plugin stops itself a quarter of `timeout_ms` early and reports what
-  // it sent. Each request is bounded by what is left of that budget too.
+  // and a failed content fire leaves the approval `indeterminate` until the
+  // operator answers it. So this plugin stops itself a quarter of `timeout_ms`
+  // early and reports what it sent. Each request is bounded by what is left of that budget too.
   // ponytail: a fixed quarter; a per-send estimate is the upgrade if it bites.
   const deadline = Date.now() + (manifest.timeout_ms ?? 60_000) * 0.75
 
@@ -128,8 +128,6 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
   let already = 0
   let error: SkillError | null = null
   let stoppedAt: string | null = null
-  // True only when the stop was a request that threw: that email may have gone.
-  let inDoubt = false
   for (const email of outbox) {
     const key = JSON.stringify([email.id, email.to])
     if (recorded.has(key)) {
@@ -168,7 +166,6 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
         ? makeSkillError('timeout', `aborted sending ${email.id}, which may have gone out`, { impact: 'HIGH', retryable: false })
         : makeSkillError('dependency_unavailable', `request failed sending ${email.id}`, { impact: 'HIGH', retryable: false })
       stoppedAt = email.id
-      inDoubt = true
       break
     } finally {
       clearTimeout(timer)
@@ -199,12 +196,13 @@ export const handler: CapabilityHandlerFn = async (manifest, args, signal, capab
 
   const summary = `${manifest.name}: sent ${sent} of ${outbox.length} (${already} already sent)`
     + (error ? `; stopped at ${stoppedAt}: ${error.message}` : '')
-  // `failed` leaves the approval `indeterminate`, and nothing clears that. It
-  // is the right answer only when an email may have gone out unrecorded. A
-  // non-2xx answer means that email was not sent, so a stop that sent nothing
-  // is `partial` like any other: the approval is spent, and re-approving the
-  // unchanged outbox retries it.
-  if (sent === 0 && error !== null && inDoubt) {
+  // `partial` means some bytes went out in this run, so a stop that sent
+  // nothing is `failed`. For a content-approved fire that leaves the approval
+  // `indeterminate` until the operator checks the mail API for the email the
+  // summary names, answers it with
+  // `warpline resolve cadence-send --not-shipped <effect-id>` when nothing
+  // arrived, and approves the unchanged outbox again.
+  if (sent === 0 && error !== null) {
     return skillFailure(error.code, summary, { ...FAILED, errors: [error] })
   }
   const result = skillOk(summary, {

@@ -190,11 +190,13 @@ candidates `candidate-propose` chose. A session grant never runs them, not even
 shows you those bytes first and runs
 `warpline approve <plugin> --content --not-before <soon> --not-after <when>`
 only on an explicit yes. The window opens a few minutes out, so the skill can
-check the bytes the command bound before anything can ship them. A send that stops part-way is `partial`, a rejected token on the first
-email included, and re-approving the unchanged Output retries it, skipping what
-already went. The operational risk to watch is a first request that throws, a
-dropped connection for example: it may have delivered, so it leaves the
-approval `indeterminate`, and no verb clears it. On a default install
+check the bytes the command bound before anything can ship them. A send that stops part-way is `partial`,
+and re-approving the unchanged Output retries it, skipping what already went. A
+send that stops before anything went out, a rejected token for example, is
+`failed`, and so is a first request that throws, which may have delivered.
+Either leaves the approval `indeterminate`. Check the sink for the fire's
+effect id, and when nothing arrived, answer it with
+`warpline resolve <plugin> --not-shipped <effect-id>` and approve again. On a default install
 (`review_gate: true`) the level-0 producers are recorded `gated` and the run
 stops there until you review them.
 
