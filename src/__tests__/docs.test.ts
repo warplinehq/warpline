@@ -1109,6 +1109,188 @@ function localImportVerdict(root: string): 'absent' | 'ok' | string {
   return 'ok'
 }
 
+// ── context7.json: what Context7 serves to every agent that asks ──────────
+
+/** Root files Context7 should index. Every other root file it parses is excluded. */
+const INDEXED = ['README.md', 'CONTRIBUTING.md', 'SECURITY.md']
+
+/** The extensions Context7 parses (context7.com/docs/adding-libraries.md, "What Gets Indexed"). */
+const CONTEXT7_EXTS = ['.md', '.mdx', '.markdown', '.rst', '.txt', '.ipynb']
+
+/**
+ * The properties and bounds of https://context7.com/schema/context7.json as
+ * fetched on 2026-09-27 (draft-07, `additionalProperties: false`). Copied here
+ * so the suite stays offline; a stale copy is caught by hand against the live
+ * schema, never by this file.
+ */
+const CONTEXT7_SCHEMA_KEYS = [
+  '$schema',
+  'projectTitle',
+  'description',
+  'branch',
+  'folders',
+  'excludeFolders',
+  'excludeFiles',
+  'rules',
+  'disallow',
+  'redirect',
+  'previousVersions',
+  'url',
+  'public_key',
+]
+const CONTEXT7_BOUNDS = {
+  description: { min: 10, max: 200 },
+  projectTitle: { min: 1, max: 100 },
+  folders: { maxItems: 50, minLength: 1, maxLength: 255 },
+  excludeFolders: { maxItems: 50, minLength: 1, maxLength: 255 },
+  excludeFiles: { maxItems: 100, minLength: 1, maxLength: 255, pattern: /^[^/\\]+$/ },
+  rules: { maxItems: 50, minLength: 1, maxLength: 255 },
+  previousVersions: { maxItems: 20, minLength: 1, maxLength: 50 },
+}
+
+/** Both must sit in ONE rule, spelled as every doc spells them. */
+const CONTENT_LITERALS = ["approval_class: 'content'", 'warpline approve --content']
+
+/**
+ * Every tracked root file Context7 parses must be classified on purpose:
+ * indexed or excluded, never both, never neither. Context7 indexes root
+ * files whatever `folders` says ("Root-level markdown files are always
+ * included", context7.com/docs/library-owners.md), so a new root file is
+ * published the day it lands unless something here notices.
+ *
+ * Blind spots it closes: a `.md`-only roster that never sees a root `.txt`;
+ * an empty roster that classifies nothing and passes; an INDEXED entry for a
+ * file that was deleted, which would otherwise sit stale forever.
+ */
+function rootRosterOffenders(
+  rootFiles: readonly string[],
+  excludeFiles: readonly string[],
+  indexed: readonly string[] = INDEXED,
+): string[] {
+  const roster = rootFiles.filter((f) => {
+    const dot = f.lastIndexOf('.')
+    return dot !== -1 && CONTEXT7_EXTS.includes(f.slice(dot).toLowerCase())
+  })
+  if (roster.length === 0) return ['the root roster is empty: could not look']
+  const out: string[] = []
+  for (const f of roster) {
+    const inIndexed = indexed.includes(f)
+    const inExcluded = excludeFiles.includes(f)
+    if (inIndexed && inExcluded) out.push(`${f}: both indexed and excluded`)
+    else if (!inIndexed && !inExcluded) {
+      out.push(
+        `${f}: unclassified; add it to INDEXED or to excludeFiles, because Context7 indexes root files whatever the folders list says`,
+      )
+    }
+  }
+  for (const m of indexed) {
+    if (!roster.includes(m)) out.push(`${m}: INDEXED names a file that is not tracked at the root`)
+  }
+  return out
+}
+
+/**
+ * context7.json against the schema's keys and numeric bounds. Context7
+ * rejects a file that fails its schema, and a keys-only check is green on a
+ * description that is too long, which is exactly the defect the file shipped
+ * with. Lengths count code points (`[...s].length`), as JSON Schema does, so
+ * an emoji is one character here and not two.
+ */
+function context7Offenders(cfg: Record<string, unknown>): string[] {
+  const out: string[] = []
+  const cp = (s: string) => [...s].length
+  const B = CONTEXT7_BOUNDS
+  for (const k of Object.keys(cfg)) {
+    if (!CONTEXT7_SCHEMA_KEYS.includes(k)) out.push(`${k}: not a schema property`)
+  }
+  const str = (key: 'description' | 'projectTitle') => {
+    const v = cfg[key]
+    if (v === undefined) return
+    if (typeof v !== 'string' || cp(v) < B[key].min || cp(v) > B[key].max) {
+      out.push(`${key}: ${typeof v === 'string' ? cp(v) : typeof v}, must be a string of ${B[key].min}..${B[key].max} code points`)
+    }
+  }
+  str('description')
+  str('projectTitle')
+  const list = (key: 'folders' | 'excludeFolders' | 'excludeFiles' | 'rules', unique: boolean) => {
+    const v = cfg[key]
+    if (v === undefined) return
+    const b = B[key]
+    if (!Array.isArray(v) || v.length > b.maxItems) {
+      out.push(`${key}: must be an array of at most ${b.maxItems} items`)
+      return
+    }
+    if (unique && new Set(v).size !== v.length) out.push(`${key}: items must be unique`)
+    for (const item of v) {
+      if (typeof item !== 'string' || cp(item) < b.minLength || cp(item) > b.maxLength) {
+        out.push(`${key}: item ${JSON.stringify(item)} must be a string of ${b.minLength}..${b.maxLength} code points`)
+      } else if ('pattern' in b && !b.pattern.test(item)) {
+        out.push(`${key}: item ${JSON.stringify(item)} must be a basename`)
+      }
+    }
+  }
+  list('folders', true)
+  list('excludeFolders', true)
+  list('excludeFiles', true)
+  list('rules', false)
+  const pv = cfg.previousVersions
+  if (pv !== undefined) {
+    const b = B.previousVersions
+    const okStr = (s: unknown) => typeof s === 'string' && cp(s) >= b.minLength && cp(s) <= b.maxLength
+    if (!Array.isArray(pv) || pv.length > b.maxItems) {
+      out.push(`previousVersions: must be an array of at most ${b.maxItems} items`)
+    } else {
+      for (const item of pv) {
+        if (okStr(item)) continue
+        const keys = item && typeof item === 'object' && !Array.isArray(item) ? Object.keys(item) : []
+        const k = keys[0]
+        if (keys.length !== 1 || (k !== 'tag' && k !== 'branch') || !okStr((item as Record<string, unknown>)[k])) {
+          out.push(`previousVersions: item ${JSON.stringify(item)} must be a version string or exactly one of { tag } / { branch }`)
+        }
+      }
+    }
+  }
+  return out
+}
+
+/**
+ * Some single rule must carry both content-approval literals. A loose match
+ * on "content" passes a file whose rules never name the command, and two
+ * rules holding one literal each read as two unrelated facts to an agent that
+ * is served one rule at a time.
+ */
+function contentRuleOffenders(rules: readonly string[]): string[] {
+  if (rules.some((r) => CONTENT_LITERALS.every((lit) => r.includes(lit)))) return []
+  return [`no single rule contains both ${CONTENT_LITERALS.map((l) => JSON.stringify(l)).join(' and ')}`]
+}
+
+/**
+ * The newest patch of every minor below the package's own minor must be in
+ * `previousVersions`, or Context7 stops serving that minor's docs at the next
+ * release and nobody notices. Zero semver tags means a clone without tags,
+ * and that throws: a check that found nothing to compare must not pass.
+ */
+function missingPreviousVersions(tags: readonly string[], version: string, previous: readonly unknown[]): string[] {
+  const re = /^v(\d+)\.(\d+)\.(\d+)$/
+  const parsed = tags.flatMap((t) => {
+    const m = re.exec(t)
+    return m ? [{ tag: t, major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]) }] : []
+  })
+  if (parsed.length === 0) throw new Error('could not look: no vX.Y.Z tags (shallow clone without tags?)')
+  const [maj, min] = version.split('.').map(Number) as [number, number]
+  const newest = new Map<string, (typeof parsed)[number]>()
+  for (const p of parsed) {
+    if (p.major > maj || (p.major === maj && p.minor >= min)) continue
+    const key = `${p.major}.${p.minor}`
+    const cur = newest.get(key)
+    if (!cur || p.patch > cur.patch) newest.set(key, p)
+  }
+  const listed = new Set(
+    previous.map((x) => (typeof x === 'string' ? x : (x as { tag?: unknown } | null)?.tag)).filter(Boolean),
+  )
+  return [...newest.values()].filter((p) => !listed.has(p.tag)).map((p) => p.tag)
+}
+
 describe('agent instructions', () => {
   test('AGENTS.md is the only tracked agent file, and a regular file', () => {
     // Asked of the git index, not the disk: a maintainer's local files must not
@@ -1195,6 +1377,32 @@ describe('agent instructions', () => {
     for (const tree of ['src', 'scripts', 'test-utils']) {
       expect(cfg.excludeFolders).toContain(tree)
     }
+  })
+
+  describe('context7.json', () => {
+    const cfg = () => JSON.parse(read('context7.json')) as Record<string, unknown>
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8' })
+
+    test('every tracked root file Context7 parses is indexed or excluded, on purpose', () => {
+      const rootFiles = git('ls-files', '-z')
+        .split('\0')
+        .filter((f) => f && !f.includes('/'))
+      expect(rootRosterOffenders(rootFiles, cfg().excludeFiles as string[])).toEqual([])
+    })
+
+    test('keys and values sit inside the schema', () => {
+      expect(context7Offenders(cfg())).toEqual([])
+    })
+
+    test('one rule names content approval and its command', () => {
+      expect(contentRuleOffenders(cfg().rules as string[])).toEqual([])
+    })
+
+    test('every earlier minor keeps its newest patch in previousVersions', () => {
+      const tags = git('tag', '--list', 'v*').split('\n').filter(Boolean)
+      const version = JSON.parse(read('package.json')).version as string
+      expect(missingPreviousVersions(tags, version, (cfg().previousVersions ?? []) as unknown[])).toEqual([])
+    })
   })
 })
 
