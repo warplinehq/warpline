@@ -47,10 +47,18 @@ for you.
 
 ## Release gates
 
-Three gates run in `.github/workflows/release.yml` before `npm publish`, and all
-three live in a script rather than inline so the same logic can be exercised without
+These gates run in `.github/workflows/release.yml` before `npm publish`, and each
+lives in a script rather than inline so the same logic can be exercised without
 cutting a release. A guard nobody has watched fail is not a guard.
 
+- **`bash scripts/assert-release-tag.sh <tag>`** — refuses the release when the
+  tag, `package.json` and the two plugin manifests disagree on the version, or
+  when the npm-stub is still present. See the marketplace note below.
+- **`bash scripts/assert-pack-whitelist.sh`** — checks what `npm pack --dry-run`
+  would publish against a hardcoded whitelist, in both directions: nothing from
+  a denied tree, and nothing outside the allowed roots. CI runs it on every pull
+  request and push to `main` too, so a `files` regression fails before release
+  day.
 - **`bash scripts/verify-tarball.sh`**, or `bun run verify:tarball` — packs the
   tarball, installs it into a throwaway prefix and scaffolds a plugin from the
   installed bin. The scaffold defects it catches do not reproduce from a
