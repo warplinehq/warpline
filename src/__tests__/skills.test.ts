@@ -235,4 +235,72 @@ describe('the skill rules can fail', () => {
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  /** One non-BMP character: one code point, two UTF-16 units. */
+  const E = '\u{1F600}'
+  const DESC = 'description: Fine.'
+  /** A one-skill repository whose frontmatter is `fm`, under `dir`. */
+  const one = (fm: string, dir = 'ok') => ({ [`${dir}/SKILL.md`]: `---\n${fm}\n---\n\nbody\n` })
+  /** A skill named `name` in a directory of the same name unless `dir` says otherwise. */
+  const named = (name: string, dir = name) => one(`name: ${JSON.stringify(name)}\n${DESC}`, dir)
+
+  // null: no offenders. A RegExp: some offender matches it. Matching one
+  // reason, never the whole list, lets a fixture carry more than one.
+  const rows: [string, Record<string, string>, RegExp | null][] = [
+    ['name of 64 characters passes', named('a'.repeat(64)), null],
+    ['description of 1024 non-BMP characters passes', one(`name: ok\ndescription: ${E.repeat(1024)}`), null],
+    ['compatibility of 500 non-BMP characters passes', one(`name: ok\n${DESC}\ncompatibility: ${E.repeat(500)}`), null],
+    ['string metadata passes', one(`name: ok\n${DESC}\nmetadata:\n  owner: x`), null],
+    [
+      'a BOM, CRLF endings and all six keys pass',
+      {
+        'full/SKILL.md':
+          '﻿---\r\nname: full\r\ndescription: All six.\r\nlicense: Apache-2.0\r\ncompatibility: Needs git.\r\n' +
+          'metadata:\r\n  owner: x\r\nallowed-tools: Bash Read\r\n---\r\n\r\nbody\r\n',
+      },
+      null,
+    ],
+    ['name of 65 characters fails', named('a'.repeat(65)), /name is 65 characters/],
+    ['description of 1025 non-BMP characters fails', one(`name: ok\ndescription: ${E.repeat(1025)}`), /description is 1025 characters/],
+    ['compatibility of 501 non-BMP characters fails', one(`name: ok\n${DESC}\ncompatibility: ${E.repeat(501)}`), /compatibility is 501 characters/],
+    ['empty compatibility fails', one(`name: ok\n${DESC}\ncompatibility: ""`), /compatibility is 0 characters/],
+    ['non-string compatibility fails', one(`name: ok\n${DESC}\ncompatibility: 5`), /compatibility must be a string/],
+    ['missing frontmatter fails', { 'ok/SKILL.md': '# ok\n\nno frontmatter\n' }, /missing frontmatter/],
+    ['frontmatter never closed fails', { 'ok/SKILL.md': `---\nname: ok\n${DESC}\n` }, /missing frontmatter/],
+    ['empty frontmatter fails', { 'ok/SKILL.md': '---\n---\n\nbody\n' }, /frontmatter is not a mapping/],
+    ['top-level list frontmatter fails', one(`- name: ok\n- ${DESC}`), /frontmatter is not a mapping/],
+    ['invalid YAML fails', one(`name: [unclosed\n${DESC}`), /frontmatter is not valid YAML/],
+    ['missing name fails', one(DESC), /missing name/],
+    ['missing description fails', one('name: ok'), /missing description/],
+    ['non-string name fails', one(`name: 123\n${DESC}`, '123'), /name must be a string/],
+    ['uppercase and underscore in name fail', named('My_Skill'), /lowercase letters, digits and hyphens/],
+    ['leading hyphen fails', named('-lead'), /starts or ends with a hyphen/],
+    ['trailing hyphen fails', named('trail-'), /starts or ends with a hyphen/],
+    ['doubled hyphen fails', named('dou--ble'), /doubled hyphen/],
+    ['name not equal to its directory fails', named('mine', 'other'), /does not match its directory/],
+    ["reserved word 'claude' fails", named('claude-helper'), /reserved word 'claude'/],
+    ["reserved word 'anthropic' fails", named('my-anthropic-skill'), /reserved word 'anthropic'/],
+    ['angle bracket in name fails', named('a<b>'), /name holds an angle bracket/],
+    ['angle bracket in description fails', one('name: ok\ndescription: use <b>this</b>'), /description holds an angle bracket/],
+    ['whitespace-only description fails', one('name: ok\ndescription: "   "'), /description is blank/],
+    ['non-string description fails', one('name: ok\ndescription: 42'), /description must be a string/],
+    ['non-string metadata value fails', one(`name: ok\n${DESC}\nmetadata:\n  v: 1.0`), /metadata value 'v' must be a string/],
+    ['metadata as a list fails', one(`name: ok\n${DESC}\nmetadata:\n  - x`), /metadata is not a mapping/],
+    ['unknown key fails', one(`name: ok\n${DESC}\nwhen_to_use: always`), /unknown key 'when_to_use'/],
+    ['duplicate name key fails', one(`name: ok\nname: ok\n${DESC}`), /duplicate key 'name'/],
+    ['root-level SKILL.md fails', { 'SKILL.md': `---\nname: ok\n${DESC}\n---\n` }, /no parent directory/],
+  ]
+
+  for (const [label, files, expected] of rows) {
+    test(label, () => {
+      const root = repoFixture(files)
+      try {
+        const offenders = skillOffenders(root)
+        if (expected === null) expect(offenders).toEqual([])
+        else expect(offenders).toContainEqual(expect.stringMatching(expected))
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    })
+  }
 })
