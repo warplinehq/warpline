@@ -363,6 +363,69 @@ describe('every CI claim names a step a workflow runs', () => {
     expect(offenders).toEqual([])
     expect(claims).toBeGreaterThanOrEqual(CLAIM_FLOOR)
   })
+
+  // Each property above, shown able to fail on a fixture it must refuse.
+  const doc = (text: string) => [{ file: 'x.md', text }]
+  const workflow = (steps: string) => [{ file: 'w.yml', text: `on: push\njobs:\n  a:\n    steps:\n${steps}` }]
+  const CLAIM = 'CI runs `scripts/verify-tarball.sh`.'
+
+  test('a workflow comment naming the script does not satisfy the claim', () => {
+    const runs = workflowRuns(workflow('      # scripts/verify-tarball.sh\n      - run: echo hi\n'))
+    expect(claimOffenders(doc(CLAIM), runs, {}).offenders).toHaveLength(1)
+  })
+
+  test('a run step naming a longer script does not satisfy the claim', () => {
+    const runs = workflowRuns(workflow('      - run: bash scripts/verify-tarball-old.sh\n'))
+    expect(claimOffenders(doc(CLAIM), runs, {}).offenders).toHaveLength(1)
+  })
+
+  // The row above differs mid-token, so it never reaches the trailing
+  // boundary. This one is a true prefix: only that boundary refuses it.
+  test('a run step extending the claimed target does not satisfy the claim', () => {
+    const runs = workflowRuns(workflow('      - run: bun run verify-tarball-old\n'))
+    expect(claimOffenders(doc('CI runs `bun run verify-tarball`.'), runs, {}).offenders).toHaveLength(1)
+  })
+
+  test('a run step running the exact script satisfies the claim', () => {
+    const runs = workflowRuns(workflow('      - run: bash scripts/verify-tarball.sh\n'))
+    expect(claimOffenders(doc(CLAIM), runs, {})).toEqual({ claims: 1, offenders: [] })
+  })
+
+  const ALIAS_CLAIM = 'The release workflow runs `bun run verify:tarball`.'
+
+  test('a `bun run X` claim is satisfied through package.json when X maps onto a script a step runs', () => {
+    const runs = workflowRuns(workflow('      - run: bash scripts/verify-tarball.sh\n'))
+    const pkgScripts = { 'verify:tarball': 'bash scripts/verify-tarball.sh' }
+    expect(claimOffenders(doc(ALIAS_CLAIM), runs, pkgScripts)).toEqual({ claims: 1, offenders: [] })
+  })
+
+  test('a `bun run X` claim with no step and no package.json mapping is an offender', () => {
+    const runs = workflowRuns(workflow('      - run: bash scripts/verify-tarball.sh\n'))
+    expect(claimOffenders(doc(ALIAS_CLAIM), runs, {}).offenders).toHaveLength(1)
+  })
+
+  test('a script named only inside a fenced block is not a claim', () => {
+    const runs = workflowRuns(workflow('      - run: echo hi\n'))
+    const fenced = doc('CI runs this:\n```sh\nbash scripts/verify-tarball.sh\n```\n')
+    expect(claimOffenders(fenced, runs, {}).claims).toBe(0)
+  })
+
+  test('a script named with no mention of CI is not a claim', () => {
+    const runs = workflowRuns(workflow('      - run: echo hi\n'))
+    expect(claimOffenders(doc('Run `scripts/x.sh` by hand.'), runs, {}).claims).toBe(0)
+  })
+
+  test('a workflow that does not parse is "could not look"', () => {
+    expect(() => workflowRuns([{ file: 'bad.yml', text: 'jobs: [unclosed' }])).toThrow(/could not look: bad.yml does not parse/)
+  })
+
+  test('no workflow files is "could not look"', () => {
+    expect(() => workflowRuns([])).toThrow(/could not look/)
+  })
+
+  test('workflows with no run steps are "could not look"', () => {
+    expect(() => workflowRuns(workflow('      - uses: actions/checkout@v4\n'))).toThrow(/could not look/)
+  })
 })
 
 // ── Links must resolve ───────────────────────────────────────────────────
