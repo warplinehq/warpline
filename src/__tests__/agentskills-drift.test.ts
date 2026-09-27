@@ -5,7 +5,8 @@
  * sources and compares their sha256 to `.github/agentskills-upstream.sha256`.
  * Its callers read the exit status and nothing else: 0 is a match, 1 is drift
  * (a changed hash, a missing or empty hash file, any HTTP status other than
- * 200), 3 is a network failure. A caller that wants to warn on 3 and block on 1
+ * 200, a curl failure that is not a transport error), 3 is a network failure.
+ * A caller that wants to warn on 3 and block on 1
  * is only as right as that split, so every arm is pinned here.
  *
  * Two mechanisms keep the tests off the network and off the tracked tree.
@@ -168,12 +169,27 @@ describe('the drift script', () => {
     })
   })
 
-  // 6 cannot resolve host, 7 cannot connect, 28 timeout.
-  for (const rc of ['6', '7', '28']) {
+  // The transport allowlist: 5 cannot resolve proxy, 6 cannot resolve host,
+  // 7 cannot connect, 28 timeout, 52 empty reply, 55 send failure, 56 receive
+  // failure.
+  for (const rc of ['5', '6', '7', '28', '52', '55', '56']) {
     test(`curl exit ${rc} is a network failure (exit 3)`, () => {
       withDrift(MATCHING, { FAKE_CURL_EXIT: rc }, (r) => {
         expect(r.status).toBe(3)
         expect(r.output).toContain('network failure')
+      })
+    })
+  }
+
+  // Anything else means the check could not look for a reason that is not the
+  // network, and the hook must not wave it through: 3 malformed URL, 23 cannot
+  // write the temp file, 35 TLS handshake, 60 certificate not trusted.
+  for (const rc of ['3', '23', '35', '60']) {
+    test(`curl exit ${rc} is not a network failure (exit 1)`, () => {
+      withDrift(MATCHING, { FAKE_CURL_EXIT: rc }, (r) => {
+        expect(r.status).toBe(1)
+        expect(r.output).not.toContain('network failure')
+        expect(r.output).toContain(`curl exit ${rc}`)
       })
     })
   }
@@ -260,6 +276,20 @@ describe('the pre-push hook', () => {
   test('a missing hash file fails the push (exit 1)', () => {
     withDrift(null, {}, (r) => expect(r.status).toBe(1), HOOK)
   })
+
+  for (const rc of ['3', '60']) {
+    test(`curl exit ${rc} fails the push (exit 1), with no network warning`, () => {
+      withDrift(
+        MATCHING,
+        { FAKE_CURL_EXIT: rc },
+        (r) => {
+          expect(r.status).toBe(1)
+          expect(r.output).not.toContain('WARNING')
+        },
+        HOOK,
+      )
+    })
+  }
 })
 
 describe('the hook is opt-in and executable', () => {

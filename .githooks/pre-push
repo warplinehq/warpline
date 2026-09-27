@@ -8,8 +8,9 @@
 #
 # It runs scripts/check-agentskills-drift.sh, which compares the upstream Agent
 # Skills rule sources against the hashes in .github/agentskills-upstream.sha256.
-# Drift, a missing hash file or an HTTP error fails the push with the script's
-# exit code. A network failure (exit 3) warns and lets the push through: a
+# Drift, a missing hash file, an HTTP error or a non-transport curl failure
+# (TLS, certificate, malformed URL) fails the push with the script's exit
+# code. A network failure (exit 3) warns and lets the push through: a
 # laptop offline should still be able to push, but it must be told the check
 # did not run. The weekly workflow still fails on a network failure.
 #

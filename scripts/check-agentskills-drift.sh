@@ -20,9 +20,12 @@
 #
 #   0  every file matches its committed hash
 #   1  drift: a hash changed, the hash file is missing, empty or malformed, a
-#      URL is outside https://raw.githubusercontent.com/, or the server answered
-#      with any status other than 200 (a 404 counts as drift: the file moved)
-#   3  network failure: curl itself exited non-zero (DNS, connect, timeout)
+#      URL is outside https://raw.githubusercontent.com/, the server answered
+#      with any status other than 200 (a 404 counts as drift: the file moved),
+#      or curl failed with an exit code outside the transport list below (a
+#      TLS or certificate failure, a malformed URL, an unwritable temp file)
+#   3  network failure: curl exited 5, 6, 7, 28, 52, 55 or 56 (proxy or host
+#      lookup, connect, timeout, empty reply, send or receive failure)
 #
 # The status is read with `-w '%{http_code}'`, never from curl's exit code. With
 # its fail-on-error flag, curl over HTTP/2 reports a 404 as exit 56, which is
@@ -73,8 +76,10 @@ while read -r want url || [ -n "${want:-}" ]; do
   rc=0
   code="$(curl -sS --connect-timeout 10 --max-time 30 -o "$tmp" -w '%{http_code}' "$url")" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "drift: network failure (curl exit $rc) for $url" >&2
-    exit 3
+    case "$rc" in
+      5|6|7|28|52|55|56) echo "drift: network failure (curl exit $rc) for $url" >&2; exit 3 ;;
+      *) echo "drift: curl failed (curl exit $rc) for $url, and that is not a transport error" >&2; exit 1 ;;
+    esac
   fi
   if [ "$code" != "200" ]; then
     echo "drift: HTTP $code for $url" >&2
