@@ -1403,6 +1403,125 @@ describe('agent instructions', () => {
       const version = JSON.parse(read('package.json')).version as string
       expect(missingPreviousVersions(tags, version, (cfg().previousVersions ?? []) as unknown[])).toEqual([])
     })
+
+    describe('rootRosterOffenders', () => {
+      test('a root llms.txt nobody classified is an offender', () => {
+        expect(rootRosterOffenders(['README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'llms.txt'], [])).toEqual([
+          expect.stringContaining('llms.txt: unclassified'),
+        ])
+      })
+
+      test('a file both indexed and excluded is an offender', () => {
+        expect(rootRosterOffenders(['README.md', 'CONTRIBUTING.md', 'SECURITY.md'], ['README.md'])).toEqual([
+          'README.md: both indexed and excluded',
+        ])
+      })
+
+      test('an empty roster could not look', () => {
+        expect(rootRosterOffenders([], [])).toEqual(['the root roster is empty: could not look'])
+      })
+
+      test('an INDEXED member that is not tracked is an offender', () => {
+        expect(rootRosterOffenders(['README.md', 'CONTRIBUTING.md'], [])).toEqual([
+          'SECURITY.md: INDEXED names a file that is not tracked at the root',
+        ])
+      })
+
+      test('the extension match ignores case', () => {
+        expect(rootRosterOffenders(['README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'notes.RST'], [])).toEqual([
+          expect.stringContaining('notes.RST: unclassified'),
+        ])
+      })
+
+      test('a file Context7 does not parse is out of scope', () => {
+        expect(rootRosterOffenders(['README.md', 'CONTRIBUTING.md', 'SECURITY.md', 'package.json'], [])).toEqual([])
+      })
+    })
+
+    describe('context7Offenders', () => {
+      const E = '\u{1F600}'
+      const field = (patch: Record<string, unknown>, key: string) =>
+        context7Offenders({ ...cfg(), ...patch }).filter((o) => o.startsWith(`${key}:`))
+
+      test('a typo key is an offender', () => {
+        expect(context7Offenders({ ...cfg(), previousVersion: [] })).toEqual(['previousVersion: not a schema property'])
+      })
+
+      test('a description of 200 non-BMP code points fits', () => {
+        expect(field({ description: E.repeat(200) }, 'description')).toEqual([])
+      })
+
+      test('a description of 201 code points does not', () => {
+        expect(field({ description: E.repeat(201) }, 'description')).toHaveLength(1)
+      })
+
+      test('a description of 9 characters is too short', () => {
+        expect(field({ description: 'x'.repeat(9) }, 'description')).toHaveLength(1)
+      })
+
+      test('a rule of 256 characters is too long', () => {
+        expect(field({ rules: ['x'.repeat(256)] }, 'rules')).toHaveLength(1)
+      })
+
+      test('51 rules are too many', () => {
+        expect(field({ rules: Array.from({ length: 51 }, (_, i) => `rule ${i}`) }, 'rules')).toHaveLength(1)
+      })
+
+      test('21 previous versions are too many', () => {
+        const pv = Array.from({ length: 21 }, (_, i) => ({ tag: `v0.${i}.0` }))
+        expect(field({ previousVersions: pv }, 'previousVersions')).toHaveLength(1)
+      })
+
+      test('a previous version naming both tag and branch is an offender', () => {
+        expect(field({ previousVersions: [{ tag: 'v1', branch: 'main' }] }, 'previousVersions')).toHaveLength(1)
+      })
+
+      test('an excludeFiles entry with a path is an offender', () => {
+        expect(field({ excludeFiles: ['docs/llms.txt'] }, 'excludeFiles')).toEqual([
+          'excludeFiles: item "docs/llms.txt" must be a basename',
+        ])
+      })
+    })
+
+    describe('contentRuleOffenders', () => {
+      test('the two literals in two rules is an offender', () => {
+        expect(
+          contentRuleOffenders(["approval_class: 'content' is one", 'warpline approve --content is another']),
+        ).toHaveLength(1)
+      })
+
+      test('both literals in one rule passes', () => {
+        expect(contentRuleOffenders(["approval_class: 'content' is approved with warpline approve --content"])).toEqual(
+          [],
+        )
+      })
+
+      test('the unquoted spelling is an offender', () => {
+        expect(contentRuleOffenders(['approval_class: content is approved with warpline approve --content'])).toHaveLength(
+          1,
+        )
+      })
+    })
+
+    describe('missingPreviousVersions', () => {
+      const TAGS = ['v0.1', 'v0.1.0', 'v0.1.2', 'v0.2.1', 'v0.3.4', 'v0.4.0']
+
+      test('the newest patch of every earlier minor, listed as strings, passes', () => {
+        expect(missingPreviousVersions(TAGS, '0.4.0', ['v0.1.2', 'v0.2.1', 'v0.3.4'])).toEqual([])
+      })
+
+      test('a dropped minor is reported', () => {
+        expect(missingPreviousVersions(TAGS, '0.4.0', ['v0.1.2', 'v0.2.1'])).toEqual(['v0.3.4'])
+      })
+
+      test('the next minor asks for the one that just shipped', () => {
+        expect(missingPreviousVersions(TAGS, '0.5.0', ['v0.1.2', 'v0.2.1', 'v0.3.4'])).toEqual(['v0.4.0'])
+      })
+
+      test('no vX.Y.Z tag throws rather than passing', () => {
+        expect(() => missingPreviousVersions(['v0.1', 'v0.2'], '0.4.0', [])).toThrow(/could not look/)
+      })
+    })
   })
 })
 
