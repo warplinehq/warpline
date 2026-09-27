@@ -20,11 +20,16 @@
  *
  * All three were fetched on 2026-09-27. `RULES_COMMIT` is the agentskills
  * commit the open spec was read at. The hashes in `HASH_FILE` are of the
- * `main` raw URLs of `UPSTREAM_FILES`, never of `RULES_COMMIT`: a commit-pinned
+ * `main` raw URLs in `UPSTREAM_FILES`, never of `RULES_COMMIT`: a commit-pinned
  * URL can never change, so hashing one could never report drift. When the
  * upstream drift guard (`scripts/check-agentskills-drift.sh`) fires, the rules
  * here are re-read and `RULES_COMMIT` is bumped together with the upstream
  * hashes, never one without the other.
+ *
+ * The drift guard hashes the spec, the skills-ref validator and parser, and
+ * quick_validate.py. The two platform.claude.com pages are not drift-checked:
+ * the script fetches only raw.githubusercontent.com URLs, and those pages are
+ * not raw files. They are re-read by hand.
  *
  * Lengths are Unicode code points (`[...s].length`), never UTF-16 units: the
  * spec counts characters, and `s.length` counts a non-BMP character twice. The
@@ -64,9 +69,10 @@ const SPEC_URL = `https://github.com/agentskills/agentskills/blob/${RULES_COMMIT
 /** The drift guard's data file: one `<sha256>  <main raw URL>` line per upstream rule source. */
 const HASH_FILE = '.github/agentskills-upstream.sha256'
 const UPSTREAM_FILES = [
-  'docs/specification.mdx',
-  'skills-ref/src/skills_ref/validator.py',
-  'skills-ref/src/skills_ref/parser.py',
+  'https://raw.githubusercontent.com/agentskills/agentskills/main/docs/specification.mdx',
+  'https://raw.githubusercontent.com/agentskills/agentskills/main/skills-ref/src/skills_ref/validator.py',
+  'https://raw.githubusercontent.com/agentskills/agentskills/main/skills-ref/src/skills_ref/parser.py',
+  'https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/scripts/quick_validate.py',
 ]
 
 /** The spec's frontmatter fields. Anything else is an offender. */
@@ -325,12 +331,12 @@ describe('the upstream hash file the drift guard reads', () => {
     const path = join(REPO_ROOT, HASH_FILE)
     expect(existsSync(path)).toBe(true)
     const lines = readFileSync(path, 'utf8').split('\n').filter((l) => l.trim() !== '')
-    expect(lines).toHaveLength(3)
-    const paths = lines.map((l) => {
-      const m = /^[0-9a-f]{64}  https:\/\/raw\.githubusercontent\.com\/agentskills\/agentskills\/main\/(.+)$/.exec(l)
+    expect(lines).toHaveLength(UPSTREAM_FILES.length)
+    const urls = lines.map((l) => {
+      const m = /^[0-9a-f]{64}  (https:\/\/raw\.githubusercontent\.com\/[\w.-]+\/[\w.-]+\/main\/.+)$/.exec(l)
       if (m === null) throw new Error(`${HASH_FILE}: not '<sha256>  <main raw URL>': ${l}`)
       return m[1]
     })
-    expect(new Set(paths)).toEqual(new Set(UPSTREAM_FILES))
+    expect(new Set(urls)).toEqual(new Set(UPSTREAM_FILES))
   })
 })

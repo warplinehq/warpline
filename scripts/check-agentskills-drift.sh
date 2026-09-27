@@ -4,10 +4,11 @@
 # committed in .github/agentskills-upstream.sha256.
 #
 # `src/__tests__/skills.test.ts` copies the SKILL.md frontmatter rules out of
-# the Agent Skills specification and the skills-ref validator and parser. A copy
-# goes stale silently: upstream tightens a rule, the vendored test keeps passing,
-# and a skill this repository ships stops loading in a stricter client. This
-# script is the tripwire. It fetches each upstream file, hashes it, and compares
+# the Agent Skills specification, the skills-ref validator and parser, and
+# Anthropic's skill-creator quick_validate.py. A copy goes stale silently:
+# upstream tightens a rule, the vendored test keeps passing, and a skill this
+# repository ships stops loading in a stricter client. This script is the
+# tripwire. It fetches each upstream file, hashes it, and compares
 # the hash to the committed one.
 #
 # The URLs are the `main` raw URLs on purpose. A raw URL pinned to a commit is

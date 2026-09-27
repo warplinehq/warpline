@@ -95,8 +95,8 @@ printf '%s\n' "$MESSAGE" | bash scripts/scan-public-surfaces.sh \
 
 `src/__tests__/skills.test.ts` enforces the Agent Skills frontmatter rules on
 every tracked `SKILL.md`. Those rules are copied from upstream, so
-`bash scripts/check-agentskills-drift.sh` compares three upstream files against
-the hashes in `.github/agentskills-upstream.sha256`. The weekly workflow
+`bash scripts/check-agentskills-drift.sh` compares each upstream file listed in
+`.github/agentskills-upstream.sha256` against its hash there. The weekly workflow
 `.github/workflows/agentskills-drift.yml` runs it and fails on a mismatch or on
 a fetch failure.
 

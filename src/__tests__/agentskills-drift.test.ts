@@ -41,6 +41,7 @@ const URLS = [
   `${BASE}docs/specification.mdx`,
   `${BASE}skills-ref/src/skills_ref/validator.py`,
   `${BASE}skills-ref/src/skills_ref/parser.py`,
+  'https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/scripts/quick_validate.py',
 ]
 
 /**
@@ -144,7 +145,7 @@ function withDrift(
 describe('the drift script', () => {
   test('matching bytes for every line exit 0 and report the count', () => {
     withDrift(MATCHING, {}, (r, root) => {
-      expect(r.output).toContain('OK: 3 upstream files match their committed hashes')
+      expect(r.output).toContain(`OK: ${URLS.length} upstream files match their committed hashes`)
       expect(r.status).toBe(0)
       expect(curlLog(root)).toEqual(URLS)
     })
@@ -216,10 +217,11 @@ describe('the drift script', () => {
   })
 
   test('the last line is checked even without a trailing newline', () => {
-    const text = `${line(BODY_SHA, URLS[0])}${line(BODY_SHA, URLS[1])}${'0'.repeat(64)}  ${URLS[2]}`
+    const last = URLS[URLS.length - 1]
+    const text = `${URLS.slice(0, -1).map((u) => line(BODY_SHA, u)).join('')}${'0'.repeat(64)}  ${last}`
     withDrift(text, {}, (r, root) => {
       expect(r.status).toBe(1)
-      expect(r.output).toContain(`drift: ${URLS[2]} changed`)
+      expect(r.output).toContain(`drift: ${last} changed`)
       expect(curlLog(root)).toEqual(URLS)
     })
   })
