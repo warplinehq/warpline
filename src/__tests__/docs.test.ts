@@ -26,7 +26,17 @@
  */
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildPlanModel } from '../cli/plan.js'
@@ -421,6 +431,130 @@ describe('generated docs/llms.txt', () => {
   test('docs/llms.txt is tracked, not just present', () => {
     const out = execFileSync('git', ['ls-files', 'docs/llms.txt'], { cwd: REPO_ROOT, encoding: 'utf8' })
     expect(out.trim()).toBe('docs/llms.txt')
+  })
+
+  // A version bump without a regeneration must fail the drift test above, which
+  // it only does if the version reaches every link.
+  test('a different version produces a different file, with every link on that tag', async () => {
+    const { llmsTxt } = await import('../../scripts/gen-llms-txt.js')
+    const { index, description, tracked } = llmsInputs()
+    const other = llmsTxt(index, '9.9.9', tracked, description)
+    expect(other).not.toBe(read('docs/llms.txt'))
+    const links = other.split('\n').filter((l) => l.startsWith('- ['))
+    expect(links.length).toBeGreaterThan(0)
+    expect(links.filter((l) => !l.includes('/v9.9.9/docs/'))).toEqual([])
+  })
+
+  // The roster comes from git, not from the index, so a doc the index drops is
+  // caught rather than silently left out of the file.
+  test('a tracked doc dropped from docs/index.md makes the generator throw', async () => {
+    const { llmsTxt } = await import('../../scripts/gen-llms-txt.js')
+    const { index, version, description, tracked } = llmsInputs()
+    const dropped = index.replace(/^- \[doctrine\.md\].*\n/m, '')
+    expect(dropped).not.toBe(index)
+    expect(() => llmsTxt(dropped, version, tracked, description)).toThrow(
+      /docs\/doctrine\.md is tracked but not listed/,
+    )
+  })
+
+  test('a bullet pointing at an untracked doc makes the generator throw', async () => {
+    const { llmsTxt } = await import('../../scripts/gen-llms-txt.js')
+    const { index, version, description, tracked } = llmsInputs()
+    const ghost = index.replace(/^(- \[doctrine\.md\].*\n)/m, '$1- [ghost.md](ghost.md) — x\n')
+    expect(ghost).not.toBe(index)
+    expect(() => llmsTxt(ghost, version, tracked, description)).toThrow(/ghost\.md.*not a tracked doc/)
+  })
+
+  test('an H2 in docs/index.md other than Background makes the generator throw', async () => {
+    const { llmsTxt } = await import('../../scripts/gen-llms-txt.js')
+    const { index, version, description, tracked } = llmsInputs()
+    expect(() => llmsTxt(`${index}\n## Extras\n`, version, tracked, description)).toThrow(/unknown section/)
+  })
+
+  // Only generated lines: no free prose can creep in and claim something the
+  // index does not, and nothing inlines a doc body.
+  test('every non-blank line is the H1, the blockquote, a section heading or a pinned link', () => {
+    const { version } = llmsInputs()
+    const v = version.replaceAll('.', '\\.')
+    const link = new RegExp(
+      `^- \\[[^\\]]+\\.md\\]\\(https://raw\\.githubusercontent\\.com/warplinehq/warpline/v${v}/docs/[^)]+\\.md\\)(: .+)?$`,
+    )
+    const shapes = [/^# warpline$/, /^> .+/, /^## (Docs|Optional)$/, link]
+    const lines = read('docs/llms.txt').split('\n').filter((l) => l.trim() !== '')
+    expect(lines.filter((l) => /^\s/.test(l))).toEqual([])
+    expect(lines.filter((l) => !shapes.some((re) => re.test(l)))).toEqual([])
+  })
+
+  // Newer revisions of the format gave `## Optional` no mechanical meaning, so
+  // each entry has to say itself that it can be skipped. Read from the
+  // generator, not the committed file: the drift test already ties the two
+  // together, and this way a generator that stops appending the note fails
+  // here by name.
+  test('every entry under ## Optional says it is not needed to use warpline', async () => {
+    const { llmsTxt } = await import('../../scripts/gen-llms-txt.js')
+    const { index, version, description, tracked } = llmsInputs()
+    const text = llmsTxt(index, version, tracked, description)
+    const at = text.indexOf('\n## Optional\n')
+    expect(at).toBeGreaterThan(-1)
+    const entries = text
+      .slice(at)
+      .split('\n')
+      .filter((l) => l.startsWith('- ['))
+    expect(entries.length).toBeGreaterThan(0)
+    expect(entries.filter((l) => !l.endsWith('(background: not needed to use warpline)'))).toEqual([])
+  })
+
+  test('no tracked file is named llms-full.txt', () => {
+    const all = execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, encoding: 'utf8' }).split('\0')
+    expect(all.filter((f) => f.split('/').pop() === 'llms-full.txt')).toEqual([])
+  })
+
+  test('the tarball ships docs/llms.txt', () => {
+    expect(packed().has('docs/llms.txt')).toBe(true)
+  })
+
+  // --check runs from a bare copy of the files it reads, which is also what
+  // proves the generator imports nothing from src/.
+  test('--check passes on the current file and refuses a stale or missing one', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-llms-'))
+    const check = (): { status: number; output: string } => {
+      try {
+        const output = execFileSync(process.execPath, ['scripts/gen-llms-txt.ts', '--check'], {
+          cwd: root,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        })
+        return { status: 0, output }
+      } catch (err) {
+        const e = err as { status?: number; stdout?: string; stderr?: string }
+        return { status: e.status ?? -1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` }
+      }
+    }
+    try {
+      mkdirSync(join(root, 'scripts'))
+      mkdirSync(join(root, 'docs'))
+      const files = ['scripts/gen-llms-txt.ts', 'package.json', 'docs/llms.txt', ...llmsInputs().tracked]
+      for (const f of files) copyFileSync(join(REPO_ROOT, f), join(root, f))
+      execFileSync('git', ['init', '-q'], { cwd: root })
+      execFileSync('git', ['add', '-A'], { cwd: root })
+
+      const ok = check()
+      expect(ok.output).toContain('OK: docs/llms.txt is current')
+      expect(ok.status).toBe(0)
+
+      const out = join(root, 'docs', 'llms.txt')
+      writeFileSync(out, readFileSync(out, 'utf8').replace('# warpline', '# warplinf'))
+      const stale = check()
+      expect(stale.status).toBe(1)
+      expect(stale.output).toContain('stale or missing')
+
+      unlinkSync(out)
+      const missing = check()
+      expect(missing.status).toBe(1)
+      expect(missing.output).toContain('stale or missing')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 
