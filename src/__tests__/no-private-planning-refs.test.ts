@@ -23,8 +23,9 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
@@ -231,16 +232,24 @@ function redact(line: string): string {
   return LOCAL_TERMS.reduce((acc, t) => acc.replace(new RegExp(esc(t), 'gi'), REDACTED), line)
 }
 
-function scan(): Map<string, string[]> {
-  const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: REPO_ROOT, encoding: 'utf8' })
+/**
+ * The files `scan()` reads, and the only place that list is made. The scan and
+ * the reach assertion below read this one enumeration, so a test re-deriving
+ * `ls-files` itself could never see a mutation inside the scan.
+ */
+function scannedFiles(root: string = REPO_ROOT): Set<string> {
+  const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' })
     .split('\0')
     .filter(Boolean)
   const files = new Set(tracked.filter((f) => !BINARY.test(f)))
   files.delete(SELF)
   files.delete(PATTERN_FILE)
+  return files
+}
 
+function scan(root: string = REPO_ROOT): Map<string, string[]> {
   const hits = new Map<string, string[]>()
-  for (const file of files) {
+  for (const file of scannedFiles(root)) {
     const found: string[] = []
 
     // A filename is exactly as published as a line of content, is precisely
@@ -264,7 +273,7 @@ function scan(): Map<string, string[]> {
     // outcome as not looking. Any other error still throws.
     let text: string
     try {
-      text = readFileSync(join(REPO_ROOT, file), 'utf8')
+      text = readFileSync(join(root, file), 'utf8')
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
       // The name is still an offender when the content is unreachable — do not
@@ -287,6 +296,28 @@ function scan(): Map<string, string[]> {
     if (found.length > 0) hits.set(file, found)
   }
   return hits
+}
+
+/** A throwaway git repo holding `files`, built under `tmpdir()`. */
+function repoFixture(files: Record<string, string>): string {
+  const root = mkdtempSync(join(tmpdir(), 'warpline-reach-'))
+  for (const [rel, body] of Object.entries(files)) {
+    mkdirSync(join(root, dirname(rel)), { recursive: true })
+    writeFileSync(join(root, rel), body)
+  }
+  execFileSync('git', ['init', '-q'], { cwd: root })
+  execFileSync('git', ['add', '-A'], { cwd: root })
+  return root
+}
+
+/**
+ * Whether `file` has a hit at line `n` that is a private-name hit, not merely
+ * any hit. A boolean on purpose: the planted term never reaches a message.
+ */
+function hasNameHit(hits: Map<string, string[]>, file: string, n: number): boolean {
+  return (hits.get(file) ?? []).some(
+    (line) => line.startsWith(`${file}:${n}: `) && PRIVATE_NAME.test(line.slice(line.indexOf(': ') + 2)),
+  )
 }
 
 /**
@@ -523,5 +554,59 @@ describe('no private planning or deployment references', () => {
    */
   test('a release-notes draft is inside the gitignored-draft scan', () => {
     expect(LAUNCH_DRAFT.test('09-05-RELEASE-NOTES.md')).toBe(true)
+  })
+})
+
+/**
+ * The agent doc is hand-edited prose written next to private context, so it is
+ * the file most likely to carry a leak. The scan above is green over it, and a
+ * scan that never reached it would be green in exactly the same way.
+ *
+ * Two separate proofs, because either alone is the failure it guards against.
+ * A plant in a temp copy shows the scan CAN fail on this file's content, but
+ * says nothing about the real tree. The real enumeration containing AGENTS.md
+ * shows the file is inside the reach, but says nothing about detection. Only
+ * together do they rule out "green while the target is outside the reach".
+ *
+ * `fixture-only.md` exists only in the temp repo, so it is reached only when
+ * the enumeration itself runs at `root`. A `root` threaded into the read but
+ * not into `git ls-files` would still find the AGENTS.md plant, because the
+ * real tree tracks a file by that name.
+ *
+ * Every assertion is a boolean. The term comes from the committed list, and a
+ * failure message must still never print it.
+ */
+describe('the scan reaches the agent doc', () => {
+  const agentDoc = readFileSync(join(REPO_ROOT, 'AGENTS.md'), 'utf8')
+
+  test('a private name planted in a temp copy of AGENTS.md is reported at its line, and a fixture-only file is reached', () => {
+    const term = PRIVATE_NAME_PATTERNS.find((p) => /^[a-z][a-z-]*$/.test(p))
+    expect(term).toBeDefined()
+    const plantLine = `reach check ${term} end`
+    const planted = `${agentDoc}${agentDoc.endsWith('\n') ? '' : '\n'}${plantLine}\n`
+    const n = planted.split('\n').indexOf(plantLine) + 1
+
+    const root = repoFixture({ 'AGENTS.md': planted, 'fixture-only.md': `${plantLine}\n` })
+    try {
+      const hits = scan(root)
+      expect(hasNameHit(hits, 'AGENTS.md', n)).toBe(true)
+      expect(hasNameHit(hits, 'fixture-only.md', 1)).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('the unplanted control copy is enumerated, and clean', () => {
+    const root = repoFixture({ 'AGENTS.md': agentDoc })
+    try {
+      expect(scannedFiles(root).has('AGENTS.md')).toBe(true)
+      expect(scan(root).has('AGENTS.md')).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('the real enumeration contains AGENTS.md', () => {
+    expect(scannedFiles().has('AGENTS.md')).toBe(true)
   })
 })
