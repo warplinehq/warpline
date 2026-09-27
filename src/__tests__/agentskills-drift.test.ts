@@ -148,4 +148,70 @@ describe('the drift script', () => {
       expect(r.output).toContain(`drift: ${URLS[1]} changed`)
     })
   })
+
+  // curl exits 0 on a 404 when it is not asked to fail on errors. The status
+  // alone decides, and a moved file is drift, not a network blip.
+  test('HTTP 404 with curl exit 0 is drift (exit 1), not network', () => {
+    withDrift(MATCHING, { FAKE_CURL_STATUS: '404' }, (r) => {
+      expect(r.status).toBe(1)
+      expect(r.output).toContain('HTTP 404')
+    })
+  })
+
+  // 6 cannot resolve host, 7 cannot connect, 28 timeout.
+  for (const rc of ['6', '7', '28']) {
+    test(`curl exit ${rc} is a network failure (exit 3)`, () => {
+      withDrift(MATCHING, { FAKE_CURL_EXIT: rc }, (r) => {
+        expect(r.status).toBe(3)
+        expect(r.output).toContain('network failure')
+      })
+    })
+  }
+
+  test('a missing hash file exits 1 without fetching', () => {
+    withDrift(null, {}, (r, root) => {
+      expect(r.status).toBe(1)
+      expect(curlLog(root)).toEqual([])
+    })
+  })
+
+  test('an empty hash file exits 1 without fetching', () => {
+    withDrift('', {}, (r, root) => {
+      expect(r.status).toBe(1)
+      expect(curlLog(root)).toEqual([])
+    })
+  })
+
+  test('a URL outside raw.githubusercontent.com exits 1 without fetching', () => {
+    withDrift(line(BODY_SHA, 'https://example.com/spec.mdx'), {}, (r, root) => {
+      expect(curlLog(root)).toEqual([])
+      expect(r.status).toBe(1)
+      expect(r.output).toContain('refusing a URL outside https://raw.githubusercontent.com/')
+    })
+  })
+
+  test('a 63-character hash exits 1 without fetching', () => {
+    withDrift(line(BODY_SHA.slice(1), URLS[0]), {}, (r, root) => {
+      expect(r.status).toBe(1)
+      expect(curlLog(root)).toEqual([])
+    })
+  })
+
+  test('a URL carrying $(…) reaches curl literally and runs nothing (PWNED stays absent)', () => {
+    const hostile = 'https://raw.githubusercontent.com/x/$(touch PWNED)'
+    withDrift(line(BODY_SHA, hostile), {}, (r, root) => {
+      expect(r.status).toBe(0)
+      expect(allNames(root)).not.toContain('PWNED')
+      expect(curlLog(root)).toEqual([hostile])
+    })
+  })
+
+  test('the last line is checked even without a trailing newline', () => {
+    const text = `${line(BODY_SHA, URLS[0])}${line(BODY_SHA, URLS[1])}${'0'.repeat(64)}  ${URLS[2]}`
+    withDrift(text, {}, (r, root) => {
+      expect(r.status).toBe(1)
+      expect(r.output).toContain(`drift: ${URLS[2]} changed`)
+      expect(curlLog(root)).toEqual(URLS)
+    })
+  })
 })
