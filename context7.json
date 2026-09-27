@@ -1,19 +1,19 @@
 {
   "$schema": "https://context7.com/schema/context7.json",
   "projectTitle": "Warpline",
-  "description": "Deterministic plugin runtime: plugins declare side effects, and the runtime gates each one behind a session grant or an operator-approved payload. Judgment work is handed off via [needs-llm].",
+  "description": "Deterministic plugin runtime: plugins declare side effects, and the runtime gates each one behind a session grant or, from v0.4.0, an approved payload. Judgment work is handed off via [needs-llm].",
   "folders": ["docs", "examples"],
   "excludeFolders": ["dist", "node_modules", "src", "scripts", "test-utils"],
   "excludeFiles": ["EXTRACTION-NOTES.md", "AGENTS.md", "DESIGN.md", "PRODUCT.md", "llms.txt"],
   "previousVersions": [{ "tag": "v0.1.2" }, { "tag": "v0.2.1" }, { "tag": "v0.3.4" }],
   "rules": [
     "A plugin is a manifest plus a handler. The manifest is a declaration of capability that the runtime enforces, not documentation.",
-    "A non-empty side_effects array gates execution at EVERY autonomy level, autonomous included, behind the session grant by default or behind content approval. autonomy_level describes how a plugin is scheduled, never what it may touch.",
+    "A non-empty side_effects array gates execution at EVERY autonomy level, autonomous included, behind the session grant by default or, from v0.4.0, behind content approval. autonomy_level describes how a plugin is scheduled, never what it may touch.",
     "An unapproved side-effecting plugin is recorded as skipped and the run continues. It is not an error and it does not halt the pipeline.",
     "Plugins never call an LLM. Judgment work is emitted as a [needs-llm] handoff, which maps to the delegated run status and is never retried.",
     "Generated plugin code imports siblings with an explicit .ts extension. Node's type stripping resolves the literal specifier; a .js specifier at a .ts file is ERR_MODULE_NOT_FOUND under Node, and Bun hides this by remapping.",
     "Manifests are validated with .parse(), not .safeParse(). An invalid manifest is a hard stop at load — a misconfigured plugin never silently runs.",
     "Manifest top level must stay declarative: no I/O, no side effects. Importing a manifest executes its module top level, and that happens during warpline plan, before any approval gate.",
-    "A plugin with approval_class: 'content' ships only the exact bytes an operator approved with warpline approve <plugin> --content --not-after <when>. One changed byte and it is skipped. Neither the session grant nor approve --all covers it."
+    "From v0.4.0, a plugin with approval_class: 'content' ships only the exact bytes an operator approved with warpline approve <plugin> --content --not-after <when>. One changed byte and it is skipped. Neither the session grant nor approve --all covers it."
   ]
 }
