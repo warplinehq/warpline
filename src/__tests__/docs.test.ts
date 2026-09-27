@@ -26,7 +26,7 @@
  */
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildPlanModel } from '../cli/plan.js'
@@ -892,7 +892,37 @@ describe('shipped docs stay package-facing', () => {
   })
 })
 
-// ── The agent-instruction files must stay one document ───────────────────
+// ── One tracked agent file, and the private file that must import it ─────
+
+/**
+ * Whether a root's `CLAUDE.local.md` still imports AGENTS.md.
+ *
+ * AGENTS.md is the only tracked agent file. Claude Code falls back to it only
+ * when no `CLAUDE.md` or `CLAUDE.local.md` exists, so a maintainer's private
+ * `CLAUDE.local.md` that stops opening with `@AGENTS.md` silently stops the
+ * repo's rules loading for that maintainer. Nothing else would say so.
+ *
+ * Absent is its own answer, never `'ok'`: CI and most clones have no such file,
+ * and a check that passed there would read as proof it had looked. The caller
+ * turns it into a named skip.
+ *
+ * A failure reports a line number and nothing from the file, because the file
+ * holds private notes and test output can end up in a public log.
+ */
+function localImportVerdict(root: string): 'absent' | 'ok' | string {
+  const path = join(root, 'CLAUDE.local.md')
+  if (!existsSync(path)) return 'absent'
+  const lines = readFileSync(path, 'utf8')
+    .replace(/^﻿/, '')
+    .split('\n')
+    .map((l) => l.replace(/\r$/, ''))
+  const i = lines.findIndex((l) => l.trim() !== '')
+  if (i === -1) return 'CLAUDE.local.md has no non-blank line; its first line must be @AGENTS.md'
+  if (lines[i] !== '@AGENTS.md') {
+    return `CLAUDE.local.md line ${i + 1} is not @AGENTS.md; without that import Claude Code stops loading AGENTS.md`
+  }
+  return 'ok'
+}
 
 describe('agent instructions', () => {
   test('AGENTS.md is the only tracked agent file, and a regular file', () => {
@@ -915,6 +945,60 @@ describe('agent instructions', () => {
     // The claims the old header made, both now false.
     expect(header).not.toMatch(/symlink/i)
     expect(header).not.toMatch(/does not (look for|read)/i)
+  })
+
+  // Only the machine that has the file can check it. Everywhere else the bun
+  // summary shows this under skip, by name, so absence never reads as a pass.
+  const verdict = localImportVerdict(REPO_ROOT)
+  test.skipIf(verdict === 'absent')(
+    verdict === 'absent'
+      ? 'local-only: CLAUDE.local.md absent — not checked'
+      : 'local-only: CLAUDE.local.md opens with @AGENTS.md',
+    () => expect(verdict).toBe('ok'),
+  )
+
+  describe('localImportVerdict', () => {
+    // undefined writes no file at all.
+    const verdictFor = (content: string | undefined) => {
+      const root = mkdtempSync(join(tmpdir(), 'warpline-local-'))
+      try {
+        if (content !== undefined) writeFileSync(join(root, 'CLAUDE.local.md'), content)
+        return localImportVerdict(root)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }
+
+    test('no CLAUDE.local.md is absent, not ok', () => {
+      expect(verdictFor(undefined)).toBe('absent')
+    })
+
+    test('@AGENTS.md on the first line is ok', () => {
+      expect(verdictFor('@AGENTS.md\n# notes\n')).toBe('ok')
+    })
+
+    test('a BOM, CRLF and blank lines before @AGENTS.md are tolerated', () => {
+      expect(verdictFor('﻿\r\n   \r\n@AGENTS.md\r\ntext\r\n')).toBe('ok')
+    })
+
+    test('text before the import is reported at its line', () => {
+      expect(verdictFor('notes\n@AGENTS.md\n')).toContain('line 1')
+      expect(verdictFor('\n\ntext\n@AGENTS.md\n')).toContain('line 3')
+    })
+
+    test('a near-miss import, an empty file and a blank-only file each fail', () => {
+      for (const content of ['@AGENTS.md.bak\n', '', '\n  \n\r\n']) {
+        const v = verdictFor(content)
+        expect(v).not.toBe('ok')
+        expect(v).not.toBe('absent')
+      }
+    })
+
+    test('the reason never carries the file content', () => {
+      const v = verdictFor('SECRET-SENTINEL-7f3a\n@AGENTS.md\n')
+      expect(v).not.toBe('ok')
+      expect(v).not.toContain('SECRET-SENTINEL-7f3a')
+    })
   })
 
   test('context7.json parses and excludes the trees that do not ship', () => {
