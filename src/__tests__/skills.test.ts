@@ -11,8 +11,10 @@
  * The rules are the union of two sources, and each check cites the one it
  * comes from:
  *
- * - the open Agent Skills specification (`SPEC_URL`), for the allowed keys and
- *   the `name`, `description`, `compatibility` and `metadata` rules;
+ * - the open Agent Skills specification, for the allowed keys and the `name`,
+ *   `description`, `compatibility` and `metadata` rules, cited below as "the
+ *   spec":
+ *   https://github.com/agentskills/agentskills/blob/<RULES_COMMIT>/docs/specification.mdx
  * - Anthropic's API rules, for the reserved words and the XML-tag ban:
  *   https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview
  *   https://platform.claude.com/docs/en/agents-and-tools/agent-skills/best-practices
@@ -62,9 +64,11 @@ import { dirname, join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
-/** The agentskills commit the open spec was read at, fetched 2026-09-27. */
+/**
+ * The agentskills commit the open spec was read at, fetched 2026-09-27. No code
+ * reads it. It is the one place the citation lives, bumped with the hashes.
+ */
 const RULES_COMMIT = '69ef37e9424c0a7ea9dd2293b559e43ec8176379'
-const SPEC_URL = `https://github.com/agentskills/agentskills/blob/${RULES_COMMIT}/docs/specification.mdx`
 
 /** The drift guard's data file: one `<sha256>  <main raw URL>` line per upstream rule source. */
 const HASH_FILE = '.github/agentskills-upstream.sha256'
@@ -157,10 +161,10 @@ function skillOffenders(root: string = REPO_ROOT): string[] {
       continue
     }
 
-    // Allowed keys: SPEC_URL, "Frontmatter".
+    // Allowed keys: the spec, "Frontmatter".
     for (const key of Object.keys(data)) if (!ALLOWED_KEYS.has(key)) bad(`unknown key '${key}'`)
 
-    // name: SPEC_URL, "name field". 1-64 characters, lowercase alphanumerics and
+    // name: the spec, "name field". 1-64 characters, lowercase alphanumerics and
     // hyphens, no leading, trailing or doubled hyphen, equal to its directory.
     const { name } = data
     if (name === undefined) bad('missing name')
@@ -181,7 +185,7 @@ function skillOffenders(root: string = REPO_ROOT): string[] {
       if (/[<>]/.test(name)) bad('name holds an angle bracket')
     }
 
-    // description: SPEC_URL, "description field". 1-1024 characters, non-empty.
+    // description: the spec, "description field". 1-1024 characters, non-empty.
     // Blank is rejected like skills-ref's `not description.strip()`.
     const { description } = data
     if (description === undefined) bad('missing description')
@@ -193,7 +197,7 @@ function skillOffenders(root: string = REPO_ROOT): string[] {
       if (/[<>]/.test(description)) bad('description holds an angle bracket')
     }
 
-    // compatibility: SPEC_URL, "compatibility field". 1-500 characters if present.
+    // compatibility: the spec, "compatibility field". 1-500 characters if present.
     const { compatibility } = data
     if (compatibility !== undefined) {
       if (typeof compatibility !== 'string') bad('compatibility must be a string')
@@ -201,7 +205,7 @@ function skillOffenders(root: string = REPO_ROOT): string[] {
         bad(`compatibility is ${cp(compatibility)} characters (1-500)`)
     }
 
-    // metadata: SPEC_URL, "metadata field". A map of string keys to string values.
+    // metadata: the spec, "metadata field". A map of string keys to string values.
     const { metadata } = data
     if (metadata !== undefined) {
       if (!isMapping(metadata)) bad('metadata is not a mapping')
