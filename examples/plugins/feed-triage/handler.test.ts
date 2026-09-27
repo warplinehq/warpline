@@ -7,7 +7,7 @@ import { SkillResultSchema, type OutputRecord } from 'warpline/schemas/skill-res
 import { newEntries, handler } from './handler.js'
 import { manifest } from './manifest.js'
 
-// CLAUDE.md rule 2: every fixture lives under tmpdir() and is removed after.
+// AGENTS.md rule 2: every fixture lives under tmpdir() and is removed after.
 const roots: string[] = []
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(r => rm(r, { recursive: true, force: true })))

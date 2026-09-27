@@ -202,7 +202,7 @@ const SWEEP_BACKLOG = new Set<string>([
 
 /**
  * The two commits that spell out the deployment specifics in the act of
- * removing them. History is immutable here — CLAUDE.md rule 5 forbids a
+ * removing them. History is immutable here — AGENTS.md rule 5 forbids a
  * force-push to main — so neither message can ever be corrected, and a scan
  * over the whole history has to exempt them by SHA or be red forever.
  *

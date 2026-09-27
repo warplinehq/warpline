@@ -2,7 +2,7 @@
  * fs-atomic tests.
  *
  * Covers: atomicWriteJson, atomicWriteText, readJsonOrNull. Pure fs only —
- * no `mock.module` (CLAUDE.md §bun:test gotchas).
+ * no `mock.module` (CONTRIBUTING.md § Testing rules).
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, rm, readFile, readdir, access } from 'node:fs/promises'

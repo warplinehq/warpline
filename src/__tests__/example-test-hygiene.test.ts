@@ -1,7 +1,7 @@
 /**
  * Every example test that creates a temp directory also removes one.
  *
- * CLAUDE.md rule 2 says tests never write outside temp dirs, and every
+ * AGENTS.md rule 2 says tests never write outside temp dirs, and every
  * example test honours it: each `withHome` re-roots `WARPLINE_HOME` to a
  * `mkdtemp` home. What the rule does not say is that the home comes back
  * down again, and for one phase none of them did — ten helpers restored the

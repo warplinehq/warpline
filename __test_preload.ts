@@ -9,10 +9,10 @@
  * is ordering-independent — but keep this preload anyway; it is the backstop
  * for code that caches a resolved path.
  *
- * It also owns the two invariants that used to be prose in CLAUDE.md that
+ * It also owns the two invariants that used to be prose in AGENTS.md that
  * every caller had to remember: the suite timeout, and the dist/ build.
  * A rule enforced here holds for `bun test`, `bun run test`, CI, and an agent
- * that never read CLAUDE.md. A rule written in prose holds until someone
+ * that never read AGENTS.md. A rule written in prose holds until someone
  * forgets it.
  */
 import { existsSync, mkdtempSync } from 'node:fs'

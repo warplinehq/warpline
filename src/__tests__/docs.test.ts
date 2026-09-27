@@ -26,7 +26,7 @@
  */
 import { describe, expect, test, beforeAll, afterAll } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildPlanModel } from '../cli/plan.js'
@@ -895,15 +895,26 @@ describe('shipped docs stay package-facing', () => {
 // ── The agent-instruction files must stay one document ───────────────────
 
 describe('agent instructions', () => {
-  test('CLAUDE.md is a symlink to AGENTS.md, not a copy of it', () => {
-    // Claude Code reads CLAUDE.md and does not look for AGENTS.md; every other
-    // harness reads AGENTS.md. A copy would satisfy both readers on the day it
-    // was made and diverge quietly afterwards, which is the failure this repo
-    // keeps finding in its own docs. git stores the link, so this holds on a
-    // fresh clone too.
-    const stat = lstatSync(join(REPO_ROOT, 'CLAUDE.md'))
-    expect(stat.isSymbolicLink()).toBe(true)
-    expect(readlinkSync(join(REPO_ROOT, 'CLAUDE.md'))).toBe('AGENTS.md')
+  test('AGENTS.md is the only tracked agent file, and a regular file', () => {
+    // Asked of the git index, not the disk: a maintainer's local files must not
+    // change the answer, and the index is what a fresh clone gets.
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8' })
+    expect(git('ls-files', 'CLAUDE.md')).toBe('')
+    expect(git('ls-files', '-s', 'AGENTS.md')).toMatch(/^100644 /)
+  })
+
+  test('the AGENTS.md header states the fallback and the import line', () => {
+    const lines = read('AGENTS.md').split('\n')
+    const start = lines.findIndex((l) => l.startsWith('>'))
+    const end = lines.findIndex((l, i) => i > start && !l.startsWith('>'))
+    const header = lines.slice(start, end === -1 ? undefined : end).join('\n')
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(header).toContain('`CLAUDE.local.md`')
+    expect(header).toContain('`@AGENTS.md`')
+    // The claims the old header made, both now false.
+    expect(header).not.toMatch(/symlink/i)
+    expect(header).not.toMatch(/does not (look for|read)/i)
   })
 
   test('context7.json parses and excludes the trees that do not ship', () => {

@@ -525,7 +525,7 @@ describe('anomaly-issue config value disclosure', () => {
     const priorHome = process.env.WARPLINE_HOME
     process.env.GITHUB_TOKEN = 'tok-123'
     // The ledger is written under the warpline home; re-root it so this test
-    // writes nothing outside its temp dir (CLAUDE.md rule 2).
+    // writes nothing outside its temp dir (AGENTS.md rule 2).
     process.env.WARPLINE_HOME = join(dir, 'home')
     const issueUrl = `https://github.com/${sentinelRepo}/issues/7`
 

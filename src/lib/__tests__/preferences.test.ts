@@ -3,7 +3,7 @@
  *
  * Fixtures go in a mkdtemp directory. `preferencesPath()` resolves under the
  * live home, so a test that forgot an explicit path would write operational
- * state (CLAUDE.md Rule 2); every case here passes its own path.
+ * state (AGENTS.md rule 2); every case here passes its own path.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises'

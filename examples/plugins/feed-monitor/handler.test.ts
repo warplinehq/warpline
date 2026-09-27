@@ -51,7 +51,7 @@ function invoke(args: Record<string, unknown>, signal = new AbortController().si
   return handler(manifest, args, signal, CONTEXT)
 }
 
-// CLAUDE.md rule 2: every fixture lives under tmpdir() and is removed after.
+// AGENTS.md rule 2: every fixture lives under tmpdir() and is removed after.
 // One tracking hook rather than a per-call `finally`, so the creation-site
 // census in src/__tests__/example-test-hygiene.test.ts stays balanced.
 const roots: string[] = []

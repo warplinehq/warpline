@@ -1,11 +1,12 @@
 # Warpline
 
-> Instructions for AI coding agents working in this repository. `CLAUDE.md` is
-> a symlink to this file — Claude Code reads `CLAUDE.md` and does not look for
-> `AGENTS.md`, so the symlink is what makes one document serve both. A symlink
-> rather than an `@AGENTS.md` import because it cannot drift and cannot half-
-> fail; the same reason `__test_preload.ts` owns the suite invariants instead
-> of this file describing them. Human contributors want `CONTRIBUTING.md`.
+> Instructions for AI coding agents working in this repository, and the only
+> agent file it tracks. Claude Code (2.1.277 or later) reads this file when no
+> `CLAUDE.md` or `CLAUDE.local.md` exists in the working directory or above
+> it; either of those files replaces it unless it imports `@AGENTS.md`. A
+> maintainer's private notes go in the gitignored `CLAUDE.local.md`, whose
+> first line must be `@AGENTS.md`, and `bun test` checks that line whenever
+> the file exists. Human contributors want `CONTRIBUTING.md`.
 
 Deterministic plugin runtime with LLM-judgment dispatch and side-effect
 approval gates. Apache-2.0. Bun runtime, TypeScript + Zod. This repo is

@@ -1,7 +1,7 @@
 /**
  * run-artifacts tests.
  *
- * Uses mkdtemp for isolation. No mock.module (CLAUDE.md gotchas).
+ * Uses mkdtemp for isolation. No mock.module (CONTRIBUTING.md § Testing rules).
  */
 import { describe, test, it, expect, beforeEach, afterEach } from 'bun:test'
 import { chmod, mkdtemp, rm, readdir, readFile, writeFile, mkdir } from 'node:fs/promises'

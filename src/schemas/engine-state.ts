@@ -408,7 +408,7 @@ export function isStubGate(gate: PendingGate): boolean {
  * on every document it writes, so a home an upgraded build has touched once is
  * refused by every earlier build from then on — correctly, and with no
  * supported rollback. Correct forward: a deprecation plus a patch version,
- * never an unpublish (CLAUDE.md Rule 4).
+ * never an unpublish (AGENTS.md rule 4).
  */
 export const ENGINE_STATE_MAX_SCHEMA_VERSION = 2
 

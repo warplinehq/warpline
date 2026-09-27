@@ -10,7 +10,7 @@
 #      downstream can tell the difference afterwards.
 #   2. NO NAME-HOLDING STUB — the directory that reserves the bare registry
 #      name is absent. It exists only until the first real upload and must be
-#      deleted in the same change (see CLAUDE.md); shipping while it is still
+#      deleted in the same change (see EXTRACTION-NOTES.md); shipping while it is still
 #      present means the repository is in a half-migrated state.
 #   3. EVERY VERSION-BEARING MANIFEST AGREES with package.json. There are two
 #      besides it, and they ship to a different place by a different route:
@@ -67,7 +67,7 @@ if [ "$TAG_VERSION" != "$VERSION" ]; then
 fi
 
 if [ -d "$STUB" ]; then
-  echo "FAIL: '${STUB}/' is still present at this commit; the directory reserving the bare registry name must be deleted before a real release (see CLAUDE.md)" >&2
+  echo "FAIL: '${STUB}/' is still present at this commit; the directory reserving the bare registry name must be deleted before a real release (see EXTRACTION-NOTES.md)" >&2
   rc=1
 fi
 

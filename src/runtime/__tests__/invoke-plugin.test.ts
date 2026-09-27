@@ -378,7 +378,7 @@ describe('invokePlugin: a name declared in both inputs and secrets', () => {
    */
   describe('and a value for that name supplied through another channel', () => {
     beforeEach(() => {
-      // CLAUDE.md: a test writes nothing outside a temp dir, and an unrooted
+      // AGENTS.md rule 2: a test writes nothing outside a temp dir, and an unrooted
       // config path resolves under the developer's real warpline home. Scoped
       // to this block, because the rest of this file resolves against the
       // ambient home and must keep doing so.

@@ -383,7 +383,7 @@ when the window ends.
 ## 7. What 0.2 requires of the runtime
 
 Each of these is a contract change and lands with its own spec edit in the
-same commit (CLAUDE.md rule 1). Listed here so the Board is not built on
+same commit (AGENTS.md rule 1). Listed here so the Board is not built on
 objects that do not exist.
 
 1. **A `denied` outcome.** A plugin entry used to be `skipped` (no Grant) or

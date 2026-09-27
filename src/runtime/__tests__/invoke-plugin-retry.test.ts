@@ -10,7 +10,7 @@
  *   - backoff delays follow exp * ±25% jitter pattern, capped at 30s
  *   - emitBoardEvent is called with attempt_failed between attempts
  *
- * Follows CLAUDE.md "bun:test gotchas": describe-level spy setup/teardown,
+ * Follows CONTRIBUTING.md "Testing rules": describe-level spy setup/teardown,
  * no mock.module. Fixtures live at .warpline/test-utils/fixture-plugins/.
  */
 import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test'

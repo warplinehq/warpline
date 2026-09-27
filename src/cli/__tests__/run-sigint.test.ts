@@ -9,7 +9,7 @@
  * without leaving the test process.
  *
  * Keep this file at one launch, one signal, one exit-code assertion, and hold
- * the sibling to the same discipline. Launching a process is where CLAUDE.md's
+ * the sibling to the same discipline. Launching a process is where AGENTS.md's
  * documented ~3% timeout flake concentrates, which is why a launch is spent
  * only on a contract that genuinely cannot be reached without one. If you are
  * about to add a second scenario here, it belongs in `run-plugin.test.ts`.
