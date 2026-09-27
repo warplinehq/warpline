@@ -86,6 +86,26 @@ printf '%s\n' "$MESSAGE" | bash scripts/scan-public-surfaces.sh \
   && npm deprecate warpline@0.0.0 "$MESSAGE"
 ```
 
+## Upstream skill rules
+
+`src/__tests__/skills.test.ts` enforces the Agent Skills frontmatter rules on
+every tracked `SKILL.md`. Those rules are copied from upstream, so
+`bash scripts/check-agentskills-drift.sh` compares three upstream files against
+the hashes in `.github/agentskills-upstream.sha256`. The weekly workflow
+`.github/workflows/agentskills-drift.yml` runs it and fails on a mismatch or on
+a fetch failure.
+
+To run the same check before every push, opt in once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hook fails the push on a mismatch. When the network is down, it prints a
+warning and lets the push through. When the check fires, re-read the rules in
+`skills.test.ts` against upstream, then update the hashes and the cited commit
+in the same commit.
+
 ## Voice
 
 Applies to the prose documents written in the first person — today that's

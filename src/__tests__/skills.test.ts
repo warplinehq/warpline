@@ -19,9 +19,12 @@
  *   https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/scripts/quick_validate.py
  *
  * All three were fetched on 2026-09-27. `RULES_COMMIT` is the agentskills
- * commit the open spec was read at. When the upstream drift guard fires, the
- * rules here are re-read and `RULES_COMMIT` is bumped together with the
- * upstream hashes, never one without the other.
+ * commit the open spec was read at. The hashes in `HASH_FILE` are of the
+ * `main` raw URLs of `UPSTREAM_FILES`, never of `RULES_COMMIT`: a commit-pinned
+ * URL can never change, so hashing one could never report drift. When the
+ * upstream drift guard (`scripts/check-agentskills-drift.sh`) fires, the rules
+ * here are re-read and `RULES_COMMIT` is bumped together with the upstream
+ * hashes, never one without the other.
  *
  * Lengths are Unicode code points (`[...s].length`), never UTF-16 units: the
  * spec counts characters, and `s.length` counts a non-BMP character twice. The
@@ -48,7 +51,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -57,6 +60,14 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 /** The agentskills commit the open spec was read at, fetched 2026-09-27. */
 const RULES_COMMIT = '69ef37e9424c0a7ea9dd2293b559e43ec8176379'
 const SPEC_URL = `https://github.com/agentskills/agentskills/blob/${RULES_COMMIT}/docs/specification.mdx`
+
+/** The drift guard's data file: one `<sha256>  <main raw URL>` line per upstream rule source. */
+const HASH_FILE = '.github/agentskills-upstream.sha256'
+const UPSTREAM_FILES = [
+  'docs/specification.mdx',
+  'skills-ref/src/skills_ref/validator.py',
+  'skills-ref/src/skills_ref/parser.py',
+]
 
 /** The spec's frontmatter fields. Anything else is an offender. */
 const ALLOWED_KEYS = new Set(['name', 'description', 'license', 'compatibility', 'metadata', 'allowed-tools'])
@@ -303,4 +314,23 @@ describe('the skill rules can fail', () => {
       }
     })
   }
+})
+
+// The drift script's own tests already refuse a malformed, empty or missing
+// file. This one exists so that deleting the file, or pinning a URL to a
+// commit (content-addressed, so it could never drift), goes red on every
+// push, not only when the weekly job runs.
+describe('the upstream hash file the drift guard reads', () => {
+  test('holds exactly one main raw URL per upstream rule source', () => {
+    const path = join(REPO_ROOT, HASH_FILE)
+    expect(existsSync(path)).toBe(true)
+    const lines = readFileSync(path, 'utf8').split('\n').filter((l) => l.trim() !== '')
+    expect(lines).toHaveLength(3)
+    const paths = lines.map((l) => {
+      const m = /^[0-9a-f]{64}  https:\/\/raw\.githubusercontent\.com\/agentskills\/agentskills\/main\/(.+)$/.exec(l)
+      if (m === null) throw new Error(`${HASH_FILE}: not '<sha256>  <main raw URL>': ${l}`)
+      return m[1]
+    })
+    expect(new Set(paths)).toEqual(new Set(UPSTREAM_FILES))
+  })
 })

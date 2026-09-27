@@ -1,0 +1,30 @@
+name: Agent Skills spec drift
+
+# Compares the upstream Agent Skills rule sources against the hashes committed
+# in .github/agentskills-upstream.sha256. `src/__tests__/skills.test.ts` copies
+# its SKILL.md rules from those sources, and a copy goes stale silently. The
+# check is network-bound, so it lives here and not in `bun test`.
+#
+# NOT advisory, unlike link-check. No job or step may carry on past a failure:
+# a drifted rule source means `skills.test.ts` enforces rules upstream no
+# longer states. A fetch failure fails the job too, because a check that could
+# not look must not read as a check that passed.
+#
+# GitHub disables a public repository's scheduled workflows after 60 days with
+# no activity. The opt-in pre-push hook in .githooks/ covers the check while
+# the repository is active.
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: compare the upstream skill rules against their committed hashes
+        run: bash scripts/check-agentskills-drift.sh

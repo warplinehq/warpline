@@ -31,6 +31,7 @@ import { describe, expect, test } from 'bun:test'
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const SCRIPT = 'scripts/check-agentskills-drift.sh'
 const HOOK = '.githooks/pre-push'
+const WORKFLOW = '.github/workflows/agentskills-drift.yml'
 const HASH_FILE = '.github/agentskills-upstream.sha256'
 
 const BODY = 'name: fixture\ndescription: bytes the fake curl serves for every URL\n'
@@ -282,5 +283,44 @@ describe('the hook is opt-in and executable', () => {
     }
     expect(scripts.prepare).toBeUndefined()
     expect(scripts.postinstall).toBeUndefined()
+  })
+})
+
+// Parsed, never grepped, so a comment can neither satisfy nor break these.
+// Unlike link-check this job is not advisory: a fetch failure must fail it
+// too, because a check that could not look must not read as one that passed.
+describe('the drift workflow', () => {
+  type Step = { uses?: string; run?: string; 'continue-on-error'?: unknown }
+  type Job = { steps: Step[]; 'continue-on-error'?: unknown }
+  const wf = Bun.YAML.parse(readFileSync(join(REPO_ROOT, WORKFLOW), 'utf8')) as {
+    on: { schedule?: unknown[]; workflow_dispatch?: unknown }
+    permissions: unknown
+    jobs: Record<string, Job>
+  }
+  const jobs = Object.values(wf.jobs)
+  const steps = jobs.flatMap((j) => j.steps)
+
+  test('runs on a schedule and on demand', () => {
+    expect(Array.isArray(wf.on.schedule) && wf.on.schedule.length > 0).toBe(true)
+    expect('workflow_dispatch' in wf.on).toBe(true)
+  })
+
+  test('reads the repository and nothing more', () => {
+    expect(wf.permissions).toEqual({ contents: 'read' })
+  })
+
+  test('no job or step carries on past a failure', () => {
+    expect(jobs.length).toBeGreaterThan(0)
+    for (const x of [...jobs, ...steps]) expect(x['continue-on-error']).toBeUndefined()
+  })
+
+  test('every action is pinned to a full commit SHA', () => {
+    const uses = steps.flatMap((s) => (s.uses === undefined ? [] : [s.uses]))
+    expect(uses.length).toBeGreaterThan(0)
+    for (const u of uses) expect(u).toMatch(/@[0-9a-f]{40}$/)
+  })
+
+  test('exactly one step runs the drift script', () => {
+    expect(steps.filter((s) => s.run === `bash ${SCRIPT}`)).toHaveLength(1)
   })
 })
