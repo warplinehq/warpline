@@ -1509,14 +1509,59 @@ function missingPreviousVersions(tags: readonly string[], version: string, previ
   return [...newest.values()].filter((p) => !listed.has(p.tag)).map((p) => p.tag)
 }
 
+/**
+ * Every file in `root`'s git index that Claude Code or another agent reads as
+ * an agent file: `CLAUDE.md`, `CLAUDE.local.md` or `AGENTS.md` by basename, at
+ * any depth, so `.claude/CLAUDE.md` and a nested `docs/CLAUDE.md` count.
+ * Case-insensitive, because macOS and Windows open `claude.md` for `CLAUDE.md`.
+ * Asked of the index, so a force-added file that `.gitignore` names still
+ * counts and an untracked one on disk never does.
+ */
+function trackedAgentFiles(root: string): string[] {
+  return execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8' })
+    .split('\0')
+    .filter((f) => /(^|\/)(CLAUDE(\.local)?|AGENTS)\.md$/i.test(f))
+}
+
 describe('agent instructions', () => {
   test('AGENTS.md is the only tracked agent file, and a regular file', () => {
     // Asked of the git index, not the disk: a maintainer's local files must not
     // change the answer, and the index is what a fresh clone gets.
-    const git = (...args: string[]) =>
-      execFileSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8' })
-    expect(git('ls-files', 'CLAUDE.md')).toBe('')
-    expect(git('ls-files', '-s', 'AGENTS.md')).toMatch(/^100644 /)
+    expect(trackedAgentFiles(REPO_ROOT)).toEqual(['AGENTS.md'])
+    expect(execFileSync('git', ['ls-files', '-s', 'AGENTS.md'], { cwd: REPO_ROOT, encoding: 'utf8' })).toMatch(
+      /^100644 /,
+    )
+  })
+
+  // The check above can only fail if the enumerator can see the file. Each
+  // name here is a second agent file every clone would get, and the CLAUDE
+  // ones also switch off the AGENTS.md fallback.
+  test('trackedAgentFiles sees every agent file name at any depth, force-added or not', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-agentfiles-'))
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' })
+    try {
+      git('init', '-q')
+      writeFileSync(join(root, '.gitignore'), '.claude/\nCLAUDE.local.md\n')
+      const planted = [
+        '.claude/CLAUDE.md',
+        'CLAUDE.local.md',
+        'CLAUDE.md',
+        'docs/CLAUDE.md',
+        'docs/sub/claude.md',
+        'examples/x/AGENTS.md',
+        'AGENTS.md',
+      ]
+      for (const f of planted) {
+        mkdirSync(join(root, f, '..'), { recursive: true })
+        writeFileSync(join(root, f), '# fixture\n')
+      }
+      // Untracked on disk: the index decides, not the disk.
+      writeFileSync(join(root, 'docs', 'CLAUDE.local.md'), '# untracked\n')
+      git('add', '-f', ...planted)
+      expect(trackedAgentFiles(root).sort()).toEqual([...planted].sort())
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   test('the AGENTS.md header states the fallback and the import line', () => {
