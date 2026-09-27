@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# Opt-in pre-push hook: the Agent Skills drift check, before every push.
+#
+# Inert until a maintainer runs `git config core.hooksPath .githooks` in their
+# own clone. Nothing in this repository runs that for them, on install or
+# otherwise.
+#
+# It runs scripts/check-agentskills-drift.sh, which compares the upstream Agent
+# Skills rule sources against the hashes in .github/agentskills-upstream.sha256.
+# Drift, a missing hash file or an HTTP error fails the push with the script's
+# exit code. A network failure (exit 3) warns and lets the push through: a
+# laptop offline should still be able to push, but it must be told the check
+# did not run. The weekly workflow still fails on a network failure.
+#
+# Reads no stdin, writes no file.
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+rc=0
+bash "$root/scripts/check-agentskills-drift.sh" || rc=$?
+if [ "$rc" -eq 3 ]; then
+  echo "WARNING: the Agent Skills drift check could not reach upstream and did not run." >&2
+  echo "WARNING: pushing anyway. Run bash scripts/check-agentskills-drift.sh once you are back online." >&2
+  exit 0
+fi
+exit "$rc"

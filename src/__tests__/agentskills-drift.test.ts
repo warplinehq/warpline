@@ -21,7 +21,7 @@
  * tests. The script gains no override knob for this. It calls `curl` exactly as
  * it does in production and the shim answers.
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -30,6 +30,7 @@ import { describe, expect, test } from 'bun:test'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const SCRIPT = 'scripts/check-agentskills-drift.sh'
+const HOOK = '.githooks/pre-push'
 const HASH_FILE = '.github/agentskills-upstream.sha256'
 
 const BODY = 'name: fixture\ndescription: bytes the fake curl serves for every URL\n'
@@ -66,13 +67,21 @@ cp "$FAKE_CURL_BODY" "$out"
 printf '%s' "\${FAKE_CURL_STATUS:-200}"
 `
 
-/** A throwaway repository holding a copy of the script, a hash file when `hashText` is non-null, the fixture body and the fake curl. */
-function driftTree(hashText: string | null): string {
+/**
+ * A throwaway repository holding a copy of the script, a hash file when
+ * `hashText` is non-null, the fixture body and the fake curl. With `hook`, the
+ * pre-push hook is copied beside them, so it resolves the copied script.
+ */
+function driftTree(hashText: string | null, hook = false): string {
   const root = mkdtempSync(join(tmpdir(), 'warpline-drift-'))
   mkdirSync(join(root, 'scripts'))
   mkdirSync(join(root, '.github'))
   mkdirSync(join(root, 'bin'))
   copyFileSync(join(REPO_ROOT, SCRIPT), join(root, SCRIPT))
+  if (hook) {
+    mkdirSync(join(root, '.githooks'))
+    copyFileSync(join(REPO_ROOT, HOOK), join(root, HOOK))
+  }
   if (hashText !== null) writeFileSync(join(root, HASH_FILE), hashText)
   writeFileSync(join(root, 'body'), BODY)
   writeFileSync(join(root, 'bin', 'curl'), FAKE_CURL)
@@ -80,26 +89,24 @@ function driftTree(hashText: string | null): string {
   return root
 }
 
-/** Exit status and stdout and stderr together, however the run ended. */
-function runDrift(root: string, env: Record<string, string> = {}): { status: number; output: string } {
-  try {
-    const output = execFileSync('bash', [SCRIPT], {
-      cwd: root,
-      encoding: 'utf8',
-      stdio: 'pipe',
-      env: {
-        ...process.env,
-        PATH: `${join(root, 'bin')}:${process.env.PATH}`,
-        FAKE_CURL_BODY: join(root, 'body'),
-        FAKE_CURL_LOG: join(root, 'curl.log'),
-        ...env,
-      },
-    })
-    return { status: 0, output }
-  } catch (err) {
-    const e = err as { status?: number; stdout?: string; stderr?: string }
-    return { status: e.status ?? -1, output: `${e.stdout ?? ''}${e.stderr ?? ''}` }
-  }
+/**
+ * Exit status and stdout and stderr together, however the run ended. `entry`
+ * is the script or the hook. `spawnSync`, not `execFileSync`: the hook's
+ * warning goes to stderr on a zero exit, which `execFileSync` would drop.
+ */
+function runDrift(root: string, env: Record<string, string> = {}, entry = SCRIPT): { status: number; output: string } {
+  const r = spawnSync('bash', [entry], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PATH: `${join(root, 'bin')}:${process.env.PATH}`,
+      FAKE_CURL_BODY: join(root, 'body'),
+      FAKE_CURL_LOG: join(root, 'curl.log'),
+      ...env,
+    },
+  })
+  return { status: r.status ?? -1, output: `${r.stdout ?? ''}${r.stderr ?? ''}` }
 }
 
 /** The URLs the fake curl was asked for, in order. Empty when it was never called. */
@@ -118,15 +125,16 @@ function allNames(dir: string): string[] {
 const line = (hash: string, url: string): string => `${hash}  ${url}\n`
 const MATCHING = URLS.map((u) => line(BODY_SHA, u)).join('')
 
-/** Build a tree, run the script, hand both to `check`, and always remove the tree. */
+/** Build a tree, run the script (or the hook), hand both to `check`, and always remove the tree. */
 function withDrift(
   hashText: string | null,
   env: Record<string, string>,
   check: (r: { status: number; output: string }, root: string) => void,
+  entry = SCRIPT,
 ): void {
-  const root = driftTree(hashText)
+  const root = driftTree(hashText, entry === HOOK)
   try {
-    check(runDrift(root, env), root)
+    check(runDrift(root, env, entry), root)
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
@@ -213,5 +221,66 @@ describe('the drift script', () => {
       expect(r.output).toContain(`drift: ${URLS[2]} changed`)
       expect(curlLog(root)).toEqual(URLS)
     })
+  })
+})
+
+// The hook's whole job is the split: block on 1, warn and pass on 3. A hook
+// that mapped every non-zero to 0 would pass the network rows, so the drift,
+// 404 and missing-file rows are the ones that prove it propagates.
+describe('the pre-push hook', () => {
+  test('matching bytes let the push through (exit 0)', () => {
+    withDrift(MATCHING, {}, (r) => expect(r.status).toBe(0), HOOK)
+  })
+
+  test('a changed upstream hash fails the push (exit 1)', () => {
+    withDrift(MATCHING.replace(BODY_SHA, '0'.repeat(64)), {}, (r) => expect(r.status).toBe(1), HOOK)
+  })
+
+  test('HTTP 404 fails the push (exit 1)', () => {
+    withDrift(MATCHING, { FAKE_CURL_STATUS: '404' }, (r) => expect(r.status).toBe(1), HOOK)
+  })
+
+  for (const rc of ['6', '28']) {
+    test(`curl exit ${rc} warns on stderr and lets the push through (exit 0)`, () => {
+      withDrift(
+        MATCHING,
+        { FAKE_CURL_EXIT: rc },
+        (r) => {
+          expect(r.status).toBe(0)
+          expect(r.output).toContain('WARNING')
+        },
+        HOOK,
+      )
+    })
+  }
+
+  test('a missing hash file fails the push (exit 1)', () => {
+    withDrift(null, {}, (r) => expect(r.status).toBe(1), HOOK)
+  })
+})
+
+describe('the hook is opt-in and executable', () => {
+  // git skips a hook without the executable bit, silently. The index mode is
+  // what a fresh clone gets, so that is what is read, not the local file mode.
+  for (const path of [HOOK, SCRIPT]) {
+    test(`${path} is tracked as mode 100755`, () => {
+      const entry = execFileSync('git', ['ls-files', '-s', path], { cwd: REPO_ROOT, encoding: 'utf8' })
+      expect(entry.startsWith('100755 ')).toBe(true)
+    })
+  }
+
+  // Installing the hook runs network code on every push, so it is the
+  // maintainer's explicit `git config core.hooksPath .githooks`, never a
+  // lifecycle script that runs on install.
+  test('no package.json script installs it', () => {
+    const { scripts } = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
+      scripts: Record<string, string>
+    }
+    for (const value of Object.values(scripts)) {
+      expect(value).not.toContain('hooksPath')
+      expect(value).not.toContain('.githooks')
+    }
+    expect(scripts.prepare).toBeUndefined()
+    expect(scripts.postinstall).toBeUndefined()
   })
 })
