@@ -393,6 +393,37 @@ describe('generated capability table', () => {
   })
 })
 
+// ── docs/llms.txt is generated from the docs index and pinned to the tag ──
+//
+// Everything here regenerates in memory and writes nothing tracked, so CI
+// shards running this file side by side cannot race on the committed file.
+
+/** The generator's four inputs, read the way its CLI reads them. */
+function llmsInputs(): { index: string; version: string; description: string; tracked: string[] } {
+  const pkg = JSON.parse(read('package.json')) as { version: string; description: string }
+  const tracked = execFileSync('git', ['ls-files', '-z', '--', 'docs/'], { cwd: REPO_ROOT, encoding: 'utf8' })
+    .split('\0')
+    .filter((f) => f.endsWith('.md'))
+  return { index: read('docs/index.md'), version: pkg.version, description: pkg.description, tracked }
+}
+
+describe('generated docs/llms.txt', () => {
+  test('docs/llms.txt matches what the generator produces from docs/index.md today', async () => {
+    const { llmsTxt } = await import('../../scripts/gen-llms-txt.js')
+    const { index, version, description, tracked } = llmsInputs()
+    // Regenerate with `bun run docs:generate`.
+    expect(read('docs/llms.txt')).toBe(llmsTxt(index, version, tracked, description))
+  })
+
+  // A local untracked file would satisfy the read above, and CI's
+  // `git diff --exit-code -- docs/` ignores untracked files, so presence on
+  // disk proves nothing about what a clone or the tarball gets.
+  test('docs/llms.txt is tracked, not just present', () => {
+    const out = execFileSync('git', ['ls-files', 'docs/llms.txt'], { cwd: REPO_ROOT, encoding: 'utf8' })
+    expect(out.trim()).toBe('docs/llms.txt')
+  })
+})
+
 // ── The README's gate demo must be output the code still produces ────────
 //
 // The block is presented to a stranger as a real `warpline plan` run showing

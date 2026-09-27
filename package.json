@@ -56,7 +56,7 @@
     "typecheck": "bun run build && tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "prepack": "tsc -p tsconfig.build.json",
-    "docs:generate": "bun run scripts/gen-manifest-table.ts --write && bun run scripts/gen-capability-table.ts --write",
+    "docs:generate": "bun run scripts/gen-manifest-table.ts --write && bun run scripts/gen-capability-table.ts --write && bun run scripts/gen-llms-txt.ts --write",
     "verify:tarball": "bash scripts/verify-tarball.sh",
     "bench": "bun run build && bun bench/run.ts"
   },

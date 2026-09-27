@@ -12,10 +12,15 @@ plugin, start at the top and work down.
 - [doctrine.md](doctrine.md) — the deterministic/LLM boundary
 - [runtime-spec.md](runtime-spec.md) — manifest fields, retry/timeout/abort semantics, run artifacts
 - [derive-dont-store.md](derive-dont-store.md) — why there is no snapshot store, diff engine or resource cache, and what `ttl_hours` plus one overwritten file does instead
-- [board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)
-  — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface
-  at 0.1, so this spec is not shipped in the package and the link is absolute.
 - [needs-llm-contract.md](needs-llm-contract.md) — the LLM handoff protocol
 - [plugin-authoring.md](plugin-authoring.md) — writing and testing plugins
 - [scheduler-recipe.md](scheduler-recipe.md) — running `advance` on a fifteen-minute tick under systemd, launchd or cron, with every scheduler fact cited to the page it came from
+
+## Background
+
+Not needed to use warpline: the reasoning behind the gate, and the spec for a surface the package does not ship.
+
+- [board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)
+  — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface
+  at 0.1, so this spec is not shipped in the package and the link is absolute.
 - [why-the-gate-holds.md](why-the-gate-holds.md) — the long argument: why the gate holds, and the objections it has to survive
