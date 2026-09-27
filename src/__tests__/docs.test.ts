@@ -1367,7 +1367,7 @@ const CONTEXT7_BOUNDS = {
 }
 
 /** Both must sit in ONE rule, spelled as every doc spells them. */
-const CONTENT_LITERALS = ["approval_class: 'content'", 'warpline approve --content']
+const CONTENT_LITERALS = ["approval_class: 'content'", 'warpline approve <plugin> --content --not-after <when>']
 
 /**
  * Every tracked root file Context7 parses must be classified on purpose:
@@ -1709,13 +1709,13 @@ describe('agent instructions', () => {
       })
 
       test('both literals in one rule passes', () => {
-        expect(contentRuleOffenders(["approval_class: 'content' is approved with warpline approve --content"])).toEqual(
+        expect(contentRuleOffenders(["approval_class: 'content' is approved with warpline approve <plugin> --content --not-after <when>"])).toEqual(
           [],
         )
       })
 
       test('the unquoted spelling is an offender', () => {
-        expect(contentRuleOffenders(['approval_class: content is approved with warpline approve --content'])).toHaveLength(
+        expect(contentRuleOffenders(['approval_class: content is approved with warpline approve <plugin> --content --not-after <when>'])).toHaveLength(
           1,
         )
       })

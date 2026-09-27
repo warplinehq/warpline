@@ -21,6 +21,6 @@ plugin, start at the top and work down.
 Not needed to use warpline: the reasoning behind the gate, and the spec for a surface the package does not ship.
 
 - [board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)
-  — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface
-  at 0.1, so this spec is not shipped in the package and the link is absolute.
+  — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface,
+  so this spec is not shipped in the package and the link is absolute.
 - [why-the-gate-holds.md](why-the-gate-holds.md) — the long argument: why the gate holds, and the objections it has to survive

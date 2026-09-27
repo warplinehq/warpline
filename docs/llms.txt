@@ -14,5 +14,5 @@
 
 ## Optional
 
-- [board-spec.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.0/docs/board-spec.md): the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface at 0.1, so this spec is not shipped in the package and the link is absolute. (background: not needed to use warpline)
+- [board-spec.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.0/docs/board-spec.md): the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface, so this spec is not shipped in the package and the link is absolute. (background: not needed to use warpline)
 - [why-the-gate-holds.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.0/docs/why-the-gate-holds.md): the long argument: why the gate holds, and the objections it has to survive (background: not needed to use warpline)

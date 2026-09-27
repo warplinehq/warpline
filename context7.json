@@ -14,6 +14,6 @@
     "Generated plugin code imports siblings with an explicit .ts extension. Node's type stripping resolves the literal specifier; a .js specifier at a .ts file is ERR_MODULE_NOT_FOUND under Node, and Bun hides this by remapping.",
     "Manifests are validated with .parse(), not .safeParse(). An invalid manifest is a hard stop at load — a misconfigured plugin never silently runs.",
     "Manifest top level must stay declarative: no I/O, no side effects. Importing a manifest executes its module top level, and that happens during warpline plan, before any approval gate.",
-    "A plugin declaring approval_class: 'content' ships only the exact bytes an operator approved ahead of time with warpline approve --content. One changed byte and it is skipped. It never consults the session grant, so approve --all does not cover it."
+    "A plugin with approval_class: 'content' ships only the exact bytes an operator approved with warpline approve <plugin> --content --not-after <when>. One changed byte and it is skipped. Neither the session grant nor approve --all covers it."
   ]
 }

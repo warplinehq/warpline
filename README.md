@@ -313,8 +313,8 @@ handoff up, the deterministic work carries on running without it.
 - [docs/runtime-spec.md](docs/runtime-spec.md) — manifest fields, retry/timeout/abort semantics, run artifacts
 - [docs/derive-dont-store.md](docs/derive-dont-store.md) — why there is no snapshot store, diff engine or resource cache, and what `ttl_hours` plus one overwritten file does instead
 - [docs/board-spec.md](https://github.com/warplinehq/warpline/blob/main/docs/board-spec.md)
-  — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface
-  at 0.1, so this spec is not shipped in the package and the link is absolute.
+  — the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface,
+  so this spec is not shipped in the package and the link is absolute.
 - [docs/needs-llm-contract.md](docs/needs-llm-contract.md) — the LLM handoff protocol
 - [docs/plugin-authoring.md](docs/plugin-authoring.md) — writing and testing plugins
 - [docs/scheduler-recipe.md](docs/scheduler-recipe.md) — running `advance` on a fifteen-minute tick under systemd, launchd or cron, with every scheduler fact cited to the page it came from
@@ -336,7 +336,7 @@ Requires [bun](https://bun.sh) ≥ 1.3. This is the one place it's genuinely
 required, because the suite is written against `bun:test`.
 
 ```bash
-# The board — a repo-only surface at 0.1, not wired into the published bin
+# The board — a repo-only surface, not wired into the published bin
 bun run src/cli/board-cli.ts status
 bun run src/cli/board-cli.ts tasks
 ```

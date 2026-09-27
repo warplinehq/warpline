@@ -1,7 +1,7 @@
 # Warpline
 
 > Instructions for AI coding agents working in this repository, and the only
-> agent file it tracks. Claude Code (2.1.277 or later) reads this file when no
+> agent file it tracks. Claude Code reads this file when no
 > `CLAUDE.md` or `CLAUDE.local.md` exists in the working directory or above
 > it; either of those files replaces it unless it imports `@AGENTS.md`. A
 > maintainer's private notes go in the gitignored `CLAUDE.local.md`, whose
