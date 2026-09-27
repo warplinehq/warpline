@@ -210,6 +210,161 @@ describe('documented commands', () => {
   })
 })
 
+// ── A claim that CI runs something must name a step a workflow runs ──────
+
+/**
+ * What makes a paragraph a claim about CI. Pairing one of these with a
+ * `scripts/*.sh` file or a `bun run X` target is the whole definition.
+ */
+const CLAIM_TRIGGER = /\bCI\b|release workflow|release\.yml|on every push|\bworkflow\b/i
+/** What may sit on either side of a token for it to count as that token. */
+const TOKEN_BOUNDARY = '[^A-Za-z0-9_.:/-]'
+const SCRIPT_TOKEN = /scripts\/[\w.-]+\.sh/g
+
+interface TextFile {
+  file: string
+  text: string
+}
+
+/**
+ * Every `jobs.*.steps[].run` string, and nothing else.
+ *
+ * Parsed, not grepped: a workflow comment explaining a step is not the step,
+ * and ci.yml's comments name scripts freely. Every shape that leaves nothing to
+ * compare against throws, because "could not look" read as "no broken claims"
+ * is the one answer this check must never give.
+ */
+function workflowRuns(files: readonly TextFile[]): string[] {
+  if (files.length === 0) throw new Error('could not look: no workflow files')
+  const runs: string[] = []
+  for (const { file, text } of files) {
+    let parsed: unknown
+    try {
+      parsed = Bun.YAML.parse(text)
+    } catch {
+      throw new Error(`could not look: ${file} does not parse`)
+    }
+    const jobs = (parsed as { jobs?: unknown } | null)?.jobs
+    if (!jobs || typeof jobs !== 'object') throw new Error(`could not look: ${file} has no jobs mapping`)
+    for (const job of Object.values(jobs)) {
+      const steps = (job as { steps?: unknown } | null)?.steps
+      if (!Array.isArray(steps)) continue
+      for (const step of steps) {
+        const run = (step as { run?: unknown } | null)?.run
+        if (typeof run === 'string') runs.push(run)
+      }
+    }
+  }
+  if (runs.length === 0) throw new Error('could not look: no run steps in any workflow')
+  return runs
+}
+
+/**
+ * The blank-line paragraphs that mention CI, fenced code blocks removed.
+ *
+ * Paragraphs, not lines: every real claim wraps, and a line-scoped check sees
+ * the trigger on one line and the script on the next. Fences go first because
+ * a command listing that happens to mention CI in a comment is not a claim
+ * that CI runs every command in it. A fence ends a paragraph in markdown, so it
+ * is replaced with a break, not with nothing.
+ */
+function claimParagraphs(markdown: string): string[] {
+  return markdown
+    .replace(/```[^\n]*\n[\s\S]*?```/g, '\n\n')
+    .split(/\n[ \t]*\n/)
+    .filter((p) => CLAIM_TRIGGER.test(p))
+}
+
+/** `scripts/*.sh` files and `bun run X` targets, one trailing full stop off X. */
+function claimTokens(paragraph: string): string[] {
+  const tokens = [...paragraph.matchAll(SCRIPT_TOKEN)].map((m) => m[0])
+  for (const m of paragraph.matchAll(/bun\s+run\s+([\w:./-]+)/g)) {
+    tokens.push(`bun run ${(m[1] as string).replace(/\.$/, '')}`)
+  }
+  return [...new Set(tokens)]
+}
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** The exact token, never a prefix: `verify-tarball-old.sh` is not `verify-tarball.sh`. */
+function hasToken(run: string, token: string): boolean {
+  return new RegExp(`(?:^|${TOKEN_BOUNDARY})${escapeRegExp(token)}(?:$|${TOKEN_BOUNDARY})`).test(run)
+}
+
+/**
+ * Every claim token no workflow run step runs.
+ *
+ * A `bun run X` a workflow never spells out still counts when package.json
+ * maps X onto `scripts/*.sh` files that workflows do run, which is how the
+ * release gates are documented (`bun run verify:tarball`).
+ *
+ * ponytail: two known ceilings. A token run only by a step in an advisory job
+ * (`continue-on-error: true`) or only by a schedule-only workflow still passes,
+ * though neither gates a merge. The upgrade is to carry job and trigger
+ * metadata with each run string and let a claim say which kind it means.
+ */
+function claimOffenders(
+  docs: readonly TextFile[],
+  runs: readonly string[],
+  pkgScripts: Record<string, string>,
+): { claims: number; offenders: string[] } {
+  const ran = (token: string) => runs.some((r) => hasToken(r, token))
+  let claims = 0
+  const offenders: string[] = []
+  for (const { file, text } of docs) {
+    for (const paragraph of claimParagraphs(text)) {
+      const tokens = claimTokens(paragraph)
+      if (tokens.length === 0) continue
+      claims++
+      for (const token of tokens) {
+        if (ran(token)) continue
+        const alias = token.startsWith('bun run ') ? pkgScripts[token.slice('bun run '.length)] : undefined
+        const scripts = alias === undefined ? [] : [...alias.matchAll(SCRIPT_TOKEN)].map((m) => m[0])
+        if (scripts.length > 0 && scripts.every(ran)) continue
+        offenders.push(`${file}: "${token}" is described as running in CI, but no workflow run step runs it`)
+      }
+    }
+  }
+  return { claims, offenders }
+}
+
+/**
+ * Prose that says CI runs a script nobody wired up reads exactly like prose
+ * that is true. The numbers in a README can be right on the day they are
+ * written and nothing keeps them right, so this compares every such claim in
+ * the docs a contributor reads against the run steps of the workflows that are
+ * actually committed.
+ */
+describe('every CI claim names a step a workflow runs', () => {
+  const tracked = (path: string) =>
+    execFileSync('git', ['ls-files', '-z', '--', path], { cwd: REPO_ROOT, encoding: 'utf8' })
+      .split('\0')
+      .filter(Boolean)
+
+  /**
+   * The count at landing. Lower means the trigger or the paragraph split
+   * stopped seeing a claim, not that a claim was fixed.
+   */
+  const CLAIM_FLOOR = 5
+
+  test('every CI claim in the real docs is run by a real workflow step', () => {
+    const docs = ['README.md', 'CONTRIBUTING.md', 'AGENTS.md', ...tracked('docs/').filter((f) => f.endsWith('.md'))].map(
+      (file) => ({ file, text: read(file) }),
+    )
+    const workflows = tracked('.github/workflows/')
+      .filter((f) => /\.ya?ml$/.test(f))
+      .map((file) => ({ file, text: read(file) }))
+    const runs = workflowRuns(workflows)
+    const pkgScripts = (JSON.parse(read('package.json')) as { scripts: Record<string, string> }).scripts
+    const { claims, offenders } = claimOffenders(docs, runs, pkgScripts)
+    // Non-vacuity for the other side of the comparison, at the landing counts.
+    expect(workflows.length).toBeGreaterThanOrEqual(7)
+    expect(runs.length).toBeGreaterThanOrEqual(29)
+    expect(offenders).toEqual([])
+    expect(claims).toBeGreaterThanOrEqual(CLAIM_FLOOR)
+  })
+})
+
 // ── Links must resolve ───────────────────────────────────────────────────
 
 describe('internal links', () => {
