@@ -513,6 +513,26 @@ describe('generated docs/llms.txt', () => {
     expect(packed().has('docs/llms.txt')).toBe(true)
   })
 
+  // The check only protects the release if it runs on built output and before
+  // anything is packed or uploaded. Parsed, not grepped, so a comment naming
+  // the command can neither satisfy nor break this.
+  test('release.yml checks docs/llms.txt after the build and before the pack and the upload', () => {
+    const wf = Bun.YAML.parse(read('.github/workflows/release.yml')) as {
+      jobs: { publish: { steps: { run?: string }[] } }
+    }
+    const runs = wf.jobs.publish.steps.map((s) => s.run?.trim())
+    const order = [
+      'bun run build',
+      'bun run scripts/gen-llms-txt.ts --check',
+      'bash scripts/assert-pack-whitelist.sh',
+      'npm publish --access public',
+    ]
+    const missing = order.filter((r) => !runs.includes(r))
+    expect(missing).toEqual([])
+    const at = order.map((r) => runs.indexOf(r))
+    expect(at).toEqual([...at].sort((a, b) => a - b))
+  })
+
   // --check runs from a bare copy of the files it reads, which is also what
   // proves the generator imports nothing from src/.
   test('--check passes on the current file and refuses a stale or missing one', () => {

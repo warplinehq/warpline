@@ -76,6 +76,14 @@ jobs:
       # retried.
       - run: bun run build
 
+      # docs/llms.txt pins every link to this version's tag, and npm packs the
+      # committed bytes. A file generated for the previous version would ship
+      # links to the wrong docs, and nothing downstream would notice. Checked
+      # after the build and before the pack, where a failure costs nothing and
+      # the upload has not happened.
+      - name: check docs/llms.txt is current for this version
+        run: bun run scripts/gen-llms-txt.ts --check
+
       # The Release title and body are public the moment the release is
       # published, and neither is reachable from `git ls-files` — so the guard
       # in the test suite has never seen either one. This run is the only place

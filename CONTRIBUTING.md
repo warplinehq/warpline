@@ -47,8 +47,8 @@ for you.
 
 ## Release gates
 
-Two gates run in `.github/workflows/release.yml` before `npm publish`, and both
-live in a script rather than inline so the same logic can be exercised without
+Three gates run in `.github/workflows/release.yml` before `npm publish`, and all
+three live in a script rather than inline so the same logic can be exercised without
 cutting a release. A guard nobody has watched fail is not a guard.
 
 - **`bash scripts/verify-tarball.sh`**, or `bun run verify:tarball` — packs the
@@ -61,13 +61,18 @@ cutting a release. A guard nobody has watched fail is not a guard.
   reachable from `git ls-files` and so the guard in
   `src/__tests__/no-private-planning-refs.test.ts` cannot see them. Commit
   messages are the third such surface, and that test now scans them directly.
+- **`bun run scripts/gen-llms-txt.ts --check`** — fails when `docs/llms.txt` is
+  missing or was generated for another version, because every link in it is
+  pinned to the release tag.
 
 **The marketplace `version` is a release artifact, not a build artifact.** Three
 files carry a version — `package.json`, `.claude-plugin/marketplace.json` and
 `plugin/.claude-plugin/plugin.json` — and only the first is what npm reads. Bump
 all three in the same commit as the tag; `scripts/assert-release-tag.sh` refuses
 the release if they disagree, and reports a missing or unreadable one as a
-failure rather than as agreement.
+failure rather than as agreement. Then run `bun run docs:generate` and commit the
+regenerated `docs/llms.txt` in that same commit; the release workflow refuses a
+stale one.
 
 The marketplace one earns the rule. It is what decides whether an installed user
 receives an update at all: with it set they are updated when it changes, and
