@@ -37,8 +37,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, join, relative } from 'node:path'
 import { buildPlanModel } from '../cli/plan.js'
 import { renderPlan } from '../cli/plan-render.js'
 import { _setHome } from '../lib/paths.js'
@@ -1301,7 +1301,8 @@ describe('shipped docs stay package-facing', () => {
  * Whether a root's `CLAUDE.local.md` still imports AGENTS.md.
  *
  * AGENTS.md is the only tracked agent file. Claude Code falls back to it only
- * when no `CLAUDE.md` or `CLAUDE.local.md` exists, so a maintainer's private
+ * when no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` exists (see
+ * `shadowVerdict`), so a maintainer's private
  * `CLAUDE.local.md` that stops opening with `@AGENTS.md` silently stops the
  * repo's rules loading for that maintainer. Nothing else would say so.
  *
@@ -1325,6 +1326,33 @@ function localImportVerdict(root: string): 'absent' | 'ok' | string {
     return `CLAUDE.local.md line ${i + 1} is not @AGENTS.md; without that import Claude Code stops loading AGENTS.md`
   }
   return 'ok'
+}
+
+/**
+ * Whether AGENTS.md still loads for a session started at `root`.
+ *
+ * Claude Code 2.1.283 drops the AGENTS.md fallback when any `CLAUDE.md`,
+ * `.claude/CLAUDE.md` or `CLAUDE.local.md` sits in the working directory or an
+ * ancestor below `/`, and that includes untracked files and files outside the
+ * repository. A root `CLAUDE.local.md` that imports `@AGENTS.md` loads it
+ * anyway, so when that file exists its verdict decides. Otherwise any such
+ * file is a failure naming its path relative to `root`, never its content.
+ *
+ * `home/.claude/CLAUDE.md` is skipped: Claude Code loads it as user memory,
+ * not as a project file, and it does not switch the fallback off.
+ */
+function shadowVerdict(root: string, home: string = homedir()): 'absent' | 'ok' | string {
+  if (existsSync(join(root, 'CLAUDE.local.md'))) return localImportVerdict(root)
+  const userMemory = join(home, '.claude', 'CLAUDE.md')
+  const found: string[] = []
+  for (let dir = root; dirname(dir) !== dir; dir = dirname(dir)) {
+    for (const name of ['CLAUDE.md', join('.claude', 'CLAUDE.md'), 'CLAUDE.local.md']) {
+      const p = join(dir, name)
+      if (p !== userMemory && existsSync(p)) found.push(relative(root, p))
+    }
+  }
+  if (found.length === 0) return 'absent'
+  return `${found.join(', ')} switch${found.length === 1 ? 'es' : ''} off the AGENTS.md fallback; add a CLAUDE.local.md at the repository root whose first line is @AGENTS.md`
 }
 
 // ── context7.json: what Context7 serves to every agent that asks ──────────
@@ -1577,15 +1605,76 @@ describe('agent instructions', () => {
     expect(header).not.toMatch(/does not (look for|read)/i)
   })
 
-  // Only the machine that has the file can check it. Everywhere else the bun
-  // summary shows this under skip, by name, so absence never reads as a pass.
-  const verdict = localImportVerdict(REPO_ROOT)
+  // Only a machine that has one of those files can check it. Everywhere else
+  // the bun summary shows this under skip, by name, so absence never reads as
+  // a pass.
+  const verdict = shadowVerdict(REPO_ROOT)
   test.skipIf(verdict === 'absent')(
     verdict === 'absent'
-      ? 'local-only: CLAUDE.local.md absent — not checked'
-      : 'local-only: CLAUDE.local.md opens with @AGENTS.md',
+      ? 'local-only: no CLAUDE.md, .claude/CLAUDE.md or CLAUDE.local.md here or above — not checked'
+      : 'local-only: nothing here or above stops AGENTS.md loading',
     () => expect(verdict).toBe('ok'),
   )
+
+  describe('shadowVerdict', () => {
+    // Paths are relative to a temp base. The repository is `base/repo`, so a
+    // file at the base is an ancestor. `home` defaults to the base.
+    const verdictFor = (files: Record<string, string>, home = '.') => {
+      const base = mkdtempSync(join(tmpdir(), 'warpline-shadow-'))
+      try {
+        mkdirSync(join(base, 'repo'))
+        for (const [rel, body] of Object.entries(files)) {
+          mkdirSync(dirname(join(base, rel)), { recursive: true })
+          writeFileSync(join(base, rel), body)
+        }
+        return shadowVerdict(join(base, 'repo'), join(base, home))
+      } finally {
+        rmSync(base, { recursive: true, force: true })
+      }
+    }
+    const shadows = (v: string) => {
+      expect(v).not.toBe('ok')
+      expect(v).not.toBe('absent')
+    }
+
+    test('no agent file here or above is absent, not ok', () => {
+      expect(verdictFor({})).toBe('absent')
+    })
+
+    test('a root CLAUDE.local.md that imports AGENTS.md is ok', () => {
+      expect(verdictFor({ 'repo/CLAUDE.local.md': '@AGENTS.md\n' })).toBe('ok')
+    })
+
+    // Each of these switches the fallback off and imports nothing.
+    for (const rel of ['repo/CLAUDE.md', 'repo/.claude/CLAUDE.md', 'CLAUDE.md', '.claude/CLAUDE.md', 'CLAUDE.local.md']) {
+      test(`${rel} with no root CLAUDE.local.md stops AGENTS.md loading`, () => {
+        const v = verdictFor({ [rel]: '# notes\n' }, 'elsewhere')
+        shadows(v)
+        expect(v).toContain(relative(join('/b', 'repo'), join('/b', rel)))
+      })
+    }
+
+    test('a root CLAUDE.local.md that imports AGENTS.md still loads it past other files', () => {
+      const files = { 'repo/CLAUDE.md': '# notes\n', 'CLAUDE.md': '# notes\n', 'repo/CLAUDE.local.md': '@AGENTS.md\n' }
+      expect(verdictFor(files)).toBe('ok')
+    })
+
+    test('a root CLAUDE.local.md without the import fails even with nothing else around', () => {
+      shadows(verdictFor({ 'repo/CLAUDE.local.md': 'notes\n' }))
+    })
+
+    // Claude Code loads the home .claude/CLAUDE.md as user memory, never as a
+    // project file, so it does not switch the fallback off.
+    test('the user memory file in home is not a shadow', () => {
+      expect(verdictFor({ '.claude/CLAUDE.md': '# user\n' })).toBe('absent')
+    })
+
+    test('the reason never carries the file content', () => {
+      const v = verdictFor({ 'repo/CLAUDE.md': 'SECRET-SENTINEL-7f3a\n' }, 'elsewhere')
+      shadows(v)
+      expect(v).not.toContain('SECRET-SENTINEL-7f3a')
+    })
+  })
 
   describe('localImportVerdict', () => {
     // undefined writes no file at all.

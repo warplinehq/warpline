@@ -1,12 +1,13 @@
 # Warpline
 
 > Instructions for AI coding agents working in this repository, and the only
-> agent file it tracks. Claude Code reads this file when no
-> `CLAUDE.md` or `CLAUDE.local.md` exists in the working directory or above
-> it; either of those files replaces it unless it imports `@AGENTS.md`. A
+> agent file it tracks. Claude Code reads this file when no `CLAUDE.md`,
+> `.claude/CLAUDE.md` or `CLAUDE.local.md` exists in the working directory or
+> above it; any of those files replaces it unless it imports `@AGENTS.md`. A
 > maintainer's private notes go in the gitignored `CLAUDE.local.md`, whose
-> first line must be `@AGENTS.md`, and `bun test` checks that line whenever
-> the file exists. Human contributors want `CONTRIBUTING.md`.
+> first line must be `@AGENTS.md`. `bun test` checks that line, and names any
+> of the other files that would stop this one loading. Human contributors want
+> `CONTRIBUTING.md`.
 
 Deterministic plugin runtime with LLM-judgment dispatch and side-effect
 approval gates. Apache-2.0. Bun runtime, TypeScript + Zod. This repo is
