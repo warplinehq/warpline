@@ -993,8 +993,36 @@ describe('docs index', () => {
 // that field is the only control that exists.
 
 describe('issue forms', () => {
-  const FORMS = ['.github/ISSUE_TEMPLATE/bug_report.yml', '.github/ISSUE_TEMPLATE/plugin_question.yml']
   const CONFIG = '.github/ISSUE_TEMPLATE/config.yml'
+  // The roster comes from git, so a form is checked the moment it is tracked.
+  // A fixed list here once let a new form pass every rule below unread. The
+  // one limit: a form not yet added to git is invisible to a local run, while
+  // CI sees every committed file.
+  const TEMPLATES = execFileSync('git', ['ls-files', '-z', '--', '.github/ISSUE_TEMPLATE/'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  })
+    .split('\0')
+    .filter(Boolean)
+  const FORMS = TEMPLATES.filter((f) => f !== CONFIG && /\.ya?ml$/.test(f))
+  /**
+   * The count at landing. Lower means the enumeration stopped seeing a form,
+   * not that a form was retired on purpose.
+   */
+  const FORM_FLOOR = 3
+
+  test('every tracked issue template is a checked form or the chooser config', () => {
+    const offenders: string[] = []
+    for (const file of TEMPLATES) {
+      if (file !== CONFIG && !/\.ya?ml$/.test(file)) {
+        offenders.push(`${file}: neither the chooser config nor a .yml form, so no check in this block reads it`)
+      }
+    }
+    if (FORMS.length < FORM_FLOOR) {
+      offenders.push(`${FORMS.length} issue form(s) found, below the floor of ${FORM_FLOOR} — the enumeration stopped seeing a form`)
+    }
+    expect(offenders).toEqual([])
+  })
 
   /** The element types GitHub's form schema accepts; anything else is dropped. */
   const ELEMENT_TYPES = new Set(['markdown', 'input', 'textarea', 'dropdown', 'checkboxes', 'upload'])
@@ -1157,6 +1185,7 @@ describe('issue forms', () => {
   const MANDATORY: Record<string, string[]> = {
     '.github/ISSUE_TEMPLATE/bug_report.yml': ['runtime', 'versions', 'expected-actual', 'repro'],
     '.github/ISSUE_TEMPLATE/plugin_question.yml': ['question'],
+    '.github/ISSUE_TEMPLATE/capability_gap.yml': ['capability', 'current-behaviour'],
   }
   const FENCED: Record<string, string[]> = {
     '.github/ISSUE_TEMPLATE/bug_report.yml': ['command-output'],
@@ -1166,6 +1195,11 @@ describe('issue forms', () => {
   test('the fields that must be answered stay mandatory, and the paste fields stay fenced', () => {
     const offenders: string[] = []
     for (const file of FORMS) {
+      if (MANDATORY[file] === undefined) {
+        offenders.push(
+          `${file}: no MANDATORY entry, so its required fields go unchecked until they are named there — or \`[]\` if none is required on purpose`,
+        )
+      }
       const seen = new Set<string>()
       for (const element of elements(read(file))) {
         const id = element.match(/^[^\S\n]*id: (\S+)$/m)?.[1] ?? '(untyped element)'
