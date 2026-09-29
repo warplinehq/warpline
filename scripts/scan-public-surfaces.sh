@@ -84,15 +84,21 @@ if ! grep -q '[^[:space:]]' "$TMP/input"; then
 fi
 
 : > "$TMP/hits"
+hit=0
 
+# `-a`, and grep's exit status as the verdict. On input holding a NUL or an
+# encoding error, GNU grep prints no matching line, only a stderr note, and
+# exits 0; BSD grep prints the note in place of the line. Either way `hits`
+# alone would read clean or carry no line number.
 set +e
-grep -n -i -E -f "$TMP/patterns" "$TMP/input" >> "$TMP/hits" 2> "$TMP/err"
+grep -a -n -i -E -f "$TMP/patterns" "$TMP/input" >> "$TMP/hits" 2> "$TMP/err"
 rc=$?
 set -e
 if [ "$rc" -gt 1 ]; then
   echo "blind: grep -E could not apply ${NAMES} (exit ${rc}): $(cat "$TMP/err")" >&2
   exit 1
 fi
+if [ "$rc" -eq 0 ]; then hit=1; fi
 
 # ── 3. The local-only terms ──────────────────────────────────────────────
 #
@@ -110,13 +116,14 @@ if [ -f "$TERMS" ]; then
   grep -v -e '^[[:space:]]*$' -e '^#' "$TERMS" > "$TMP/terms" || true
   if [ -s "$TMP/terms" ]; then
     set +e
-    grep -n -i -F -f "$TMP/terms" "$TMP/input" >> "$TMP/hits" 2> "$TMP/err"
+    grep -a -n -i -F -f "$TMP/terms" "$TMP/input" >> "$TMP/hits" 2> "$TMP/err"
     rc=$?
     set -e
     if [ "$rc" -gt 1 ]; then
       echo "blind: grep -F could not apply ${TERMS} (exit ${rc}): $(cat "$TMP/err")" >&2
       exit 1
     fi
+    if [ "$rc" -eq 0 ]; then hit=1; fi
   fi
 fi
 
@@ -124,7 +131,7 @@ fi
 
 SCANNED="$(awk 'END { print NR }' "$TMP/input")"
 
-if [ -s "$TMP/hits" ]; then
+if [ "$hit" -eq 1 ] || [ -s "$TMP/hits" ]; then
   echo "FAIL: this text names the source runtime's closed deployment" >&2
   cut -d: -f1 "$TMP/hits" | sort -n -u | while IFS= read -r n; do
     echo "  line ${n}" >&2

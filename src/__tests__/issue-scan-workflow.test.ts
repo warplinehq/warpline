@@ -183,6 +183,21 @@ describe('the issue scan workflow', () => {
     expect(r.stderr.split('\n')).toContain(`  line ${line}`)
   })
 
+  // GNU grep, the one on a CI runner, calls input holding a NUL "binary",
+  // prints no matching line and exits 0. `jq -r` turns a `\u0000` escape in
+  // the payload into a raw NUL, so a reporter can put one there.
+  test('a private name on a line holding a NUL is still reported at its line', () => {
+    const planted = `The ${SAMPLE}\u0000 plugin needs to wait for a reviewer.`
+    const body = renderSubmission({ capability: planted })
+    const line = 1 + body.split('\n').indexOf(planted) + 1
+    expect(line).toBeGreaterThan(1)
+    const r = runStep(NEUTRAL_TITLE, body)
+    expect(reproduces(r)).toBe(false)
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('FAIL:')
+    expect(r.stderr.split('\n')).toContain(`  line ${line}`)
+  })
+
   test('an issue with an empty body is still scanned on its title and never reads blind', () => {
     for (const body of [null, '']) {
       const r = runStep(NEUTRAL_TITLE, body)
