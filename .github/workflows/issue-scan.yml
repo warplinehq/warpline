@@ -18,7 +18,11 @@ name: Issue scan
 #
 # The limits, stated rather than hidden:
 #   - It runs after GitHub has published the issue. It reports a leak and
-#     cannot prevent one; the fix is a maintainer editing or deleting it.
+#     cannot prevent one. Editing alone does not remove a leak: the old body
+#     stays in the issue's public edit history until every revision holding
+#     it is deleted, and an old title stays in a "changed the title" timeline
+#     event that only deleting the issue removes. Emails already sent to
+#     watchers stay sent.
 #   - CI holds only the committed `.github/private-names.txt`. The local
 #     `.private-terms` list never reaches a runner.
 #   - A private name that is also an ordinary word is beyond any list.
