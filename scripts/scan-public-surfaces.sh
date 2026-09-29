@@ -6,7 +6,7 @@
 # committed patterns in `.github/private-names.txt`, or one of the local-only
 # terms in gitignored `.private-terms`.
 #
-# Three public surfaces exist that `git ls-files` cannot reach, so the guard in
+# Four public surfaces exist that `git ls-files` cannot reach, so the guard in
 # `src/__tests__/no-private-planning-refs.test.ts` has never seen any of them:
 #
 #   1. commit messages — now scanned by that test, which reads git log directly
@@ -15,6 +15,9 @@
 #   3. an `npm deprecate` message — published prose with no review step, and
 #      the reason this script has ONE mode and reads stdin: the same command
 #      covers it with no second implementation
+#   4. an issue title and body — scanned by this script from
+#      `.github/workflows/issue-scan.yml`, after GitHub has already published
+#      them, so it reports a leak rather than preventing one
 #
 # Run it by hand before sending a deprecation message, or against any prose
 # about to be published:

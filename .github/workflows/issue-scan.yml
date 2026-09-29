@@ -1,0 +1,43 @@
+name: Issue scan
+
+# Screens an issue's title and body for the names of the source runtime's
+# closed deployment. Issue text is a public surface `git ls-files` never
+# reaches, so no test in the suite has ever seen it. The release workflow
+# already screens release text with the same script, the same way.
+#
+# The text is read from the environment and never interpolated into the shell
+# by the workflow expression syntax. Anyone can open an issue, so the title and
+# body are attacker-controlled, and an expression inside `run:` would execute
+# them.
+#
+# Line 1 of the scanned text is the title. Lines 2 onward are the body. The
+# output is line numbers only, and nothing here echoes the text, because the
+# log of a public repository's workflow is public too.
+#
+# The limits, stated rather than hidden:
+#   - It runs after GitHub has published the issue. It reports a leak and
+#     cannot prevent one; the fix is a maintainer editing or deleting it.
+#   - CI holds only the committed `.github/private-names.txt`. The local
+#     `.private-terms` list never reaches a runner.
+#   - A private name that is also an ordinary word is beyond any list.
+#   - Comments, pull requests and discussions are not scanned.
+#
+# NOT advisory. No job or step may carry on past a failure: a scan that could
+# not look must not read as a scan that passed.
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: check the issue title and body name nothing private
+        env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: printf '%s\n%s\n' "$ISSUE_TITLE" "$ISSUE_BODY" | bash scripts/scan-public-surfaces.sh

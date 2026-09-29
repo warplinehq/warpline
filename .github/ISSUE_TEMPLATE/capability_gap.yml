@@ -1,0 +1,49 @@
+name: Capability gap
+description: A plugin needs something warpline has no way to express.
+title: 'Capability gap: '
+body:
+  # The warning goes first because it is the only thing that reaches the
+  # reporter before the text is public. The scan that runs afterwards is stated
+  # here with its limits, so nobody mistakes it for a safety net.
+  - type: markdown
+    attributes:
+      value: |
+        **This issue is public, and so is everything you type into it.**
+
+        Describe the capability in warpline's own terms: what a plugin
+        declares, runs, is gated on or hands off. Leave the deployment out. Do
+        not name a private plugin, a private data source, a company, a runtime
+        or a host.
+
+        A workflow scans the title and body after you submit. It runs once the
+        issue is already public, so it can report a leak but cannot prevent
+        one. It only knows the names on a committed list, it cannot recognise a
+        private name that is also an ordinary word, and it does not read
+        comments. Read your text back before you submit.
+
+  - type: textarea
+    id: capability
+    attributes:
+      label: What a plugin needs to do
+      description: In warpline's terms, the behaviour a plugin cannot express today. Redact any plugin, data source, company or host name, and describe the shape instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: current-behaviour
+    attributes:
+      label: What warpline does instead
+      description: The refusal, the missing manifest field, or the workaround you use today. Redact paths, hostnames and anything named after your deployment.
+    validations:
+      required: true
+
+  # One honest statement, not a list of them. The form cannot check what was
+  # typed above, so the gate it wants is the reporter saying, once, that they
+  # read it back with public eyes. Same reasoning as the authoring form.
+  - type: checkboxes
+    id: public-safe
+    attributes:
+      label: Before you submit
+      options:
+        - label: This issue names no private plugin, data source, company, runtime or host, and it describes the capability rather than my deployment.
+          required: true
