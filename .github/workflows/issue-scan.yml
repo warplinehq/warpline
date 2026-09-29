@@ -5,13 +5,15 @@ name: Issue scan
 # reaches, so no test in the suite has ever seen it. The release workflow
 # already screens release text with the same script, the same way.
 #
-# The text is read from the environment and never interpolated into the shell
-# by the workflow expression syntax. Anyone can open an issue, so the title and
-# body are attacker-controlled, and an expression inside `run:` would execute
-# them.
+# The text is read from the event payload file with `jq`, never from `env:` and
+# never through the workflow expression syntax. Anyone can open an issue, so the
+# title and body are attacker-controlled, and an expression inside `run:` would
+# execute them. `env:` is no better for this: the runner prints every step's
+# `env:` block, values included, into the log, and masks only registered
+# secrets. The payload file is never printed.
 #
-# Line 1 of the scanned text is the title. Lines 2 onward are the body. The
-# output is line numbers only, and nothing here echoes the text, because the
+# Line 1 of the scanned text is the title. Lines 2 onward are the body; a
+# missing body is an empty line. The output is line numbers only, because the
 # log of a public repository's workflow is public too.
 #
 # The limits, stated rather than hidden:
@@ -37,7 +39,4 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: check the issue title and body name nothing private
-        env:
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_BODY: ${{ github.event.issue.body }}
-        run: printf '%s\n%s\n' "$ISSUE_TITLE" "$ISSUE_BODY" | bash scripts/scan-public-surfaces.sh
+        run: jq -r '.issue.title, (.issue.body // "")' "$GITHUB_EVENT_PATH" | bash scripts/scan-public-surfaces.sh

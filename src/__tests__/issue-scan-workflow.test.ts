@@ -6,12 +6,19 @@
  * has never seen one. `.github/workflows/issue-scan.yml` is the only screen they
  * pass through. It pipes both fields into `scripts/scan-public-surfaces.sh`.
  *
- * The step is executed here, not grepped. A misspelled variable in the pipe
- * expands to nothing, so the scan passes on half the text and reads green
- * while blind. Only running the step's own `run:` string, with the env the
- * workflow declares, can tell those apart. The run happens in a temp tree that
- * holds only the scanner and the committed list, so a holder's local
- * `.private-terms` cannot make a local run disagree with CI.
+ * The step is executed here, not grepped. A misspelled field in the pipe
+ * yields nothing, so the scan passes on half the text and reads green while
+ * blind. Only running the step's own `run:` string against an event payload
+ * file, the way the runner hands one over, can tell those apart. The run
+ * happens in a temp tree that holds only the scanner, the committed list and
+ * the payload, so a holder's local `.private-terms` cannot make a local run
+ * disagree with CI.
+ *
+ * The text comes from the payload file and never from `env:`. The runner
+ * prints every step's `env:` block, values included, into the public log, and
+ * masks only registered secrets. So the pin below refuses any expression in
+ * any `env:` of this workflow, and a test that fed the step through env vars
+ * would be testing the leaking shape.
  *
  * What the workflow cannot do is stated here as it is in the workflow: it runs
  * after GitHub has published the issue, so it reports a leak and cannot
@@ -20,7 +27,7 @@
  * discussions are not scanned at all.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
@@ -31,12 +38,9 @@ const FORM = '.github/ISSUE_TEMPLATE/capability_gap.yml'
 const SCANNER = 'scripts/scan-public-surfaces.sh'
 const NAMES = '.github/private-names.txt'
 
-const TITLE_EXPR = /^\$\{\{\s*github\.event\.issue\.title\s*\}\}$/
-const BODY_EXPR = /^\$\{\{\s*github\.event\.issue\.body\s*\}\}$/
-
-type Step = { name?: string; uses?: string; run?: string; env?: Record<string, string>; 'continue-on-error'?: unknown }
-type Job = { steps: Step[]; permissions?: unknown; 'continue-on-error'?: unknown }
-type Workflow = { on: Record<string, unknown>; permissions: unknown; jobs: Record<string, Job> }
+type Step = { name?: string; uses?: string; run?: string; env?: Record<string, unknown>; 'continue-on-error'?: unknown }
+type Job = { steps: Step[]; env?: Record<string, unknown>; permissions?: unknown; 'continue-on-error'?: unknown }
+type Workflow = { on: Record<string, unknown>; env?: Record<string, unknown>; permissions: unknown; jobs: Record<string, Job> }
 
 function workflow(): Workflow {
   return Bun.YAML.parse(readFileSync(join(REPO_ROOT, WORKFLOW), 'utf8')) as Workflow
@@ -50,15 +54,9 @@ function scanStepOf(wf: Workflow): Step {
   return hits[0] as Step
 }
 
-/** The scan step's `run:` string and the env keys that carry the title and body. */
-function scanStep(): { run: string; titleVar: string; bodyVar: string } {
-  const step = scanStepOf(workflow())
-  const env = Object.entries(step.env ?? {})
-  const titleVar = env.find(([, v]) => TITLE_EXPR.test(String(v)))?.[0]
-  const bodyVar = env.find(([, v]) => BODY_EXPR.test(String(v)))?.[0]
-  if (titleVar === undefined) throw new Error(`could not look: no env key in ${WORKFLOW} carries the issue title`)
-  if (bodyVar === undefined) throw new Error(`could not look: no env key in ${WORKFLOW} carries the issue body`)
-  return { run: step.run as string, titleVar, bodyVar }
+/** The scan step's `run:` string. */
+function scanStep(): string {
+  return scanStepOf(workflow()).run as string
 }
 
 /**
@@ -84,19 +82,23 @@ function renderSubmission(answers: Record<string, string>): string {
 
 /**
  * Runs the workflow step's own `run:` string under the shell GitHub uses for
- * `run:` on Linux, in a temp tree holding only the scanner and the committed
- * list. The child env is PATH, TMPDIR when set (so the scanner's `mktemp`
- * stays in the test's temp root), and the two variables. Nothing else leaks in.
+ * `run:` on Linux, in a temp tree holding only the scanner, the committed list
+ * and an `issues` event payload. The child env is PATH, TMPDIR when set (so the
+ * scanner's `mktemp` stays in the test's temp root), and GITHUB_EVENT_PATH.
+ * Nothing else leaks in. A `null` body is what GitHub sends for an issue with
+ * no body.
  */
-function runStep(title: string, body: string): { status: number | null; stdout: string; stderr: string } {
-  const { run, titleVar, bodyVar } = scanStep()
+function runStep(title: string, body: string | null): { status: number | null; stdout: string; stderr: string } {
+  const run = scanStep()
   const root = mkdtempSync(join(tmpdir(), 'warpline-issue-scan-'))
   try {
     for (const rel of [SCANNER, NAMES]) {
       mkdirSync(join(root, rel, '..'), { recursive: true })
       copyFileSync(join(REPO_ROOT, rel), join(root, rel))
     }
-    const env: Record<string, string> = { PATH: process.env.PATH ?? '/usr/bin:/bin', [titleVar]: title, [bodyVar]: body }
+    const event = join(root, 'event.json')
+    writeFileSync(event, JSON.stringify({ action: 'opened', issue: { number: 1, title, body } }))
+    const env: Record<string, string> = { PATH: process.env.PATH ?? '/usr/bin:/bin', GITHUB_EVENT_PATH: event }
     if (process.env.TMPDIR) env.TMPDIR = process.env.TMPDIR
     const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', run], { cwd: root, encoding: 'utf8', env })
     return { status: r.status, stdout: r.stdout, stderr: r.stderr }
@@ -182,10 +184,12 @@ describe('the issue scan workflow', () => {
   })
 
   test('an issue with an empty body is still scanned on its title and never reads blind', () => {
-    const r = runStep(NEUTRAL_TITLE, '')
-    expect(r.stderr).not.toContain('blind:')
-    expect(r.status).toBe(0)
-    expect(r.stdout).toContain('OK: scanned 2 lines')
+    for (const body of [null, '']) {
+      const r = runStep(NEUTRAL_TITLE, body)
+      expect(r.stderr).not.toContain('blind:')
+      expect(r.status).toBe(0)
+      expect(r.stdout).toContain('OK: scanned 2 lines')
+    }
   })
 
   // The hardening pins. Parsed, never grepped, so a comment can neither
@@ -215,11 +219,13 @@ describe('the issue scan workflow', () => {
     for (const u of uses) expect(u).toMatch(/@[0-9a-f]{40}$/)
   })
 
-  test('the scan step takes the event text through env and nothing else', () => {
-    const env = Object.values(scanStepOf(wf).env ?? {}).map(String)
-    expect(env).toHaveLength(2)
-    expect(env.some((v) => TITLE_EXPR.test(v))).toBe(true)
-    expect(env.some((v) => BODY_EXPR.test(v))).toBe(true)
+  // The runner prints each step's resolved `env:` into the public log. Any
+  // expression here, at any level, is event text on its way to that log, and
+  // this workflow needs none: the scan reads the payload file.
+  test('no env: at workflow, job or step level holds an expression', () => {
+    const envs = [wf.env, ...jobs.map((j) => j.env), ...steps.map((s) => s.env)]
+    const offenders = envs.flatMap((e) => Object.entries(e ?? {})).filter(([, v]) => String(v).includes('${{'))
+    expect(offenders.map(([k]) => k)).toEqual([])
   })
 })
 
