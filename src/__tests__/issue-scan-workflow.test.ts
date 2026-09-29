@@ -128,9 +128,44 @@ function runInterpolations(files: readonly { file: string; text: string }[]): st
     for (const [job, { steps = [] }] of Object.entries(wf.jobs ?? {})) {
       steps.forEach((s, n) => {
         if (typeof s.run === 'string' && s.run.includes('${{')) {
-          offenders.push(`${file}: job '${job}' step ${n} interpolates an expression inside run:, where it lands in the shell; pass it through env: instead`)
+          offenders.push(`${file}: job '${job}' step ${n} interpolates an expression inside run:, where it lands in the shell; read it from the "$GITHUB_EVENT_PATH" payload with jq instead`)
         }
       })
+    }
+  }
+  return offenders
+}
+
+/**
+ * Every `env:` value, at workflow, job or step level, that resolves event
+ * text. The runner prints each step's resolved `env:` into the public log, so
+ * a title or body routed through `env:` is copied there, and the log outlives
+ * any edit to the text. Read the `$GITHUB_EVENT_PATH` payload instead, which
+ * the runner never prints. Throws rather than returning `[]` when it could not
+ * look.
+ */
+function eventTextInEnv(files: readonly { file: string; text: string }[]): string[] {
+  if (files.length === 0) throw new Error('could not look: no workflow files')
+  type Env = { env?: Record<string, unknown> }
+  const offenders: string[] = []
+  for (const { file, text } of files) {
+    let wf: Env & { jobs?: Record<string, Env & { steps?: Env[] }> }
+    try {
+      wf = Bun.YAML.parse(text) as typeof wf
+    } catch {
+      throw new Error(`could not look: ${file} does not parse`)
+    }
+    const scopes: [string, Env][] = [['workflow', wf]]
+    for (const [job, j] of Object.entries(wf.jobs ?? {})) {
+      scopes.push([`job '${job}'`, j])
+      ;(j.steps ?? []).forEach((s, n) => scopes.push([`job '${job}' step ${n}`, s]))
+    }
+    for (const [where, { env }] of scopes) {
+      for (const [k, v] of Object.entries(env ?? {})) {
+        if (/\$\{\{[^}]*github\.event\b/.test(String(v))) {
+          offenders.push(`${file}: ${where} env ${k} resolves event text, which the runner prints into the log; read it from the "$GITHUB_EVENT_PATH" payload with jq instead`)
+        }
+      }
     }
   }
   return offenders
@@ -244,7 +279,7 @@ describe('the issue scan workflow', () => {
   })
 })
 
-describe('no workflow run step interpolates an expression', () => {
+describe('every tracked workflow keeps event text out of the shell and the log', () => {
   const tracked = execFileSync('git', ['ls-files', '-z', '--', '.github/workflows/'], { cwd: REPO_ROOT, encoding: 'utf8' })
     .split('\0')
     .filter((f) => /\.ya?ml$/.test(f))
@@ -265,6 +300,35 @@ describe('no workflow run step interpolates an expression', () => {
 
   test('a step that reads the title from env is not', () => {
     expect(runInterpolations(fixture('echo "$ISSUE_TITLE"'))).toEqual([])
+  })
+
+  test('no tracked workflow routes event text through env:', () => {
+    expect(eventTextInEnv(tracked)).toEqual([])
+  })
+
+  test('event text in env: is reported at every level, and other expressions are not', () => {
+    const text = [
+      'on: issues',
+      'env:',
+      '  A: ${{ github.event.issue.title }}',
+      'jobs:',
+      '  x:',
+      '    runs-on: ubuntu-latest',
+      '    env:',
+      '      B: ${{ github.event.issue.body }}',
+      '    steps:',
+      '      - run: true',
+      '        env:',
+      '          C: ${{ github.event.release.name }}',
+      '          TOKEN: ${{ secrets.GITHUB_TOKEN }}',
+      '          REF: ${{ github.ref }}',
+    ].join('\n')
+    expect(eventTextInEnv([{ file: 'fixture.yml', text }]).length).toBe(3)
+  })
+
+  test('env: checks "could not look" on no files or an unparsable one', () => {
+    expect(() => eventTextInEnv([])).toThrow(/could not look/)
+    expect(() => eventTextInEnv([{ file: 'bad.yml', text: 'jobs: [unclosed' }])).toThrow(/could not look: bad.yml does not parse/)
   })
 
   test('a workflow that does not parse is "could not look"', () => {

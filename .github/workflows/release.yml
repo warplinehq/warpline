@@ -90,17 +90,20 @@ jobs:
       # that holds them, and the check has to happen before the upload, because
       # the upload is what makes the version permanent.
       #
-      # Read from the environment, never interpolated into the shell by the
-      # workflow expression syntax, for the same reason the tag is two steps
-      # above: a release body is attacker-influenced text on a job that mints a
-      # registry credential.
+      # Read from the event payload file with jq, never interpolated into the
+      # shell by the workflow expression syntax, for the same reason the tag is
+      # two steps above: a release body is attacker-influenced text on a job
+      # that mints a registry credential. Not through `env:` either: the runner
+      # prints every step's `env:` block, values included, into the log, so a
+      # private name this step catches would be copied there. The runner never
+      # prints the payload file.
       #
       # No `gh` and no network: the release event payload carries both fields.
+      # `shell: bash` turns on pipefail, so a jq failure fails the step rather
+      # than handing the scanner an empty read.
       - name: check the release title and body name nothing private
-        env:
-          RELEASE_TITLE: ${{ github.event.release.name }}
-          RELEASE_BODY: ${{ github.event.release.body }}
-        run: printf '%s\n%s\n' "$RELEASE_TITLE" "$RELEASE_BODY" | bash scripts/scan-public-surfaces.sh
+        shell: bash
+        run: jq -r '(.release.name // ""), (.release.body // "")' "$GITHUB_EVENT_PATH" | bash scripts/scan-public-surfaces.sh
 
       # The same two-directional gate ci.yml runs on every push, run once more
       # against the bytes that are about to leave this repository forever.
