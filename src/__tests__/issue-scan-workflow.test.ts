@@ -24,7 +24,7 @@
  * after GitHub has published the issue, so it reports a leak and cannot
  * prevent one. On CI it sees only the committed list. A private name that is
  * also an ordinary word is beyond any list. Comments, pull requests and
- * discussions are not scanned at all.
+ * discussions are not scanned at all. A failed scan notifies no maintainer.
  */
 import { execFileSync, spawnSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -299,6 +299,25 @@ describe('the issue scan workflow', () => {
     const options = box[0]?.attributes.options ?? []
     expect(options.length).toBeGreaterThan(0)
     for (const o of options) expect(o.required).toBe(true)
+  })
+
+  // WR-02. GitHub tells only the actor who triggered a run that it failed, and
+  // here that is the reporter. With read-only permissions the job cannot label
+  // or comment either, so a red run reaches no maintainer. That is a limit, and
+  // it is stated where the other limits are: the workflow header and the form's
+  // warning, the one text a reporter reads before the issue is public.
+  test('the workflow and the form both say a failed scan notifies no maintainer', () => {
+    const header = readFileSync(join(REPO_ROOT, WORKFLOW), 'utf8')
+      .split('\n')
+      .filter((l) => l.startsWith('#'))
+      .join(' ')
+      .replace(/#\s*/g, '')
+      .replace(/\s+/g, ' ')
+    expect(header).toContain('notifies no maintainer')
+    type Element = { type: string; attributes: { value?: string } }
+    const form = Bun.YAML.parse(readFileSync(join(REPO_ROOT, FORM), 'utf8')) as { body: Element[] }
+    const warning = form.body.find((e) => e.type === 'markdown')?.attributes.value?.replace(/\s+/g, ' ') ?? ''
+    expect(warning).toContain('notifies no maintainer')
   })
 
   test('every action is pinned to a full commit SHA', () => {

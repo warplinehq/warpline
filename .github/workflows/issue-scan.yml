@@ -27,6 +27,12 @@ name: Issue scan
 #     `.private-terms` list never reaches a runner.
 #   - A private name that is also an ordinary word is beyond any list.
 #   - Comments, pull requests and discussions are not scanned.
+#   - A failed scan notifies no maintainer. GitHub tells only the actor who
+#     triggered the run, which is the reporter, and this job has read-only
+#     permissions, so it cannot label or comment. A leak is found by reading
+#     the Actions tab. Giving the job write access to close this was
+#     declined: a write token on a workflow anyone can trigger costs more
+#     than the gap does.
 #
 # NOT advisory. No job or step may carry on past a failure: a scan that could
 # not look must not read as a scan that passed.

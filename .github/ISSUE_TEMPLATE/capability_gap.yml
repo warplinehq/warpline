@@ -19,7 +19,12 @@ body:
         issue is already public, so it can report a leak but cannot prevent
         one. It only knows the names on a committed list, it cannot recognise a
         private name that is also an ordinary word, and it does not read
-        comments. Read your text back before you submit.
+        comments. A failed scan notifies no maintainer: GitHub tells only
+        you. If it fails, or you spot a leak yourself, editing does not remove
+        it, because the old text stays in the issue's history. Use "Report a
+        security vulnerability privately" on the New issue page instead, and a
+        maintainer will delete the issue. Read your text back before you
+        submit.
 
   - type: textarea
     id: capability
