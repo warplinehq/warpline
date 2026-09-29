@@ -19,7 +19,7 @@
  * also an ordinary word is beyond any list. Comments, pull requests and
  * discussions are not scanned at all.
  */
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -105,6 +105,35 @@ function runStep(title: string, body: string): { status: number | null; stdout: 
   }
 }
 
+/**
+ * Every `run:` string that holds a workflow expression. An expression inside
+ * `run:` is substituted into the script before the shell sees it, so event
+ * text there executes. Throws rather than returning `[]` when it could not
+ * look: no files, or a file that does not parse.
+ */
+// ponytail: only `run:` strings are checked, so an action input that evaluates
+// code (a `script:` input) would slip past. Check step inputs if one is added.
+function runInterpolations(files: readonly { file: string; text: string }[]): string[] {
+  if (files.length === 0) throw new Error('could not look: no workflow files')
+  const offenders: string[] = []
+  for (const { file, text } of files) {
+    let wf: { jobs?: Record<string, { steps?: { run?: unknown }[] }> }
+    try {
+      wf = Bun.YAML.parse(text) as typeof wf
+    } catch {
+      throw new Error(`could not look: ${file} does not parse`)
+    }
+    for (const [job, { steps = [] }] of Object.entries(wf.jobs ?? {})) {
+      steps.forEach((s, n) => {
+        if (typeof s.run === 'string' && s.run.includes('${{')) {
+          offenders.push(`${file}: job '${job}' step ${n} interpolates an expression inside run:, where it lands in the shell; pass it through env: instead`)
+        }
+      })
+    }
+  }
+  return offenders
+}
+
 // Taken from the committed list at runtime, the same selection
 // `no-private-planning-refs.test.ts` makes, so no sample is ever written here.
 const SAMPLE = readFileSync(join(REPO_ROOT, NAMES), 'utf8')
@@ -157,5 +186,71 @@ describe('the issue scan workflow', () => {
     expect(r.stderr).not.toContain('blind:')
     expect(r.status).toBe(0)
     expect(r.stdout).toContain('OK: scanned 2 lines')
+  })
+
+  // The hardening pins. Parsed, never grepped, so a comment can neither
+  // satisfy nor break them.
+  const wf = workflow()
+  const jobs = Object.values(wf.jobs)
+  const steps = jobs.flatMap((j) => j.steps)
+
+  test('runs when an issue is opened or edited, and on nothing else', () => {
+    expect(Object.keys(wf.on)).toEqual(['issues'])
+    expect((wf.on.issues as { types?: unknown }).types).toEqual(['opened', 'edited'])
+  })
+
+  test('reads the repository and nothing more, and no job widens that', () => {
+    expect(wf.permissions).toEqual({ contents: 'read' })
+    for (const j of jobs) expect(j.permissions).toBeUndefined()
+  })
+
+  test('no job or step carries on past a failure', () => {
+    expect(jobs.length).toBeGreaterThan(0)
+    for (const x of [...jobs, ...steps]) expect(x['continue-on-error']).toBeUndefined()
+  })
+
+  test('every action is pinned to a full commit SHA', () => {
+    const uses = steps.flatMap((s) => (s.uses === undefined ? [] : [s.uses]))
+    expect(uses.length).toBeGreaterThan(0)
+    for (const u of uses) expect(u).toMatch(/@[0-9a-f]{40}$/)
+  })
+
+  test('the scan step takes the event text through env and nothing else', () => {
+    const env = Object.values(scanStepOf(wf).env ?? {}).map(String)
+    expect(env).toHaveLength(2)
+    expect(env.some((v) => TITLE_EXPR.test(v))).toBe(true)
+    expect(env.some((v) => BODY_EXPR.test(v))).toBe(true)
+  })
+})
+
+describe('no workflow run step interpolates an expression', () => {
+  const tracked = execFileSync('git', ['ls-files', '-z', '--', '.github/workflows/'], { cwd: REPO_ROOT, encoding: 'utf8' })
+    .split('\0')
+    .filter((f) => /\.ya?ml$/.test(f))
+    .map((file) => ({ file, text: readFileSync(join(REPO_ROOT, file), 'utf8') }))
+
+  const fixture = (run: string) => [
+    { file: 'fixture.yml', text: `on: issues\njobs:\n  x:\n    runs-on: ubuntu-latest\n    steps:\n      - run: ${run}\n` },
+  ]
+
+  test('every tracked workflow keeps expressions out of run:', () => {
+    expect(tracked.length).toBeGreaterThanOrEqual(8)
+    expect(runInterpolations(tracked)).toEqual([])
+  })
+
+  test('a step that runs echo on the issue title is reported', () => {
+    expect(runInterpolations(fixture('echo "${{ github.event.issue.title }}"'))).toHaveLength(1)
+  })
+
+  test('a step that reads the title from env is not', () => {
+    expect(runInterpolations(fixture('echo "$ISSUE_TITLE"'))).toEqual([])
+  })
+
+  test('a workflow that does not parse is "could not look"', () => {
+    expect(() => runInterpolations([{ file: 'bad.yml', text: 'jobs: [unclosed' }])).toThrow(/could not look: bad.yml does not parse/)
+  })
+
+  test('no workflow files is "could not look"', () => {
+    expect(() => runInterpolations([])).toThrow(/could not look/)
   })
 })
