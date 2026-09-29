@@ -42,5 +42,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # `shell: bash` turns on pipefail, so a jq failure fails the step rather
+      # than handing the scanner an empty read.
       - name: check the issue title and body name nothing private
+        shell: bash
         run: jq -r '.issue.title, (.issue.body // "")' "$GITHUB_EVENT_PATH" | bash scripts/scan-public-surfaces.sh

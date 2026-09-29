@@ -38,7 +38,16 @@ const FORM = '.github/ISSUE_TEMPLATE/capability_gap.yml'
 const SCANNER = 'scripts/scan-public-surfaces.sh'
 const NAMES = '.github/private-names.txt'
 
-type Step = { name?: string; uses?: string; run?: string; env?: Record<string, unknown>; 'continue-on-error'?: unknown }
+type Step = {
+  name?: string
+  uses?: string
+  run?: string
+  shell?: string
+  'working-directory'?: string
+  with?: Record<string, unknown>
+  env?: Record<string, unknown>
+  'continue-on-error'?: unknown
+}
 type Job = { steps: Step[]; env?: Record<string, unknown>; permissions?: unknown; 'continue-on-error'?: unknown }
 type Workflow = { on: Record<string, unknown>; env?: Record<string, unknown>; permissions: unknown; jobs: Record<string, Job> }
 
@@ -82,7 +91,7 @@ function renderSubmission(answers: Record<string, string>): string {
 
 /**
  * Runs the workflow step's own `run:` string under the shell GitHub uses for
- * `run:` on Linux, in a temp tree holding only the scanner, the committed list
+ * `shell: bash` on Linux (pinned below), in a temp tree holding only the scanner, the committed list
  * and an `issues` event payload. The child env is PATH, TMPDIR when set (so the
  * scanner's `mktemp` stays in the test's temp root), and GITHUB_EVENT_PATH.
  * Nothing else leaks in. A `null` body is what GitHub sends for an issue with
@@ -261,6 +270,35 @@ describe('the issue scan workflow', () => {
   test('no job or step carries on past a failure', () => {
     expect(jobs.length).toBeGreaterThan(0)
     for (const x of [...jobs, ...steps]) expect(x['continue-on-error']).toBeUndefined()
+  })
+
+  // `runStep` runs the step as `bash --noprofile --norc -eo pipefail`, which is
+  // what the runner does for `shell: bash`. With no `shell:` the runner uses
+  // `bash -e` without pipefail, so a jq failure would hand the scanner an
+  // empty read; and a `working-directory:` would move the scanner's path.
+  test('the scan step runs under shell: bash from the checkout root', () => {
+    const step = scanStepOf(wf)
+    expect(step.shell).toBe('bash')
+    expect(step['working-directory']).toBeUndefined()
+  })
+
+  // Nothing here pushes, so the job token has no reason to sit in .git/config.
+  test('every checkout leaves no credentials behind', () => {
+    const checkouts = steps.filter((s) => s.uses?.startsWith('actions/checkout@'))
+    expect(checkouts.length).toBeGreaterThan(0)
+    for (const s of checkouts) expect(s.with?.['persist-credentials']).toBe(false)
+  })
+
+  // The reporter's one attestation. `required: true` on a checkbox option sits
+  // under the option itself, where no `validations:` check above can see it.
+  test("the form's public-safe attestation stays required", () => {
+    type Element = { type: string; id?: string; attributes: { options?: { required?: unknown }[] } }
+    const form = Bun.YAML.parse(readFileSync(join(REPO_ROOT, FORM), 'utf8')) as { body: Element[] }
+    const box = form.body.filter((e) => e.type === 'checkboxes' && e.id === 'public-safe')
+    expect(box.length).toBe(1)
+    const options = box[0]?.attributes.options ?? []
+    expect(options.length).toBeGreaterThan(0)
+    for (const o of options) expect(o.required).toBe(true)
   })
 
   test('every action is pinned to a full commit SHA', () => {
