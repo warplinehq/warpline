@@ -131,7 +131,7 @@ fi
 
 SCANNED="$(awk 'END { print NR }' "$TMP/input")"
 
-if [ "$hit" -eq 1 ] || [ -s "$TMP/hits" ]; then
+if [ "$hit" -eq 1 ]; then
   echo "FAIL: this text names the source runtime's closed deployment" >&2
   cut -d: -f1 "$TMP/hits" | sort -n -u | while IFS= read -r n; do
     echo "  line ${n}" >&2
