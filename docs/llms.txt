@@ -4,15 +4,15 @@
 
 ## Docs
 
-- [first-plugin.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.1/docs/first-plugin.md): **start here**: build, run and gate a plugin in ten minutes
-- [doctrine.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.1/docs/doctrine.md): the deterministic/LLM boundary
-- [runtime-spec.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.1/docs/runtime-spec.md): manifest fields, retry/timeout/abort semantics, run artifacts
-- [derive-dont-store.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.1/docs/derive-dont-store.md): why there is no snapshot store, diff engine or resource cache, and what `ttl_hours` plus one overwritten file does instead
-- [needs-llm-contract.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.1/docs/needs-llm-contract.md): the LLM handoff protocol
-- [plugin-authoring.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.1/docs/plugin-authoring.md): writing and testing plugins
-- [scheduler-recipe.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.1/docs/scheduler-recipe.md): running `advance` on a fifteen-minute tick under systemd, launchd or cron, with every scheduler fact cited to the page it came from
+- [first-plugin.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.2/docs/first-plugin.md): **start here**: build, run and gate a plugin in ten minutes
+- [doctrine.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.2/docs/doctrine.md): the deterministic/LLM boundary
+- [runtime-spec.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.2/docs/runtime-spec.md): manifest fields, retry/timeout/abort semantics, run artifacts
+- [derive-dont-store.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.2/docs/derive-dont-store.md): why there is no snapshot store, diff engine or resource cache, and what `ttl_hours` plus one overwritten file does instead
+- [needs-llm-contract.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.2/docs/needs-llm-contract.md): the LLM handoff protocol
+- [plugin-authoring.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.2/docs/plugin-authoring.md): writing and testing plugins
+- [scheduler-recipe.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.2/docs/scheduler-recipe.md): running `advance` on a fifteen-minute tick under systemd, launchd or cron, with every scheduler fact cited to the page it came from
 
 ## Optional
 
-- [board-spec.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.1/docs/board-spec.md): the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface, so this spec is not shipped in the package and the link is absolute. (background: not needed to use warpline)
-- [why-the-gate-holds.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.1/docs/why-the-gate-holds.md): the long argument: why the gate holds, and the objections it has to survive (background: not needed to use warpline)
+- [board-spec.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.2/docs/board-spec.md): the Board: objects, Ask lifecycle, places, form, file formats. The board is a repo-only surface, so this spec is not shipped in the package and the link is absolute. (background: not needed to use warpline)
+- [why-the-gate-holds.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.4.2/docs/why-the-gate-holds.md): the long argument: why the gate holds, and the objections it has to survive (background: not needed to use warpline)
