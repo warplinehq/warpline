@@ -16,9 +16,10 @@
  *
  * The text comes from the payload file and never from `env:`. The runner
  * prints every step's `env:` block, values included, into the public log, and
- * masks only registered secrets. So the pin below refuses any expression in
- * any `env:` of this workflow, and a test that fed the step through env vars
- * would be testing the leaking shape.
+ * masks only registered secrets. So the pin below refuses, in every tracked
+ * workflow, any `env:` or `with:` expression outside a short allowlist, and a
+ * test that fed the step through env vars would be testing the leaking shape.
+ * The release workflow's scan step is run the same way, on a release payload.
  *
  * What the workflow cannot do is stated here as it is in the workflow: it runs
  * after GitHub has published the issue, so it reports a leak and cannot
@@ -38,34 +39,35 @@ const FORM = '.github/ISSUE_TEMPLATE/capability_gap.yml'
 const SCANNER = 'scripts/scan-public-surfaces.sh'
 const NAMES = '.github/private-names.txt'
 
-type Step = {
-  name?: string
-  uses?: string
-  run?: string
-  shell?: string
-  'working-directory'?: string
-  with?: Record<string, unknown>
-  env?: Record<string, unknown>
+const RELEASE = '.github/workflows/release.yml'
+
+type Vars = Record<string, unknown>
+type Step = { name?: string; uses?: string; run?: string; shell?: string; 'working-directory'?: string; with?: Vars; env?: Vars; 'continue-on-error'?: unknown }
+type Job = {
+  steps?: Step[]
+  env?: Vars
+  permissions?: unknown
   'continue-on-error'?: unknown
+  container?: string | { env?: Vars }
+  services?: Record<string, { env?: Vars }>
 }
-type Job = { steps: Step[]; env?: Record<string, unknown>; permissions?: unknown; 'continue-on-error'?: unknown }
-type Workflow = { on: Record<string, unknown>; env?: Record<string, unknown>; permissions: unknown; jobs: Record<string, Job> }
+type Workflow = { on: Record<string, unknown>; env?: Vars; permissions: unknown; jobs: Record<string, Job> }
+type FormElement = { type: string; id?: string; attributes: { label?: string; value?: string; options?: { label: string; required?: unknown }[] } }
 
-function workflow(): Workflow {
-  return Bun.YAML.parse(readFileSync(join(REPO_ROOT, WORKFLOW), 'utf8')) as Workflow
+function workflow(file = WORKFLOW): Workflow {
+  return Bun.YAML.parse(readFileSync(join(REPO_ROOT, file), 'utf8')) as Workflow
 }
 
-function scanStepOf(wf: Workflow): Step {
-  const hits = Object.values(wf.jobs)
-    .flatMap((j) => j.steps)
+function form(): { body: FormElement[] } {
+  return Bun.YAML.parse(readFileSync(join(REPO_ROOT, FORM), 'utf8')) as { body: FormElement[] }
+}
+
+function scanStepOf(file: string): Step {
+  const hits = Object.values(workflow(file).jobs)
+    .flatMap((j) => j.steps ?? [])
     .filter((s) => typeof s.run === 'string' && s.run.includes(`bash ${SCANNER}`))
-  if (hits.length !== 1) throw new Error(`could not look: ${hits.length} steps in ${WORKFLOW} run ${SCANNER}, expected 1`)
+  if (hits.length !== 1) throw new Error(`could not look: ${hits.length} steps in ${file} run ${SCANNER}, expected 1`)
   return hits[0] as Step
-}
-
-/** The scan step's `run:` string. */
-function scanStep(): string {
-  return scanStepOf(workflow()).run as string
 }
 
 /**
@@ -75,10 +77,8 @@ function scanStep(): string {
  * line numbers depend on it, and every expected line is computed from this.
  */
 function renderSubmission(answers: Record<string, string>): string {
-  type Element = { type: string; id?: string; attributes: { label?: string; options?: { label: string }[] } }
-  const form = Bun.YAML.parse(readFileSync(join(REPO_ROOT, FORM), 'utf8')) as { body: Element[] }
-  return form.body
-    .filter((e) => e.type !== 'markdown')
+  return form()
+    .body.filter((e) => e.type !== 'markdown')
     .map((e) => {
       const answer =
         e.type === 'checkboxes'
@@ -89,90 +89,111 @@ function renderSubmission(answers: Record<string, string>): string {
     .join('\n\n')
 }
 
+type Run = { status: number | null; stdout: string; stderr: string }
+
 /**
- * Runs the workflow step's own `run:` string under the shell GitHub uses for
- * `shell: bash` on Linux (pinned below), in a temp tree holding only the scanner, the committed list
- * and an `issues` event payload. The child env is PATH, TMPDIR when set (so the
- * scanner's `mktemp` stays in the test's temp root), and GITHUB_EVENT_PATH.
- * Nothing else leaks in. A `null` body is what GitHub sends for an issue with
- * no body.
+ * Runs `script` under the shell GitHub uses for `shell: bash` on Linux
+ * (pinned below), in a temp tree holding only the scanner, the name list and,
+ * when given, an event payload. `names` is the list's content, `null` for no
+ * list, and the committed list when left out. The child env is PATH, TMPDIR
+ * when set (so the scanner's `mktemp` stays in the test's temp root), and
+ * GITHUB_EVENT_PATH. Nothing else leaks in, and no `.private-terms` exists, so
+ * a holder's local run agrees with CI.
  */
-function runStep(title: string, body: string | null): { status: number | null; stdout: string; stderr: string } {
-  const run = scanStep()
+function runInTree(script: string, opts: { event?: unknown; names?: string | null; input?: string }): Run {
   const root = mkdtempSync(join(tmpdir(), 'warpline-issue-scan-'))
   try {
-    for (const rel of [SCANNER, NAMES]) {
-      mkdirSync(join(root, rel, '..'), { recursive: true })
-      copyFileSync(join(REPO_ROOT, rel), join(root, rel))
-    }
+    mkdirSync(join(root, SCANNER, '..'), { recursive: true })
+    mkdirSync(join(root, NAMES, '..'), { recursive: true })
+    copyFileSync(join(REPO_ROOT, SCANNER), join(root, SCANNER))
+    if (opts.names === undefined) copyFileSync(join(REPO_ROOT, NAMES), join(root, NAMES))
+    else if (opts.names !== null) writeFileSync(join(root, NAMES), opts.names)
     const event = join(root, 'event.json')
-    writeFileSync(event, JSON.stringify({ action: 'opened', issue: { number: 1, title, body } }))
+    writeFileSync(event, JSON.stringify(opts.event ?? {}))
     const env: Record<string, string> = { PATH: process.env.PATH ?? '/usr/bin:/bin', GITHUB_EVENT_PATH: event }
     if (process.env.TMPDIR) env.TMPDIR = process.env.TMPDIR
-    const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', run], { cwd: root, encoding: 'utf8', env })
+    const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', script], { cwd: root, encoding: 'utf8', env, input: opts.input ?? '' })
     return { status: r.status, stdout: r.stdout, stderr: r.stderr }
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
 }
 
-/**
- * Every `run:` string that holds a workflow expression. An expression inside
- * `run:` is substituted into the script before the shell sees it, so event
- * text there executes. Throws rather than returning `[]` when it could not
- * look: no files, or a file that does not parse.
- */
-// ponytail: only `run:` strings are checked, so an action input that evaluates
-// code (a `script:` input) would slip past. Check step inputs if one is added.
-function runInterpolations(files: readonly { file: string; text: string }[]): string[] {
+/** The workflow's own scan step, run against `event` as its payload. */
+function runStep(file: string, event: unknown): Run {
+  return runInTree(scanStepOf(file).run as string, { event })
+}
+
+/** An `issues` event. A `null` body is what GitHub sends for an issue with no body. */
+function runIssue(title: string, body: string | null): Run {
+  return runStep(WORKFLOW, { action: 'opened', issue: { number: 1, title, body } })
+}
+
+function runRelease(name: string, body: string): Run {
+  return runStep(RELEASE, { action: 'published', release: { name, body } })
+}
+
+/** Parses each file. Throws "could not look" on no files or one that does not parse, never `[]`. */
+function parseWorkflows(files: readonly { file: string; text: string }[]): { file: string; wf: Partial<Workflow> }[] {
   if (files.length === 0) throw new Error('could not look: no workflow files')
-  const offenders: string[] = []
-  for (const { file, text } of files) {
-    let wf: { jobs?: Record<string, { steps?: { run?: unknown }[] }> }
+  return files.map(({ file, text }) => {
     try {
-      wf = Bun.YAML.parse(text) as typeof wf
+      return { file, wf: (Bun.YAML.parse(text) ?? {}) as Partial<Workflow> }
     } catch {
       throw new Error(`could not look: ${file} does not parse`)
     }
-    for (const [job, { steps = [] }] of Object.entries(wf.jobs ?? {})) {
-      steps.forEach((s, n) => {
-        if (typeof s.run === 'string' && s.run.includes('${{')) {
-          offenders.push(`${file}: job '${job}' step ${n} interpolates an expression inside run:, where it lands in the shell; read it from the "$GITHUB_EVENT_PATH" payload with jq instead`)
-        }
-      })
-    }
-  }
-  return offenders
+  })
 }
 
 /**
- * Every `env:` value, at workflow, job or step level, that resolves event
- * text. The runner prints each step's resolved `env:` into the public log, so
- * a title or body routed through `env:` is copied there, and the log outlives
- * any edit to the text. Read the `$GITHUB_EVENT_PATH` payload instead, which
- * the runner never prints. Throws rather than returning `[]` when it could not
- * look.
+ * Every `run:` string that holds a workflow expression. An expression inside
+ * `run:` is substituted into the script before the shell sees it, so event
+ * text there executes.
  */
-function eventTextInEnv(files: readonly { file: string; text: string }[]): string[] {
-  if (files.length === 0) throw new Error('could not look: no workflow files')
-  type Env = { env?: Record<string, unknown> }
+function runInterpolations(files: readonly { file: string; text: string }[]): string[] {
+  return parseWorkflows(files).flatMap(({ file, wf }) =>
+    Object.entries(wf.jobs ?? {}).flatMap(([job, { steps = [] }]) =>
+      steps.flatMap((s, n) =>
+        typeof s.run === 'string' && s.run.includes('${{')
+          ? [`${file}: job '${job}' step ${n} interpolates an expression inside run:, where it lands in the shell; read it from the "$GITHUB_EVENT_PATH" payload with jq instead`]
+          : [],
+      ),
+    ),
+  )
+}
+
+// The only expressions an `env:` or `with:` value may hold, none of them text
+// an outsider writes. `secrets.<NAME>` is masked in the log. `github.ref` and
+// `github.sha` are refs the repository names. Tracked uses today: link-check's
+// GITHUB_TOKEN (secrets) and its cache key `lychee-${{ github.sha }}`.
+const ALLOWED_EXPR = /\$\{\{\s*(?:secrets\.[A-Za-z_][A-Za-z0-9_]*|github\.ref|github\.sha)\s*\}\}/g
+
+/**
+ * Every `env:` value (workflow, job, step, `container.env`, `services.*.env`)
+ * and every step `with:` value holding an expression outside the allowlist.
+ * The runner prints each step's resolved `env:` into the public log, and an
+ * action input can land anywhere the action puts it. Matching any `${{` rather
+ * than `github.event` catches `format(...)` and `github['event']` spellings
+ * too. Read event text from the `$GITHUB_EVENT_PATH` payload instead, which
+ * the runner never prints.
+ */
+// ponytail: a `run:` or `with: script:` elsewhere is caught above or here, but
+// an expression in `if:` or a matrix is not read. Extend the scopes if one
+// ever carries event text somewhere it is printed.
+function exprInEnvOrWith(files: readonly { file: string; text: string }[]): string[] {
   const offenders: string[] = []
-  for (const { file, text } of files) {
-    let wf: Env & { jobs?: Record<string, Env & { steps?: Env[] }> }
-    try {
-      wf = Bun.YAML.parse(text) as typeof wf
-    } catch {
-      throw new Error(`could not look: ${file} does not parse`)
-    }
-    const scopes: [string, Env][] = [['workflow', wf]]
+  for (const { file, wf } of parseWorkflows(files)) {
+    const scopes: [string, Vars | undefined][] = [['workflow env', wf.env]]
     for (const [job, j] of Object.entries(wf.jobs ?? {})) {
-      scopes.push([`job '${job}'`, j])
-      ;(j.steps ?? []).forEach((s, n) => scopes.push([`job '${job}' step ${n}`, s]))
+      scopes.push([`job '${job}' env`, j.env])
+      if (typeof j.container === 'object') scopes.push([`job '${job}' container.env`, j.container?.env])
+      for (const [svc, sv] of Object.entries(j.services ?? {})) scopes.push([`job '${job}' services.${svc}.env`, sv?.env])
+      ;(j.steps ?? []).forEach((s, n) => scopes.push([`job '${job}' step ${n} env`, s.env], [`job '${job}' step ${n} with`, s.with]))
     }
-    for (const [where, { env }] of scopes) {
-      for (const [k, v] of Object.entries(env ?? {})) {
-        if (/\$\{\{[^}]*github\.event\b/.test(String(v))) {
-          offenders.push(`${file}: ${where} env ${k} resolves event text, which the runner prints into the log; read it from the "$GITHUB_EVENT_PATH" payload with jq instead`)
+    for (const [where, vars] of scopes) {
+      for (const [k, v] of Object.entries(vars ?? {})) {
+        if (String(v).replace(ALLOWED_EXPR, '').includes('${{')) {
+          offenders.push(`${file}: ${where} ${k} holds an expression outside the allowlist; read event text from the "$GITHUB_EVENT_PATH" payload with jq instead`)
         }
       }
     }
@@ -201,14 +222,14 @@ describe('the issue scan workflow', () => {
 
   test('a neutral submission rendered from the form passes, every line scanned', () => {
     const body = renderSubmission({})
-    const r = runStep(NEUTRAL_TITLE, body)
+    const r = runIssue(NEUTRAL_TITLE, body)
     expect(r.stderr).toBe('')
     expect(r.status).toBe(0)
     expect(r.stdout).toContain(`OK: scanned ${1 + body.split('\n').length} lines`)
   })
 
   test('a private name in the title is reported at line 1 and not reproduced', () => {
-    const r = runStep(`Capability gap: ${SAMPLE}`, renderSubmission({}))
+    const r = runIssue(`Capability gap: ${SAMPLE}`, renderSubmission({}))
     expect(reproduces(r)).toBe(false)
     expect(r.status).toBe(1)
     expect(r.stderr).toContain('FAIL:')
@@ -220,7 +241,7 @@ describe('the issue scan workflow', () => {
     const body = renderSubmission({ capability: `${planted}\nA second, neutral line.` })
     const line = 1 + body.split('\n').indexOf(planted) + 1
     expect(line).toBeGreaterThan(1)
-    const r = runStep(NEUTRAL_TITLE, body)
+    const r = runIssue(NEUTRAL_TITLE, body)
     expect(reproduces(r)).toBe(false)
     expect(r.status).toBe(1)
     expect(r.stderr).toContain('FAIL:')
@@ -235,7 +256,7 @@ describe('the issue scan workflow', () => {
     const body = renderSubmission({ capability: planted })
     const line = 1 + body.split('\n').indexOf(planted) + 1
     expect(line).toBeGreaterThan(1)
-    const r = runStep(NEUTRAL_TITLE, body)
+    const r = runIssue(NEUTRAL_TITLE, body)
     expect(reproduces(r)).toBe(false)
     expect(r.status).toBe(1)
     expect(r.stderr).toContain('FAIL:')
@@ -244,7 +265,7 @@ describe('the issue scan workflow', () => {
 
   test('an issue with an empty body is still scanned on its title and never reads blind', () => {
     for (const body of [null, '']) {
-      const r = runStep(NEUTRAL_TITLE, body)
+      const r = runIssue(NEUTRAL_TITLE, body)
       expect(r.stderr).not.toContain('blind:')
       expect(r.status).toBe(0)
       expect(r.stdout).toContain('OK: scanned 2 lines')
@@ -255,7 +276,7 @@ describe('the issue scan workflow', () => {
   // satisfy nor break them.
   const wf = workflow()
   const jobs = Object.values(wf.jobs)
-  const steps = jobs.flatMap((j) => j.steps)
+  const steps = jobs.flatMap((j) => j.steps ?? [])
 
   test('runs when an issue is opened or edited, and on nothing else', () => {
     expect(Object.keys(wf.on)).toEqual(['issues'])
@@ -272,14 +293,16 @@ describe('the issue scan workflow', () => {
     for (const x of [...jobs, ...steps]) expect(x['continue-on-error']).toBeUndefined()
   })
 
-  // `runStep` runs the step as `bash --noprofile --norc -eo pipefail`, which is
-  // what the runner does for `shell: bash`. With no `shell:` the runner uses
+  // `runInTree` runs the step as `bash --noprofile --norc -eo pipefail`, which
+  // is what the runner does for `shell: bash`. With no `shell:` the runner uses
   // `bash -e` without pipefail, so a jq failure would hand the scanner an
   // empty read; and a `working-directory:` would move the scanner's path.
-  test('the scan step runs under shell: bash from the checkout root', () => {
-    const step = scanStepOf(wf)
-    expect(step.shell).toBe('bash')
-    expect(step['working-directory']).toBeUndefined()
+  test('both scan steps, issue and release, run under shell: bash from the checkout root', () => {
+    for (const file of [WORKFLOW, RELEASE]) {
+      const step = scanStepOf(file)
+      expect(step.shell).toBe('bash')
+      expect(step['working-directory']).toBeUndefined()
+    }
   })
 
   // Nothing here pushes, so the job token has no reason to sit in .git/config.
@@ -292,9 +315,7 @@ describe('the issue scan workflow', () => {
   // The reporter's one attestation. `required: true` on a checkbox option sits
   // under the option itself, where no `validations:` check above can see it.
   test("the form's public-safe attestation stays required", () => {
-    type Element = { type: string; id?: string; attributes: { options?: { required?: unknown }[] } }
-    const form = Bun.YAML.parse(readFileSync(join(REPO_ROOT, FORM), 'utf8')) as { body: Element[] }
-    const box = form.body.filter((e) => e.type === 'checkboxes' && e.id === 'public-safe')
+    const box = form().body.filter((e) => e.type === 'checkboxes' && e.id === 'public-safe')
     expect(box.length).toBe(1)
     const options = box[0]?.attributes.options ?? []
     expect(options.length).toBeGreaterThan(0)
@@ -314,9 +335,7 @@ describe('the issue scan workflow', () => {
       .replace(/#\s*/g, '')
       .replace(/\s+/g, ' ')
     expect(header).toContain('notifies no maintainer')
-    type Element = { type: string; attributes: { value?: string } }
-    const form = Bun.YAML.parse(readFileSync(join(REPO_ROOT, FORM), 'utf8')) as { body: Element[] }
-    const warning = form.body.find((e) => e.type === 'markdown')?.attributes.value?.replace(/\s+/g, ' ') ?? ''
+    const warning = form().body.find((e) => e.type === 'markdown')?.attributes.value?.replace(/\s+/g, ' ') ?? ''
     expect(warning).toContain('notifies no maintainer')
   })
 
@@ -325,15 +344,42 @@ describe('the issue scan workflow', () => {
     expect(uses.length).toBeGreaterThan(0)
     for (const u of uses) expect(u).toMatch(/@[0-9a-f]{40}$/)
   })
+})
 
-  // The runner prints each step's resolved `env:` into the public log. Any
-  // expression here, at any level, is event text on its way to that log, and
-  // this workflow needs none: the scan reads the payload file.
-  test('no env: at workflow, job or step level holds an expression', () => {
-    const envs = [wf.env, ...jobs.map((j) => j.env), ...steps.map((s) => s.env)]
-    const offenders = envs.flatMap((e) => Object.entries(e ?? {})).filter(([, v]) => String(v).includes('${{'))
-    expect(offenders.map(([k]) => k)).toEqual([])
+// The release scan: the same scanner, fed the release title and body from the
+// `release` payload before the upload makes the version permanent.
+describe('the release scan step', () => {
+  test('a neutral release passes, every line scanned', () => {
+    const body = 'Adds a reviewer wait between steps.\n\n- one fix\n- another'
+    const r = runRelease('v9.9.9', body)
+    expect(r.stderr).toBe('')
+    expect(r.status).toBe(0)
+    expect(r.stdout).toContain(`OK: scanned ${1 + body.split('\n').length} lines`)
   })
+
+  test('a private name in the release title is reported at line 1 and not reproduced', () => {
+    const r = runRelease(`v9.9.9 ${SAMPLE}`, 'A neutral body.')
+    expect(reproduces(r)).toBe(false)
+    expect(r.status).toBe(1)
+    expect(r.stderr).toContain('FAIL:')
+    expect(r.stderr.split('\n')).toContain('  line 1')
+  })
+})
+
+// The scanner's own refusals to read green while blind.
+describe('the scanner says blind rather than passing', () => {
+  const scan = (input: string, names?: string | null) => runInTree(`bash ${SCANNER}`, { input, names })
+  for (const [label, input, names] of [
+    ['empty stdin', '', undefined],
+    ['an absent committed list', 'neutral text', null],
+    ['a committed list of only comments and blanks', 'neutral text', '# nothing\n\n'],
+  ] as const) {
+    test(`on ${label}`, () => {
+      const r = scan(input, names)
+      expect(r.status).toBe(1)
+      expect(r.stderr).toContain('blind:')
+    })
+  }
 })
 
 describe('every tracked workflow keeps event text out of the shell and the log', () => {
@@ -359,40 +405,54 @@ describe('every tracked workflow keeps event text out of the shell and the log',
     expect(runInterpolations(fixture('echo "$ISSUE_TITLE"'))).toEqual([])
   })
 
-  test('no tracked workflow routes event text through env:', () => {
-    expect(eventTextInEnv(tracked)).toEqual([])
+  test('no tracked workflow puts a non-allowlisted expression in env: or with:', () => {
+    expect(exprInEnvOrWith(tracked)).toEqual([])
   })
 
-  test('event text in env: is reported at every level, and other expressions are not', () => {
+  test('env:/with: expressions are reported at every level, evasive spellings included, and allowlisted ones are not', () => {
     const text = [
       'on: issues',
       'env:',
-      '  A: ${{ github.event.issue.title }}',
+      "  A: ${{ format('{0}', github.event.issue.title) }}",
       'jobs:',
       '  x:',
       '    runs-on: ubuntu-latest',
-      '    env:',
-      '      B: ${{ github.event.issue.body }}',
-      '    steps:',
-      '      - run: true',
+      '    container:',
+      '      image: alpine',
+      '      env:',
+      '        B: ${{ github.event.issue.body }}',
+      '    services:',
+      '      db:',
+      '        image: postgres',
       '        env:',
-      '          C: ${{ github.event.release.name }}',
+      '          C: ${{ github.head_ref }}',
+      '    env:',
+      "      D: ${{ github['event'].release.name }}",
+      '    steps:',
+      '      - uses: actions/github-script@v7',
+      '        with:',
+      '          script: console.log(${{ toJSON(github.event.issue.title) }})',
+      '          key: lychee-${{ github.sha }}',
+      '        env:',
       '          TOKEN: ${{ secrets.GITHUB_TOKEN }}',
       '          REF: ${{ github.ref }}',
+      '          E: ${{ secrets.X }}-${{ github.event.issue.title }}',
     ].join('\n')
-    expect(eventTextInEnv([{ file: 'fixture.yml', text }]).length).toBe(3)
+    const found = exprInEnvOrWith([{ file: 'fixture.yml', text }])
+    expect(found.map((f) => f.split(' holds')[0])).toEqual([
+      'fixture.yml: workflow env A',
+      "fixture.yml: job 'x' env D",
+      "fixture.yml: job 'x' container.env B",
+      "fixture.yml: job 'x' services.db.env C",
+      "fixture.yml: job 'x' step 0 env E",
+      "fixture.yml: job 'x' step 0 with script",
+    ])
   })
 
-  test('env: checks "could not look" on no files or an unparsable one', () => {
-    expect(() => eventTextInEnv([])).toThrow(/could not look/)
-    expect(() => eventTextInEnv([{ file: 'bad.yml', text: 'jobs: [unclosed' }])).toThrow(/could not look: bad.yml does not parse/)
-  })
-
-  test('a workflow that does not parse is "could not look"', () => {
-    expect(() => runInterpolations([{ file: 'bad.yml', text: 'jobs: [unclosed' }])).toThrow(/could not look: bad.yml does not parse/)
-  })
-
-  test('no workflow files is "could not look"', () => {
-    expect(() => runInterpolations([])).toThrow(/could not look/)
+  test('both checks are "could not look" on no files or an unparsable one', () => {
+    for (const check of [runInterpolations, exprInEnvOrWith]) {
+      expect(() => check([])).toThrow(/could not look/)
+      expect(() => check([{ file: 'bad.yml', text: 'jobs: [unclosed' }])).toThrow(/could not look: bad.yml does not parse/)
+    }
   })
 })
