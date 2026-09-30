@@ -1505,8 +1505,13 @@ a missing value rather than as a rejected file.
 ### `plugin_runs`
 
 A record keyed by plugin name, holding the last run of each. It is what the
-TTL staleness check reads, and the only field that check consults is
-`last_run_at`.
+TTL staleness check reads. That check consults `last_run_at`, and `status` for
+one rule: an entry recording `failed` is not fresh, so the plugin is due at the
+next advance whatever its `ttl_hours`. `ttl_hours` is how long a success stays
+fresh, and a timeout is recorded `failed` like any other failure. `partial`,
+`skipped` and `gated` entries age by `last_run_at` as before. A plugin that
+keeps failing is therefore retried on every advance; the scheduler's interval
+is the backoff.
 
 The dueness evaluator is a second reader of the record, and the first reader for
 which `status` decides whether a plugin runs at all. A plugin holding a declared
@@ -1592,8 +1597,8 @@ Four limitations, written down here rather than left for a reader to discover.
 **The latch, and how it clears.** The gate reads the LAST run's status, so a
 dependency whose last run failed gates its dependents until it runs again
 without failing. In the ordinary case it self-clears on the very next advance:
-the dependency is due, it runs, its entry is overwritten, and its dependents are
-due again. It cannot be cleared by hand — `warpline run` invokes one plugin
+a failed run is never fresh (§ `plugin_runs`), so the dependency is due, it
+runs, its entry is overwritten, and its dependents are due again. It cannot be cleared by hand — `warpline run` invokes one plugin
 standalone and writes no run record, so a manual run of the failed dependency
 leaves the latch exactly where it was. It is genuinely sticky only for a
 dependency that has stopped being scheduled at all: a `manual` dependency nobody

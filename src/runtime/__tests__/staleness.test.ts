@@ -220,4 +220,29 @@ describe('isPluginFresh', () => {
     expect(result.fresh).toBe(false)
     expect(result.reason).toBe('forced')
   })
+
+  // #29: ttl_hours is how long a SUCCESS stays fresh. A timeout is recorded
+  // 'failed' too, so a failed attempt inside the window must not suppress the
+  // retry until the TTL lapses.
+  test('Test 8: last run failed inside the TTL window → fresh: false', () => {
+    const manifest = makeManifest({ name: 'test-plugin', ttl_hours: 6, dependencies: [] })
+    const state = makeState({
+      'test-plugin': { last_run_at: hoursAgo(1), status: 'failed' },
+    })
+
+    const result = isPluginFresh('test-plugin', manifest, state)
+
+    expect(result.fresh).toBe(false)
+    expect(result.reason).toBe('last run failed')
+  })
+
+  test('Test 8b: partial and gated runs inside the TTL window stay fresh', () => {
+    const manifest = makeManifest({ name: 'test-plugin', ttl_hours: 6, dependencies: [] })
+    for (const status of ['partial', 'gated'] as const) {
+      const state = makeState({
+        'test-plugin': { last_run_at: hoursAgo(1), status } as never,
+      })
+      expect(isPluginFresh('test-plugin', manifest, state).fresh).toBe(true)
+    }
+  })
 })

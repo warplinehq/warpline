@@ -381,19 +381,26 @@ describe('a gate applied after its producer ran again does not re-arm the bytes 
     expect(firedCount()).toBe(0)
 
     const applied = await approve([PRODUCER])
-    // No force: the producer is fresh and does not run.
-    await advance()
 
     // Before the fix the stale apply wrote the parked run and the gate's
     // `success` over the later failure. The hold lifted, the bytes read
     // current, and the approval, whose fingerprint still matched, fired. What
     // stops it now is that the entry is never re-stamped to the parked run.
-    expect(firedCount()).toBe(0)
     const kept = (await readState()).plugin_runs[PRODUCER]!
     expect(kept.run_id).toBe(second.run_id)
     expect(kept.status).toBe('failed')
     expect(kept.last_output?.run_id).toBe(first.run_id)
     expect(applied.code).toBe(1)
     expect(applied.stderr).toContain('ran again after this result was parked')
+
+    // No force. A failed run is not fresh (#29), so the producer runs again
+    // and fails again. A re-stamped `success` would have been fresh, skipped
+    // the producer and released the consumer.
+    const third = await advance()
+    expect(firedCount()).toBe(0)
+    const after = (await readState()).plugin_runs[PRODUCER]!
+    expect(after.run_id).toBe(third.run_id)
+    expect(after.status).toBe('failed')
+    expect(after.last_output?.run_id).toBe(first.run_id)
   })
 })

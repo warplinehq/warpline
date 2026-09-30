@@ -64,14 +64,16 @@ documented with the rest in [runtime-spec.md](runtime-spec.md).
 The second is the freshness predicate, `isPluginFresh` in
 [staleness.ts](https://github.com/warplinehq/warpline/blob/main/src/runtime/staleness.ts).
 On every advance, the engine asks it one question per plugin: is this result
-still fresh, or should the plugin run? The answer comes from four checks, in
-this order. A plugin that's never run, runs. A plugin whose declared dependency
+still fresh, or should the plugin run? The answer comes from five checks, in
+this order. A plugin that's never run, runs. A plugin whose last run failed
+runs too. The window only counts from a run that worked, and a timeout is a
+failure. A plugin whose declared dependency
 ran more recently than it did also runs, even inside its own window. That's
 what lets a refreshed upstream pull its downstream through. A plugin inside its
 `ttl_hours` window is skipped. Anything else runs.
 
 That's the whole mechanism. Nothing is kept. "Is it worth recomputing" is
-answered from two timestamps the engine already writes, and the plugin's
+answered from two timestamps and a status the engine already writes, and the plugin's
 result is derived fresh from the real source every time it's asked for.
 
 The runtime holds itself to the same rule. The run log keeps one entry per

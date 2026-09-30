@@ -597,7 +597,7 @@ describe('plan ≡ what a run would attempt', () => {
    *
    * Nine exclusions and eight reasons, not nine of each: `failed-producer`
    * exists to arm the dependency gate on the plugin below it and is itself
-   * excluded as `fresh`, which `fresh-one` already covers. It adds a plugin
+   * excluded as `manual`, which `manual-one` already covers. It adds a plugin
    * without adding a reason.
    *
    * `recover-producer` / `dep-recovers` are the OTHER half of the dependency
@@ -627,7 +627,8 @@ describe('plan ≡ what a run would attempt', () => {
     await writePlugin(home, 'manual-one', { ...tolerant, autonomy_level: 'manual' })
     await writePlugin(home, 'fresh-one', tolerant)
     await writePlugin(home, 'locked-one', tolerant)
-    await writePlugin(home, 'failed-producer', tolerant)
+    // `manual`, so no advance runs it: see its seeded row below.
+    await writePlugin(home, 'failed-producer', { ...tolerant, autonomy_level: 'manual' })
     // TWO side-effecting plugins, and no .session-approval file exists anywhere
     // in this fixture — see constraint 1 above. NEITHER is granted, and neither
     // may be. They are here for different reasons: `gated-one` is the approval
@@ -678,18 +679,18 @@ describe('plan ≡ what a run would attempt', () => {
       {
         // 1 hour into a 24h TTL — hours from the boundary in both directions.
         'fresh-one': { last_run_at: new Date(Date.now() - 3_600_000).toISOString(), status: 'success' },
-        // Seeded failed AND fresh, and the freshness is load-bearing rather
-        // than decorative. The harness runs the plan model first and a real
-        // advance second (constraint 2). A seeded-failed producer that were DUE
-        // would be attempted by that advance, its autonomous arm would overwrite
-        // the seeded status with a success, and by `dep-failed-one`'s level the
-        // gate would read a success — while the plan side, having run first,
-        // read the failure. Freshness keys on the timestamp and ignores the
-        // status (`staleness.ts`), and the freshness arm writes a run-log row
-        // and no run record, so this row survives the advance byte for byte.
+        // Seeded failed, on a `manual` plugin, and the `manual` is load-bearing
+        // rather than decorative. The harness runs the plan model first and a
+        // real advance second (constraint 2). A seeded-failed producer that were
+        // DUE would be attempted by that advance, its autonomous arm would
+        // overwrite the seeded status with a success, and by `dep-failed-one`'s
+        // level the gate would read a success — while the plan side, having run
+        // first, read the failure. TTL cannot hold it still: a failed run is
+        // never fresh (#29, `staleness.ts`). The `manual` arm runs nothing and
+        // writes no run record, so this row survives the advance byte for byte.
         //
-        // What the freshness does NOT buy any more is the fixture's blindness to
-        // the gate. `recover-producer` below is stale on purpose and does
+        // What holding it still does NOT buy any more is the fixture's blindness
+        // to the gate. `recover-producer` below is due on purpose and does
         // re-run; this pair is here for Test 2's reason coverage, which needs a
         // `dependency_failed` verdict to read and needs the producer to hold
         // still while it reads it.
@@ -697,7 +698,8 @@ describe('plan ≡ what a run would attempt', () => {
           last_run_at: new Date(Date.now() - 3_600_000).toISOString(),
           status: 'failed',
         },
-        // Failed and STALE — 25 hours into a 24h TTL. Plan finds it due, the
+        // Failed, so due whatever its age (#29); 25 hours old from before a
+        // failed run could be fresh, and harmless either way. Plan finds it due, the
         // advance re-runs it, `SUCCESS_HANDLER` overwrites the seeded status,
         // and `dep-recovers` is ungated on both surfaces. The clearing this
         // fixture used to be built to avoid is the thing it now proves.
@@ -768,7 +770,7 @@ describe('plan ≡ what a run would attempt', () => {
 
     // Ten excluded plugins, NINE distinct not-due reason codes — every arm of
     // evaluatePlugin's chain, in chain order. `failed-producer` shares
-    // `fresh-one`'s reason, which is why ten exclusions span nine codes.
+    // `manual-one`'s reason, which is why ten exclusions span nine codes.
     //
     // The title says every guard and now means it. It used to span eight of the
     // nine with `denied` absent, so a chain that dropped the denial arm
@@ -779,7 +781,7 @@ describe('plan ≡ what a run would attempt', () => {
     expect(reason('supervised-one')).toBe('headless_supervised')
     expect(reason('manual-one')).toBe('manual')
     expect(reason('fresh-one')).toBe('fresh')
-    expect(reason('failed-producer')).toBe('fresh')
+    expect(reason('failed-producer')).toBe('manual')
     expect(reason('locked-one')).toBe('task_locked')
     // The ordering assertion, and it belongs HERE rather than in Test 1. Set
     // equality is satisfied either way: a consumer gated as `unapproved` is
@@ -878,8 +880,8 @@ describe('plan ≡ what a run would attempt', () => {
   })
 
   /**
-   * The second hop, on both surfaces. `held-root` is seeded failed and fresh,
-   * so it holds still and holds `held-mid` back. `held-mid` writes no record,
+   * The second hop, on both surfaces. `held-root` is seeded failed and is
+   * `manual`, so it holds still and holds `held-mid` back. `held-mid` writes no record,
    * so the preview can only hold `held-tail` back from its own verdict about
    * `held-mid`, which is what the advance does from its own skip. A preview
    * that read the state document alone would report `held-tail` due, the
@@ -887,13 +889,14 @@ describe('plan ≡ what a run would attempt', () => {
    */
   test('Test 2c: a dependency held back by a failed dependency holds back its dependent in both', async () => {
     const tolerant = { min_tier: 'suspended' }
-    await writePlugin(home, 'held-root', tolerant)
+    await writePlugin(home, 'held-root', { ...tolerant, autonomy_level: 'manual' })
     await writePlugin(home, 'held-mid', { ...tolerant, dependencies: ['held-root'] })
     await writePlugin(home, 'held-tail', { ...tolerant, dependencies: ['held-mid'] })
     for (const name of ['held-root', 'held-mid', 'held-tail']) await writeHandler(home, name)
 
     await writeState(home, {
-      // 1 hour into a 24h TTL: fresh, so the advance does not re-run it.
+      // `manual`, so the advance does not re-run it. TTL no longer could: a
+      // failed run is never fresh (#29).
       'held-root': { last_run_at: new Date(Date.now() - 3_600_000).toISOString(), status: 'failed' },
     })
 

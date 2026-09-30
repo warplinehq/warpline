@@ -4,6 +4,7 @@
  * Two gates decide whether a plugin is due:
  *   1. Dependency invalidation — an upstream plugin re-ran since this one did.
  *   2. TTL expiry — the last successful run is older than `ttl_hours`.
+ * A plugin whose last run failed is due regardless: the window is a success's.
  * `--force` overrides both.
  *
  * READ THIS BEFORE CHANGING THE GATE ORDER. An earlier design ANDed the two:
@@ -47,9 +48,10 @@ export interface FreshnessResult {
  * Order (see the gate-ordering note in the module docstring):
  *   1. force            → run
  *   2. never run        → run
- *   3. dependency newer → run (fires inside the TTL window too)
- *   4. within ttl_hours → skip
- *   5. otherwise        → run (TTL expired)
+ *   3. last run failed  → run
+ *   4. dependency newer → run (fires inside the TTL window too)
+ *   5. within ttl_hours → skip
+ *   6. otherwise        → run (TTL expired)
  *
  * Returns { fresh: false } when the plugin SHOULD run.
  * Returns { fresh: true }  when the plugin SHOULD be skipped.
@@ -77,6 +79,14 @@ export function isPluginFresh(
   const pluginState = state.plugin_runs?.[pluginName]
   if (!pluginState?.last_run_at) {
     return { fresh: false, reason: 'never run' }
+  }
+
+  // -- Last run failed --
+  // `ttl_hours` is how long a SUCCESS stays fresh. The engine stamps
+  // `last_run_at` on a failed run too (a timeout included), so without this a
+  // failure would suppress its own retry until the TTL lapsed (#29).
+  if (pluginState.status === 'failed') {
+    return { fresh: false, reason: 'last run failed' }
   }
 
   const lastRunMs = new Date(pluginState.last_run_at).getTime()
