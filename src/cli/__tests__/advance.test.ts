@@ -1335,3 +1335,49 @@ describe('the interrupt handler does not outlive the call', () => {
     expect(SIGNALS.map((sig) => process.listenerCount(sig))).toEqual(before)
   })
 })
+
+describe('#31: WARPLINE_TRIGGER lands on the run log', () => {
+  /** The single advance run log in the home (the JSONL day files are not it). */
+  async function runLogs(): Promise<Array<Record<string, unknown>>> {
+    const files = (await readdir(home.runsDir)).filter((f) => f.endsWith('.json'))
+    return Promise.all(files.map(async (f) => JSON.parse(await readFile(join(home.runsDir, f), 'utf-8'))))
+  }
+
+  async function withTrigger<T>(value: string | undefined, fn: () => Promise<T>): Promise<T> {
+    const saved = process.env.WARPLINE_TRIGGER
+    if (value === undefined) delete process.env.WARPLINE_TRIGGER
+    else process.env.WARPLINE_TRIGGER = value
+    try {
+      return await fn()
+    } finally {
+      if (saved === undefined) delete process.env.WARPLINE_TRIGGER
+      else process.env.WARPLINE_TRIGGER = saved
+    }
+  }
+
+  test('scheduled is recorded as scheduled', async () => {
+    await writePlugin(home, 'due-one')
+    const { code } = await withTrigger('scheduled', () => capture(() => main(['advance'])))
+    expect(code).toBe(0)
+    const logs = await runLogs()
+    expect(logs).toHaveLength(1)
+    expect(logs[0]!.trigger).toBe('scheduled')
+  })
+
+  test('unset leaves no trigger key at all', async () => {
+    await writePlugin(home, 'due-one')
+    const { code } = await withTrigger(undefined, () => capture(() => main(['advance'])))
+    expect(code).toBe(0)
+    const logs = await runLogs()
+    expect(logs).toHaveLength(1)
+    expect(Object.hasOwn(logs[0]!, 'trigger')).toBe(false)
+  })
+
+  test('an unknown value refuses with 1 before anything runs', async () => {
+    await writePlugin(home, 'due-one')
+    const { code, stderr } = await withTrigger('schedueld', () => capture(() => main(['advance'])))
+    expect(code).toBe(1)
+    expect(stderr).toContain("WARPLINE_TRIGGER='schedueld'")
+    expect(await runLogs()).toHaveLength(0)
+  })
+})

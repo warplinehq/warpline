@@ -642,7 +642,8 @@ sibling — the transcript file belongs to the direct-invocation path.
   "resumed_from": null,
   "summary": "Engine run <run-id>: 3 plugins processed",
   "plugin_entries": [],
-  "manifests_loaded": 3
+  "manifests_loaded": 3,
+  "trigger": "scheduled"
 }
 ```
 
@@ -690,6 +691,18 @@ the ordinary gated path. The field is optional, never defaulted, so a run log
 written before it existed reads back as absent rather than as a run that loaded
 nothing — and zero, which is the signature of the empty root, keeps meaning
 exactly that.
+
+`trigger` is what started the advance, `scheduled` or `manual`, as the host
+asserts it. warpline cannot tell a scheduler tick from a person at a terminal,
+so it records only what it is told: `AdvanceOptions.trigger` from a library
+host, or the `WARPLINE_TRIGGER` env var from `warpline advance`, which refuses
+any other value with `1` before running (§ 11). The field is optional and never
+defaulted, like `manifests_loaded`: absent means nobody said, which is also what
+every run log written before the field existed reads as. A host counting
+consecutive scheduled advances counts only `"trigger": "scheduled"`, so a hand
+run cannot stand in for a tick that failed or never fired. It is not
+`RunArtifact.user_initiated`, which sits on the single-plugin `run` verb's
+artifact and says nothing about an advance.
 
 Before 0.2 this document also declared six fields nothing here ever wrote and no
 document ever described: an optional aggregate metrics object, a per-mode array
@@ -2600,7 +2613,9 @@ them.
 positional argument are both refused by the argument parser: the command writes
 the parser's message plus its usage text to stderr, writes nothing to stdout,
 and exits `1` without running anything. `warpline advance strict` — the typo for
-`--strict` — is refused there rather than quietly running non-strict. That is a
+`--strict` — is refused there rather than quietly running non-strict. A
+`WARPLINE_TRIGGER` that is set to anything but `scheduled` or `manual` is refused
+the same way, with one line naming the value. That is a
 cause of `1` in its own right and this table is a closed enumeration, so it is
 named here rather than left for a monitor to discover as "a plugin failed". What
 tells them apart from outside: under `--json` a plugin failure, an empty plugin

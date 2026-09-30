@@ -135,6 +135,8 @@ import { runAdvance } from '../runtime/engine.js'
 import type { AdvanceResult, PluginFsmState } from '../runtime/engine.js'
 import { advanceCounts, advanceExitCode } from '../runtime/exit-codes.js'
 import { isInteractive } from './prompt.js'
+import { RunTriggerSchema } from '../schemas/run-log.js'
+import type { RunTrigger } from '../schemas/run-log.js'
 
 export const USAGE = `Usage: warpline advance [--strict] [--json]
 
@@ -401,6 +403,24 @@ export async function run(
       return 1
     }
 
+    // What started this advance (#31), for the run log. Warpline cannot tell a
+    // scheduler from a person, so the unit file says so. Refused on a value
+    // it does not know, like a mistyped flag: recording nothing would make a
+    // typo'd `scheduled` indistinguishable from a host that never said.
+    const rawTrigger = process.env.WARPLINE_TRIGGER
+    let trigger: RunTrigger | undefined
+    if (rawTrigger) {
+      const parsed = RunTriggerSchema.safeParse(rawTrigger)
+      if (!parsed.success) {
+        process.stderr.write(
+          `warpline advance: WARPLINE_TRIGGER='${rawTrigger}' is not one of ` +
+            `${RunTriggerSchema.options.join(', ')}. Nothing ran.\n`,
+        )
+        return 1
+      }
+      trigger = parsed.data
+    }
+
     // Above `runAdvance` because there is nowhere below it this could sit: home
     // resolution creates nothing, and the home comes into existence at whichever
     // writer reaches its own recursive mkdir first — the run log's or the
@@ -427,7 +447,7 @@ export async function run(
 
     let result: AdvanceResult
     try {
-      result = await runAdvance({})
+      result = await runAdvance({ trigger })
     } catch (err) {
       // Contention on the run lock is not a new exit code — the single catch
       // below already reports `75` for any throw out of the advance, and this is

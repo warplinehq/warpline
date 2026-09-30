@@ -104,7 +104,7 @@ import {
 import { ENGINE_STATE_MAX_SCHEMA_VERSION } from '../schemas/engine-state.js'
 import type { Approval, Denial, EngineState, PendingGate, PluginRun } from '../schemas/engine-state.js'
 import { writeRunLog, pruneRunLogs } from './run-log-store.js'
-import type { RefusalReason, RunLog } from '../schemas/run-log.js'
+import type { RefusalReason, RunLog, RunTrigger } from '../schemas/run-log.js'
 import type { SkillResult, StoredOutputRecord, StoredSkillResult } from '../schemas/skill-result.js'
 import {
   emitBoardEvent,
@@ -240,6 +240,12 @@ export interface AdvanceOptions {
    * before any write.
    */
   pluginsDir?: string
+  /**
+   * What started this advance, recorded on its run log as `trigger`. The host
+   * asserts it, since warpline cannot tell a scheduler from a person. Omitted,
+   * the run log carries no `trigger` at all.
+   */
+  trigger?: RunTrigger
   /** Override state file path (for testing — full path to engine-state.json) */
   stateDir?: string
   /**
@@ -2434,6 +2440,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     onPluginStart,
     onPluginEnd,
     onRunFailure,
+    trigger,
   } = options
 
   // The destructure above defaults only `undefined`, so an empty string
@@ -3792,6 +3799,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // an entry — deriving this from `plugin_entries.length` would under-report
       // on this runtime's ordinary path.
       manifests_loaded: plugins.size,
+      ...(trigger !== undefined ? { trigger } : {}),
     }
 
     await mkdir(runsDir, { recursive: true })

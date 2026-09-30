@@ -30,6 +30,8 @@ if (!process.env.WARPLINE_HOME) {
 // outright: the default then follows the temp home above, and a test that
 // wants the var sets it itself.
 delete process.env.WARPLINE_PLUGINS_DIR
+// Same for the advance trigger: a run log's `trigger` is asserted by tests.
+delete process.env.WARPLINE_TRIGGER
 
 /**
  * bunfig.toml's `[test] timeout` key is silently ignored (bun 1.3.11) — setting

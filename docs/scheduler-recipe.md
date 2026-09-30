@@ -48,6 +48,15 @@ were still fresh, parked at a gate, or ran to completion. The last of those is
 the worst case on this page: the advance did work, and it did it somewhere
 else. Set the variable.
 
+Set two more beside it. `WARPLINE_TRIGGER=scheduled` marks every run log this
+unit writes as `"trigger": "scheduled"`, so an advance you run by hand (unset,
+or `WARPLINE_TRIGGER=manual`) can never be counted as a scheduled tick. warpline
+cannot tell a scheduler from a person, so this is the only place that answer
+comes from, and a value other than `scheduled` or `manual` is refused with `1`
+before anything runs. If your plugins live outside the home, set
+`WARPLINE_PLUGINS_DIR` too, and set it in the shell you run `approve` from as
+well (`runtime-spec.md` § 1).
+
 Skip this step and everything after it verifies the wrong fleet.
 
 ### 2. Then pin the interpreter path
@@ -106,6 +115,7 @@ Description=Warpline advance
 [Service]
 Type=oneshot
 Environment=WARPLINE_HOME=/home/operator/.warpline
+Environment=WARPLINE_TRIGGER=scheduled
 ExecStart=/usr/bin/node /opt/warpline/node_modules/.bin/warpline advance
 ```
 
@@ -211,7 +221,10 @@ confirm the next tick is where you expect it.
     <string>advance</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>WARPLINE_HOME</key><string>/Users/operator/.warpline</string></dict>
+  <dict>
+    <key>WARPLINE_HOME</key><string>/Users/operator/.warpline</string>
+    <key>WARPLINE_TRIGGER</key><string>scheduled</string>
+  </dict>
   <key>WorkingDirectory</key><string>/Users/operator</string>
   <key>StartInterval</key><integer>900</integer>
   <key>StandardOutPath</key><string>/Users/operator/.warpline/logs/advance.out</string>
@@ -291,6 +304,7 @@ Use the ones above.
 
 ```crontab
 WARPLINE_HOME=/home/operator/.warpline
+WARPLINE_TRIGGER=scheduled
 PATH=/usr/local/bin:/usr/bin:/bin
 */15 * * * * /usr/bin/node /opt/warpline/node_modules/.bin/warpline advance >> /home/operator/.warpline/logs/advance.log 2>&1
 ```

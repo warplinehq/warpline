@@ -111,6 +111,10 @@ export type PluginLogEntry = z.infer<typeof PluginLogEntrySchema>
  * A host that wants run telemetry derives it from `plugin_entries` — the only
  * accumulated field here, and the one the engine actually fills.
  */
+/** What started an advance. The host asserts it; see `RunLog.trigger`. */
+export const RunTriggerSchema = z.enum(['scheduled', 'manual'])
+export type RunTrigger = z.infer<typeof RunTriggerSchema>
+
 export const RunLogSchema = z.object({
   run_id: z.string(),
   started_at: z.string(),
@@ -138,6 +142,16 @@ export const RunLogSchema = z.object({
    * loaded.
    */
   manifests_loaded: z.number().int().optional(),
+  /**
+   * What started this advance, as the host asserts it: `scheduled` for a
+   * scheduler tick, `manual` for a person running it by hand (#31). Warpline
+   * cannot detect either, so it records only what it is told: from
+   * `AdvanceOptions.trigger`, or `WARPLINE_TRIGGER` on the CLI. Absent when
+   * nobody said, and never defaulted, for the same reason as
+   * `manifests_loaded`: a record that predates the field, or a host that does
+   * not set it, must not read as either answer.
+   */
+  trigger: RunTriggerSchema.optional(),
 })
 
 export type RunLog = z.infer<typeof RunLogSchema>
