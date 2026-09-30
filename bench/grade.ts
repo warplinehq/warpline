@@ -13,14 +13,19 @@
  * the fact in a shape a reader can use is what the benchmark is about.
  */
 import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, resolve, sep } from 'node:path'
+import { z } from 'zod'
 import { GRADED_KEYS, type GradedKey } from './record.js'
 import { GRADED_PATHS } from './seed.js'
 
 export interface GradeResult {
-  /** Per-artifact outcome, one entry per graded key. */
-  paths: Record<GradedKey, boolean>
-  /** True only when every one of the four passed. */
+  /**
+   * Per-check outcome. The public grader keys it by the four artifact names; a
+   * check-driven grader keys it by opaque `check-N` ids, whose mapping to what
+   * they grade lives with whoever wrote the checks.
+   */
+  paths: Record<string, boolean>
+  /** True only when every check passed. */
   passed: boolean
 }
 
@@ -107,4 +112,109 @@ export function gradeHome(home: string): GradeResult {
   }
 
   return { paths, passed: GRADED_KEYS.every((key) => paths[key]) }
+}
+
+/**
+ * The closed predicate set a check can apply to a parsed value.
+ *
+ * Closed on purpose. Each predicate asks whether a fact is present in a usable
+ * shape, and none of them can ask what the text says or how long it is, so a
+ * configuration cannot smuggle an arm-specific wording into the grade.
+ */
+export const GradePredicateSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('exists') }),
+  z.strictObject({ kind: z.literal('integer_gte'), n: z.number().int() }),
+  z.strictObject({ kind: z.literal('non_empty_array') }),
+  z.strictObject({ kind: z.literal('non_empty_string') }),
+  z.strictObject({ kind: z.literal('keyset_equals'), keys: z.array(z.string()).min(1) }),
+])
+export type GradePredicate = z.infer<typeof GradePredicateSchema>
+
+/**
+ * One check: an opaque id, a file under the home's `graded/` directory, a JSON
+ * pointer into it, and the predicate the pointed-at value must satisfy.
+ */
+export const GradeCheckSchema = z.strictObject({
+  id: z.string().regex(/^check-\d+$/),
+  path: z
+    .string()
+    .refine(
+      (path) => path.startsWith('graded/') && !isAbsolute(path) && !path.split(/[\\/]/).includes('..'),
+      'a check path must sit under graded/ and must not climb out of it',
+    ),
+  pointer: z.string().refine((pointer) => pointer === '' || pointer.startsWith('/'), "a JSON pointer is '' or starts with '/'"),
+  predicate: GradePredicateSchema,
+})
+export type GradeCheck = z.infer<typeof GradeCheckSchema>
+
+const NOT_FOUND = { found: false, value: undefined } as const
+
+/**
+ * Resolve an RFC 6901 JSON pointer. `''` is the whole document. Each token is
+ * unescaped `~1` before `~0`, so `~01` reads the key `~1` and not `/`. An array
+ * token must be a canonical index inside the array; an object token must be an
+ * own key. Anything else is not found, never a throw.
+ */
+export function resolvePointer(value: unknown, pointer: string): { found: boolean; value: unknown } {
+  if (pointer === '') return { found: true, value }
+  if (!pointer.startsWith('/')) return NOT_FOUND
+  let current = value
+  for (const raw of pointer.slice(1).split('/')) {
+    const token = raw.replaceAll('~1', '/').replaceAll('~0', '~')
+    if (Array.isArray(current)) {
+      if (!/^(0|[1-9]\d*)$/.test(token) || Number(token) >= current.length) return NOT_FOUND
+      current = current[Number(token)]
+    } else if (isRecord(current) && Object.hasOwn(current, token)) {
+      current = current[token]
+    } else {
+      return NOT_FOUND
+    }
+  }
+  return { found: true, value: current }
+}
+
+function applyPredicate(predicate: GradePredicate, value: unknown): boolean {
+  switch (predicate.kind) {
+    case 'exists':
+      return true
+    case 'integer_gte':
+      return Number.isInteger(value) && (value as number) >= predicate.n
+    case 'non_empty_array':
+      return Array.isArray(value) && value.length > 0
+    case 'non_empty_string':
+    case 'keyset_equals':
+      throw new Error(`grade: predicate '${predicate.kind}' is not wired yet`)
+  }
+}
+
+/**
+ * Grade a home against a list of checks. Arm-blind in the same way `gradeHome`
+ * is: it reads files and nothing else, and the checks name ids and paths, never
+ * whatever produced them.
+ *
+ * A malformed check, an empty list and a duplicate id are configuration errors
+ * and throw. A missing file, invalid JSON or a pointer that finds nothing is an
+ * artifact that failed, and grades false.
+ */
+export function gradeWithChecks(home: string, checks: readonly GradeCheck[]): GradeResult {
+  if (checks.length === 0) throw new Error('grade: a grader with no checks graded nothing')
+  const root = resolve(home) + sep
+  const paths: Record<string, boolean> = {}
+  for (const raw of checks) {
+    const check = GradeCheckSchema.parse(raw)
+    if (Object.hasOwn(paths, check.id)) throw new Error(`grade: check id '${check.id}' appears twice`)
+    const file = resolve(join(home, check.path))
+    if (!file.startsWith(root)) throw new Error(`grade: check '${check.id}' resolves outside the home`)
+    if (!existsSync(file)) {
+      paths[check.id] = false
+      continue
+    }
+    if (check.predicate.kind === 'exists' && check.pointer === '') {
+      paths[check.id] = true
+      continue
+    }
+    const hit = resolvePointer(readJson(file), check.pointer)
+    paths[check.id] = hit.found && hit.value !== undefined && applyPredicate(check.predicate, hit.value)
+  }
+  return { paths, passed: Object.values(paths).every(Boolean) }
 }

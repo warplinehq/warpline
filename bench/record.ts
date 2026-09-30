@@ -52,17 +52,36 @@ export const TokenClassesSchema = z.object({
 export type TokenClasses = z.infer<typeof TokenClassesSchema>
 
 /**
- * Per-artifact grading outcome. The `satisfies` clause is the drift guard: a
- * key added to or removed from the graded set fails the typecheck here rather
- * than producing a record whose `graded` map silently disagrees with the
- * grader's.
+ * The public run's grading outcome: the four artifacts, keyed by name. The
+ * `satisfies` clause is the drift guard: a key added to or removed from the
+ * graded set fails the typecheck here rather than producing a record whose
+ * `graded` map silently disagrees with the grader's. Strict, so a fifth key is
+ * refused rather than stripped.
  */
-const GradedSchema = z.object({
+const PublicGradedSchema = z.strictObject({
   'announce-fanout': z.boolean(),
   'daily-digest': z.boolean(),
   'draft-writer': z.boolean(),
   'metrics-rollup': z.boolean(),
 } satisfies Record<GradedKey, z.ZodBoolean>)
+
+/**
+ * A private run's grading outcome: opaque check ids, never names. What each id
+ * grades is recorded outside this repository, so a published record carries
+ * the outcome without the thing it was an outcome of.
+ */
+const PrivateGradedSchema = z
+  .record(z.string().regex(/^check-\d+$/), z.boolean())
+  .refine((graded) => Object.keys(graded).length > 0, 'a private graded map with no checks graded nothing')
+
+/**
+ * Per-check grading outcome: either the public four artifacts or a private
+ * run's check ids. Both branches are constrained, and that is the point of
+ * them. An unconstrained union accepts an empty map, which is a run that
+ * graded nothing, and silently strips a map that mixes the two key spaces
+ * down to whichever branch it happens to match.
+ */
+const GradedSchema = z.union([PublicGradedSchema, PrivateGradedSchema])
 
 export const BenchRunRecordSchema = z.object({
   /** Which arm produced this run. Three, closed — an unknown arm is a bug, not data. */
@@ -100,6 +119,12 @@ export const BenchRunRecordSchema = z.object({
   package_version: z.string(),
   claude_cli_version: z.string(),
   model_id: z.string(),
+  /** The digest of the snapshot this run's home was seeded from. Absent on a run seeded from the tracked fixtures. */
+  snapshot_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** The salted public commitment of the method this run was made under. Absent on a run whose method is tracked in full. */
+  prereg_commitment: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** How many outbound attempts the session sandbox blocked. Absent on a run that had no sandbox to count them. */
+  outbound_blocked: z.number().int().nonnegative().optional(),
 })
 
 export type BenchRunRecord = z.infer<typeof BenchRunRecordSchema>
