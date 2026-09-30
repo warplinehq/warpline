@@ -49,6 +49,7 @@ import {
   buildClaudeEnv,
   buildConsumerPrompt,
   CONSUMER_PLUGIN_PATH,
+  ISOLATION_SETTINGS,
   parseClaudeResult,
   PINNED_MODEL,
   resolveDisposition,
@@ -92,6 +93,7 @@ import {
   withArmHome,
   writeSessionGrant,
 } from '../../bench/seed.js'
+import { withFakeClaude } from '../../test-utils/fake-claude.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
@@ -949,6 +951,55 @@ describe('bench harness — the three sessions, built', () => {
   })
 })
 
+/** One JSON line per event, the way a stream-json session prints them. */
+function jsonl(...events: unknown[]): string {
+  return `${events.map((event) => JSON.stringify(event)).join('\n')}\n`
+}
+
+/** The init event an isolated session prints: no web tool, no server. */
+const STREAM_INIT = { type: 'system', subtype: 'init', tools: ['Bash', 'Read'], mcp_servers: [] }
+
+/** The model reaching for the network through its shell. */
+const BASH_USE = {
+  type: 'assistant',
+  message: {
+    content: [{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'curl -sS https://example.com' } }],
+  },
+  parent_tool_use_id: null,
+}
+
+/** The sandbox refusing it, in the shape the probes recorded. */
+const BLOCKED_TOOL_RESULT = {
+  type: 'user',
+  message: {
+    content: [
+      {
+        type: 'tool_result',
+        tool_use_id: 'tu1',
+        content:
+          'curl: (56) CONNECT tunnel failed, response 403 <sandbox_violations>deny network-outbound example.com:443</sandbox_violations>',
+      },
+    ],
+  },
+}
+
+/** The last line: the same keys the whole-stdout result carries. */
+const STREAM_RESULT = {
+  type: 'result',
+  subtype: 'success',
+  is_error: false,
+  duration_ms: 1200,
+  num_turns: 2,
+  usage: {
+    input_tokens: 1,
+    output_tokens: 2,
+    cache_creation_input_tokens: 3,
+    cache_read_input_tokens: 4,
+    server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+  },
+  modelUsage: { 'claude-opus-5': {} },
+}
+
 /**
  * The private run's network isolation, and the public argv it must not move.
  *
@@ -996,6 +1047,46 @@ describe('bench harness — the isolated sessions', () => {
       '--plugin-dir',
       join(REPO_ROOT, 'plugin'),
     ])
+  })
+
+  test('an isolated control session is flagged, audited and counted end to end through a real spawn', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'warpline-bench-isolated-'))
+    try {
+      await withFakeClaude({ stdout: jsonl(STREAM_INIT, BASH_USE, BLOCKED_TOOL_RESULT, STREAM_RESULT) }, async () => {
+        const run = await runClaudeArm('agent-from-scratch', home, 'reply ok', {
+          isolated: true,
+          grade: () => ({ paths: { 'check-1': true }, passed: true }),
+        })
+
+        // The spawn really happened: the fake wrote what it was handed.
+        const argvPath = join(home, 'argv.txt')
+        expect(existsSync(argvPath)).toBe(true)
+        const lines = readFileSync(argvPath, 'utf8').replace(/\n$/, '').split('\n')
+        for (const expected of [
+          'stream-json',
+          '--verbose',
+          '--settings',
+          JSON.stringify(ISOLATION_SETTINGS),
+          '--strict-mcp-config',
+          '--disallowedTools',
+          'WebFetch',
+          'WebSearch',
+          'RemoteTrigger',
+        ]) {
+          expect(lines).toContain(expected)
+        }
+        expect(lines).not.toContain('json')
+        // Last, because the flag is variadic and would swallow anything after it.
+        expect(lines.slice(-3)).toEqual(['WebFetch', 'WebSearch', 'RemoteTrigger'])
+
+        expect(run.outbound_blocked).toBe(1)
+        expect(run.parsed.tokens).toEqual({ input: 1, output: 2, cache_creation: 3, cache_read: 4 })
+        expect(run.parsed.model_id).toBe('claude-opus-5')
+        expect(run.grade.passed).toBe(true)
+      })
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
   })
 })
 

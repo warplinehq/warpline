@@ -419,6 +419,59 @@ export const SESSION_BUDGET = '5'
 export const CONSUMER_PLUGIN_PATH = join(REPO_ROOT, 'plugin')
 
 /**
+ * The sandbox every isolated session runs in: on, no host allowed, no escape
+ * hatch for an unsandboxed command, and the filesystem left exactly as a public
+ * session has it.
+ *
+ * A tracked constant and not a config value, so no configuration can weaken it
+ * and the pre-registration freezes one reviewable literal.
+ */
+export const ISOLATION_SETTINGS = {
+  sandbox: {
+    enabled: true,
+    filesystem: { disabled: true },
+    network: { allowedDomains: [], strictAllowlist: true },
+    allowUnsandboxedCommands: false,
+  },
+} as const
+
+/**
+ * The in-process tools an isolated session has removed by bare name. The
+ * sandbox covers subprocesses and not these, and a bare name removes the tool
+ * from the session outright, which a command-text pattern does not.
+ */
+export const ISOLATION_REMOVED_TOOLS = ['WebFetch', 'WebSearch', 'RemoteTrigger'] as const
+
+/** How a session is run. Both default to the public behaviour. */
+export interface SessionOptions {
+  /** Run in the network sandbox, with the web tools removed and the transcript audited. */
+  isolated?: boolean
+  /** The warpline home the session is handed, when it is not its working directory. */
+  warplineHome?: string
+}
+
+/**
+ * The session's network isolation did not hold, so this run measures nothing.
+ *
+ * Thrown rather than counted, on the `ApiUnavailableError` precedent: a session
+ * that had a web tool, a server or a provider-side web request is a different
+ * experiment from the one the set measures, and no record value says so. The
+ * message names the arm and, at most, a tool name from the removed list. It
+ * never quotes the transcript.
+ */
+export class OutboundConfigError extends Error {
+  readonly arm: ArmId
+  readonly what: string
+
+  constructor(arm: ArmId, what: string) {
+    super(`${arm}: the session's network isolation failed (${what}); this run measures nothing`)
+    this.name = 'OutboundConfigError'
+    this.arm = arm
+    this.what = what
+  }
+}
+
+/**
  * One argv for every session, so the two control arms and the consumer cannot
  * drift into two setups reported as one number.
  *
@@ -452,13 +505,22 @@ export const CONSUMER_PLUGIN_PATH = join(REPO_ROOT, 'plugin')
  *
  * No turn cap is passed because the pinned tool version has no such flag —
  * confirmed absent from its own help — so the spend ceiling is the only one.
+ *
+ * `isolated` adds network isolation, identically for all three sessions, and
+ * leaves the public argv byte-for-byte as it was. The sandbox settings block
+ * every subprocess's network whatever the binary, so an absolute path or an
+ * interpreter gets no further than `curl` does. The in-process web and remote
+ * tools are removed by name, because the sandbox does not cover them. And the
+ * output becomes a stream of JSON lines, because the transcript is the only
+ * place a blocked attempt is visible at all: the result object reads `success`
+ * either way.
  */
-export function buildClaudeArgv(session: SessionId, promptBody: string): string[] {
+export function buildClaudeArgv(session: SessionId, promptBody: string, isolated = false): string[] {
   const argv = [
     '--print',
     promptBody,
     '--output-format',
-    'json',
+    isolated ? 'stream-json' : 'json',
     '--model',
     PINNED_MODEL,
     '--max-budget-usd',
@@ -473,10 +535,14 @@ export function buildClaudeArgv(session: SessionId, promptBody: string): string[
     '--strict-mcp-config',
     '--no-session-persistence',
   ]
+  if (isolated) argv.push('--verbose', '--settings', JSON.stringify(ISOLATION_SETTINGS))
   // The warpline arm only. The runtime's own skills are the reference
   // implementation of the thing being measured, and handing them to a control
   // arm would be handing a control the answer.
   if (session === 'consumer') argv.push('--plugin-dir', CONSUMER_PLUGIN_PATH)
+  // Last, because the flag is variadic: anything after it would be read as one
+  // more tool name.
+  if (isolated) argv.push('--disallowedTools', ...ISOLATION_REMOVED_TOOLS)
   return argv
 }
 
@@ -491,8 +557,8 @@ export function buildClaudeArgv(session: SessionId, promptBody: string): string[
  * the absence a property of the code instead of a property of whatever shell
  * the harness happened to be launched from.
  */
-export function buildClaudeEnv(home: string): Record<string, string | undefined> {
-  const env: Record<string, string | undefined> = { ...process.env, WARPLINE_HOME: home }
+export function buildClaudeEnv(home: string, warplineHome: string = home): Record<string, string | undefined> {
+  const env: Record<string, string | undefined> = { ...process.env, WARPLINE_HOME: warplineHome }
   delete env.CLAUDE_CONFIG_DIR
   return env
 }
@@ -523,6 +589,8 @@ export interface SessionOutcome {
   parsed: ParsedClaudeResult
   /** Float milliseconds the harness measured, not the duration the tool reported. */
   wall_clock_ms: number
+  /** Sandbox-blocked attempts in an isolated session's transcript; null when not isolated. */
+  outbound_blocked: number | null
 }
 
 /** Which arm a session's failure is named for. A consumer failure is warpline's. */
@@ -550,13 +618,19 @@ function armOf(session: SessionId): ArmId {
  * the throw and nowhere else. It never reaches a record, and `parseRecord`
  * strips a `stderr` key anyway.
  */
-async function runSession(session: SessionId, home: string, promptBody: string): Promise<SessionOutcome> {
+async function runSession(
+  session: SessionId,
+  home: string,
+  promptBody: string,
+  options: SessionOptions = {},
+): Promise<SessionOutcome> {
+  const isolated = options.isolated === true
   const started = performance.now()
   let diagnostics = ''
   const stdout = await new Promise<string>((settle, fail) => {
-    const child = spawn('claude', buildClaudeArgv(session, promptBody), {
+    const child = spawn('claude', buildClaudeArgv(session, promptBody, isolated), {
       cwd: home,
-      env: buildClaudeEnv(home),
+      env: buildClaudeEnv(home, options.warplineHome ?? home),
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let collected = ''
@@ -574,20 +648,136 @@ async function runSession(session: SessionId, home: string, promptBody: string):
     child.on('close', () => settle(collected))
   })
   const wall_clock_ms = performance.now() - started
+  return { ...parseSessionStdout(stdout, armOf(session), isolated, diagnostics), wall_clock_ms }
+}
 
-  let raw: unknown
-  try {
-    raw = JSON.parse(stdout)
-  } catch {
-    // The tail and not the head: a tool that logged its way to a crash puts the
-    // reason last. An empty capture is stated rather than rendered as silence.
-    throw new Error(
-      `${armOf(session)}: the session printed no result object, so this run measures nothing — it wrote: ${
-        diagnostics.slice(-2000).trim() || '(nothing on either stream)'
-      }`,
-    )
+/** The one refusal for a session that printed nothing parseable as a result. */
+function noResultObject(arm: ArmId, diagnostics: string): Error {
+  // The tail and not the head: a tool that logged its way to a crash puts the
+  // reason last. An empty capture is stated rather than rendered as silence.
+  return new Error(
+    `${arm}: the session printed no result object, so this run measures nothing — it wrote: ${
+      diagnostics.slice(-2000).trim() || '(nothing on either stream)'
+    }`,
+  )
+}
+
+/**
+ * Parse what one session printed.
+ *
+ * Not isolated: the whole of standard output is one result object, exactly as
+ * the public method reads it, and `outbound_blocked` is null.
+ *
+ * Isolated: one JSON event per line. The LAST result event goes through
+ * `parseClaudeResult` unchanged and FIRST, so a provider outage still reads as
+ * one before anything else is asked of the run. The events before it are the
+ * transcript, and they are audited. Only the count leaves this function; the
+ * transcript itself is discarded here and never reaches a record.
+ */
+export function parseSessionStdout(
+  stdout: string,
+  arm: ArmId,
+  isolated: boolean,
+  diagnostics: string,
+): { parsed: ParsedClaudeResult; outbound_blocked: number | null } {
+  if (!isolated) {
+    let raw: unknown
+    try {
+      raw = JSON.parse(stdout)
+    } catch {
+      throw noResultObject(arm, diagnostics)
+    }
+    return { parsed: parseClaudeResult(raw, arm), outbound_blocked: null }
   }
-  return { parsed: parseClaudeResult(raw, armOf(session)), wall_clock_ms }
+
+  const events: unknown[] = []
+  for (const line of stdout.split('\n')) {
+    if (line.trim() === '') continue
+    try {
+      events.push(JSON.parse(line))
+    } catch {
+      throw new Error(`${arm}: the session printed a line that is not JSON, so this run measures nothing`)
+    }
+  }
+  let resultIndex = -1
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (asRecord(events[i]).type === 'result') {
+      resultIndex = i
+      break
+    }
+  }
+  if (resultIndex === -1) throw noResultObject(arm, diagnostics)
+
+  const resultEvent = events[resultIndex]
+  const parsed = parseClaudeResult(resultEvent, arm)
+  return { parsed, outbound_blocked: auditTranscript(events.slice(0, resultIndex), resultEvent, arm) }
+}
+
+/** The tag the sandbox writes into a tool result it refused. */
+const SANDBOX_VIOLATION_TAG = '<sandbox_violations>'
+
+/** A message's content blocks, or none. */
+function contentBlocks(event: Record<string, unknown>): Record<string, unknown>[] {
+  const content = asRecord(event.message).content
+  return Array.isArray(content) ? content.map(asRecord) : []
+}
+
+/** A tool result's content as text: a string, or the joined text of text blocks. */
+function toolResultText(block: Record<string, unknown>): string {
+  const content = block.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map(asRecord)
+    .map((part) => (typeof part.text === 'string' ? part.text : ''))
+    .join('')
+}
+
+/**
+ * Audit one isolated session's transcript: throw when the isolation was not in
+ * place, and otherwise count the attempts the sandbox blocked.
+ *
+ * A configuration failure is a removed tool in the init tool list, a configured
+ * MCP server, a removed tool or any MCP tool actually used — by the session or
+ * by a subagent, whose tool uses appear in the same stream — or a provider-side
+ * web request. Each throws `OutboundConfigError`. A blocked attempt is the arm's
+ * own behaviour under the rule every arm shares, so the run is kept and counted.
+ */
+export function auditTranscript(events: readonly unknown[], result: unknown, arm: ArmId): number {
+  const removed: ReadonlySet<string> = new Set(ISOLATION_REMOVED_TOOLS)
+  let blocked = 0
+  for (const raw of events) {
+    const event = asRecord(raw)
+    if (event.type === 'system' && event.subtype === 'init') {
+      const tools = Array.isArray(event.tools) ? event.tools : []
+      for (const name of ISOLATION_REMOVED_TOOLS) {
+        if (tools.includes(name)) throw new OutboundConfigError(arm, `the tool list carries ${name}`)
+      }
+      if (Array.isArray(event.mcp_servers) && event.mcp_servers.length > 0) {
+        throw new OutboundConfigError(arm, 'an MCP server is configured')
+      }
+    }
+    if (event.type === 'assistant') {
+      for (const block of contentBlocks(event)) {
+        if (block.type !== 'tool_use' || typeof block.name !== 'string') continue
+        if (removed.has(block.name)) throw new OutboundConfigError(arm, `a ${block.name} call was made`)
+        if (block.name.startsWith('mcp__')) throw new OutboundConfigError(arm, 'an MCP tool was called')
+      }
+    }
+    if (event.type === 'user') {
+      for (const block of contentBlocks(event)) {
+        if (block.type === 'tool_result' && toolResultText(block).includes(SANDBOX_VIOLATION_TAG)) blocked++
+      }
+    }
+  }
+  const serverTools = asRecord(asRecord(asRecord(result).usage).server_tool_use)
+  for (const key of ['web_search_requests', 'web_fetch_requests']) {
+    const count = serverTools[key]
+    if (typeof count === 'number' && count > 0) {
+      throw new OutboundConfigError(arm, 'the provider reports web requests')
+    }
+  }
+  return blocked
 }
 
 /**
@@ -621,10 +811,15 @@ export interface ClaudeArmResult extends SessionOutcome {
  * It does NOT seed: it is handed a home the control recipe already prepared,
  * and it asserts that home rather than trusting it.
  */
-export async function runClaudeArm(arm: ControlArmId, home: string, promptBody: string): Promise<ClaudeArmResult> {
+export async function runClaudeArm(
+  arm: ControlArmId,
+  home: string,
+  promptBody: string,
+  options: SessionOptions & { grade?: (home: string) => GradeResult } = {},
+): Promise<ClaudeArmResult> {
   assertControlHome(arm, home)
-  const outcome = await runSession(arm, home, promptBody)
-  return { ...outcome, grade: gradeHome(home) }
+  const outcome = await runSession(arm, home, promptBody, options)
+  return { ...outcome, grade: (options.grade ?? gradeHome)(home) }
 }
 
 /** The consumer session's own segment, timed separately from the advance. */
