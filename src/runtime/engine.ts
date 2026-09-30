@@ -243,7 +243,8 @@ export interface AdvanceOptions {
   /**
    * What started this advance, recorded on its run log as `trigger`. The host
    * asserts it, since warpline cannot tell a scheduler from a person. Omitted,
-   * the run log carries no `trigger` at all.
+   * the run log carries no `trigger` at all. `WARPLINE_TRIGGER` is read by the
+   * `warpline advance` CLI only, never here: a library host passes this.
    */
   trigger?: RunTrigger
   /** Override state file path (for testing — full path to engine-state.json) */

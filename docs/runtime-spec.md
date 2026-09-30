@@ -711,7 +711,9 @@ exactly that.
 asserts it. warpline cannot tell a scheduler tick from a person at a terminal,
 so it records only what it is told: `AdvanceOptions.trigger` from a library
 host, or the `WARPLINE_TRIGGER` env var from `warpline advance`, which refuses
-any other value with `1` before running (§ 11). The field is optional and never
+any other value with `1` before running (§ 11). The env var is read by the CLI
+alone: `runAdvance()` never reads it, so a library host that sets it and not the
+option records no `trigger`. The field is optional and never
 defaulted, like `manifests_loaded`: absent means nobody said, which is also what
 every run log written before the field existed reads as. A host counting
 consecutive scheduled advances counts only `"trigger": "scheduled"`, so a hand

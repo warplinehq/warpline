@@ -51,9 +51,11 @@ else. Set the variable.
 Set two more beside it. `WARPLINE_TRIGGER=scheduled` marks every run log this
 unit writes as `"trigger": "scheduled"`, so an advance you run by hand (unset,
 or `WARPLINE_TRIGGER=manual`) can never be counted as a scheduled tick. warpline
-cannot tell a scheduler from a person, so this is the only place that answer
-comes from, and a value other than `scheduled` or `manual` is refused with `1`
-before anything runs. If your plugins live outside the home, set
+cannot tell a scheduler from a person, so the unit has to say, and a value other
+than `scheduled` or `manual` is refused with `1` before anything runs. Only the
+`warpline advance` command reads this variable. A host that calls `runAdvance()`
+as a library never sees it and passes `AdvanceOptions.trigger` instead, or its
+run logs carry no `trigger` at all. If your plugins live outside the home, set
 `WARPLINE_PLUGINS_DIR` too, and set it in the shell you run `approve` from as
 well (`runtime-spec.md` § 1).
 
