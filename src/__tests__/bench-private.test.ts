@@ -21,14 +21,23 @@ import {
 } from '../../bench/grade.js'
 import { ARM_ORDER, assertControlHome, runWarplineArm, type Provenance } from '../../bench/arms.js'
 import {
+  assertEngineUnchanged,
+  assertFleetInstall,
+  assertPackageVersion,
   assertPluginsPresent,
+  assertPrivatePreconditions,
   assertPrivateSeam,
+  assertSnapshotDigest,
+  COMMITMENTS_FILE,
+  ENGINE_BASE_SHA,
   flipAutonomy,
   loadPrivateConfig,
   materializeCopyMap,
+  parseCommitments,
   PrivateConfigSchema,
   privatePluginsDir,
   privateWarplineHome,
+  readPreregCommitment,
   scrubEnv,
   seedPrivateControl,
   seedPrivateHome,
@@ -431,7 +440,7 @@ export const runsDir = (): string => join(warplineHomeDir(), 'runs')
     links: { from: fleet('node_modules'), packages: ['zod'] },
     pathsSeam: { module: '.fleet/scripts/shared/paths.ts', exports: ['STATE_DIR', 'warplineHomeDir', 'runsDir'] },
     envScrub: ['FLEET_STATE_DIR'],
-    fleetInstall: fleet('node_modules/warpline'),
+    fleetInstall: fleet('node_modules/warpline/package.json'),
     prompts: { agent: join(root, 'prompts/agent.md'), consumer: join(root, 'prompts/consumer.md') },
     notes: join(root, 'notes.md'),
     copyMap: [{ plugin: 'alpha', from: '.fleet/state/alpha.json', to: 'graded/check-1.json' }],
@@ -872,5 +881,233 @@ describe('private iteration', () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true })
     }
+  })
+})
+
+/** The published 0.5.0 release commit, tagged v0.5.0: one runtime JSDoc comment behind the pinned base. */
+const RELEASE_SHA = '5751a53c45be402535f396e3b8b8a8b0d1f69a42'
+
+/** git in a fixture repository, never reading the operator's own configuration. */
+function fixtureGit(root: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+  }).trim()
+}
+
+/** Write `files` under `root` and commit them, returning the new HEAD. */
+function commitFixture(root: string, files: Record<string, string>, message: string): string {
+  writeTree(root, files)
+  fixtureGit(root, ['add', '-A'])
+  fixtureGit(root, [
+    '-c',
+    'user.name=fixture',
+    '-c',
+    'user.email=fixture@example.invalid',
+    '-c',
+    'commit.gpgsign=false',
+    'commit',
+    '-q',
+    '-m',
+    message,
+  ])
+  return fixtureGit(root, ['rev-parse', 'HEAD'])
+}
+
+/**
+ * A repository shaped like this one where it matters to the engine check: a
+ * manifest at 0.5.0, a build config, runtime source, a top-level and a nested
+ * test dir, and an empty commitments ledger, all committed as `base`. The
+ * caller removes `root`.
+ */
+function engineFixture(): { root: string; base: string } {
+  const root = mkdtempSync(join(tmpdir(), 'bench-private-engine-'))
+  fixtureGit(root, ['init', '-q'])
+  const base = commitFixture(
+    root,
+    {
+      'package.json': '{ "version": "0.5.0" }\n',
+      'tsconfig.build.json': '{ "exclude": ["src/**/__tests__/**"] }\n',
+      'src/runtime/x.ts': 'export const x = 1\n',
+      'src/__tests__/y.test.ts': "test('y', () => {})\n",
+      'src/runtime/__tests__/z.test.ts': "test('z', () => {})\n",
+      [COMMITMENTS_FILE]: '',
+    },
+    'the pinned engine',
+  )
+  return { root, base }
+}
+
+/** Run `fn` over a fresh engine fixture, removed afterwards whatever happens. */
+function withEngine(fn: (fixture: { root: string; base: string }) => void): void {
+  const fixture = engineFixture()
+  try {
+    fn(fixture)
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true })
+  }
+}
+
+const PREREG_HEX = 'a'.repeat(64)
+const RESULTS_HEX = 'b'.repeat(64)
+
+describe('private preconditions', () => {
+  test('a change under either test dir passes the engine check, and a runtime change refuses naming the base', () => {
+    withEngine(({ root, base }) => {
+      commitFixture(root, { 'src/__tests__/y.test.ts': "test('y', () => { expect(1).toBe(1) })\n" }, 'a top-level test')
+      expect(() => assertEngineUnchanged(root, base)).not.toThrow()
+      commitFixture(root, { 'src/runtime/__tests__/z.test.ts': "test('z', () => { expect(2).toBe(2) })\n" }, 'a nested test')
+      expect(() => assertEngineUnchanged(root, base)).not.toThrow()
+      commitFixture(root, { 'src/runtime/x.ts': 'export const x = 2\n' }, 'the engine moves')
+      expect(() => assertEngineUnchanged(root, base)).toThrow(new RegExp(`engine under test changed since ${base.slice(0, 7)}`))
+    })
+  })
+
+  test('a committed package manifest change refuses the engine check', () => {
+    withEngine(({ root, base }) => {
+      commitFixture(root, { 'package.json': '{ "version": "0.5.0", "main": "x" }\n' }, 'the manifest moves')
+      expect(() => assertEngineUnchanged(root, base)).toThrow(/engine under test changed/)
+    })
+  })
+
+  test('a committed build config change refuses the engine check', () => {
+    withEngine(({ root, base }) => {
+      commitFixture(root, { 'tsconfig.build.json': '{ "exclude": [] }\n' }, 'the build config moves')
+      expect(() => assertEngineUnchanged(root, base)).toThrow(/engine under test changed/)
+    })
+  })
+
+  test('an unreachable base is red, never clean', () => {
+    withEngine(({ root }) => {
+      expect(() => assertEngineUnchanged(root, 'f'.repeat(40))).toThrow(/could not compare/)
+    })
+  })
+
+  /**
+   * The one test in this file that reads this repository's own history.
+   *
+   * The red control comes first: the published release commit is one runtime
+   * JSDoc comment behind the pinned base, so the check must refuse from it. That
+   * proves the pathspec reaches the real engine source, and that a wrong or
+   * unreachable base cannot pass silently.
+   *
+   * The HEAD check holds only while the measured set is open. Once a results
+   * entry is committed the set is closed and the engine may move again, so the
+   * HEAD check is skipped: the file's one deliberate vacuous branch. Unscoped, it
+   * would be true today and false for good after the first engine commit that
+   * follows the set. If it goes red while the set is open, a commit touched the
+   * engine under test: that stops the private set, and it is not a test to fix.
+   */
+  test('the real repository passes the engine check while the private set is open', () => {
+    expect(() => assertEngineUnchanged(REPO_ROOT, RELEASE_SHA)).toThrow(/engine under test changed/)
+    const entries = parseCommitments(readFileSync(join(REPO_ROOT, COMMITMENTS_FILE), 'utf8'))
+    if (entries.some((entry) => entry.kind === 'results')) {
+      expect(entries.filter((entry) => entry.kind === 'results')).toHaveLength(1)
+      return
+    }
+    expect(() => assertEngineUnchanged(REPO_ROOT)).not.toThrow()
+    expect(ENGINE_BASE_SHA).toMatch(/^3363c0c/)
+  })
+
+  test('the package version passes at 0.5.0 and refuses at 0.4.0', () => {
+    withEngine(({ root }) => {
+      expect(() => assertPackageVersion(root)).not.toThrow()
+      writeFileSync(join(root, 'package.json'), '{ "version": "0.4.0" }\n')
+      expect(() => assertPackageVersion(root)).toThrow(/0\.4\.0/)
+    })
+  })
+
+  test('the fleet install refuses 0.4.0 naming both versions, passes 0.5.0, and refuses a missing file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'bench-private-install-'))
+    try {
+      const path = join(dir, 'package.json')
+      writeFileSync(path, '{ "version": "0.4.0" }')
+      let message = ''
+      try {
+        assertFleetInstall(path)
+      } catch (error) {
+        message = (error as Error).message
+      }
+      expect(message).toContain('0.4.0')
+      expect(message).toContain('0.5.0')
+      writeFileSync(path, '{ "version": "0.5.0" }')
+      expect(() => assertFleetInstall(path)).not.toThrow()
+      expect(() => assertFleetInstall(join(dir, 'absent.json'))).toThrow()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('the prereg commitment is read only from a ledger holding exactly one prereg and no results', () => {
+    withEngine(({ root }) => {
+      const ledger = (text: string): void => writeFileSync(join(root, COMMITMENTS_FILE), text)
+      expect(() => readPreregCommitment(root)).toThrow(/no prereg commitment/)
+      ledger(`prereg ${PREREG_HEX}\n`)
+      expect(readPreregCommitment(root)).toBe(PREREG_HEX)
+      ledger(`prereg ${PREREG_HEX}\nprereg ${'c'.repeat(64)}\n`)
+      expect(() => readPreregCommitment(root)).toThrow(/2 prereg/)
+      ledger(`prereg ${PREREG_HEX}\nresults ${RESULTS_HEX}\n`)
+      expect(() => readPreregCommitment(root)).toThrow(/results commitment already exists/)
+      ledger(`prereg ${PREREG_HEX} \n`)
+      expect(() => readPreregCommitment(root)).toThrow(/line 1 is not a prereg or results entry/)
+    })
+  })
+
+  test('the snapshot digest must be frozen in the config and must match the snapshot', async () => {
+    await withFleet(async ({ config }) => {
+      const digest = await takeSnapshot(config)
+      expect(() => assertSnapshotDigest(config)).toThrow(/no frozen snapshot digest/)
+      config.snapshot.sha256 = digest
+      expect(assertSnapshotDigest(config)).toBe(digest)
+      const file = join(config.snapshot.dir, '.fleet/state/input.json')
+      const bytes = readFileSync(file)
+      bytes[0] = bytes[0]! ^ 1
+      writeFileSync(file, bytes)
+      const moved = treeDigest(config.snapshot.dir)
+      let message = ''
+      try {
+        assertSnapshotDigest(config)
+      } catch (error) {
+        message = (error as Error).message
+      }
+      expect(message).toContain(digest.slice(0, 7))
+      expect(message).toContain(moved.slice(0, 7))
+    })
+  })
+
+  /** A frozen snapshot, a 0.5.0 fleet install and an engine fixture: every precondition met but the ledger. */
+  async function validSetup(
+    fn: (setup: { config: PrivateConfig; root: string; base: string; digest: string }) => void,
+  ): Promise<void> {
+    await withFleet(async ({ config }) => {
+      const digest = await takeSnapshot(config)
+      config.snapshot.sha256 = digest
+      withEngine(({ root, base }) => fn({ config, root, base, digest }))
+    })
+  }
+
+  test('a missing plugin is named first, even when the digest is wrong too', async () => {
+    await validSetup(({ config, root, base }) => {
+      rmSync(join(config.snapshot.dir, '.fleet/plugins/beta'), { recursive: true })
+      config.snapshot.sha256 = 'f'.repeat(64)
+      expect(() => assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base })).toThrow(/'beta' is absent/)
+    })
+  })
+
+  test('with every precondition met it returns the digest and the prereg commitment', async () => {
+    await validSetup(({ config, root, base, digest }) => {
+      commitFixture(root, { [COMMITMENTS_FILE]: `prereg ${PREREG_HEX}\n` }, 'the method is frozen')
+      expect(assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base })).toEqual({
+        snapshot_sha256: digest,
+        prereg_commitment: PREREG_HEX,
+      })
+    })
+  })
+
+  test('without a required prereg it returns the digest alone over an empty ledger', async () => {
+    await validSetup(({ config, root, base, digest }) => {
+      expect(assertPrivatePreconditions(config, root, { requirePrereg: false, engineBase: base })).toEqual({ snapshot_sha256: digest })
+    })
   })
 })

@@ -12,6 +12,7 @@
  * committed, the freeze test forbids removing it, so the format can never be
  * changed after that without the history saying so.
  */
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { copyFile, cp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
@@ -445,4 +446,150 @@ export async function seedPrivateControl(
   await mkdir(join(home, GRADED_DIR), { recursive: true })
   // A byte COPY and never a link: a link would let a measured run's edits reach the live notes.
   if (arm === 'agent-with-state') await copyFile(config.notes, join(home, NOTES_PATH))
+}
+
+/**
+ * The commit the private set's engine is pinned to.
+ *
+ * 0.5.0 was released from the commit tagged `v0.5.0`. This base is the one
+ * commit after it, which changes only a JSDoc comment in the runtime source,
+ * and `package.json` still reads 0.5.0. So the engine under test is the release
+ * plus one comment, and the private pre-registration names that difference.
+ * Moving this constant moves what every private record measures, so it moves
+ * only on a recorded operator decision.
+ */
+export const ENGINE_BASE_SHA = '3363c0c136443b2a29cf591e30315dc0ac4c1e43'
+
+/** The package version the private set measures, in this checkout and in the fleet's install. */
+export const PINNED_PACKAGE_VERSION = '0.5.0'
+
+/**
+ * What counts as the engine: the runtime source, the package manifest and the
+ * build config, and not the tests.
+ *
+ * The test exclusion is the build config's own exclude pattern, and it needs
+ * git's `glob` magic to mean the same thing there. Without it git's `**` is two
+ * plain wildcards, which cannot match zero directories, so a change under
+ * `src/__tests__` itself would stay in the diff and this set's own test commits
+ * would refuse it.
+ */
+export const ENGINE_PATHSPEC = ['src', ':(exclude,glob)src/**/__tests__/**', 'package.json', 'tsconfig.build.json'] as const
+
+const short = (sha: string): string => sha.slice(0, 7)
+
+/**
+ * Refuse unless no commit since `base` touches the engine.
+ *
+ * Exit 1 from the diff is a moved engine. Any other failure, such as a base
+ * a shallow clone cannot reach or a mistyped one, is red too and never clean,
+ * because a check that could not look has not looked.
+ */
+export function assertEngineUnchanged(repoRoot: string, base: string = ENGINE_BASE_SHA): void {
+  try {
+    execFileSync('git', ['diff', '--quiet', '--no-ext-diff', base, 'HEAD', '--', ...ENGINE_PATHSPEC], {
+      cwd: repoRoot,
+      stdio: ['ignore', 'ignore', 'pipe'],
+    })
+  } catch (error) {
+    if ((error as { status?: number }).status === 1) {
+      throw new Error(
+        `the engine under test changed since ${short(base)}: a commit after it touches the runtime source, the package manifest or the build config — the private set must run the pinned engine`,
+      )
+    }
+    throw new Error(`could not compare the engine against ${short(base)} — an unreachable base is a refusal, never a pass`, { cause: error })
+  }
+}
+
+/** The `version` a package manifest declares. */
+function manifestVersion(path: string): unknown {
+  return (JSON.parse(readFileSync(path, 'utf8')) as { version?: unknown }).version
+}
+
+/** Refuse unless this checkout's package manifest reads the pinned version. */
+export function assertPackageVersion(repoRoot: string, expected: string = PINNED_PACKAGE_VERSION): void {
+  const version = manifestVersion(join(repoRoot, 'package.json'))
+  if (version !== expected) {
+    throw new Error(`package.json reads ${String(version)}, and the private set is pinned to ${expected}`)
+  }
+}
+
+/**
+ * Refuse unless the fleet's installed engine reads the pinned version. The
+ * fleet's own handlers import from that install, so a fleet on an older
+ * engine is measured on the old engine whatever this checkout says.
+ */
+export function assertFleetInstall(packageJsonPath: string, expected: string = PINNED_PACKAGE_VERSION): void {
+  if (!existsSync(packageJsonPath)) {
+    throw new Error(`the fleet install has no package manifest at the configured path — the fleet's engine version cannot be read`)
+  }
+  const version = manifestVersion(packageJsonPath)
+  if (version !== expected) {
+    throw new Error(`the fleet install reads ${String(version)}, and the private set is pinned to ${expected} — update the fleet before measuring it`)
+  }
+}
+
+/**
+ * The one prereg commitment a measured set is bound to.
+ *
+ * Exactly one prereg line and no results line: none means the method is not
+ * frozen, two means there is no single method, and a results line means the
+ * measured set is closed. The ledger is read from the checkout, so it is the
+ * committed ledger only when the tree is clean, which the entry point refuses
+ * to start without.
+ */
+export function readPreregCommitment(repoRoot: string): string {
+  const entries = parseCommitments(readFileSync(join(repoRoot, COMMITMENTS_FILE), 'utf8'))
+  if (entries.some((entry) => entry.kind === 'results')) {
+    throw new Error(`a results commitment already exists in ${COMMITMENTS_FILE} — the measured set is closed`)
+  }
+  const prereg = entries.filter((entry) => entry.kind === 'prereg')
+  if (prereg.length === 0) throw new Error(`no prereg commitment in ${COMMITMENTS_FILE} — the method is not frozen, so no set may start`)
+  if (prereg.length > 1) throw new Error(`${COMMITMENTS_FILE} holds ${prereg.length} prereg commitments — a set is bound to exactly one method`)
+  return prereg[0]!.hex
+}
+
+/**
+ * Refuse unless the config records the snapshot's digest and the snapshot on
+ * disk still has it. Returns the digest, which every record then carries.
+ */
+export function assertSnapshotDigest(config: PrivateConfig): string {
+  const frozen = config.snapshot.sha256
+  if (frozen === undefined) {
+    throw new Error('the config records no frozen snapshot digest — take the snapshot once and record its digest before any set')
+  }
+  const actual = treeDigest(config.snapshot.dir)
+  if (actual !== frozen) {
+    throw new Error(`the snapshot digests to ${short(actual)} where the config froze ${short(frozen)} — the snapshot changed after it was taken`)
+  }
+  return actual
+}
+
+/**
+ * Every precondition of a private set, checked before the first spend, in a
+ * pinned order:
+ *
+ *   1. every configured plugin is in the snapshot;
+ *   2. the snapshot has its frozen digest;
+ *   3. this checkout's package version;
+ *   4. the engine unchanged since the pinned base;
+ *   5. the fleet install's version;
+ *   6. exactly one prereg commitment, when the set is a measured one.
+ *
+ * Plugin presence is first because a missing plugin also changes the digest,
+ * and the operator must be told which plugin, not that a hash moved.
+ *
+ * `engineBase` exists for fixture repositories, which cannot contain the
+ * pinned commit. The private entry point never passes it.
+ */
+export function assertPrivatePreconditions(
+  config: PrivateConfig,
+  repoRoot: string,
+  options: { requirePrereg: boolean; engineBase?: string },
+): PrivateStamp {
+  assertPluginsPresent(config.snapshot.dir, config)
+  const snapshot_sha256 = assertSnapshotDigest(config)
+  assertPackageVersion(repoRoot)
+  assertEngineUnchanged(repoRoot, options.engineBase)
+  assertFleetInstall(config.fleetInstall)
+  return options.requirePrereg ? { snapshot_sha256, prereg_commitment: readPreregCommitment(repoRoot) } : { snapshot_sha256 }
 }
