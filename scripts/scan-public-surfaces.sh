@@ -60,8 +60,10 @@ fi
 # the committed list is three letters and is a whole word, and unbounded it
 # fires inside an ordinary English word that merely contains those letters. A
 # gate that reds on its first real release body is a gate that gets bypassed.
-START='(^|[^A-Za-z0-9_])'
-END='([^A-Za-z0-9_]|$)'
+# An underscore counts as a boundary, so a committed term inside an identifier
+# such as an environment variable name is caught.
+START='(^|[^A-Za-z0-9])'
+END='([^A-Za-z0-9]|$)'
 
 : > "$TMP/patterns"
 while IFS= read -r line || [ -n "$line" ]; do

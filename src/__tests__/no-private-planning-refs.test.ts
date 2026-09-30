@@ -22,7 +22,7 @@
  * forgetting a second command. See .planning/notes/docs-automation-and-diataxis.md.
  */
 import { describe, expect, test } from 'bun:test'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -198,8 +198,13 @@ const LOCAL_TERMS: string[] = (() => {
  * Domains, handles and paths are exactly what a holder writes down.
  */
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/**
+ * A term that starts or ends with a word character is bounded there by a
+ * letter-and-digit lookaround rather than `\b`, so an underscore counts as a
+ * boundary and a term inside an identifier is caught, as in PRIVATE_NAME.
+ */
 const bounded = (t: string) =>
-  `${/^\w/.test(t) ? '\\b' : ''}${esc(t)}${/\w$/.test(t) ? '\\b' : ''}`
+  `${/^\w/.test(t) ? '(?<![A-Za-z0-9])' : ''}${esc(t)}${/\w$/.test(t) ? '(?![A-Za-z0-9])' : ''}`
 
 const LOCAL_NAME = LOCAL_TERMS.length
   ? new RegExp(LOCAL_TERMS.map(bounded).join('|'), 'i')
@@ -461,6 +466,7 @@ describe('no private planning or deployment references', () => {
       ['a|b', 'x a|b y', 'x b y'],
       ['frob(', 'call frob( here', 'call frobs here'],
       ['plain', 'a plain word', 'plainly not'],
+      ['plain', 'const X_PLAIN_ROOT = 1', 'plain9'],
     ]
     const offenders = CASES.flatMap(([term, hit, miss]) => {
       // Throws here rather than asserting if `esc` stops escaping — which is
@@ -489,6 +495,22 @@ describe('no private planning or deployment references', () => {
     expect(PRIVATE_NAME.test(`${term}x`)).toBe(false)
     expect(PRIVATE_NAME.test(`x${term}`)).toBe(false)
     expect(PRIVATE_NAME.test(`${term}9`)).toBe(false)
+  })
+
+  /**
+   * The release workflow and the issue scan read the same committed list
+   * through `scripts/scan-public-surfaces.sh` and `grep -E`, with boundaries of
+   * their own. Fixing the boundary here alone would leave the published
+   * surfaces with the old gap. Exit statuses only; stdin is never printed.
+   */
+  test('the release-surface scan catches a committed term embedded in an identifier', () => {
+    const term = PRIVATE_NAME_PATTERNS.find((p) => /^[a-z]+$/.test(p))
+    if (term === undefined) throw new Error('no plain single-word entry in the committed list; this pin has no sample')
+    const run = (input: string) =>
+      spawnSync('bash', ['scripts/scan-public-surfaces.sh'], { cwd: REPO_ROOT, input, stdio: ['pipe', 'ignore', 'ignore'] })
+        .status
+    expect(run(`X_${term.toUpperCase()}_ROOT\n`)).toBe(1)
+    expect(run('a plain line with nothing to find\n')).toBe(0)
   })
 
   /**
