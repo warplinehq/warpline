@@ -19,7 +19,7 @@ import {
   resolvePointer,
   type GradeCheck,
 } from '../../bench/grade.js'
-import { assertControlHome, runWarplineArm } from '../../bench/arms.js'
+import { ARM_ORDER, assertControlHome, runWarplineArm, type Provenance } from '../../bench/arms.js'
 import {
   assertPluginsPresent,
   assertPrivateSeam,
@@ -28,6 +28,7 @@ import {
   materializeCopyMap,
   PrivateConfigSchema,
   privatePluginsDir,
+  privateWarplineHome,
   scrubEnv,
   seedPrivateControl,
   seedPrivateHome,
@@ -36,6 +37,13 @@ import {
   type PrivateConfig,
 } from '../../bench/private.js'
 import { BenchRunRecordSchema, GRADED_KEYS, parseRecord } from '../../bench/record.js'
+import {
+  runIteration,
+  summarisePrivate,
+  type ArmRunner,
+  type ArmRunOutcome,
+  type PrivateIterationHooks,
+} from '../../bench/run.js'
 import { RunLogSchema } from 'warpline/schemas/run-log'
 import { assertHomeSeam, ControlSeedError } from '../../bench/seed.js'
 
@@ -749,5 +757,120 @@ describe('private config and seeding refusals', () => {
       const home = mkdtempSync(join(root, 'control-'))
       await expect(seedPrivateControl(home, 'warpline' as never, config)).rejects.toBeInstanceOf(ControlSeedError)
     })
+  })
+})
+
+/** Provenance without a spawn: the real reader runs git and the tool itself. */
+const testProvenance = (modelId: string): Provenance => ({
+  git_sha: 'abcdef0',
+  package_version: '0.5.0',
+  claude_cli_version: '0.0.0 (test)',
+  model_id: modelId,
+})
+
+/** What an injected runner reports, whatever the arm: fixed tokens, the pinned model, two blocked attempts. */
+const privateOutcome = (grade: ArmRunOutcome['grade']): ArmRunOutcome => ({
+  tokens: { input: 1, output: 2, cache_creation: 3, cache_read: 4 },
+  wall_clock_ms: 1,
+  runtime_ms: null,
+  consumer_ms: null,
+  parked_handoffs: 0,
+  subtype: 'success',
+  model_id: 'claude-opus-5',
+  grade,
+  outbound_blocked: 2,
+})
+
+/** The sixteen keys a public record has always carried, arm through model_id. */
+const PUBLIC_RECORD_KEYS = [
+  'arm',
+  'iteration',
+  'arm_order_index',
+  'cold',
+  'disposition',
+  'truncation_subtype',
+  'tokens',
+  'wall_clock_ms',
+  'runtime_ms',
+  'consumer_ms',
+  'parked_handoffs',
+  'graded',
+  'git_sha',
+  'package_version',
+  'claude_cli_version',
+  'model_id',
+]
+
+describe('private iteration', () => {
+  test('two private iterations over the synthetic fleet write stamped, check-keyed records through the real driver', async () => {
+    await withFleet(async ({ root, config }) => {
+      const digest = await takeSnapshot(config)
+      scrubEnv(config.envScrub)
+      const prereg = 'c'.repeat(64)
+      const hooks: PrivateIterationHooks = {
+        seed: (arm, home) => (arm === 'warpline' ? seedPrivateHome(home, config) : seedPrivateControl(home, arm, config)),
+        warplineHomeOf: (home) => privateWarplineHome(home, config),
+        stamp: { snapshot_sha256: digest, prereg_commitment: prereg },
+      }
+      const seams: { expected: string; actual: string | undefined }[] = []
+      const runner: ArmRunner = async (arm, home) => {
+        if (arm === 'warpline') {
+          seams.push({ expected: privateWarplineHome(home, config), actual: process.env.WARPLINE_HOME })
+          await assertPrivateSeam(home, config)
+          await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap))
+        } else {
+          writeFileSync(join(home, 'graded/check-1.json'), '{"items":[1]}')
+        }
+        // Standing in for the consumer session, which writes the judgment output.
+        writeFileSync(join(home, 'graded/check-2.json'), '{}')
+        return privateOutcome(gradeWithChecks(home, config.checks))
+      }
+      const resultsDir = join(root, 'results')
+      for (const iteration of [1, 2]) {
+        await runIteration({ iteration, runner, resultsDir, notesSource: config.notes, provenance: testProvenance, privateHooks: hooks })
+      }
+
+      const files = readdirSync(resultsDir).sort()
+      expect(files).toHaveLength(6)
+      for (const file of files) {
+        const record = BenchRunRecordSchema.parse(JSON.parse(readFileSync(join(resultsDir, file), 'utf8')))
+        expect(record.snapshot_sha256).toBe(digest)
+        expect(record.prereg_commitment).toBe(prereg)
+        expect(record.outbound_blocked).toBe(2)
+        expect(Object.keys(record.graded).sort()).toEqual(['check-1', 'check-2'])
+      }
+      expect(seams).toHaveLength(2)
+      for (const { expected, actual } of seams) expect(actual).toBe(expected)
+
+      const summary = await summarisePrivate(resultsDir, prereg)
+      for (const arm of ARM_ORDER) {
+        const row = summary[arm]
+        expect('shortfall' in row ? row.shortfall : null).toEqual({ count: 1, threshold: 10 })
+        expect('median' in row).toBe(false)
+      }
+    })
+  })
+
+  test('a public iteration writes exactly the pre-existing keys and none of the three private fields', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'bench-private-public-'))
+    try {
+      const notesSource = join(scratch, 'notes.md')
+      writeFileSync(notesSource, 'public notes\n')
+      const grade = { paths: Object.fromEntries(GRADED_KEYS.map((key) => [key, true])), passed: true }
+      const runner: ArmRunner = async () => {
+        const { outbound_blocked: _dropped, ...outcome } = privateOutcome(grade)
+        return outcome
+      }
+      const resultsDir = join(scratch, 'results')
+      await runIteration({ iteration: 1, runner, resultsDir, notesSource, provenance: testProvenance })
+      const files = readdirSync(resultsDir)
+      expect(files).toHaveLength(3)
+      for (const file of files) {
+        const raw = JSON.parse(readFileSync(join(resultsDir, file), 'utf8')) as Record<string, unknown>
+        expect(Object.keys(raw).sort()).toEqual([...PUBLIC_RECORD_KEYS].sort())
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true })
+    }
   })
 })

@@ -43,6 +43,7 @@ import {
   type Provenance,
 } from './arms.js'
 import type { GradeResult } from './grade.js'
+import type { PrivateStamp } from './private.js'
 import { BenchRunRecordSchema, parseRecord, type BenchRunRecord, type TokenClasses } from './record.js'
 import { assertHomeSeam, assertHomesDistinct, NOTES_FIXTURE, NOTES_PATH, seedArmHome, seedControlHome } from './seed.js'
 import { SHORTFALL_N, summariseArm, type ArmSummary, type SummarisableRun } from './stats.js'
@@ -106,6 +107,8 @@ export interface ArmRunOutcome {
   /** The canonical id read back from the session; null when the pinned model served nothing. */
   model_id: string | null
   grade: GradeResult
+  /** Outbound attempts the session sandbox blocked. Absent when the arm had no sandbox to count them. */
+  outbound_blocked?: number | null
 }
 
 /** The one seam a test replaces. Takes a seeded home, returns what it measured. */
@@ -252,13 +255,33 @@ export async function resumeState(resultsDir: string): Promise<ResumeState> {
   return { nextIteration: highest + 1, runs, passing, seen }
 }
 
-/** Everything one iteration needs. Four seams, none of them defaulted here. */
+/**
+ * The three things a privately configured scenario changes about one
+ * iteration: how each home is seeded, where the warpline arm's engine home
+ * sits inside its arm home, and what every record is stamped with.
+ */
+export interface PrivateIterationHooks {
+  seed(arm: ArmId, home: string): Promise<unknown>
+  warplineHomeOf(home: string): string
+  stamp: PrivateStamp
+}
+
+/**
+ * Everything one iteration needs. Four seams, none of them defaulted here.
+ *
+ * `privateHooks` is the one seam through which a second, privately configured
+ * scenario runs on this exact driver, so the order, the sequencing, the cold
+ * flag, the disposition chain and the exclusive write are the ones the public
+ * set was measured with. Absent, the iteration is today's behaviour byte for
+ * byte.
+ */
 export interface IterationOptions {
   iteration: number
   runner: ArmRunner
   resultsDir: string
   notesSource: string
   provenance: ProvenanceReader
+  privateHooks?: PrivateIterationHooks
 }
 
 /**
@@ -276,9 +299,15 @@ export interface IterationOptions {
  *
  * Homes are removed in a `finally`, whatever happened, including a throw from
  * the runner.
+ *
+ * With `privateHooks`, three things change and nothing else: each home is
+ * seeded by the hook instead of the tracked recipe, the home variable points at
+ * the warpline home inside the arm home, and the stamp joins the raw record
+ * BEFORE the scrub and the parse, so a stamped record passes the same one write
+ * path as any other.
  */
 export async function runIteration(options: IterationOptions): Promise<BenchRunRecord[]> {
-  const { iteration, runner, resultsDir, notesSource, provenance } = options
+  const { iteration, runner, resultsDir, notesSource, provenance, privateHooks } = options
   await mkdir(resultsDir, { recursive: true })
   // Read ONCE, before the iteration starts, so every arm in one iteration reads
   // the same pre-iteration state and `cold` cannot depend on arm order.
@@ -294,11 +323,12 @@ export async function runIteration(options: IterationOptions): Promise<BenchRunR
   try {
     for (const [index, arm] of ARM_ORDER.entries()) {
       const home = homes.get(arm) as string
-      await seedFor(arm, home, notesSource)
+      if (privateHooks) await privateHooks.seed(arm, home)
+      else await seedFor(arm, home, notesSource)
 
       const outcome =
         arm === 'warpline'
-          ? await withHomeEnv(home, () => runner(arm, home, iteration))
+          ? await withHomeEnv(privateHooks ? privateHooks.warplineHomeOf(home) : home, () => runner(arm, home, iteration))
           : await runner(arm, home, iteration)
 
       if (outcome.model_id === null) {
@@ -332,6 +362,8 @@ export async function runIteration(options: IterationOptions): Promise<BenchRunR
           parked_handoffs: outcome.parked_handoffs,
           graded: outcome.grade.paths,
           ...provenance(outcome.model_id),
+          ...(privateHooks ? privateHooks.stamp : {}),
+          ...(typeof outcome.outbound_blocked === 'number' ? { outbound_blocked: outcome.outbound_blocked } : {}),
         },
         home,
       )
@@ -418,10 +450,26 @@ export async function runSet(options: SetOptions): Promise<SetSummary> {
   return summariseSet(options.resultsDir)
 }
 
+/**
+ * The private set's published rows: the public summary, over records bound to
+ * the one committed method.
+ */
+export async function summarisePrivate(resultsDir: string, prereg: string): Promise<SetSummary> {
+  const { runs } = await resumeState(resultsDir)
+  for (const run of runs) {
+    if (run.prereg_commitment !== prereg) {
+      throw new Error(`${run.arm}-${run.iteration}: its prereg commitment is not the committed one, so it is not data for this set`)
+    }
+  }
+  return summariseSet(resultsDir)
+}
+
 /** The warm-up pass. No notes source and no provenance: it writes no record. */
 export interface WarmupOptions {
   runner: ArmRunner
   resultsDir: string
+  /** Seeds the warm-up home in place of the tracked control recipe, for a privately configured scenario. */
+  seed?: (arm: ControlArmId, home: string) => Promise<void>
 }
 
 /**
@@ -455,7 +503,8 @@ export async function runWarmup(options: WarmupOptions): Promise<string> {
 
   const home = await mkdtemp(join(tmpdir(), `warpline-bench-${WARMUP_ARM}-`))
   try {
-    await seedControlHome(home, WARMUP_ARM)
+    if (options.seed) await options.seed(WARMUP_ARM, home)
+    else await seedControlHome(home, WARMUP_ARM)
     await options.runner(WARMUP_ARM, home, 1)
 
     const produced = join(home, NOTES_PATH)

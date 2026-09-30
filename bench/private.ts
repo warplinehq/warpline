@@ -102,6 +102,15 @@ export function treeDigest(root: string): string {
   return sha256hex(Buffer.from(files.map((rel) => `${rel}\0${sha256hex(readFileSync(join(root, rel)))}\n`).join('')))
 }
 
+/**
+ * What binds a private record to its input and its method: the snapshot digest
+ * always, and the prereg commitment whenever the set is a measured one.
+ */
+export interface PrivateStamp {
+  snapshot_sha256: string
+  prereg_commitment?: string
+}
+
 /** The checkout root, which is also the package root a seeded fleet resolves `warpline` to. */
 const REPO_ROOT = resolve(import.meta.dir, '..')
 
