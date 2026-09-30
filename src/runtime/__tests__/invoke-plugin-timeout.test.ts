@@ -8,7 +8,7 @@
  *
  * Uses fixture plugins from .warpline/test-utils/fixture-plugins/.
  */
-import { describe, it, expect } from 'bun:test'
+import { describe, it, expect, spyOn } from 'bun:test'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
@@ -51,8 +51,26 @@ describe('invokePlugin — per-attempt timeout', () => {
 
     expect(res.timed_out).toBe(true)
     expect(res.result.summary).toStartWith('late-timer-plugin: timeout (timer fired ')
-    expect(res.result.summary).toContain('late against timeout_ms=100')
+    expect(res.result.summary).toContain('late against timeout_ms=100: the event loop was blocked)')
     expect(res.result.errors[0]?.message).toContain('late against timeout_ms=100')
+  }, 10_000)
+
+  // #30: `timeout_ms` bounds AWAKE time. Under Bun on macOS a `setTimeout`
+  // counts a system sleep and fires on wake, while `performance.now()` stops
+  // (measured 2026-09-30: 124s asleep, wall 131.2s, performance.now 9.9s).
+  // Here the awake clock runs at a tenth of wall speed, so 600ms of wall time
+  // is 60ms awake, well inside the 200ms budget: the plugin must complete.
+  it('a timer that fires after a sleep re-arms for the awake remainder instead of timing out', async () => {
+    const realNow = performance.now.bind(performance)
+    const origin = realNow()
+    const spy = spyOn(performance, 'now').mockImplementation(() => origin + (realNow() - origin) / 10)
+    try {
+      const res = await invokePlugin('slept-through-plugin', {}, { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
+      expect(res.timed_out).toBe(false)
+      expect(res.result.status).toBe('success')
+    } finally {
+      spy.mockRestore()
+    }
   }, 10_000)
 
   it('an on-time timeout keeps the plain summary', async () => {
