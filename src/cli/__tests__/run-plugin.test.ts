@@ -13,7 +13,7 @@
  * real path, so each fixture's `../../../src/...` imports still resolve.
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _setHome } from '../../lib/paths.js'
@@ -557,5 +557,36 @@ describe('runPlugin — a handler cannot reach stdout', () => {
     expect(onStderr).toContain('CONSOLE FROM RUN')
     expect(onStderr).toContain('RAW FROM RUN')
     expect(JSON.parse(result.stdout).ok).toBe(true)
+  })
+})
+
+/**
+ * A preferences file that exists and cannot be used refuses the manual run
+ * before the plugin is invoked. It used to fall back to defaults, which ran the
+ * artifact trim on a cap nobody chose.
+ */
+describe('runPlugin — an unusable preferences file', () => {
+  test('refuses with exit 1 and ok:false before invocation, naming the key and never the value', async () => {
+    const SENTINEL = 'S3NTINEL_7f3a'
+    const prefsFile = join(home, 'preferences.json')
+    const runsDir = join(home, 'runs')
+    const listRuns = (): string[] => (existsSync(runsDir) ? readdirSync(runsDir).sort() : [])
+    writeFileSync(prefsFile, JSON.stringify({ retention: { keep_per_plugin: SENTINEL } }))
+    try {
+      const before = listRuns()
+      const { payload, code, stdout } = await runPlugin(['success-plugin', 'run', '--json'])
+
+      expect(code).toBe(1)
+      expect(payload.ok).toBe(false)
+      // No invocation happened, so no invocation-derived field is present.
+      expect(payload.duration_ms).toBeUndefined()
+      expect(payload.error).toContain('preferences.json')
+      expect(payload.error).toContain('retention.keep_per_plugin')
+      expect(payload.error).not.toContain(SENTINEL)
+      expect(stdout).not.toContain(SENTINEL)
+      expect(listRuns()).toEqual(before)
+    } finally {
+      rmSync(prefsFile, { force: true })
+    }
   })
 })

@@ -906,6 +906,77 @@ export async function handler(manifest, args, signal, capabilities) {
 // write, so the operator gets an error naming what and where instead of a run
 // record that says nothing happened.
 
+// -----------------------------------------------------------------------
+// runAdvance — a preferences file it cannot use
+// -----------------------------------------------------------------------
+//
+// preferences.json used to fall back to defaults on any invalid or unknown
+// key, so retention ran on the 30-day rule nobody chose. It now refuses, and
+// like the plugin-root refusal below it refuses ABOVE every write.
+
+describe('runAdvance refuses a preferences file it cannot use', () => {
+  let ctx: TestHome
+
+  beforeEach(async () => {
+    ctx = await createTestHome()
+    _setHome(ctx.root)
+  })
+
+  afterEach(async () => {
+    _setHome(null)
+    await ctx.cleanup()
+  })
+
+  test('an unknown preferences key refuses on a non-normal tier and leaves the home byte-identical', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const { writeEngineState } = await import('../engine-state-store.js')
+    const { defaultEngineState } = await import('../../schemas/engine-state.js')
+    const { TIER_THRESHOLDS_MS } = await import('../tier.js')
+
+    const statePath = join(ctx.stateDir, 'engine-state.json')
+    const eventsPath = join(ctx.runsDir, 'events.jsonl')
+
+    // A tier that is not normal is what makes the read's position visible: a
+    // read left below step 2c would write the tier-transition event first.
+    const seeded = defaultEngineState()
+    seeded.last_interaction_at = new Date(
+      Date.now() - TIER_THRESHOLDS_MS.degraded - 24 * 60 * 60 * 1000,
+    ).toISOString()
+    await writeEngineState(seeded, statePath)
+    await writeFile(
+      join(ctx.stateDir, 'preferences.json'),
+      JSON.stringify({ review_gate: false, retention: { dayz: 365 } }),
+    )
+
+    let hookCalls = 0
+    const before = await snapshotHome(ctx.root)
+    const err = await runAdvance({
+      pluginsDir: ctx.pluginsDir,
+      stateDir: statePath,
+      runsDir: ctx.runsDir,
+      eventsPath,
+      onRunFailure: () => {
+        hookCalls++
+      },
+    }).then(
+      () => null,
+      (e: unknown) => e as Error,
+    )
+    const after = await snapshotHome(ctx.root)
+
+    expect(err?.name).toBe('PreferencesInvalidError')
+    expect(err?.message).toMatch(/retention\.dayz/)
+    expect(after).toEqual(before)
+    // Named individually so a regression says WHICH write escaped the guard.
+    expect(existsSync(eventsPath)).toBe(false)
+    expect(await readdir(ctx.runsDir)).toEqual([])
+    expect(existsSync(lockPath())).toBe(false)
+    expect(existsSync(join(ctx.stateDir, '.lock'))).toBe(false)
+    expect(existsSync(join(ctx.stateDir, 'last-successful-advance'))).toBe(false)
+    expect(hookCalls).toBe(0)
+  })
+})
+
 describe('runAdvance refuses a plugin root it cannot read', () => {
   let ctx: TestHome
 

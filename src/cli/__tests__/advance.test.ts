@@ -21,6 +21,7 @@ import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { grantApproval } from '../../runtime/approval-gate.js'
 import { createTestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
+import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import type { TestHome } from '../../runtime/__tests__/helpers/create-test-home.js'
 import { _setHome } from '../../lib/paths.js'
 import { proposalFingerprint } from '../../runtime/engine.js'
@@ -330,14 +331,15 @@ describe('run(): no home and no terminal', () => {
 })
 
 /**
- * One stderr line when the preferences file exists and cannot be used.
+ * A preferences file that exists and cannot be used refuses the advance.
  *
- * `readPreferences` keeps its three silent fallbacks; this is a second, reporting
- * read beside it. A silent default here is how an operator who set a long
- * retention window and fat-fingered the JSON gets the 30-day rule instead, and
- * the evidence they were preserving deleted, with exit code 0.
+ * It used to run on built-in defaults with one stderr line, which is how an
+ * operator who set a long retention window and fat-fingered the JSON got the
+ * 30-day rule instead and the evidence they were preserving deleted. Now the
+ * engine's own read refuses above the run lock: `75`, nothing on stdout, one
+ * stderr line naming the file and the key path, and the home untouched.
  */
-describe('run(): the preferences report', () => {
+describe('run(): an unusable preferences file refuses the advance', () => {
   /** Every stderr line that mentions the preferences file. */
   const prefLines = (stderr: string): string[] =>
     stderr.split('\n').filter((line) => line.includes('preferences.json'))
@@ -360,45 +362,48 @@ describe('run(): the preferences report', () => {
     expect(code).toBe(0)
   })
 
-  test('a truncated preferences file is exactly one line, and the advance still runs', async () => {
+  test('a truncated preferences file exits 75 with one line, nothing on stdout, the home untouched', async () => {
     await writePlugin(home, 'alpha')
     await writeFile(join(home.root, 'preferences.json'), '{"review_gate": fal')
+    const before = await snapshotHome(home.root)
 
     const { code, stdout, stderr } = await capture(() => run([], { stdin: {} }))
 
+    expect(code).toBe(75)
+    expect(stdout).toBe('')
     expect(prefLines(stderr)).toHaveLength(1)
     expect(prefLines(stderr)[0]).toContain(join(home.root, 'preferences.json'))
-    // Reported, not raised: the run is unaffected and still renders.
-    expect(stdout).toContain('Advance ')
-    expect(code).not.toBe(75)
+    expect(await snapshotHome(home.root)).toEqual(before)
   })
 
-  test('valid JSON with the wrong type for a known key is the same one line', async () => {
+  test('a wrong-typed value exits 75 naming the key and never the value', async () => {
     await writePlugin(home, 'alpha')
-    await writeFile(join(home.root, 'preferences.json'), JSON.stringify({ review_gate: 'yes' }))
+    await writeFile(
+      join(home.root, 'preferences.json'),
+      JSON.stringify({ review_gate: 'S3NTINEL_7f3a' }),
+    )
 
-    const { stderr } = await capture(() => run([], { stdin: {} }))
+    const { code, stderr } = await capture(() => run([], { stdin: {} }))
 
+    expect(code).toBe(75)
     expect(prefLines(stderr)).toHaveLength(1)
+    expect(prefLines(stderr)[0]).toContain('review_gate')
+    expect(stderr).not.toContain('S3NTINEL_7f3a')
   })
 
-  /**
-   * The limit of the report, pinned so it is documented rather than discovered.
-   * Zod strips unknown keys instead of failing, so a misspelled retention key
-   * parses clean and this read has nothing to say about it. The pruned count in
-   * the machine-readable output is the only confirmation a retention setting
-   * took effect; this line is not that, and must not be read as if it were.
-   */
-  test('an unknown key inside the retention block says nothing — Zod strips it', async () => {
+  test('an unknown key inside the retention block exits 75 naming the key', async () => {
     await writePlugin(home, 'alpha')
     await writeFile(
       join(home.root, 'preferences.json'),
       JSON.stringify({ review_gate: false, retention: { dayz: 5 } }),
     )
 
-    const { stderr } = await capture(() => run([], { stdin: {} }))
+    const { code, stdout, stderr } = await capture(() => run([], { stdin: {} }))
 
-    expect(prefLines(stderr)).toEqual([])
+    expect(code).toBe(75)
+    expect(stdout).toBe('')
+    expect(prefLines(stderr)).toHaveLength(1)
+    expect(prefLines(stderr)[0]).toContain('retention.dayz')
   })
 })
 
