@@ -326,13 +326,6 @@ let printingPlugins = 0
 let restoreStdout: (() => void) | null = null
 
 /** The three console methods that write to stdout. The rest write to stderr. */
-/**
- * How late a timeout timer must fire, beyond `timeout_ms` itself, before the
- * record calls it late (#30). The floor keeps ordinary load jitter on a short
- * timeout from reading as a sleep.
- */
-const LATE_TIMER_FLOOR_MS = 1_000
-
 
 const STDOUT_CONSOLE = ['log', 'info', 'debug'] as const
 
@@ -715,10 +708,11 @@ export async function invokePlugin(
         // may not have been slow at all, so the record says so (#30).
         // ponytail: annotation only, the attempt still fails. Re-arming for
         // the unslept remainder needs a clock that pauses across suspend,
-        // which is unverified under Bun on macOS.
+        // which is unverified under Bun on macOS. The 1s floor keeps load
+        // jitter on a short timeout from reading as a sleep.
         const lateMs = Date.now() - attemptStart - timeoutMs
         const late =
-          isTimeout && lateMs > Math.max(timeoutMs, LATE_TIMER_FLOOR_MS)
+          isTimeout && lateMs > Math.max(timeoutMs, 1_000)
             ? ` (timer fired ${Math.round(lateMs / 1000)}s late against timeout_ms=${timeoutMs}: the machine slept or the event loop was blocked)`
             : ''
         resolvePromise({

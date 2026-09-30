@@ -135,8 +135,7 @@ import { runAdvance } from '../runtime/engine.js'
 import type { AdvanceResult, PluginFsmState } from '../runtime/engine.js'
 import { advanceCounts, advanceExitCode } from '../runtime/exit-codes.js'
 import { isInteractive } from './prompt.js'
-import { RunTriggerSchema } from '../schemas/run-log.js'
-import type { RunTrigger } from '../schemas/run-log.js'
+import { RunTriggerSchema, type RunTrigger } from '../schemas/run-log.js'
 
 export const USAGE = `Usage: warpline advance [--strict] [--json]
 
