@@ -31,19 +31,37 @@ import { existsSync } from 'node:fs'
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { agreementVerdict, type AgreementReport } from './agreement.js'
 import {
   ARM_ORDER,
   assertCleanWorktree,
   readProvenance,
   resolveDisposition,
+  runCanary,
   runClaudeArm,
+  runConsumerSession,
+  runWarplineArm,
   runWarplineIteration,
   type ArmId,
+  type ClaudeArmResult,
+  type ConsumerSessionResult,
   type ControlArmId,
   type Provenance,
 } from './arms.js'
-import type { GradeResult } from './grade.js'
-import { PINNED_PACKAGE_VERSION, type PrivateStamp } from './private.js'
+import { gradeWithChecks, type GradeResult } from './grade.js'
+import {
+  assertPrivatePreconditions,
+  assertPrivateSeam,
+  materializeCopyMap,
+  PINNED_PACKAGE_VERSION,
+  privatePluginsDir,
+  privateWarplineHome,
+  scrubEnv,
+  seedPrivateControl,
+  seedPrivateHome,
+  type PrivateConfig,
+  type PrivateStamp,
+} from './private.js'
 import { BenchRunRecordSchema, parseRecord, type BenchRunRecord, type TokenClasses } from './record.js'
 import { assertHomeSeam, assertHomesDistinct, NOTES_FIXTURE, NOTES_PATH, seedArmHome, seedControlHome } from './seed.js'
 import { SHORTFALL_N, summariseArm, type ArmSummary, type SummarisableRun } from './stats.js'
@@ -597,6 +615,147 @@ export const runRealArm: ArmRunner = async (arm, home, iteration) => {
     model_id: result.parsed.model_id,
     grade: result.grade,
   }
+}
+
+/** The two seams inside a private arm a test replaces. Absent, each is the real isolated session. */
+export interface PrivateRunnerDeps {
+  consume?: (home: string, runLogPath: string) => Promise<ConsumerSessionResult>
+  control?: (arm: ControlArmId, home: string, prompt: string) => Promise<ClaudeArmResult>
+}
+
+/**
+ * The private arms: the real ones, pointed at a privately configured fleet.
+ *
+ * Every session runs isolated. The warpline arm advances the fleet's own plugin
+ * root and grades the copied deterministic outputs; its consumer reads the
+ * config's prompt with its working directory at the arm home and the warpline
+ * home beside it. Each control reads the config's agent prompt. All three are
+ * graded by the config's checks, so no tracked line names what is graded.
+ *
+ * The fleet's path seam is measured before the advance, with the home variable
+ * already pointed at the warpline home, because that is the last moment a
+ * leftover override is a refusal rather than a write into live state.
+ */
+export function makePrivateRunner(config: PrivateConfig, deps: PrivateRunnerDeps = {}): ArmRunner {
+  const grade = (home: string): GradeResult => gradeWithChecks(home, config.checks)
+  return async (arm, home, iteration) => {
+    if (arm === 'warpline') {
+      const warplineHome = privateWarplineHome(home, config)
+      await assertPrivateSeam(home, config)
+      const result = await runWarplineIteration(home, iteration, {
+        advance: (h) => runWarplineArm(h, privatePluginsDir(h, config), (h2, a) => materializeCopyMap(h2, a, config.copyMap)),
+        consume:
+          deps.consume ??
+          ((h, runLogPath) => runConsumerSession(h, runLogPath, { isolated: true, warplineHome, promptPath: config.prompts.consumer })),
+        grade,
+      })
+      return {
+        tokens: result.tokens,
+        wall_clock_ms: result.wall_clock_ms,
+        runtime_ms: result.runtime_ms,
+        consumer_ms: result.consumer_ms,
+        parked_handoffs: result.parked_handoffs,
+        subtype: result.consumer.subtype,
+        model_id: result.consumer.model_id,
+        grade: result.grade,
+        outbound_blocked: result.outbound_blocked,
+      }
+    }
+    const prompt = await readFile(config.prompts.agent, 'utf8')
+    const control = deps.control ?? ((a: ControlArmId, h: string, p: string) => runClaudeArm(a, h, p, { isolated: true, grade }))
+    const result = await control(arm, home, prompt)
+    return {
+      tokens: result.parsed.tokens,
+      wall_clock_ms: result.wall_clock_ms,
+      runtime_ms: null,
+      consumer_ms: null,
+      parked_handoffs: 0,
+      subtype: result.parsed.subtype,
+      model_id: result.parsed.model_id,
+      grade: result.grade,
+      outbound_blocked: result.outbound_blocked,
+    }
+  }
+}
+
+/** How a private iteration seeds each home, where its warpline home sits, and what it stamps. */
+export function privateHooks(config: PrivateConfig, stamp: PrivateStamp): PrivateIterationHooks {
+  return {
+    seed: (arm, home) => (arm === 'warpline' ? seedPrivateHome(home, config) : seedPrivateControl(home, arm, config)),
+    warplineHomeOf: (home) => privateWarplineHome(home, config),
+    stamp,
+  }
+}
+
+/** Everything a private entry point may be handed in place of the real thing. */
+export interface PrivateSetDeps {
+  preconditions?: (options: { requirePrereg: boolean }) => PrivateStamp
+  canary?: () => Promise<number>
+  runner?: ArmRunner
+  provenance?: ProvenanceReader
+  /** The public records the verdict compares against. */
+  publicResultsDir?: string
+}
+
+/**
+ * The real preconditions: every private check, then a clean tree.
+ *
+ * The clean-tree refusal comes after the plugin check on purpose. A missing
+ * plugin is the one mistake an operator can make in the config alone, and it
+ * must be named as itself whatever state the checkout is in. Nothing is spent
+ * until both have passed, so the order between them costs nothing.
+ */
+function realPreconditions(config: PrivateConfig): NonNullable<PrivateSetDeps['preconditions']> {
+  return (options) => {
+    const stamp = assertPrivatePreconditions(config, REPO_ROOT, options)
+    assertCleanWorktree(REPO_ROOT)
+    return stamp
+  }
+}
+
+/**
+ * The gate every private entry point passes before it spends: scrub the
+ * configured variables, check the preconditions, then run the canary.
+ *
+ * The order is the safety property. The scrub is first, so no fleet override
+ * survives into anything that follows. The preconditions are next, so a missing
+ * plugin is named before anything is spent. The canary is last, so an absent
+ * sandbox refuses before the first paid session. Each step throws, and a throw
+ * here runs no arm and writes no record.
+ */
+async function privateGate(config: PrivateConfig, deps: PrivateSetDeps, requirePrereg: boolean): Promise<PrivateStamp> {
+  scrubEnv(config.envScrub)
+  const stamp = (deps.preconditions ?? realPreconditions(config))({ requirePrereg })
+  await (deps.canary ?? runCanary)()
+  return stamp
+}
+
+/**
+ * The measured private set, then its summary and the verdict against the
+ * public one, computed together and mechanically.
+ *
+ * The gate runs first, so nothing is spent unless the preconditions and the
+ * canary pass. The set runs on the public driver through the private hooks, so
+ * the order, the cap, the cold flag and the exclusive write are the ones the
+ * public set was measured with. The verdict is computed only over a set
+ * `runSet` finished, from the private summary, which refuses any record not
+ * bound to the committed method.
+ */
+export async function runPrivateSet(
+  config: PrivateConfig,
+  deps: PrivateSetDeps = {},
+): Promise<{ summary: SetSummary; agreement: AgreementReport }> {
+  const stamp = await privateGate(config, deps, true)
+  await runSet({
+    runner: deps.runner ?? makePrivateRunner(config),
+    resultsDir: config.resultsDir,
+    notesSource: config.notes,
+    provenance: deps.provenance ?? readProvenance,
+    privateHooks: privateHooks(config, stamp),
+  })
+  const summary = await summarisePrivate(config.resultsDir, stamp.prereg_commitment as string)
+  const agreement = agreementVerdict(summary, await summariseSet(deps.publicResultsDir ?? join(REPO_ROOT, 'bench/results')))
+  return { summary, agreement }
 }
 
 /**

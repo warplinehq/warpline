@@ -47,13 +47,16 @@ import {
 } from '../../bench/private.js'
 import { BenchRunRecordSchema, GRADED_KEYS, parseRecord } from '../../bench/record.js'
 import {
+  makePrivateRunner,
   runIteration,
+  runPrivateSet,
   summarisePrivate,
   summariseSet,
   type ArmRunner,
   type ArmRunOutcome,
   type PrivateIterationHooks,
 } from '../../bench/run.js'
+import { withFakeClaude } from '../../test-utils/fake-claude.js'
 import { RunLogSchema } from 'warpline/schemas/run-log'
 import { assertHomeSeam, ControlSeedError } from '../../bench/seed.js'
 
@@ -420,7 +423,7 @@ export const runsDir = (): string => join(warplineHomeDir(), 'runs')
     'staging/wh/preferences.json': '{"review_gate":false}',
     'staging/wh/config/beta.json': '{}',
     'prompts/agent.md': 'a synthetic agent prompt\n',
-    'prompts/consumer.md': 'a synthetic consumer prompt\n',
+    'prompts/consumer.md': 'a synthetic consumer prompt over {{RUN_LOG_PATH}}\n',
     'notes.md': 'synthetic notes\n',
   })
   const fleet = (rel: string): string => join(repo, '.fleet', rel)
@@ -1224,4 +1227,139 @@ describe('private summary', () => {
       }
     })
   })
+})
+
+/** One JSON line per event, the way an isolated session prints them. */
+const jsonl = (...events: unknown[]): string => `${events.map((event) => JSON.stringify(event)).join('\n')}\n`
+
+/**
+ * What the fake command-line tool prints for every session of a private set,
+ * the canary included: no removed tool, one shell call, one sandbox-blocked
+ * result, and a result line on the pinned model.
+ */
+const FAKE_SESSION = jsonl(
+  { type: 'system', subtype: 'init', tools: ['Bash', 'Read'], mcp_servers: [] },
+  {
+    type: 'assistant',
+    message: { content: [{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'curl -sS https://example.com' } }] },
+    parent_tool_use_id: null,
+  },
+  {
+    type: 'user',
+    message: {
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'tu1',
+          content: 'curl: (56) CONNECT tunnel failed, response 403 <sandbox_violations>deny network-outbound example.com:443</sandbox_violations>',
+        },
+      ],
+    },
+  },
+  {
+    type: 'result',
+    subtype: 'success',
+    is_error: false,
+    duration_ms: 5,
+    num_turns: 2,
+    usage: {
+      input_tokens: 1,
+      output_tokens: 2,
+      cache_creation_input_tokens: 3,
+      cache_read_input_tokens: 4,
+      server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+    },
+    modelUsage: { 'claude-opus-5': {} },
+  },
+)
+
+/**
+ * What the fake does in the home it runs in, standing in for a session's
+ * deliverables: the first check's file only when the advance did not already
+ * put it there, and the second check's file always.
+ */
+const FAKE_DELIVERABLES = [
+  'mkdir -p graded',
+  `[ -f graded/check-1.json ] || printf '{"items":[1]}' > graded/check-1.json`,
+  `printf '{}' > graded/check-2.json`,
+].join('\n')
+
+/** Provenance without git or the tool: pinned to the private set's package version. */
+const setProvenance = (model: string): Provenance => ({
+  git_sha: 'f'.repeat(40),
+  package_version: '0.5.0',
+  claude_cli_version: '0.0.0 (fake)',
+  model_id: model,
+})
+
+describe('private set, end to end', () => {
+  /**
+   * The whole measured-set path over the synthetic fleet. Seeding is real, the
+   * engine is real, and every session, the canary included, is a real spawn of
+   * the fake tool through the isolated argv and the transcript audit. Only the
+   * preconditions, which read this checkout's ledger, and the provenance, which
+   * runs git and the tool, are injected.
+   */
+  test(
+    'eleven iterations end in stamped records, a median per arm and a mechanical verdict',
+    async () => {
+      await withFleet(async ({ config }) => {
+        const digest = await takeSnapshot(config)
+        config.snapshot.sha256 = digest
+        const prereg = 'c'.repeat(64)
+        process.env.FLEET_STATE_DIR = '/nowhere/a-decoy-fleet-state'
+
+        const consumerHomes: { expected: string; actual: string; argv: string[] }[] = []
+        const real = makePrivateRunner(config)
+        const runner: ArmRunner = async (arm, home, iteration) => {
+          const outcome = await real(arm, home, iteration)
+          if (arm === 'warpline') {
+            consumerHomes.push({
+              expected: privateWarplineHome(home, config),
+              actual: readFileSync(join(home, 'warpline-home.txt'), 'utf8'),
+              argv: readFileSync(join(home, 'argv.txt'), 'utf8').split('\n'),
+            })
+          }
+          return outcome
+        }
+
+        const { summary, agreement } = await withFakeClaude({ stdout: FAKE_SESSION, before: FAKE_DELIVERABLES }, () =>
+          runPrivateSet(config, {
+            preconditions: () => ({ snapshot_sha256: digest, prereg_commitment: prereg }),
+            provenance: setProvenance,
+            runner,
+          }),
+        )
+
+        expect(process.env.FLEET_STATE_DIR).toBeUndefined()
+
+        const files = readdirSync(config.resultsDir).sort()
+        expect(files).toHaveLength(33)
+        for (const file of files) {
+          const text = readFileSync(join(config.resultsDir, file), 'utf8')
+          const record = BenchRunRecordSchema.parse(JSON.parse(text))
+          expect(record.snapshot_sha256).toBe(digest)
+          expect(record.prereg_commitment).toBe(prereg)
+          expect(record.outbound_blocked).toBe(1)
+          expect(text).not.toContain('alpha')
+          expect(text).not.toContain('beta')
+        }
+
+        for (const arm of ARM_ORDER) expect('median' in summary[arm]).toBe(true)
+
+        // Warpline's output is the consumer's 2 plus the advance's 0, over a
+        // control's 2: exactly 1, which is on neither side, so disagreement.
+        expect(agreement.verdict).toBe('diverge')
+        expect(agreement.diverged).toContain('output:agent-with-state')
+        expect(agreement.diverged).toContain('output:agent-from-scratch')
+
+        expect(consumerHomes).toHaveLength(11)
+        for (const { expected, actual, argv } of consumerHomes) {
+          expect(actual).toBe(expected)
+          expect(argv).toContain('--disallowedTools')
+        }
+      })
+    },
+    60_000,
+  )
 })
