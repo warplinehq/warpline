@@ -950,6 +950,56 @@ describe('bench harness — the three sessions, built', () => {
 })
 
 /**
+ * The private run's network isolation, and the public argv it must not move.
+ *
+ * The two public arrays are pinned WHOLE, as literals, and they were written and
+ * watched green against the builder before it learned an isolated mode. A
+ * membership check would stay green if a flag moved, doubled or gained a value;
+ * a whole-array literal cannot.
+ */
+describe('bench harness — the isolated sessions', () => {
+  test('a public control session argv is exactly the published one', () => {
+    expect(buildClaudeArgv('agent-with-state', 'P')).toEqual([
+      '--print',
+      'P',
+      '--output-format',
+      'json',
+      '--model',
+      'claude-opus-5',
+      '--max-budget-usd',
+      '5',
+      '--permission-mode',
+      'bypassPermissions',
+      '--setting-sources',
+      '',
+      '--strict-mcp-config',
+      '--no-session-persistence',
+    ])
+  })
+
+  test('the public consumer argv is exactly the published one', () => {
+    expect(buildClaudeArgv('consumer', 'P')).toEqual([
+      '--print',
+      'P',
+      '--output-format',
+      'json',
+      '--model',
+      'claude-opus-5',
+      '--max-budget-usd',
+      '5',
+      '--permission-mode',
+      'bypassPermissions',
+      '--setting-sources',
+      '',
+      '--strict-mcp-config',
+      '--no-session-persistence',
+      '--plugin-dir',
+      join(REPO_ROOT, 'plugin'),
+    ])
+  })
+})
+
+/**
  * The warpline arm's two-segment assembly, and the two refusals that spend no
  * money.
  *
