@@ -25,12 +25,16 @@
  *   - the PROVENANCE READER, because the real one runs `git` and the tool itself,
  *     and the tool is not on a continuous-integration runner.
  *
- * The tracked default of each is bound at `main()` and nowhere else.
+ * The tracked default of each is bound at `main()` and nowhere else. The
+ * private entry points take the same seams, plus the preconditions and the
+ * canary, as optional dependencies that default to the real ones, and
+ * `main()` is the one caller that leaves them unset.
  */
-import { existsSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { agreementVerdict, type AgreementReport } from './agreement.js'
 import {
   ARM_ORDER,
@@ -52,6 +56,8 @@ import { gradeWithChecks, type GradeResult } from './grade.js'
 import {
   assertPrivatePreconditions,
   assertPrivateSeam,
+  commitment,
+  loadPrivateConfig,
   materializeCopyMap,
   PINNED_PACKAGE_VERSION,
   privatePluginsDir,
@@ -59,6 +65,8 @@ import {
   scrubEnv,
   seedPrivateControl,
   seedPrivateHome,
+  takeSnapshot,
+  treeDigest,
   type PrivateConfig,
   type PrivateStamp,
 } from './private.js'
@@ -97,6 +105,24 @@ export const MAX_ITERATIONS = 15
 
 /** The mode argument the one unmeasured warm-up invocation passes. */
 export const WARMUP_MODE = 'warmup'
+
+/** The measured private set: `private <absolute config path>`. */
+export const PRIVATE_MODE = 'private'
+
+/** The private warm-up, which produces the with-state notes: `private-warmup <absolute config path>`. */
+export const PRIVATE_WARMUP_MODE = 'private-warmup'
+
+/** One disclosed, uncountable iteration: `private-shakedown <absolute config path> <absolute scratch dir>`. */
+export const PRIVATE_SHAKEDOWN_MODE = 'private-shakedown'
+
+/** Take the private snapshot once and print its digest: `snapshot <absolute config path>`. */
+export const SNAPSHOT_MODE = 'snapshot'
+
+/** Write a fresh salt outside this repository: `salt <absolute path>`. */
+export const SALT_MODE = 'salt'
+
+/** Print one salted digest of a file or a directory: `commit <absolute salt path> <absolute document path>`. */
+export const COMMIT_MODE = 'commit'
 
 /** The arm the warm-up pass runs: the one that starts with no notes. */
 const WARMUP_ARM: ControlArmId = 'agent-from-scratch'
@@ -805,6 +831,34 @@ export async function runPrivateWarmup(config: PrivateConfig, deps: PrivateSetDe
   })
 }
 
+/** A path argument, refused unless absolute: a relative one would depend on where the command ran. */
+function absoluteArg(value: string | undefined, what: string): string {
+  if (value === undefined || !isAbsolute(value)) throw new Error(`the ${what} path must be absolute, got '${value ?? ''}'`)
+  return value
+}
+
+/**
+ * Refuse a salt path inside this checkout, under either spelling of it.
+ *
+ * The parent is resolved through any link, so a path reached through a link
+ * into the checkout is refused as well. A parent that does not exist cannot
+ * be written through either, so its plain spelling is enough.
+ */
+function refuseInsideRepository(path: string): void {
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p)
+    } catch {
+      return resolve(p)
+    }
+  }
+  const candidates = [resolve(path), join(real(dirname(path)), basename(path))]
+  const roots = [REPO_ROOT, real(REPO_ROOT)]
+  if (candidates.some((candidate) => roots.some((root) => candidate === root || candidate.startsWith(root + sep)))) {
+    throw new Error('the salt must live in the private repository, never inside this repository')
+  }
+}
+
 /**
  * The entry point, and the ONE place the tracked defaults are bound.
  *
@@ -815,11 +869,74 @@ export async function runPrivateWarmup(config: PrivateConfig, deps: PrivateSetDe
 async function main(argv: readonly string[]): Promise<void> {
   const resultsDir = join(REPO_ROOT, 'bench/results')
 
+  // The private modes. Every private value arrives through the config, whose
+  // path must be absolute, so no tracked line names what the set measures and
+  // no mode's meaning depends on where it was launched from.
+  if (argv[2] === PRIVATE_MODE) {
+    const { summary, agreement } = await runPrivateSet(loadPrivateConfig(argv[3] ?? ''))
+    process.stdout.write(`${JSON.stringify({ summary, agreement }, null, 2)}\n`)
+    return
+  }
+
+  if (argv[2] === PRIVATE_WARMUP_MODE) {
+    const produced = await runPrivateWarmup(loadPrivateConfig(argv[3] ?? ''))
+    process.stdout.write(`the private warm-up session's notes were copied out to:\n  ${produced}\n`)
+    process.stdout.write(`read it by eye, copy it to the config's notes path, and record its sha256 in the private pre-registration.\n`)
+    return
+  }
+
+  // Its records are printed and never summarised: they carry no commitment, so
+  // the private summary would refuse them anyway.
+  if (argv[2] === PRIVATE_SHAKEDOWN_MODE) {
+    const config = loadPrivateConfig(argv[3] ?? '')
+    const records = await runPrivateShakedown(config, absoluteArg(argv[4], 'shakedown scratch dir'))
+    for (const { arm, iteration, disposition, graded, outbound_blocked } of records) {
+      process.stdout.write(`${JSON.stringify({ arm, iteration, disposition, graded, outbound_blocked })}\n`)
+    }
+    return
+  }
+
+  if (argv[2] === SNAPSHOT_MODE) {
+    const digest = await takeSnapshot(loadPrivateConfig(argv[3] ?? ''))
+    process.stdout.write(`${digest}\nrecord it as snapshot.sha256 in the private config.\n`)
+    return
+  }
+
+  // The salt is what keeps a published commitment from being reversed by
+  // hashing guesses, so it is written once, readable by its owner alone, never
+  // inside this repository, and never printed.
+  if (argv[2] === SALT_MODE) {
+    const path = absoluteArg(argv[3], 'salt')
+    refuseInsideRepository(path)
+    writeFileSync(path, randomBytes(32), { flag: 'wx', mode: 0o600 })
+    process.stdout.write('wrote a 32-byte salt\n')
+    return
+  }
+
+  // Exactly one line, the salted digest, so the output can be pasted into the
+  // public ledger as it stands. A directory is bound through its tree digest.
+  if (argv[2] === COMMIT_MODE) {
+    const saltPath = absoluteArg(argv[3], 'salt')
+    refuseInsideRepository(saltPath)
+    const doc = absoluteArg(argv[4], 'document')
+    const bytes = statSync(doc).isDirectory() ? Buffer.from(treeDigest(doc)) : readFileSync(doc)
+    process.stdout.write(`${commitment(readFileSync(saltPath), bytes)}\n`)
+    return
+  }
+
   if (argv[2] === WARMUP_MODE) {
     const produced = await runWarmup({ runner: runRealArm, resultsDir })
     process.stdout.write(`the warm-up session's notes were copied out to:\n  ${produced}\n`)
     process.stdout.write(`read it by eye, then copy it to ${NOTES_FIXTURE} and commit it.\n`)
     return
+  }
+
+  // A mistyped mode must not fall through to the public measured set, which
+  // spends. The public set is the invocation with no mode at all.
+  if (argv[2] !== undefined) {
+    throw new Error(
+      `unknown mode '${argv[2]}' — expected no mode, or one of ${[WARMUP_MODE, PRIVATE_MODE, PRIVATE_WARMUP_MODE, PRIVATE_SHAKEDOWN_MODE, SNAPSHOT_MODE, SALT_MODE, COMMIT_MODE].join(', ')}`,
+    )
   }
 
   // Before the spend and not only at stamp time. readProvenance refuses a dirty

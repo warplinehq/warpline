@@ -8,7 +8,7 @@
  * configuration drives without ever naming what it is grading.
  */
 import { describe, expect, test } from 'bun:test'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -28,6 +28,7 @@ import {
   assertPrivatePreconditions,
   assertPrivateSeam,
   assertSnapshotDigest,
+  commitment,
   COMMITMENTS_FILE,
   ENGINE_BASE_SHA,
   flipAutonomy,
@@ -1512,6 +1513,160 @@ describe('private set ordering', () => {
       writeRecords(config.resultsDir, [privateSample()])
       const { deps } = orderSpies(digest)
       await expect(runPrivateWarmup(config, deps)).rejects.toThrow(/belongs BEFORE the measured set/)
+    })
+  })
+})
+
+/**
+ * The harness's own entry point, as an operator runs it, in a subprocess from
+ * the checkout root. PATH is inherited untouched, so no case below may reach a
+ * session: each one must finish or refuse before anything is spent.
+ */
+function bench(...args: string[]): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync('bun', ['bench/run.ts', ...args], { cwd: REPO_ROOT, encoding: 'utf8' })
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr }
+}
+
+/** Write the config where the operator keeps it: a file outside this repository. */
+function writeConfig(root: string, config: PrivateConfig): string {
+  const path = join(root, 'private.json')
+  writeFileSync(path, JSON.stringify(config))
+  return path
+}
+
+/** Run `fn` over a fresh temp dir outside the checkout, removed afterwards whatever happens. */
+async function withScratch(fn: (dir: string) => Promise<void> | void): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'bench-private-cli-'))
+  try {
+    await fn(dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+const HEX64 = /[0-9a-f]{64}/g
+
+describe('private command line', () => {
+  test('a configured plugin absent from the snapshot is named, and nothing runs or is written', async () => {
+    await withFrozenFleet(async ({ root, config }) => {
+      config.plugins.push('gamma')
+      const run = bench('private', writeConfig(root, config))
+      expect(run.status).not.toBe(0)
+      expect(run.stderr).toContain('gamma')
+      expect(run.stderr).toContain('absent')
+      expect(existsSync(config.resultsDir)).toBe(false)
+    })
+  })
+
+  test('a relative config path is refused', () => {
+    const run = bench('private', 'relative.json')
+    expect(run.status).not.toBe(0)
+    expect(run.stderr).toMatch(/absolute/)
+  })
+
+  test('a relative shakedown scratch dir is refused', async () => {
+    await withFrozenFleet(async ({ root, config }) => {
+      const run = bench('private-shakedown', writeConfig(root, config), 'scratch')
+      expect(run.status).not.toBe(0)
+      expect(run.stderr).toMatch(/absolute/)
+      expect(existsSync(join(REPO_ROOT, 'scratch'))).toBe(false)
+    })
+  })
+
+  test('an unknown mode is refused rather than falling through to the public set', () => {
+    const run = bench('privat', '/nowhere/private.json')
+    expect(run.status).not.toBe(0)
+    expect(run.stderr).toMatch(/unknown mode 'privat'/)
+  })
+
+  test('snapshot prints the digest of the snapshot it took, and no other digest', async () => {
+    await withFleet(async ({ root, config }) => {
+      const run = bench('snapshot', writeConfig(root, config))
+      expect(run.status).toBe(0)
+      const digests = run.stdout.match(HEX64) ?? []
+      expect(digests).toEqual([treeDigest(config.snapshot.dir)])
+    })
+  })
+
+  test('salt writes 32 bytes readable by the owner alone, and prints none of them', async () => {
+    await withScratch((dir) => {
+      const path = join(dir, 's.bin')
+      const run = bench('salt', path)
+      expect(run.status).toBe(0)
+      expect(readFileSync(path)).toHaveLength(32)
+      expect(statSync(path).mode & 0o777).toBe(0o600)
+      expect(run.stdout.match(HEX64)).toBeNull()
+      expect(run.stdout).not.toContain(readFileSync(path).toString('hex').slice(0, 16))
+    })
+  })
+
+  test('salt never replaces an existing salt', async () => {
+    await withScratch((dir) => {
+      const path = join(dir, 's.bin')
+      expect(bench('salt', path).status).toBe(0)
+      const first = readFileSync(path)
+      expect(bench('salt', path).status).not.toBe(0)
+      expect(Buffer.compare(readFileSync(path), first)).toBe(0)
+    })
+  })
+
+  test('salt refuses a path inside this repository, directly or through a link to it', async () => {
+    // Names no operator file could carry, removed whatever happens, so a
+    // regression here cannot leave a salt in the checkout.
+    const name = `salt-probe-${process.pid}.bin`
+    const inside = join(REPO_ROOT, '.bench-private', name)
+    const atRoot = join(REPO_ROOT, name)
+    try {
+      const run = bench('salt', inside)
+      expect(run.status).not.toBe(0)
+      expect(run.stderr).toMatch(/inside this repository/)
+      expect(existsSync(inside)).toBe(false)
+
+      await withScratch((dir) => {
+        symlinkSync(REPO_ROOT, join(dir, 'checkout'), 'dir')
+        const linked = bench('salt', join(dir, 'checkout', name))
+        expect(linked.status).not.toBe(0)
+        expect(linked.stderr).toMatch(/inside this repository/)
+        expect(existsSync(atRoot)).toBe(false)
+      })
+    } finally {
+      rmSync(inside, { force: true })
+      rmSync(atRoot, { force: true })
+    }
+  })
+
+  test('commit prints exactly the salted digest of a file, and nothing else', async () => {
+    await withScratch((dir) => {
+      const salt = join(dir, 's.bin')
+      const doc = join(dir, 'prereg.md')
+      writeFileSync(doc, 'a synthetic pre-registration\n')
+      expect(bench('salt', salt).status).toBe(0)
+      const run = bench('commit', salt, doc)
+      expect(run.status).toBe(0)
+      expect(run.stdout).toBe(`${commitment(readFileSync(salt), readFileSync(doc))}\n`)
+    })
+  })
+
+  test('commit over a directory salts its tree digest', async () => {
+    await withScratch((dir) => {
+      const salt = join(dir, 's.bin')
+      const doc = join(dir, 'results')
+      writeTree(doc, { 'a.json': '{}', 'b/c.json': '[]' })
+      expect(bench('salt', salt).status).toBe(0)
+      const run = bench('commit', salt, doc)
+      expect(run.status).toBe(0)
+      expect(run.stdout).toBe(`${commitment(readFileSync(salt), Buffer.from(treeDigest(doc)))}\n`)
+    })
+  })
+
+  test('commit refuses a salt inside this repository', async () => {
+    await withScratch((dir) => {
+      const doc = join(dir, 'prereg.md')
+      writeFileSync(doc, 'a synthetic pre-registration\n')
+      const run = bench('commit', join(REPO_ROOT, '.bench-private', `salt-probe-${process.pid}.bin`), doc)
+      expect(run.status).not.toBe(0)
+      expect(run.stderr).toMatch(/inside this repository/)
+      expect(run.stdout).toBe('')
     })
   })
 })
