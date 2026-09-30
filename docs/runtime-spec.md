@@ -418,6 +418,15 @@ true` on the result). Enforcement is an `AbortController.signal.addEventListener
 'abort', ...)` plus a `setTimeout`-armed abort that races the handler
 promise.
 
+The timer and `elapsed_ms` both count wall time, including time the machine
+spent suspended. A timeout whose timer fired more than `max(timeout_ms, 1s)`
+past its deadline is still a timeout, but its summary and error say so:
+`<plugin>: timeout (timer fired <n>s late against timeout_ms=<ms>: the machine
+slept or the event loop was blocked)`. That tells a run the machine slept
+through apart from a slow plugin. It is an annotation only: the attempt is not
+retried, and the `failed` record it writes is due again at the next advance
+(§ `plugin_runs`).
+
 Timeout vs. retry interaction:
 
 | Outcome                              | `status`    | `retried`                 | `timed_out` |

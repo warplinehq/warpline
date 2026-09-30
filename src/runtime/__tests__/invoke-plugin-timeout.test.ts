@@ -43,6 +43,23 @@ describe('invokePlugin — per-attempt timeout', () => {
     expect(res.attempts[0]?.status).toBe('timeout')
   }, 10_000)
 
+  // #30: a timer that fires far past its deadline means the process could not
+  // run (a sleep, or a blocked event loop). Still a timeout, but the record
+  // says so, so it can be told apart from a slow plugin.
+  it('a timeout whose timer fired late says so in the summary and the error', async () => {
+    const res = await invokePlugin('late-timer-plugin', {}, { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
+
+    expect(res.timed_out).toBe(true)
+    expect(res.result.summary).toStartWith('late-timer-plugin: timeout (timer fired ')
+    expect(res.result.summary).toContain('late against timeout_ms=100')
+    expect(res.result.errors[0]?.message).toContain('late against timeout_ms=100')
+  }, 10_000)
+
+  it('an on-time timeout keeps the plain summary', async () => {
+    const res = await invokePlugin('abort-unaware-plugin', {}, { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
+    expect(res.result.summary).toBe('abort-unaware-plugin: timeout')
+  }, 10_000)
+
   it('clean success when handler completes inside timeout', async () => {
     const res = await invokePlugin('success-plugin', {}, { pluginsDir: FIXTURES_DIR, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
     expect(res.timed_out).toBe(false)

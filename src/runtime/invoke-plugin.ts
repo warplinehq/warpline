@@ -326,6 +326,14 @@ let printingPlugins = 0
 let restoreStdout: (() => void) | null = null
 
 /** The three console methods that write to stdout. The rest write to stderr. */
+/**
+ * How late a timeout timer must fire, beyond `timeout_ms` itself, before the
+ * record calls it late (#30). The floor keeps ordinary load jitter on a short
+ * timeout from reading as a sleep.
+ */
+const LATE_TIMER_FLOOR_MS = 1_000
+
+
 const STDOUT_CONSOLE = ['log', 'info', 'debug'] as const
 
 function redirectPluginOutput(): void {
@@ -702,6 +710,17 @@ export async function invokePlugin(
       const onAbort = () => {
         const reason = String(attemptCtl.signal.reason ?? '')
         const isTimeout = reason === 'timeout' || reason.includes('timeout')
+        // A timer that fires far past its deadline means nothing could run in
+        // between: the machine slept, or the event loop was held. The plugin
+        // may not have been slow at all, so the record says so (#30).
+        // ponytail: annotation only, the attempt still fails. Re-arming for
+        // the unslept remainder needs a clock that pauses across suspend,
+        // which is unverified under Bun on macOS.
+        const lateMs = Date.now() - attemptStart - timeoutMs
+        const late =
+          isTimeout && lateMs > Math.max(timeoutMs, LATE_TIMER_FLOOR_MS)
+            ? ` (timer fired ${Math.round(lateMs / 1000)}s late against timeout_ms=${timeoutMs}: the machine slept or the event loop was blocked)`
+            : ''
         resolvePromise({
           status: 'failed',
           phases_completed: [],
@@ -710,14 +729,14 @@ export async function invokePlugin(
             makeSkillError(
               isTimeout ? 'timeout' : 'dependency_unavailable',
               isTimeout
-                ? `Plugin '${pluginName}' exceeded timeout_ms=${timeoutMs}`
+                ? `Plugin '${pluginName}' exceeded timeout_ms=${timeoutMs}${late}`
                 : `Plugin '${pluginName}' cancelled: ${reason || 'aborted'}`,
               { retryable: false },
             ),
           ],
           data_freshness: {},
           summary: isTimeout
-            ? `${pluginName}: timeout`
+            ? `${pluginName}: timeout${late}`
             : `${pluginName}: cancelled`,
           artifacts_produced: [],
           schema_version: 1,
