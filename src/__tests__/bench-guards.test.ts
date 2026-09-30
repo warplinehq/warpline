@@ -23,6 +23,9 @@
  *   - the shortfall case is asserted by ABSENCE (`in`), never by comparing a
  *     median field to zero: the claim is that no median was computed, and a
  *     zero would be a figure a table renderer would happily print.
+ *   - the agreement cases RECOMPUTE the public ratios from the committed
+ *     records rather than restating them. A restated ratio would keep passing
+ *     after the records or the summary arithmetic changed underneath it.
  */
 import { describe, expect, test } from 'bun:test'
 import {
@@ -350,5 +353,47 @@ describe('the harness cannot reach the published tarball', () => {
     const denylist = source.split('\n').filter((l) => l.startsWith('DENIED_RE='))
     expect(denylist).toHaveLength(1)
     expect(denylist[0]).not.toContain(HARNESS_DIR)
+  })
+})
+
+// ─── agreement ───────────────────────────────────────────────────────────────
+
+/**
+ * The rule that decides whether a private-scale figure may be published, run
+ * against the public records it is compared with.
+ *
+ * The public side is read from disk through the same `summariseSet` the
+ * published table comes from. Nothing here spawns a process or writes a file.
+ */
+import {
+  agreementVerdict,
+  agrees,
+  GATING_RATIOS,
+  gatingRatios,
+  powerOfTenBucket,
+  twoSigFigs,
+  type SummaryLike,
+} from '../../bench/agreement.js'
+import { summariseSet } from '../../bench/run.js'
+
+describe('agreement — the public ratios, recomputed', () => {
+  test('the committed records give the four published public ratios at two significant figures', async () => {
+    const pub = await summariseSet(join(GUARDS_REPO_ROOT, 'bench/results'))
+    const result = gatingRatios(pub)
+    if (!('ratios' in result)) throw new Error('the public set carries a shortfall')
+    expect(twoSigFigs(result.ratios['wall_clock:agent-with-state'])).toBe('0.76')
+    expect(twoSigFigs(result.ratios['wall_clock:agent-from-scratch'])).toBe('0.80')
+    expect(twoSigFigs(result.ratios['output:agent-with-state'])).toBe('0.63')
+    expect(twoSigFigs(result.ratios['output:agent-from-scratch'])).toBe('0.70')
+  })
+
+  test('the public set compared with itself publishes, every ratio agreeing', async () => {
+    const pub = await summariseSet(join(GUARDS_REPO_ROOT, 'bench/results'))
+    const report = agreementVerdict(pub, pub)
+    expect(report.verdict).toBe('publish')
+    expect(report.ratios.map((r) => r.id)).toEqual(GATING_RATIOS.map((g) => g.id))
+    expect(report.ratios.every((r) => r.verdict === 'agree')).toBe(true)
+    expect(report.diverged).toEqual([])
+    expect(report.shortfalls).toEqual([])
   })
 })
