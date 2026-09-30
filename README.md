@@ -101,7 +101,8 @@ systems (macOS, Linux). Windows is untested and unclaimed.
 
 Every file warpline reads or writes lives under one home directory: the
 `WARPLINE_HOME` env var, else the nearest ancestor `.warpline/` directory,
-else `<cwd>/.warpline`.
+else `<cwd>/.warpline`. The one exception is the plugin root: `<home>/plugins`
+unless `WARPLINE_PLUGINS_DIR` names another directory.
 
 ## What you get
 

@@ -146,6 +146,7 @@ npx warpline approve hello-warpline
 Approved 1 scope:
   hello-warpline
 Expires ... (240m remaining).
+Grant file: .../.session-approval
 ```
 
 Approval is a *session* grant, not a per-action prompt: one decision, scoped to

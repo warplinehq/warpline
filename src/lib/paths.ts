@@ -4,8 +4,9 @@
  * There are two roots, not one. State and configuration — engine state, run
  * artifacts, the event log, the session-approval grant, per-plugin config —
  * resolve from the home below. The PLUGIN root is separate: a host may supply
- * its own through `AdvanceOptions.pluginsDir`, and it defaults to
- * `<home>/plugins` only when none is given. The two are independent and are
+ * its own through `AdvanceOptions.pluginsDir` (or `WARPLINE_PLUGINS_DIR` for a
+ * process it does not embed), and it defaults to `<home>/plugins` only when
+ * neither is given. The two are independent and are
  * not required to be disjoint.
  *
  * The home resolves as:
@@ -61,12 +62,17 @@ export function runsDir(): string {
 }
 
 /**
- * The DEFAULT plugin root (<name>/manifest.ts + handler.ts under it).
+ * The DEFAULT plugin root (<name>/manifest.ts + handler.ts under it):
+ * `WARPLINE_PLUGINS_DIR` when set, otherwise `<home>/plugins`.
  *
  * Not necessarily the root a given advance reads: `AdvanceOptions.pluginsDir`
- * takes precedence when a host supplies one.
+ * takes precedence when a host supplies one. The env var is how a host's own
+ * root reaches the CLI verbs (approve, deny, resolve, configure, plan), which
+ * run in a process the host's options never touch.
  */
 export function pluginsDir(): string {
+  const env = process.env.WARPLINE_PLUGINS_DIR
+  if (env) return path.resolve(env)
   return path.join(warplineHome(), 'plugins')
 }
 

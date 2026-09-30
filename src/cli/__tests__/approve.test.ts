@@ -2212,3 +2212,30 @@ describe('warpline approve --content', () => {
     expect(await approvalsOnDisk()).toBe(before)
   })
 })
+
+describe('#28: a host-supplied plugin root reaches approve', () => {
+  test('WARPLINE_PLUGINS_DIR validates names against that root, and the grant file is named', async () => {
+    // The host's root sits outside the home, and the home holds no plugins/.
+    const hostRoot = join(root, '..', `${root.split('/').pop()}-host-plugins`)
+    const { rename } = await import('node:fs/promises')
+    await rename(join(root, 'plugins'), hostRoot)
+    const saved = process.env.WARPLINE_PLUGINS_DIR
+    try {
+      delete process.env.WARPLINE_PLUGINS_DIR
+      const without = await capture('approve', ['render-issue'])
+      expect(without.code).toBe(1)
+      expect(without.stderr).toContain('Unknown plugin: render-issue')
+      expect(existsSync(approvalPath)).toBe(false)
+
+      process.env.WARPLINE_PLUGINS_DIR = hostRoot
+      const withRoot = await capture('approve', ['render-issue'])
+      expect(withRoot.code).toBe(0)
+      expect((await readGrant()).scopes).toEqual(['render-issue'])
+      expect(withRoot.stdout).toContain(`Grant file: ${approvalPath}\n`)
+    } finally {
+      if (saved === undefined) delete process.env.WARPLINE_PLUGINS_DIR
+      else process.env.WARPLINE_PLUGINS_DIR = saved
+      await rm(hostRoot, { recursive: true, force: true })
+    }
+  })
+})

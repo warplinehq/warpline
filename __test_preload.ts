@@ -25,6 +25,12 @@ if (!process.env.WARPLINE_HOME) {
   process.env.WARPLINE_HOME = mkdtempSync(join(tmpdir(), 'warpline-test-home-'))
 }
 
+// An operator's WARPLINE_PLUGINS_DIR would point init/scaffold tests at a real
+// plugin root and every name-validating verb at real manifests. Unset it
+// outright: the default then follows the temp home above, and a test that
+// wants the var sets it itself.
+delete process.env.WARPLINE_PLUGINS_DIR
+
 /**
  * bunfig.toml's `[test] timeout` key is silently ignored (bun 1.3.11) — setting
  * it there looks like it works and does nothing. This is the one place that

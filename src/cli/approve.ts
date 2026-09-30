@@ -1086,6 +1086,9 @@ export async function run(argv: string[]): Promise<number> {
       ? ` — runs beyond the ${ceilingHours}h ceiling from the first grant`
       : ''
   process.stdout.write(`Expires ${result.expires_at} (${remaining}m remaining)${note}.\n`)
+  // The home resolves from WARPLINE_HOME, an ancestor `.warpline/` or the cwd,
+  // so a forgotten env var writes a grant no scheduled run reads (#28). Name it.
+  process.stdout.write(`Grant file: ${approvalPath}\n`)
 
   return 0
 }

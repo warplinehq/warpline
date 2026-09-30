@@ -23,9 +23,17 @@ validated against `PluginManifestSchema`, imported from
 `warpline/schemas/plugin-manifest`.
 
 The plugin root is resolved by exactly one rule: `AdvanceOptions.pluginsDir`
-when the host supplies it, otherwise `<warplineHome()>/plugins`. It is a single
+when the host supplies it, otherwise the `WARPLINE_PLUGINS_DIR` env var when it
+is set and non-empty, otherwise `<warplineHome()>/plugins`. It is a single
 root, not a search-path list — nothing falls back to a second location when a
 plugin is not found under the first.
+
+The env var is how a host that supplies its own root reaches the CLI verbs that
+validate plugin names against it — `approve`, `deny`, `resolve`, `configure`,
+`plan` — and `advance`, `init` and `scaffold`, all of which run in a process the
+host's `AdvanceOptions` never touch. Set it wherever `WARPLINE_HOME` is set.
+`approve` prints the grant file it wrote (`Grant file: <path>`), so a grant
+written into a home no scheduled run reads is visible at the moment it is made.
 
 The plugin root and the home are independent. A supplied root may sit outside
 the home, inside it, or be exactly `<home>/plugins`; nothing requires the two to
