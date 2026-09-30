@@ -256,8 +256,13 @@ function commitmentsFreeze(
     throw new Error(`blind: ${COMMITMENTS_FILE} is not tracked`)
   }
 
-  // `-m` prints a merge once per parent, so the Set is load-bearing, and it
-  // keeps first occurrence so topological order survives the dedupe.
+  // `--full-history` is the load-bearing flag: without it, a merge TREESAME to
+  // one parent hides the other branch, and a line that branch added and the
+  // merge dropped is never seen (pinned by the dropped-in-merge fixture). `-m`
+  // matches `preRegAncestry`; with no diff requested git prints each merge
+  // once, and the Set, which keeps first occurrence so topological order
+  // survives, is there for the day a diff is asked for and it prints one per
+  // parent.
   const touching = [
     ...new Set(
       git(root, ['log', '--full-history', '-m', '--topo-order', '--reverse', '--format=%H', '--', COMMITMENTS_FILE])
@@ -562,6 +567,67 @@ function ledger(...lines: string[]): { path: string; body: string } {
   return { path: COMMITMENTS_FILE, body: lines.map((l) => `${l}\n`).join('') }
 }
 
+/**
+ * The two ledger shapes only a merge can produce. Both branches write the one
+ * file, so the merge is taken with `-s ours` and the joined ledger staged by
+ * hand: a textual conflict is git's business, and what is under test is the
+ * content the merge commit ends up carrying.
+ *
+ *   *   merge          <- ledger: prereg A + the side line
+ *   |\
+ *   | * side           <- 'second-prereg': prereg B / 'results-before-prereg': results R
+ *   * | main           <- prereg A
+ *   |/
+ *   * base             <- empty ledger + the agreement rule
+ *
+ * For 'results-before-prereg' the side branch forked before the prereg, so its
+ * results line cannot descend from it, however the merge is resolved.
+ *
+ * 'second-prereg-dropped' is the remove-and-re-add attempt in merge form: the
+ * side branch adds prereg B and the merge keeps main's ledger alone. That merge
+ * is TREESAME to main, so git's default history simplification never walks the
+ * side branch, and only `--full-history` sees prereg B come and go.
+ */
+function commitmentsMergeFixture(kind: 'second-prereg' | 'results-before-prereg' | 'second-prereg-dropped'): {
+  root: string
+  shas: Record<'base' | 'side' | 'main' | 'merge', string>
+} {
+  const root = mkdtempSync(join(tmpdir(), 'warpline-commitments-merge-'))
+  const head = (): string => git(root, ['rev-parse', 'HEAD'])
+  const sideLine = kind === 'results-before-prereg' ? RESULTS_R : PREREG_B
+  git(root, ['init', '-q'])
+
+  stage(root, RULE_V1.path, RULE_V1.body)
+  stage(root, COMMITMENTS_FILE, '')
+  commit(root, 'base')
+  const base = head()
+  // Read rather than assumed, for the reason `mergeFixture` gives.
+  const main = git(root, ['branch', '--show-current'])
+
+  git(root, ['checkout', '-q', '-b', 'side'])
+  stage(root, COMMITMENTS_FILE, `${sideLine}\n`)
+  commit(root, 'side')
+  const side = head()
+
+  git(root, ['checkout', '-q', main])
+  stage(root, COMMITMENTS_FILE, `${PREREG_A}\n`)
+  commit(root, 'main')
+  const mainSha = head()
+
+  execFileSync(
+    'git',
+    ['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'merge', '--no-ff', '--no-commit', '-s', 'ours', 'side'],
+    { cwd: root, env: GIT_ENV, stdio: 'ignore' },
+  )
+  stage(root, COMMITMENTS_FILE, kind === 'second-prereg-dropped' ? `${PREREG_A}\n` : `${PREREG_A}\n${sideLine}\n`)
+  commit(root, 'merge')
+
+  return { root, shas: { base, side, main: mainSha, merge: head() } }
+}
+
+/** A fixture's own sha, shortened the way a finding shortens it. */
+const abbrev = (sha: string): string => sha.slice(0, 7)
+
 describe('the private commitments file is append-only and frozen by ancestry', () => {
   test('the ledger parser accepts the two line kinds and names only the line number of anything else', () => {
     expect(parseCommitments('')).toEqual([])
@@ -590,6 +656,186 @@ describe('the private commitments file is append-only and frozen by ancestry', (
         findings: [{ kind: 'second-prereg', commit: shas[3]!.slice(0, 7) }],
         vacuous: false,
       })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /** Remove-and-re-add starts with a removal, and that is where it is caught. */
+  test('a removed line is reported at the commit that removes it', () => {
+    const { root, shas } = fixture([RULE_V1, ledger(), ledger(PREREG_A), ledger()])
+    try {
+      expect(commitmentsFreeze(root).findings).toEqual([{ kind: 'line-removed', commit: abbrev(shas[3]!) }])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * `merge-base --is-ancestor X X` exits 0, so a commit adding both lines passes
+   * an ancestry check while fixing nothing. The distinct-commit rule is the
+   * only thing that reports this, and this fixture is what proves it does.
+   */
+  test('a results line added in the same commit as the prereg is reported', () => {
+    const { root, shas } = fixture([RULE_V1, ledger(), ledger(PREREG_A, RESULTS_R)])
+    try {
+      expect(isAncestor(root, shas[2]!, shas[2]!)).toBe(true)
+      expect(commitmentsFreeze(root).findings).toEqual([
+        { kind: 'results-before-prereg', commit: abbrev(shas[2]!) },
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a results line committed before the prereg on one branch is reported', () => {
+    const { root, shas } = fixture([RULE_V1, ledger(), ledger(RESULTS_R), ledger(RESULTS_R, PREREG_A)])
+    try {
+      expect(commitmentsFreeze(root).findings).toEqual([
+        { kind: 'results-before-prereg', commit: abbrev(shas[2]!) },
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a second results line is reported at the commit that adds it', () => {
+    const { root, shas } = fixture([
+      RULE_V1,
+      ledger(),
+      ledger(PREREG_A),
+      ledger(PREREG_A, RESULTS_R),
+      ledger(PREREG_A, RESULTS_R, RESULTS_S),
+    ])
+    try {
+      expect(commitmentsFreeze(root).findings).toEqual([{ kind: 'second-results', commit: abbrev(shas[4]!) }])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * Two prereg lines that each arrive on their own branch, with the merge
+   * joining them. Exactly one finding, at the branch commit git orders second:
+   * the merge introduces nothing, since each line is already in one of its
+   * parents, and a comparison against the first parent alone would name the
+   * merge as well. The graph shape is asserted, not assumed.
+   */
+  test('a second prereg line that arrives through a merge is reported once, at its branch commit', () => {
+    const { root, shas } = commitmentsMergeFixture('second-prereg')
+    try {
+      expect(git(root, ['rev-list', '--merges', '--count', 'HEAD'])).toBe('1')
+      const order = git(root, ['rev-list', '--topo-order', '--reverse', 'HEAD']).split('\n')
+      const later = order.indexOf(shas.side) > order.indexOf(shas.main) ? shas.side : shas.main
+      expect(commitmentsFreeze(root).findings).toEqual([{ kind: 'second-prereg', commit: abbrev(later) }])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a results line from a branch that forked before the prereg is reported after the merge', () => {
+    const { root, shas } = commitmentsMergeFixture('results-before-prereg')
+    try {
+      expect(git(root, ['rev-list', '--merges', '--count', 'HEAD'])).toBe('1')
+      expect(commitmentsFreeze(root).findings).toEqual([
+        { kind: 'results-before-prereg', commit: abbrev(shas.side) },
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * Watched green with `--full-history` removed from the enumeration before
+   * this fixture existed: every other case passed, because in every other
+   * fixture the side branch's line survives the merge. Here it does not, and
+   * the default walk never reaches the commit that added it.
+   */
+  test('a second prereg that a merge drops is still reported, and so is the removal', () => {
+    const { root, shas } = commitmentsMergeFixture('second-prereg-dropped')
+    try {
+      expect(git(root, ['rev-list', '--merges', '--count', 'HEAD'])).toBe('1')
+      expect(git(root, ['log', '--format=%H', '--', COMMITMENTS_FILE]).split('\n')).not.toContain(shas.side)
+      const order = git(root, ['rev-list', '--topo-order', '--reverse', 'HEAD']).split('\n')
+      const later = order.indexOf(shas.side) > order.indexOf(shas.main) ? shas.side : shas.main
+      expect(commitmentsFreeze(root).findings).toEqual([
+        { kind: 'second-prereg', commit: abbrev(later) },
+        { kind: 'line-removed', commit: abbrev(shas.merge) },
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('the agreement module edited after the prereg is reported by path', () => {
+    const { root } = fixture([RULE_V1, ledger(), ledger(PREREG_A), RULE_V2])
+    try {
+      expect(commitmentsFreeze(root).findings).toEqual([
+        { kind: 'frozen-changed-after-prereg', path: FROZEN_AT_PREREG[0] },
+      ])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /** Nothing to compare against is blind, and blind is not clean. */
+  test('a frozen path absent at the prereg commit throws', () => {
+    const { root } = fixture([ledger(), ledger(PREREG_A)])
+    try {
+      expect(() => commitmentsFreeze(root)).toThrow(/absent at the prereg commit/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a staged line no commit adds throws rather than reporting clean', () => {
+    const { root } = fixture([RULE_V1, ledger()])
+    try {
+      stage(root, COMMITMENTS_FILE, `${PREREG_A}\n`)
+      expect(git(root, ['log', '--format=%h', '--', COMMITMENTS_FILE]).split('\n')).toHaveLength(1)
+      expect(() => commitmentsFreeze(root)).toThrow(/blind/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('an untracked ledger throws rather than reporting an empty one', () => {
+    const { root } = fixture([RULE_V1])
+    try {
+      expect(() => commitmentsFreeze(root)).toThrow(/not tracked/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /** Cloned through `file://` for the reason the ancestry test above gives. */
+  test('a shallow repository throws rather than reporting clean over unseen history', () => {
+    const { root } = fixture([RULE_V1, ledger(), ledger(PREREG_A)])
+    const clone = mkdtempSync(join(tmpdir(), 'warpline-commitments-shallow-'))
+    try {
+      git(clone, ['clone', '-q', '--depth', '1', `file://${root}`, 'copy'])
+      const shallow = join(clone, 'copy')
+      expect(git(shallow, ['rev-parse', '--is-shallow-repository'])).toBe('true')
+      expect(() => commitmentsFreeze(shallow)).toThrow(/shallow/)
+    } finally {
+      rmSync(clone, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a malformed committed line throws naming its line number', () => {
+    const { root } = fixture([RULE_V1, ledger(), { path: COMMITMENTS_FILE, body: 'prereg XYZ\n' }])
+    try {
+      expect(() => commitmentsFreeze(root)).toThrow(/line 1\b/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  test('a prereg followed by one results line in a later commit reports no offender', () => {
+    const { root } = fixture([RULE_V1, ledger(), ledger(PREREG_A), ledger(PREREG_A, RESULTS_R)])
+    try {
+      expect(commitmentsFreeze(root)).toEqual({ findings: [], vacuous: false })
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
