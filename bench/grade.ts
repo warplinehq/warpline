@@ -12,7 +12,7 @@
  * fact in three different words are three passes, and an artifact that carries
  * the fact in a shape a reader can use is what the benchmark is about.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { GRADED_KEYS, type GradedKey } from './record.js'
@@ -88,15 +88,20 @@ function gradeDraft(path: string): boolean {
   }
 }
 
+/** The same keys, no more and no fewer, in any order. */
+function sameKeys(actual: readonly string[], expected: readonly string[]): boolean {
+  const keys = [...actual].sort()
+  const want = [...expected].sort()
+  return keys.length === want.length && keys.every((k, i) => k === want[i])
+}
+
 /** A fan-out: one entry per graded channel, no more and no fewer. */
 function gradeFanout(path: string): boolean {
   const value = readJson(path)
   if (!isRecord(value)) return false
   const channels = gradedChannels()
   if (channels.length === 0) return false
-  const keys = Object.keys(value).sort()
-  const expected = [...channels].sort()
-  return keys.length === expected.length && keys.every((k, i) => k === expected[i])
+  return sameKeys(Object.keys(value), channels)
 }
 
 /** Grade one home's four artifacts, whichever arm produced them. */
@@ -182,8 +187,9 @@ function applyPredicate(predicate: GradePredicate, value: unknown): boolean {
     case 'non_empty_array':
       return Array.isArray(value) && value.length > 0
     case 'non_empty_string':
+      return typeof value === 'string' && value.trim().length > 0
     case 'keyset_equals':
-      throw new Error(`grade: predicate '${predicate.kind}' is not wired yet`)
+      return isRecord(value) && sameKeys(Object.keys(value), predicate.keys)
   }
 }
 
@@ -193,19 +199,22 @@ function applyPredicate(predicate: GradePredicate, value: unknown): boolean {
  * whatever produced them.
  *
  * A malformed check, an empty list and a duplicate id are configuration errors
- * and throw. A missing file, invalid JSON or a pointer that finds nothing is an
- * artifact that failed, and grades false.
+ * and throw. A missing file, a file linked from outside the home, invalid JSON
+ * or a pointer that finds nothing is an artifact that failed, and grades false.
  */
 export function gradeWithChecks(home: string, checks: readonly GradeCheck[]): GradeResult {
   if (checks.length === 0) throw new Error('grade: a grader with no checks graded nothing')
   const root = resolve(home) + sep
+  const realRoot = realpathSync(home) + sep
   const paths: Record<string, boolean> = {}
   for (const raw of checks) {
     const check = GradeCheckSchema.parse(raw)
     if (Object.hasOwn(paths, check.id)) throw new Error(`grade: check id '${check.id}' appears twice`)
     const file = resolve(join(home, check.path))
     if (!file.startsWith(root)) throw new Error(`grade: check '${check.id}' resolves outside the home`)
-    if (!existsSync(file)) {
+    // The path is operator-written, the file is arm-written. A link planted in
+    // graded/ that points outside the home would grade someone else's file.
+    if (!existsSync(file) || !realpathSync(file).startsWith(realRoot)) {
       paths[check.id] = false
       continue
     }
