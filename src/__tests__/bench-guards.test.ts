@@ -470,3 +470,114 @@ describe('agreement — the rule at its boundaries', () => {
     expect(() => agreementVerdict(LITERAL_PUBLIC, pub)).toThrow(/public set/)
   })
 })
+
+// ─── publication shape ───────────────────────────────────────────────────────
+
+/**
+ * Every number in a published private-scale section that is not in a
+ * publishable form, as `line <n>: <token>`, plus every hex run as `hex` and
+ * every provenance phrasing the README-versus-records test reads first-match.
+ *
+ * A published private-scale figure is a ratio at two significant figures, an
+ * order of magnitude or a shape. A digit in any other form is either a raw
+ * count, which leaks fleet size and cadence, or false precision. A hex run of
+ * seven or more characters holding a digit is a hash of private material, and
+ * it is caught inside a code span too. A version inside a code span is the one
+ * number allowed outside those forms.
+ *
+ * Its ceiling: a count that is itself a power of ten (`1`, `100`) passes, as
+ * `10` already does under the two-figure rule. So the rule against stating a
+ * count stays a reviewed judgment, and this scanner does not replace it.
+ */
+function publicationShapeOffenders(section: string): string[] {
+  const offenders: string[] = []
+  section.split('\n').forEach((line, i) => {
+    const n = i + 1
+    for (const _ of line.matchAll(/\b(?=[0-9a-f]*\d)[0-9a-f]{7,}\b/g)) offenders.push(`line ${n}: hex`)
+    if (/git SHA\s+`|package version\s+`|tool version\s+`|model\s+`/.test(line)) {
+      offenders.push(`line ${n}: provenance phrasing`)
+    }
+    // Commas only BETWEEN digits, so a list like `0.76, 0.80` reads as two
+    // ratios rather than two tokens with a trailing comma.
+    for (const [tok] of line.replace(/`[^`]*`/g, '').matchAll(/\d(?:[\d,]*\d)?(?:\.\d+)?/g)) {
+      const v = Number(tok.replace(/,/g, ''))
+      const admitted = tok === v.toPrecision(2) || (v > 0 && tok === String(powerOfTenBucket(v)))
+      if (!admitted) offenders.push(`line ${n}: ${tok}`)
+    }
+  })
+  return offenders
+}
+
+/** A clean section, in the shape the published one will take. */
+const CLEAN_SECTION = [
+  '## At private scale',
+  '',
+  'The same harness, run against a private workload, agreed with the public figures.',
+  '',
+  '| Ratio | Figure |',
+  '|---|---|',
+  '| wall-clock, warpline over the agent with state | 0.76 |',
+  '| wall-clock, warpline over the agent from scratch | 0.80 |',
+  '| output tokens, warpline over the agent with state | 0.63 |',
+  '| output tokens, warpline over the agent from scratch | 0.70 |',
+  '',
+  'In shape, cache reads were higher than both controls.',
+  '',
+  'Run against warpline `0.5.0`.',
+]
+
+/** Where a planted line goes, and the line number an offender must name. */
+const PLANT_AT = 3
+const PLANTED_LINE = PLANT_AT + 1
+
+function planted(line: string): string {
+  return [...CLEAN_SECTION.slice(0, PLANT_AT), line, ...CLEAN_SECTION.slice(PLANT_AT)].join('\n')
+}
+
+describe('publication shape', () => {
+  test('a ratio is published at two significant figures', () => {
+    expect(twoSigFigs(0.7572742106250411)).toBe('0.76')
+    expect(twoSigFigs(0.8004756312321419)).toBe('0.80')
+    expect(twoSigFigs(0.6347868487043745)).toBe('0.63')
+    expect(twoSigFigs(0.7041415546283418)).toBe('0.70')
+    expect(twoSigFigs(1.049)).toBe('1.0')
+  })
+
+  test('an order of magnitude is the power of ten at or below the value', () => {
+    expect(powerOfTenBucket(0.76)).toBe(0.1)
+    expect(powerOfTenBucket(1.2)).toBe(1)
+    expect(powerOfTenBucket(12)).toBe(10)
+    expect(powerOfTenBucket(0.05)).toBe(0.01)
+    expect(() => powerOfTenBucket(0)).toThrow(/agreement:/)
+  })
+
+  test('the clean section has no offender', () => {
+    expect(publicationShapeOffenders(CLEAN_SECTION.join('\n'))).toEqual([])
+  })
+
+  test.each([
+    ['a raw millisecond figure', 'The median run took 77259 ms.', '77259'],
+    ['a raw token median', 'The median output was 4556.5 tokens.', '4556.5'],
+    ['an unrounded ratio', 'The wall-clock ratio was 0.7572.', '0.7572'],
+    ['a plugin count', 'The workload ran across 7 plugins.', '7'],
+    ['a version outside a code span', 'Run against warpline 0.5.0 on the day.', '0.5'],
+    ['a digest inside a code span', `The snapshot digest was \`${'a1'.repeat(32)}\`.`, 'hex'],
+    ['a provenance phrasing', 'Measured on model `claude-opus-5`.', 'provenance phrasing'],
+  ])('%s is named on its own line', (_what, line, token) => {
+    const offenders = publicationShapeOffenders(planted(line))
+    expect(offenders).toContain(`line ${PLANTED_LINE}: ${token}`)
+    expect(offenders.every((o) => o.startsWith(`line ${PLANTED_LINE}: `))).toBe(true)
+  })
+
+  test('a bare version reports both of its parts', () => {
+    const offenders = publicationShapeOffenders(planted('Run against warpline 0.5.0 on the day.'))
+    expect(offenders).toEqual([`line ${PLANTED_LINE}: 0.5`, `line ${PLANTED_LINE}: 0`])
+  })
+
+  test('an order of magnitude written as the formatter renders it is admitted, and any other value is not', () => {
+    expect(publicationShapeOffenders(planted('within 0.1 to 1 of the public figure, and 0.01 at the extreme'))).toEqual(
+      [],
+    )
+    expect(publicationShapeOffenders(planted('within 0.2 of the public figure'))).toEqual([`line ${PLANTED_LINE}: 0.2`])
+  })
+})
