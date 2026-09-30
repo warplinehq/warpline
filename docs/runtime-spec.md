@@ -1195,16 +1195,28 @@ JSON file; there is no daemon, no keyring and no server.
   "granted_at": "2026-08-20T12:00:00.000Z",
   "first_granted_at": "2026-08-20T09:30:00.000Z",
   "expires_at": "2026-08-20T13:30:00.000Z",
-  "scopes": ["issue-render", "digest-sender"]
+  "scopes": ["digest-sender", "issue-render"],
+  "scope_windows": {
+    "digest-sender": {
+      "first_granted_at": "2026-08-20T12:00:00.000Z",
+      "expires_at": "2026-08-20T16:00:00.000Z"
+    },
+    "issue-render": {
+      "first_granted_at": "2026-08-20T09:30:00.000Z",
+      "expires_at": "2026-08-20T13:30:00.000Z"
+    }
+  }
 }
 ```
 
 | Field              | Type               | Meaning |
 |--------------------|--------------------|---------|
 | `granted_at`       | ISO 8601 string    | When the most recent grant was written. |
-| `first_granted_at` | ISO 8601 string    | When the FIRST grant in this window was written — the anchor for the 23-hour ceiling below. Optional on read, always written. |
-| `expires_at`       | ISO 8601 string    | When the grant stops being honoured. |
+| `first_granted_at` | ISO 8601 string    | The earliest `first_granted_at` across `scope_windows`. On a file without `scope_windows`, when the FIRST grant in this window was written — the anchor for the 23-hour ceiling below. Optional on read, always written. |
+| `expires_at`       | ISO 8601 string    | The earliest expiry across `scope_windows`. On a file without `scope_windows`, when the grant stops being honoured for every scope. Always written, and a file whose `expires_at` will not parse is corrupt. |
 | `scopes`           | `"*"` or `string[]` | `"*"` approves every plugin. An array approves exactly the plugin **directory** names it lists — the same key the engine passes to the gate, not `manifest.name`. Always written sorted, so both the file and its diff are stable. |
+| `min_reader_version` | integer, optional | The oldest reader that may interpret the file. A reader whose own version (`GRANT_READER_VERSION`, 1 in this build) is lower refuses the whole file, and so does any value that is not a finite number. Nothing writes it yet. |
+| `scope_windows`    | object, optional   | One window per scope key (a plugin name, or `"*"`), each with its own `first_granted_at` and `expires_at`. Each scope expires on its own clock and is capped at its own ceiling. Written by `warpline approve`; `grantApproval` does not write it. |
 
 The file is written with `JSON.stringify(payload, null, 2)`. It is a plain
 TypeScript `interface`, not a Zod schema, and carries no `schema_version`: the
@@ -1216,6 +1228,16 @@ loads and its single grant time serves as its own anchor. An older build
 reading a newer file ignores the field. Removing the field later would silently
 reset every ceiling anchor to the latest grant, which is the failure the field
 exists to prevent — treat it as permanent.
+
+`scope_windows` was added after 0.4.2. Before it, one `expires_at` covered every
+scope, so `approve b --ttl 1h` after `approve a --long --ttl 30d` gave `b`
+thirty days. A file without it is read as one window over every listed scope,
+which is what it meant when it was written. The top-level `expires_at` and
+`first_granted_at` are written as the EARLIEST window's, so an older build,
+which ignores `scope_windows`, expires every scope at the soonest window's
+expiry. A rollback narrows authority and never widens it. An older build's
+`approve` rewrites the file without `scope_windows`, and the file then reads
+the old way again.
 
 **Approving a parked result never writes this file.** `warpline approve` answers
 whichever gate is waiting, and when a parked result is waiting it records that
@@ -1246,6 +1268,20 @@ answer: `new Date('nonsense').getTime()` is `NaN`, and `now > NaN` is false, so
 an unguarded read treats a garbage expiry as an expiry infinitely far away. The
 same holds for an absent `expires_at`. Both are refused before the scope list
 is consulted.
+
+A file with `scope_windows` is decided per scope: a plugin is approved when the
+file lists it and its own window is live, or when a `"*"` window is live. One
+scope's window never approves another, and a window for a scope the file does
+not list approves nothing. A window whose `expires_at` will not parse is not
+live.
+
+A file carrying a `min_reader_version` above this build's is refused outright,
+before anything else in it is read: every scope reads unapproved. This is the
+X.509 critical-extension rule applied to one file. A reader that cannot see a
+field must not guess at what it grants. No build writes the field yet. It
+exists so the next format change that an older reader could misread as more
+authority can set it, and every reader from this build on already refuses.
+`warpline approve` over such a file starts a fresh grant, which narrows.
 
 An unapproved side-effecting plugin is recorded `skipped` and the run
 continues. The gate withholds execution from one plugin; it does not abort the
@@ -1360,14 +1396,16 @@ later one is the failure this behaviour exists to prevent.
 
 | Rule | Behaviour |
 |------|-----------|
-| Scopes | Unioned with the live grant and written sorted. A `"*"` on either side absorbs the other. |
-| `expires_at` | **Preserved** from the live grant. An explicit `--ttl` may extend it, never shorten it. |
-| Ceiling | `expires_at` is capped at `first_granted_at + 23h`. A capped grant reports the cap on stdout. |
-| `--long` | Permits an expiry past the ceiling, and prints that it did. |
-| Prior `--long` grant | The ceiling never shortens time already held. `mergeGrant` caps at `max(first_granted_at + 23h, live expires_at)`, so a window opened by an earlier `--long` survives every later plain `approve` unchanged, and `capped` is false. Revoke to close it early. |
-| `--replace` | Overwrites the scope list and resets `expires_at`; `first_granted_at` is preserved. |
-| Unparseable `first_granted_at` | The grant is **not merged onto**. The anchor is what the ceiling is measured from, so an anchor that will not parse is a ceiling that cannot be computed. `mergeGrant` starts a fresh window instead, which costs the operator scopes they re-grant in one command rather than handing out a window nobody authorised. |
-| Expired grant | Not merged onto. The window has closed; the next grant restarts it, with a new `first_granted_at`. |
+| Scopes | Unioned with the live grant and written sorted. A `"*"` on either side absorbs the other in `scopes`; the named windows stay in `scope_windows`. |
+| Windows | **One per scope.** A requested scope that holds a live window keeps its `expires_at`; a scope without one opens its own window from now, with its own `first_granted_at`. Every scope the command did not name keeps its window unchanged, so a later `approve b --ttl 1h` gives `b` one hour and neither shortens nor lends a standing `--long` window on `a`. |
+| `expires_at` | **Preserved** per scope. An explicit `--ttl` may extend a scope's window, never shorten it. |
+| Ceiling | Each window's expiry is capped at its own `first_granted_at + 23h`. A capped scope reports the cap on its stdout line. |
+| `--long` | Permits an expiry past the ceiling for the scopes named, and prints that it did. |
+| Prior `--long` window | The ceiling never shortens time a scope already holds. `mergeGrant` caps at `max(first_granted_at + 23h, live expires_at)` for that scope, so a window opened by an earlier `--long` survives every later plain `approve` of it unchanged, and `capped` is false. Revoke to close it early. |
+| `--replace` | Drops every other scope and resets the requested scopes' expiries. It never restarts a live scope's ceiling: a requested scope that holds a live window keeps its own `first_granted_at`, or repeating `--replace` would walk the window forward. A requested scope with no live window starts fresh, as on any approve. It never borrows another scope's anchor, which could hand it a ceiling already in the past. |
+| Unparseable `first_granted_at` | That window is **not merged onto**. The anchor is what the ceiling is measured from, so an anchor that will not parse is a ceiling that cannot be computed. `mergeGrant` drops the window and starts that scope fresh, which costs the operator a scope they re-grant in one command rather than handing out a window nobody authorised. |
+| Expired window | Not merged onto. That scope's window has closed; the next grant of it restarts it, with a new `first_granted_at`. Other scopes are unaffected. |
+| Output | One line per live scope, each with its own expiry, then `Grant file: <path>`. |
 | Default TTL | 4 hours. |
 | `--all` | The only path to `"*"`. No positional name is ever treated as a wildcard. It prints the number of side-effecting plugins and the total number of declared side effects it covers before granting. |
 | Concurrent approve | The file is not locked, and the outcome is last-write-wins: each invocation reads the live grant, merges in memory and writes the whole result, so of two overlapping invocations the later write wins outright and the earlier one's scopes are lost. |

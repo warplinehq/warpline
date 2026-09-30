@@ -54,7 +54,7 @@ import {
 } from '../runtime/engine.js'
 import type { EvalContext, RunProfile } from '../runtime/engine.js'
 import { computeTier } from '../runtime/tier.js'
-import { checkApproval } from '../runtime/approval-gate.js'
+import { checkApproval, liveGrantScopes } from '../runtime/approval-gate.js'
 import { readEngineStateReadOnly, withoutStateBackups } from '../runtime/engine-state-store.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../board/state-manager.js'
 import { renderPlan } from './plan-render.js'
@@ -90,7 +90,19 @@ function cycleMembers(err: unknown): string[] {
  * per-plugin verdicts still come from `checkApproval` itself — this read is for
  * display, never for a decision.
  */
-async function readGrant(approvalPath: string): Promise<GrantState | undefined> {
+async function readGrant(approvalPath: string, now: number): Promise<GrantState | undefined> {
+  // Live scopes first, each on its own window (#27): the header names the
+  // scopes still approved and the soonest of their expiries. The file-level
+  // `expires_at` is the EARLIEST window, so reading it alone would call a
+  // grant expired while a longer window in it is still live.
+  const live = await liveGrantScopes(approvalPath, now)
+  if (live.length > 0) {
+    return {
+      scopes: live.some((w) => w.scope === '*') ? '*' : live.map((w) => w.scope),
+      expiresAt: Math.min(...live.map((w) => w.expiresAt)),
+    }
+  }
+  // Nothing live: the file-level read below still names an expired grant.
   try {
     const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as {
       scopes?: '*' | string[]
@@ -119,7 +131,7 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
   const approvalPath = sessionApprovalPath()
 
   const { manifests, failures } = await loadPluginManifests(resolvedPluginsDir)
-  const grant = await readGrant(approvalPath)
+  const grant = await readGrant(approvalPath, now)
   const shell = { pluginsDir: resolvedPluginsDir, grant, failures }
 
   let levels: string[][]

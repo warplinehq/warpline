@@ -15,16 +15,17 @@
  * carries.
  *
  * **Why one pin is a whole file and the other is a slice.**
- * `approval-gate.ts` has had zero commits since `v0.2`, so a file-level digest
- * is exactly the claim. `engine-state.ts` has had four in the same span, none
+ * `approval-gate.ts` had zero commits from `v0.2` until the #27 amendment, and
+ * every change since is one FREEZE-10 names, so a file-level digest is exactly
+ * the claim. `engine-state.ts` has had four in the same span, none
  * of them touching `PendingGateSchema` — a file-level digest there would go red
  * on the next unrelated schema field, and a pin that reddens for reasons its
  * contract never claimed gets deleted rather than read. So the second pin is
  * scoped to the declaration, sliced between two structural anchors rather than
  * by line numbers, which move.
  *
- * **Provenance.** The file digest is the `v0.2` content's, confirmed identical
- * to the working tree at authoring time. The block digest was the `v0.2`
+ * **Provenance.** The file digest was the `v0.2` content's until FREEZE-10 was
+ * amended on 2026-09-30 for #27; it now pins the per-scope-window gate. The block digest was the `v0.2`
  * content's too until FREEZE-10 was amended on 2026-09-23. It now pins the
  * amended declaration, whose one changed line is `plugin_result`. Reproduce:
  *
@@ -58,7 +59,15 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 const APPROVAL_GATE = join(REPO_ROOT, 'src', 'runtime', 'approval-gate.ts')
 const ENGINE_STATE = join(REPO_ROOT, 'src', 'schemas', 'engine-state.ts')
 
-const APPROVAL_GATE_SHA256 = 'd286a53f2b55b19ddbabeae64ce3bc0423912d376860cd5d73c23e6d48ffb72d'
+/**
+ * Re-pinned when FREEZE-10 was amended on 2026-09-30 for issue #27. The grant
+ * file gains per-scope windows (`scope_windows`), so a later short approve
+ * neither borrows nor shortens another scope's standing `--long` window, and a
+ * reader-side `min_reader_version` refusal. The reachability clause is
+ * unchanged: no content-approval path reaches this module. The `v0.2` digest
+ * was `d286a53f2b55b19ddbabeae64ce3bc0423912d376860cd5d73c23e6d48ffb72d`.
+ */
+const APPROVAL_GATE_SHA256 = 'b3918f0dd76abf3dd783c42b30738246293d246c0da02c70b2229a6fd87ed766'
 /**
  * Re-pinned when FREEZE-10 was amended on 2026-09-23. `plugin_result` takes
  * `StoredSkillResultSchema`, so an applied gate can hold an erased Output: once

@@ -7,8 +7,8 @@
  *   1. A plugin needs approval when its manifest's `side_effects` array is
  *      non-empty; the engine calls checkApproval() with the plugin's name
  *   2. Approval is a JSON file at sessionApprovalPath()
- *      (<warplineHome>/.session-approval) carrying an expiry and a `scopes`
- *      value of either '*' or a list of plugin names
+ *      (<warplineHome>/.session-approval) carrying a `scopes` value of either
+ *      '*' or a list of plugin names, and an expiry per scope (#27)
  *   3. grantApproval() writes that file — 4-hour TTL by default, overridable
  *      per call; mergeGrant() is the additive variant behind
  *      `warpline approve`; revokeApproval() deletes it. The file format is
@@ -62,6 +62,94 @@ interface ApprovalFile {
   expires_at: string
   /** '*' = every plugin, or an array of specific plugin names */
   scopes: '*' | string[]
+  /**
+   * One window per scope key (a plugin name, or '*'), so each scope expires on
+   * its own clock (#27). Before it, one `expires_at` covered every scope, and
+   * a later `approve b --ttl 1h` inherited a standing `--long` window for `a`.
+   *
+   * Optional on read; `mergeGrant` always writes it, `grantApproval` never
+   * does. A file without it is read as one window over every listed scope,
+   * which is exactly what it meant when it was written. The top-level
+   * `expires_at` and `first_granted_at` are then written as the EARLIEST
+   * window's, so an older build that ignores this key expires every scope
+   * early and never late: a rollback narrows authority, it cannot widen it.
+   */
+  scope_windows?: Record<string, { first_granted_at: string; expires_at: string }>
+  /**
+   * The oldest reader that may interpret this file. A reader whose
+   * {@link GRANT_READER_VERSION} is lower refuses the file outright: fail
+   * closed, never guess at a format it cannot see (RFC 5280's critical flag,
+   * Delta Lake's `minReaderVersion`). Nothing writes it yet. It exists so a
+   * future change that an older reader could misread as MORE authority can
+   * set it, and every reader from this one on already refuses.
+   */
+  min_reader_version?: number
+}
+
+/** The grant-file format this build reads. See `ApprovalFile.min_reader_version`. */
+export const GRANT_READER_VERSION = 1
+
+/** A scope's live window, parsed. `first` is null when the anchor is unusable. */
+interface Window {
+  first: number | null
+  expires: number
+}
+
+/**
+ * The live windows in a grant file, keyed by scope ('*' or a plugin name).
+ *
+ * The one reader of the format, shared by the decision path and the merge
+ * path so the two cannot disagree about what is live. Fail-closed: an
+ * unparseable top-level `expires_at` is a corrupt file and yields nothing,
+ * and a window only counts for a scope the file actually lists.
+ */
+function liveWindows(raw: ApprovalFile, now: number): Map<string, Window> {
+  const out = new Map<string, Window>()
+  // Absent means every reader. Anything present that is not a number this
+  // build meets is refused, a garbage value included.
+  if (raw.min_reader_version !== undefined) {
+    const v = raw.min_reader_version
+    if (typeof v !== 'number' || !Number.isFinite(v) || v > GRANT_READER_VERSION) return out
+  }
+  const fileExpires = parseTimestamp(raw.expires_at)
+  if (fileExpires === null) return out
+  const fileFirst = parseTimestamp(raw.first_granted_at ?? raw.granted_at)
+  const listed = (key: string) =>
+    raw.scopes === '*' || (Array.isArray(raw.scopes) && key !== '*' && raw.scopes.includes(key))
+
+  const perScope = raw.scope_windows
+  if (perScope !== null && typeof perScope === 'object' && !Array.isArray(perScope)) {
+    for (const [key, w] of Object.entries(perScope)) {
+      if (!listed(key) || w === null || typeof w !== 'object') continue
+      const expires = parseTimestamp(w.expires_at)
+      if (expires === null || now > expires) continue
+      out.set(key, { first: parseTimestamp(w.first_granted_at), expires })
+    }
+    return out
+  }
+
+  // A file with no per-scope windows: one window over every listed scope.
+  if (now > fileExpires) return out
+  const keys = raw.scopes === '*' ? ['*'] : Array.isArray(raw.scopes) ? raw.scopes : []
+  for (const key of keys) out.set(key, { first: fileFirst, expires: fileExpires })
+  return out
+}
+
+/**
+ * The live scopes of a grant file with their expiries, for display. Never
+ * throws; a missing or corrupt file reads as none. Decisions go through
+ * {@link checkApproval}, never through this.
+ */
+export async function liveGrantScopes(
+  approvalPath: string = sessionApprovalPath(),
+  now: number = Date.now(),
+): Promise<Array<{ scope: string; expiresAt: number }>> {
+  try {
+    const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
+    return [...liveWindows(raw, now)].map(([scope, w]) => ({ scope, expiresAt: w.expires }))
+  } catch {
+    return []
+  }
 }
 
 /**
@@ -103,17 +191,13 @@ export async function checkApproval(
   try {
     const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
 
-    // Check expiry. Strict `>`, so a grant is live up to and including its
-    // expiry millisecond — the edge `engine-loader.test.ts:218` pins. An
-    // expiry that will not parse is no expiry at all, so it is not live.
-    const expiresAt = parseTimestamp(raw.expires_at)
-    if (expiresAt === null || now > expiresAt) return false
-
-    // Wildcard grants all scopes
-    if (raw.scopes === '*') return true
-
-    // Array — check if scope is explicitly granted
-    return Array.isArray(raw.scopes) && raw.scopes.includes(scope)
+    // Expiry is strict `>`, so a window is live up to and including its expiry
+    // millisecond — the edge `engine-loader.test.ts:218` pins. An expiry that
+    // will not parse is no expiry at all, so it is not live. A scope is
+    // approved by its own window or by a live '*' window, never by another
+    // scope's.
+    const windows = liveWindows(raw, now)
+    return windows.has(scope) || windows.has('*')
   } catch {
     // File doesn't exist, is corrupt, or is unreadable — treat as unapproved
     return false
@@ -188,7 +272,7 @@ export interface MergeGrantResult {
   first_granted_at: string
   /** The scopes now on disk, sorted. */
   scopes: '*' | string[]
-  /** True when the ceiling pulled the requested expiry back. */
+  /** True when the ceiling pulled a requested scope's expiry back. */
   capped: boolean
   /**
    * True when the effective expiry sits past the ceiling — either because
@@ -197,53 +281,27 @@ export interface MergeGrantResult {
    * about the window, not a record of the flag.
    */
   extended: boolean
+  /**
+   * The window each REQUESTED scope now holds. They can differ: a scope that
+   * already held a live window keeps its expiry, a new one opens its own.
+   */
+  windows: Array<{ scope: string; expires_at: string; capped: boolean; extended: boolean }>
 }
 
 /**
- * A live grant with its timestamps already parsed, so that no caller re-parses
- * a string this function has already vouched for. Every number here is finite.
- */
-interface LiveGrant {
-  grant: ApprovalFile
-  /** `first_granted_at ?? granted_at` — the `MAX_GRANT_WINDOW_MS` anchor. */
-  firstGrantedAt: number
-  expiresAt: number
-}
-
-/** Read the live grant, or null if it is missing, corrupt or already expired. */
-async function readLiveGrant(approvalPath: string, now: number): Promise<LiveGrant | null> {
-  try {
-    const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
-    // An expired grant is not merged onto: the operator's window has closed and
-    // a new grant restarts it. Merging would silently resurrect scopes the
-    // expiry was supposed to have retired.
-    const expiresAt = parseTimestamp(raw.expires_at)
-    if (expiresAt === null || now > expiresAt) return null
-
-    // The anchor is what the ceiling is measured from, so an anchor that will
-    // not parse is a grant whose ceiling cannot be computed — the unbounded
-    // window `MAX_GRANT_WINDOW_MS` exists to refuse. Discarding it costs the
-    // operator scopes they re-grant in one command; honouring it would hand
-    // out time nobody authorised.
-    const firstGrantedAt = parseTimestamp(raw.first_granted_at ?? raw.granted_at)
-    if (firstGrantedAt === null) return null
-
-    return { grant: raw, firstGrantedAt, expiresAt }
-  } catch {
-    return null
-  }
-}
-
-/**
- * Grant approval additively: union the requested scopes with any live grant,
- * preserve that grant's expiry, and cap any extension at the first-grant
- * ceiling.
+ * Grant approval additively, one window per scope: a requested scope that
+ * holds a live window keeps its expiry (an explicit TTL may extend it), a new
+ * one opens its own, and every other live scope is left exactly as it was.
+ * Each window's extension is capped at its own first-grant ceiling.
  *
  * This is the write path behind `warpline approve`. `grantApproval` above is
  * the unconditional overwrite it always was — programmatic pre-grants want that
  * — while an operator typing `approve b` after `approve a` means "and b", not
  * "instead of a". Losing an earlier grant to a later one is the failure this
- * function exists to prevent.
+ * function exists to prevent. Per-scope windows (#27) are what keep "and b"
+ * from also meaning "and b for as long as a": a later `approve b --ttl 1h`
+ * gets one hour, and a standing `--long` window on `a` is neither shortened
+ * nor lent.
  *
  * `checkApproval` is deliberately untouched by any of this: the run path reads
  * the grant and never writes it, and keeping that provable by inspection rather
@@ -255,48 +313,89 @@ export async function mergeGrant(
   approvalPath: string = sessionApprovalPath(),
 ): Promise<MergeGrantResult> {
   const now = opts.now ?? Date.now()
-  const live = await readLiveGrant(approvalPath, now)
 
-  const firstGrantedAt = live?.firstGrantedAt ?? now
-  const ceiling = firstGrantedAt + MAX_GRANT_WINDOW_MS
-  const liveExpiry = live?.expiresAt ?? null
-
-  const requested: '*' | string[] = scopes === '*' ? '*' : Array.isArray(scopes) ? scopes : [scopes]
-  const merged: '*' | string[] =
-    opts.replace || !live
-      ? requested
-      : requested === '*' || live.grant.scopes === '*'
-        ? '*'
-        : [...new Set([...live.grant.scopes, ...requested])]
-  const finalScopes: '*' | string[] = merged === '*' ? '*' : [...merged].sort()
-
-  // Expiry: replace (or a fresh window) restarts the clock; a merge keeps the
-  // live expiry unless an explicit --ttl asks for more, and never for less.
-  let expiry: number
-  if (opts.replace || liveExpiry === null) {
-    expiry = now + (opts.ttlMs ?? DEFAULT_TTL_MS)
-  } else if (opts.ttlMs !== undefined) {
-    expiry = Math.max(liveExpiry, now + opts.ttlMs)
-  } else {
-    expiry = liveExpiry
-  }
-
-  // The ceiling never shortens time the operator already holds — an earlier
-  // --long grant stays honoured — it only refuses to hand out more.
-  let capped = false
-  if (!opts.long) {
-    const bound = Math.max(ceiling, liveExpiry ?? ceiling)
-    if (expiry > bound) {
-      expiry = bound
-      capped = true
+  // An expired window is not merged onto: its scope's window has closed and a
+  // new grant restarts it. A window whose anchor will not parse is dropped
+  // too: the anchor is what the ceiling is measured from, so honouring it
+  // would hand out time nobody authorised. Either costs the operator a scope
+  // they re-grant in one command.
+  let live = new Map<string, { first: number; expires: number }>()
+  try {
+    const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
+    for (const [key, w] of liveWindows(raw, now)) {
+      if (w.first !== null) live.set(key, { first: w.first, expires: w.expires })
     }
+  } catch {
+    live = new Map()
   }
+
+  const requested: string[] = scopes === '*' ? ['*'] : Array.isArray(scopes) ? scopes : [scopes]
+
+  // `--replace` drops every other scope and restarts the requested expiries,
+  // but it never restarts a live scope's ceiling, or `approve --replace`
+  // repeated would walk the window forward. Each scope keeps its OWN anchor:
+  // borrowing another scope's would hand a new scope a ceiling already in the
+  // past, a window expired on arrival. A scope with no live window starts
+  // fresh, as it would on any approve (Kerberos: a new `kinit`, a new anchor).
+  const next = opts.replace ? new Map<string, { first: number; expires: number }>() : new Map(live)
+  const windows: MergeGrantResult['windows'] = []
+
+  for (const key of requested) {
+    const held = live.get(key)
+    const first = held?.first ?? now
+    const ceiling = first + MAX_GRANT_WINDOW_MS
+
+    // Expiry: replace (or a fresh window) restarts the clock; a merge keeps the
+    // live expiry unless an explicit --ttl asks for more, and never for less.
+    let expiry: number
+    if (opts.replace || held === undefined) {
+      expiry = now + (opts.ttlMs ?? DEFAULT_TTL_MS)
+    } else if (opts.ttlMs !== undefined) {
+      expiry = Math.max(held.expires, now + opts.ttlMs)
+    } else {
+      expiry = held.expires
+    }
+
+    // The ceiling never shortens time this scope already holds — an earlier
+    // --long window stays honoured — it only refuses to hand out more.
+    let capped = false
+    if (!opts.long) {
+      const bound = Math.max(ceiling, held?.expires ?? ceiling)
+      if (expiry > bound) {
+        expiry = bound
+        capped = true
+      }
+    }
+
+    next.set(key, { first, expires: expiry })
+    windows.push({
+      scope: key,
+      expires_at: new Date(expiry).toISOString(),
+      capped,
+      extended: !capped && expiry > ceiling,
+    })
+  }
+
+  const keys = [...next.keys()].sort()
+  const finalScopes: '*' | string[] = next.has('*') ? '*' : keys
+  // The top-level fields are the EARLIEST window's, so a build that reads only
+  // them expires every scope early and never late (see `scope_windows`). An
+  // empty grant, reachable only from the library, approves nothing.
+  const all = [...next.values()]
+  const fileExpiry = all.length > 0 ? Math.min(...all.map((w) => w.expires)) : now + (opts.ttlMs ?? DEFAULT_TTL_MS)
+  const fileFirst = all.length > 0 ? Math.min(...all.map((w) => w.first)) : now
 
   const payload: ApprovalFile = {
     granted_at: new Date(now).toISOString(),
-    first_granted_at: new Date(firstGrantedAt).toISOString(),
-    expires_at: new Date(expiry).toISOString(),
+    first_granted_at: new Date(fileFirst).toISOString(),
+    expires_at: new Date(fileExpiry).toISOString(),
     scopes: finalScopes,
+    scope_windows: Object.fromEntries(
+      keys.map((k) => {
+        const w = next.get(k)!
+        return [k, { first_granted_at: new Date(w.first).toISOString(), expires_at: new Date(w.expires).toISOString() }]
+      }),
+    ),
   }
   await writeGrantFile(approvalPath, payload)
 
@@ -304,8 +403,9 @@ export async function mergeGrant(
     expires_at: payload.expires_at,
     first_granted_at: payload.first_granted_at as string,
     scopes: finalScopes,
-    capped,
-    extended: !capped && expiry > ceiling,
+    capped: windows.some((w) => w.capped),
+    extended: windows.some((w) => w.extended),
+    windows,
   }
 }
 

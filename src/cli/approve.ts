@@ -75,7 +75,7 @@ import {
   loadPluginManifests,
   proposalFingerprint,
 } from '../runtime/engine.js'
-import { DEFAULT_TTL_MS, mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
+import { DEFAULT_TTL_MS, liveGrantScopes, mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
 import {
@@ -1067,25 +1067,34 @@ export async function run(argv: string[]): Promise<number> {
     approvalPath,
   )
 
-  const remaining = Math.floor((new Date(result.expires_at).getTime() - now) / MINUTE)
-  if (result.scopes === '*') {
-    process.stdout.write('Approved scope: * (every plugin)\n')
-  } else {
-    process.stdout.write(`Approved ${plural(result.scopes.length, 'scope')}:\n`)
-    for (const scope of result.scopes) process.stdout.write(`  ${scope}\n`)
-  }
-
+  // One line per live scope, each with its own expiry (#27): a scope this
+  // command did not name can hold a different window, and one "Expires" line
+  // under a list of scopes read as if they all shared it.
   const ceilingHours = MAX_GRANT_WINDOW_MS / (60 * MINUTE)
-  const note = result.capped
-    ? ` — capped at the ${ceilingHours}h ceiling from the first grant`
-    : result.extended
-      // No `(--long)` attribution: `extended` is also true for a plain approve
-      // that carried an earlier --long window forward, and naming a flag this
-      // invocation did not pass tells the operator they asked for something
-      // they did not ask for.
-      ? ` — runs beyond the ${ceilingHours}h ceiling from the first grant`
-      : ''
-  process.stdout.write(`Expires ${result.expires_at} (${remaining}m remaining)${note}.\n`)
+  const requested = new Map(result.windows.map((w) => [w.scope, w]))
+  const expiryText = (scope: string, expiresAt: number): string => {
+    const remaining = Math.floor((expiresAt - now) / MINUTE)
+    const w = requested.get(scope)
+    const note = w?.capped
+      ? ` — capped at the ${ceilingHours}h ceiling from the first grant`
+      : w?.extended
+        // No `(--long)` attribution: `extended` is also true for a plain approve
+        // that carried an earlier --long window forward, and naming a flag this
+        // invocation did not pass tells the operator they asked for something
+        // they did not ask for.
+        ? ` — runs beyond the ${ceilingHours}h ceiling from the first grant`
+        : ''
+    return `expires ${new Date(expiresAt).toISOString()} (${remaining}m remaining)${note}`
+  }
+  const live = await liveGrantScopes(approvalPath, now)
+  const wildcard = live.find((w) => w.scope === '*')
+  if (result.scopes === '*' && wildcard) {
+    process.stdout.write(`Approved scope: * (every plugin) — ${expiryText('*', wildcard.expiresAt)}\n`)
+  } else {
+    const named = live.filter((w) => w.scope !== '*').sort((a, b) => (a.scope < b.scope ? -1 : 1))
+    process.stdout.write(`Approved ${plural(named.length, 'scope')}:\n`)
+    for (const w of named) process.stdout.write(`  ${w.scope} — ${expiryText(w.scope, w.expiresAt)}\n`)
+  }
   // The home resolves from WARPLINE_HOME, an ancestor `.warpline/` or the cwd,
   // so a forgotten env var writes a grant no scheduled run reads (#28). Name it.
   process.stdout.write(`Grant file: ${approvalPath}\n`)

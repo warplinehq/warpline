@@ -144,8 +144,7 @@ npx warpline approve hello-warpline
 
 ```
 Approved 1 scope:
-  hello-warpline
-Expires ... (240m remaining).
+  hello-warpline — expires ... (240m remaining)
 Grant file: .../.session-approval
 ```
 
