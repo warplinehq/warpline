@@ -418,14 +418,20 @@ true` on the result). Enforcement is an `AbortController.signal.addEventListener
 'abort', ...)` plus a `setTimeout`-armed abort that races the handler
 promise.
 
-The timer and `elapsed_ms` both count wall time, including time the machine
-spent suspended. A timeout whose timer fired more than `max(timeout_ms, 1s)`
-past its deadline is still a timeout, but its summary and error say so:
-`<plugin>: timeout (timer fired <n>s late against timeout_ms=<ms>: the machine
-slept or the event loop was blocked)`. That tells a run the machine slept
-through apart from a slow plugin. It is an annotation only: the attempt is not
-retried, and the `failed` record it writes is due again at the next advance
-(§ `plugin_runs`).
+`timeout_ms` bounds **awake** time: the time the plugin could actually run. A
+system sleep does not count against it. A `setTimeout` counts a sleep and fires
+on wake, while `performance.now()` stops for the duration (measured under Bun on
+macOS: 124 s asleep read as 131.2 s of wall time and 9.9 s of
+`performance.now()`). So when the timer fires with awake budget left, it re-arms
+for the remainder rather than failing the attempt. `elapsed_ms` stays wall
+time, how long the attempt took end to end, and can therefore exceed
+`timeout_ms` on an attempt that did not time out.
+
+A timeout whose awake deadline passed by more than `max(timeout_ms, 1s)` before
+the timer could run is still a timeout, but its summary and error say why:
+`<plugin>: timeout (timer fired <n>s late against timeout_ms=<ms>: the event
+loop was blocked)`. That tells a handler that held the event loop apart from
+one that was merely slow.
 
 Timeout vs. retry interaction:
 

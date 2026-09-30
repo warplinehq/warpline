@@ -691,10 +691,21 @@ export async function invokePlugin(
     } else {
       options.signal?.addEventListener('abort', onExternalAbort, { once: true })
     }
-    const timeoutTimer = setTimeout(
-      () => attemptCtl.abort('timeout'),
-      timeoutMs,
-    )
+    // `timeout_ms` bounds AWAKE time (#30). A `setTimeout` counts a system
+    // sleep and fires on wake; `performance.now()` stops while asleep
+    // (measured under Bun on macOS). So a timer that fires with awake budget
+    // left re-arms for the remainder rather than failing a plugin that was
+    // never given the chance to run.
+    const awakeStart = performance.now()
+    let timeoutTimer: ReturnType<typeof setTimeout> | undefined
+    const arm = (ms: number): void => {
+      timeoutTimer = setTimeout(() => {
+        const awake = performance.now() - awakeStart
+        if (awake < timeoutMs) arm(Math.max(1, timeoutMs - awake))
+        else attemptCtl.abort('timeout')
+      }, ms)
+    }
+    arm(timeoutMs)
 
     // Race the handler against the attempt signal so abort-unaware handlers
     // don't pin the event loop when timeout fires or the caller cancels.
@@ -703,17 +714,15 @@ export async function invokePlugin(
       const onAbort = () => {
         const reason = String(attemptCtl.signal.reason ?? '')
         const isTimeout = reason === 'timeout' || reason.includes('timeout')
-        // A timer that fires far past its deadline means nothing could run in
-        // between: the machine slept, or the event loop was held. The plugin
-        // may not have been slow at all, so the record says so (#30).
-        // ponytail: annotation only, the attempt still fails. Re-arming for
-        // the unslept remainder needs a clock that pauses across suspend,
-        // which is unverified under Bun on macOS. The 1s floor keeps load
-        // jitter on a short timeout from reading as a sleep.
-        const lateMs = Date.now() - attemptStart - timeoutMs
+        // A timer that fires far past its awake deadline means the event loop
+        // was held: nothing could run, and the plugin may not have been slow
+        // at all, so the record says so. A sleep no longer lands here, since
+        // the timer re-arms on awake time. The 1s floor keeps load jitter on
+        // a short timeout from reading as a block.
+        const lateMs = performance.now() - awakeStart - timeoutMs
         const late =
           isTimeout && lateMs > Math.max(timeoutMs, 1_000)
-            ? ` (timer fired ${Math.round(lateMs / 1000)}s late against timeout_ms=${timeoutMs}: the machine slept or the event loop was blocked)`
+            ? ` (timer fired ${Math.round(lateMs / 1000)}s late against timeout_ms=${timeoutMs}: the event loop was blocked)`
             : ''
         resolvePromise({
           status: 'failed',
