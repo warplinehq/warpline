@@ -9,7 +9,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -22,6 +22,7 @@ import {
 import { runWarplineArm } from '../../bench/arms.js'
 import {
   assertPrivateSeam,
+  flipAutonomy,
   materializeCopyMap,
   privatePluginsDir,
   scrubEnv,
@@ -479,6 +480,103 @@ describe('private warpline arm, end to end', () => {
       expect(gradeWithChecks(home, config.checks).paths).toEqual({ 'check-1': true, 'check-2': false })
       expect(treeDigest(liveState)).toBe(liveBefore)
       expect(JSON.parse(readFileSync(join(home, '.fleet/state/alpha.json'), 'utf8')).run).toBe('fresh')
+    })
+  })
+})
+
+/** Indices of the lines that differ between two texts of the same line count. */
+function differingLines(a: string, b: string): number[] {
+  const left = a.split('\n')
+  const right = b.split('\n')
+  expect(right.length).toBe(left.length)
+  return left.flatMap((line, i) => (line === right[i] ? [] : [i]))
+}
+
+describe('private snapshot', () => {
+  const CODE_LINE = "  autonomy_level: 'supervised',"
+
+  test('the flip rewrites the one code line and leaves the docstring mention alone', () => {
+    const text = syntheticManifest('alpha', 'supervised')
+    const flipped = flipAutonomy(text)
+    const [changed, ...rest] = differingLines(text, flipped)
+    expect(rest).toEqual([])
+    expect(text.split('\n')[changed!]).toBe(CODE_LINE)
+    expect(flipped.split('\n')[changed!]).toBe("  autonomy_level: 'autonomous',")
+    expect(flipped).toContain(" * autonomy_level: 'manual' is not this plugin's")
+  })
+
+  test('a manifest with two autonomy lines is refused', () => {
+    const text = syntheticManifest('alpha', 'supervised').replace(CODE_LINE, `${CODE_LINE}\n${CODE_LINE}`)
+    expect(() => flipAutonomy(text)).toThrow(/found 2/)
+  })
+
+  test('a manifest with no autonomy line is refused', () => {
+    const text = syntheticManifest('alpha', 'supervised').replace(`${CODE_LINE}\n`, '')
+    expect(() => flipAutonomy(text)).toThrow(/found 0/)
+  })
+
+  test('an already-autonomous manifest comes back byte-identical', () => {
+    const text = syntheticManifest('alpha', 'autonomous')
+    expect(flipAutonomy(text)).toBe(text)
+  })
+
+  test('each snapshot manifest differs from its live manifest in the autonomy line only, and the live one is untouched', async () => {
+    await withFleet(async ({ root, config }) => {
+      const livePath = (name: string): string => join(root, 'repo', '.fleet', 'plugins', name, 'manifest.ts')
+      const before = config.plugins.map((name) => readFileSync(livePath(name)))
+      await takeSnapshot(config)
+      config.plugins.forEach((name, i) => {
+        const live = readFileSync(livePath(name), 'utf8')
+        const snapshot = readFileSync(join(config.snapshot.dir, '.fleet/plugins', name, 'manifest.ts'), 'utf8')
+        expect(snapshot).toContain("  autonomy_level: 'autonomous',")
+        expect(differingLines(live, snapshot)).toHaveLength(1)
+        expect(Buffer.compare(readFileSync(livePath(name)), before[i]!)).toBe(0)
+      })
+    })
+  })
+
+  test('the digest binds the snapshot tree, and one edited byte changes it', async () => {
+    await withFleet(async ({ config }) => {
+      const digest = await takeSnapshot(config)
+      expect(digest).toBe(treeDigest(config.snapshot.dir))
+      const file = join(config.snapshot.dir, '.fleet/state/input.json')
+      const bytes = readFileSync(file)
+      bytes[0] = bytes[0]! ^ 1
+      writeFileSync(file, bytes)
+      expect(treeDigest(config.snapshot.dir)).not.toBe(digest)
+    })
+  })
+
+  test('a second snapshot into the same dir is refused', async () => {
+    await withFleet(async ({ config }) => {
+      await takeSnapshot(config)
+      await expect(takeSnapshot(config)).rejects.toThrow(/taken once/)
+    })
+  })
+
+  test('a configured plugin no entry copies is refused by name', async () => {
+    await withFleet(async ({ config }) => {
+      config.entries = config.entries.filter((entry) => entry.to !== '.fleet/plugins/beta')
+      await expect(takeSnapshot(config)).rejects.toThrow(/configured plugin 'beta' is absent from the snapshot/)
+    })
+  })
+
+  test('two homes seeded from one snapshot carry byte-identical entries', async () => {
+    await withFleet(async ({ root, config }) => {
+      await takeSnapshot(config)
+      const homes = [mkdtempSync(join(root, 'home-a-')), mkdtempSync(join(root, 'home-b-'))]
+      for (const home of homes) await seedPrivateHome(home, config)
+      for (const { to } of config.entries) {
+        const [a, b] = homes.map((home) => join(home!, to))
+        const source = join(config.snapshot.dir, to)
+        if (statSync(source).isDirectory()) {
+          expect(treeDigest(a!)).toBe(treeDigest(source))
+          expect(treeDigest(b!)).toBe(treeDigest(source))
+        } else {
+          expect(Buffer.compare(readFileSync(a!), readFileSync(source))).toBe(0)
+          expect(Buffer.compare(readFileSync(b!), readFileSync(source))).toBe(0)
+        }
+      }
     })
   })
 })
