@@ -2239,3 +2239,24 @@ describe('#28: a host-supplied plugin root reaches approve', () => {
     }
   })
 })
+
+describe('#27: each scope prints and keeps its own window', () => {
+  test('approve a --long --ttl 30d, then b --ttl 1h: b gets one hour and says so, a keeps thirty days', async () => {
+    const a = await capture('approve', ['render-issue', '--long', '--ttl', '30d'])
+    expect(a.code).toBe(0)
+    const b = await capture('approve', ['digest-sender', '--ttl', '1h'])
+    expect(b.code).toBe(0)
+
+    // b's own line: one hour, and none of the "beyond the ceiling" note that
+    // used to follow it when it inherited a's window.
+    expect(b.stdout).toMatch(/ {2}digest-sender — expires \S+ \((59|60)m remaining\)\n/)
+    expect(b.stdout).toMatch(/ {2}render-issue — expires \S+ \(4319\dm remaining\)\n/)
+    expect(b.stdout).not.toContain('beyond the')
+
+    const grant = await readGrant()
+    expect(grant.scopes).toEqual(['digest-sender', 'render-issue'])
+    const hour = Date.now() + 3_600_000
+    expect(await checkApproval('digest-sender', approvalPath, { now: hour + 60_000 })).toBe(false)
+    expect(await checkApproval('render-issue', approvalPath, { now: hour + 60_000 })).toBe(true)
+  })
+})

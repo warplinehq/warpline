@@ -222,7 +222,7 @@ const readGrant = async () => JSON.parse(await Bun.file(approvalPath).text())
 const T0 = Date.UTC(2026, 7, 20, 12, 0, 0)
 
 describe('mergeGrant', () => {
-  test('1: granting a then b unions the scopes sorted and preserves expires_at', async () => {
+  test('1: granting a then b unions the scopes sorted; the file-level expires_at is the earliest window', async () => {
     const first = await mergeGrant('b', { now: T0 }, approvalPath)
     const second = await mergeGrant('a', { now: T0 + 60_000 }, approvalPath)
 
@@ -285,19 +285,32 @@ describe('mergeGrant', () => {
     expect(result.expires_at).toBe(iso(T0 + 1000 + 30 * 24 * HOUR))
   })
 
-  test('6: replace overwrites the scopes and resets expires_at, keeping first_granted_at', async () => {
+  test('6: replace overwrites the scopes and resets expires_at; a live scope keeps its anchor, a new one starts fresh', async () => {
     await mergeGrant(['a', 'b'], { ttlMs: HOUR, now: T0 }, approvalPath)
 
     const result = await mergeGrant(
-      'c',
+      ['a', 'c'],
       { replace: true, ttlMs: 2 * HOUR, now: T0 + 1000 },
       approvalPath,
     )
 
-    expect(result.scopes).toEqual(['c'])
+    expect(result.scopes).toEqual(['a', 'c'])
+    const raw = await readGrant()
+    expect(raw.scopes).toEqual(['a', 'c'])
+    expect(raw.scope_windows.a).toEqual({ first_granted_at: iso(T0), expires_at: iso(T0 + 1000 + 2 * HOUR) })
+    expect(raw.scope_windows.c).toEqual({ first_granted_at: iso(T0 + 1000), expires_at: iso(T0 + 1000 + 2 * HOUR) })
     expect(result.first_granted_at).toBe(iso(T0))
-    expect(result.expires_at).toBe(iso(T0 + 1000 + 2 * HOUR))
-    expect((await readGrant()).scopes).toEqual(['c'])
+  })
+
+  test('6b: --replace next to an old standing window does not hand a new scope an expired ceiling', async () => {
+    await mergeGrant('a', { ttlMs: 30 * 24 * HOUR, long: true, now: T0 }, approvalPath)
+    const later = T0 + 10 * 24 * HOUR
+    const result = await mergeGrant('b', { replace: true, ttlMs: HOUR, now: later }, approvalPath)
+
+    expect(result.windows).toEqual([
+      { scope: 'b', expires_at: iso(later + HOUR), capped: false, extended: false },
+    ])
+    expect(await checkApproval('b', approvalPath, { now: later + 1000 })).toBe(true)
   })
 
   test('a wildcard absorbs named scopes in either merge direction', async () => {
@@ -314,6 +327,95 @@ describe('mergeGrant', () => {
 
     expect(result.scopes).toEqual(['b'])
     expect(result.first_granted_at).toBe(iso(later))
+  })
+
+  // #27: the issue's reproduction. A standing --long window on one plugin and
+  // an interactive one-hour approval of another must not interact.
+  test('27a: a later short approval neither borrows nor shortens a standing --long window', async () => {
+    await mergeGrant('plugin-a', { ttlMs: 30 * 24 * HOUR, long: true, now: T0 }, approvalPath)
+    const b = await mergeGrant('plugin-b', { ttlMs: HOUR, now: T0 + HOUR }, approvalPath)
+
+    expect(b.windows).toEqual([
+      { scope: 'plugin-b', expires_at: iso(T0 + 2 * HOUR), capped: false, extended: false },
+    ])
+    const raw = await readGrant()
+    expect(raw.scopes).toEqual(['plugin-a', 'plugin-b'])
+    expect(raw.scope_windows['plugin-a'].expires_at).toBe(iso(T0 + 30 * 24 * HOUR))
+    expect(raw.scope_windows['plugin-b'].expires_at).toBe(iso(T0 + 2 * HOUR))
+
+    // plugin-b lapses on its own clock; plugin-a is still approved.
+    const after = T0 + 3 * HOUR
+    expect(await checkApproval('plugin-b', approvalPath, { now: after })).toBe(false)
+    expect(await checkApproval('plugin-a', approvalPath, { now: after })).toBe(true)
+  })
+
+  test('27b: an older build reading only the top-level fields expires every scope early, never late', async () => {
+    await mergeGrant('plugin-a', { ttlMs: 30 * 24 * HOUR, long: true, now: T0 }, approvalPath)
+    await mergeGrant('plugin-b', { ttlMs: HOUR, now: T0 + HOUR }, approvalPath)
+
+    const raw = await readGrant()
+    // The earliest window, so the pre-#27 read (one expiry for every scope)
+    // cannot hand plugin-b plugin-a's thirty days.
+    expect(raw.expires_at).toBe(iso(T0 + 2 * HOUR))
+    expect(raw.first_granted_at).toBe(iso(T0))
+  })
+
+  test('27c: a merge onto a scope expired in a live file restarts only that scope', async () => {
+    await mergeGrant('plugin-a', { ttlMs: 30 * 24 * HOUR, long: true, now: T0 }, approvalPath)
+    await mergeGrant('plugin-b', { ttlMs: HOUR, now: T0 }, approvalPath)
+
+    const later = T0 + 5 * HOUR
+    const again = await mergeGrant('plugin-b', { ttlMs: HOUR, now: later }, approvalPath)
+    expect(again.windows[0]!.expires_at).toBe(iso(later + HOUR))
+    const raw = await readGrant()
+    expect(raw.scope_windows['plugin-b'].first_granted_at).toBe(iso(later))
+    expect(raw.scope_windows['plugin-a'].expires_at).toBe(iso(T0 + 30 * 24 * HOUR))
+  })
+
+  test('27d: --replace never restarts the ceiling, so repeating it cannot walk a window forward', async () => {
+    await mergeGrant('a', { ttlMs: 22 * HOUR, now: T0 }, approvalPath)
+    const late = T0 + 20 * HOUR
+    const replaced = await mergeGrant('a', { replace: true, ttlMs: 4 * HOUR, now: late }, approvalPath)
+
+    // Anchored at T0, so the ceiling is T0 + 23h, not late + 4h.
+    expect(replaced.capped).toBe(true)
+    expect(replaced.windows[0]!.expires_at).toBe(iso(T0 + MAX_GRANT_WINDOW_MS))
+  })
+
+  test('27e: a per-scope window only counts for a scope the file lists', async () => {
+    await writeFile(
+      approvalPath,
+      JSON.stringify({
+        granted_at: iso(T0),
+        first_granted_at: iso(T0),
+        expires_at: iso(T0 + HOUR),
+        scopes: ['a'],
+        scope_windows: { b: { first_granted_at: iso(T0), expires_at: iso(T0 + HOUR) } },
+      }),
+    )
+    expect(await checkApproval('b', approvalPath, { now: T0 })).toBe(false)
+    expect(await checkApproval('a', approvalPath, { now: T0 })).toBe(false)
+  })
+
+  test('27f: a file asking for a newer reader is refused outright, never guessed at', async () => {
+    const file = (v: unknown) =>
+      writeFile(
+        approvalPath,
+        JSON.stringify({
+          granted_at: iso(T0),
+          first_granted_at: iso(T0),
+          expires_at: iso(T0 + HOUR),
+          scopes: '*',
+          min_reader_version: v,
+        }),
+      )
+    // This build reads format 1.
+    await file(2)
+    expect(await checkApproval('a', approvalPath, { now: T0 })).toBe(false)
+    await file('1')
+    expect(await checkApproval('a', approvalPath, { now: T0 })).toBe(false)
+    await file(1)
+    expect(await checkApproval('a', approvalPath, { now: T0 })).toBe(true)
   })
 
   test('7: the existing three-argument grantApproval call shape is unchanged', async () => {
