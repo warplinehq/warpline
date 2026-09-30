@@ -28,6 +28,7 @@ today-aggregator
 content-kanban
 outreach-(drafts|generator)
 collateral-(import|discover)
+collateral
 hypothesis-gen
 experiment-checker
 seo-audit

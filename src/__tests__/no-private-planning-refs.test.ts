@@ -120,7 +120,19 @@ const PRIVATE_NAME_PATTERNS: string[] = (() => {
   return patterns
 })()
 
-const PRIVATE_NAME = new RegExp(PRIVATE_NAME_PATTERNS.map((p) => `\\b${p}\\b`).join('|'), 'i')
+/**
+ * Bounded by lookarounds on letters and digits rather than by `\b`, because
+ * `\b` counts `_` as a word character and so let a term embedded in an
+ * identifier (an environment variable name, say) through green. An underscore
+ * is now a boundary; a letter or a digit still is not, so a match stays whole.
+ * The `(?:…)` wrap keeps a pattern with a top-level alternation bound to its
+ * own boundaries. It is built here in JavaScript and never enters the list
+ * file, so the grep -E portability rule below does not apply to it.
+ */
+const PRIVATE_NAME = new RegExp(
+  PRIVATE_NAME_PATTERNS.map((p) => `(?<![A-Za-z0-9])(?:${p})(?![A-Za-z0-9])`).join('|'),
+  'i',
+)
 
 /**
  * Both forms below are legal in a JavaScript `RegExp` and fatal, or worse than
@@ -460,6 +472,23 @@ describe('no private planning or deployment references', () => {
       ]
     })
     expect(offenders).toEqual([])
+  })
+
+  /**
+   * An environment variable name is where a deployment term most often turns
+   * up in code, and `\b` counts `_` as a word character, so a term inside one
+   * passed this guard green. Letters and digits still are not a boundary: the
+   * term stays whole against them. Booleans only, so a failure never prints
+   * the term. The sample comes from the committed list and moves with it.
+   */
+  test('a committed term embedded in an identifier is still matched', () => {
+    const term = PRIVATE_NAME_PATTERNS.find((p) => /^[a-z]+$/.test(p))
+    if (term === undefined) throw new Error('no plain single-word entry in the committed list; this pin has no sample')
+    expect(PRIVATE_NAME.test(`const X_${term.toUpperCase()}_ROOT = 1`)).toBe(true)
+    expect(PRIVATE_NAME.test(`${term}_DIR`)).toBe(true)
+    expect(PRIVATE_NAME.test(`${term}x`)).toBe(false)
+    expect(PRIVATE_NAME.test(`x${term}`)).toBe(false)
+    expect(PRIVATE_NAME.test(`${term}9`)).toBe(false)
   })
 
   /**
