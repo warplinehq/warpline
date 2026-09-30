@@ -9,7 +9,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -19,7 +19,19 @@ import {
   resolvePointer,
   type GradeCheck,
 } from '../../bench/grade.js'
+import { runWarplineArm } from '../../bench/arms.js'
+import {
+  assertPrivateSeam,
+  materializeCopyMap,
+  privatePluginsDir,
+  scrubEnv,
+  seedPrivateHome,
+  takeSnapshot,
+  treeDigest,
+  type PrivateConfig,
+} from '../../bench/private.js'
 import { BenchRunRecordSchema, GRADED_KEYS, parseRecord } from '../../bench/record.js'
+import { assertHomeSeam } from '../../bench/seed.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
@@ -299,5 +311,174 @@ describe('grader imports', () => {
 
   test('the grader imports nothing outside the bench and the standard library', () => {
     expect(graderImportOffenders(readFileSync(join(REPO_ROOT, 'bench', 'grade.ts'), 'utf8'))).toEqual([])
+  })
+})
+
+/** Write each file under `root`, creating parents. */
+function writeTree(root: string, files: Record<string, string>): void {
+  for (const [rel, body] of Object.entries(files)) {
+    const path = join(root, rel)
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, body)
+  }
+}
+
+/** A synthetic plugin manifest. The docstring mention of the field is there to be left alone. */
+const syntheticManifest = (name: string, autonomy: string, extra = ''): string => `import { PluginManifestSchema } from 'warpline/schemas/plugin-manifest'
+
+/**
+ * ${name}, a synthetic fleet plugin.
+ * autonomy_level: 'manual' is not this plugin's
+ */
+export const manifest = PluginManifestSchema.parse({
+  name: '${name}',
+  version: '1.0.0',
+  description: 'A synthetic plugin for the private harness tests',
+  autonomy_level: '${autonomy}',
+  side_effects: [],${extra}
+  ttl_hours: 1,
+  schedule: 'on_run',
+})
+`
+
+/**
+ * A fleet-shaped repository the harness knows nothing about by name, plus a
+ * config describing it: a plugin root with two plugins and a decoy, shared code
+ * the handlers import through relative paths, a paths module with an override
+ * variable, live state with a stale output already in it, and staged
+ * warpline-home files. Every name is invented. The caller removes `root`.
+ */
+function buildSyntheticFleet(): { root: string; config: PrivateConfig; liveState: string } {
+  const root = mkdtempSync(join(tmpdir(), 'bench-private-fleet-'))
+  const repo = join(root, 'repo')
+  writeTree(repo, {
+    '.fleet/plugins/alpha/manifest.ts': syntheticManifest('alpha', 'supervised'),
+    '.fleet/plugins/alpha/handler.ts': `import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { skillOk } from 'warpline/unstable-result'
+import { STATE_DIR } from '../../scripts/shared/paths.ts'
+import { itemsOf } from '../../shared/util.ts'
+
+export const handler = async () => {
+  const items = itemsOf(JSON.parse(readFileSync(join(STATE_DIR, 'input.json'), 'utf8')))
+  writeFileSync(join(STATE_DIR, 'alpha.json'), JSON.stringify({ items, run: 'fresh' }))
+  return skillOk(\`alpha: copied \${items.length} items\`)
+}
+`,
+    '.fleet/plugins/beta/manifest.ts': syntheticManifest('beta', 'manual', '\n  llm_handoff: true,'),
+    '.fleet/plugins/beta/handler.ts': `import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { warplineHome } from 'warpline/lib/paths'
+import { skillHandoff } from 'warpline/unstable-result'
+
+export const handler = async () => {
+  const context = 'state/beta.handoff.json'
+  mkdirSync(join(warplineHome(), 'state'), { recursive: true })
+  writeFileSync(join(warplineHome(), context), JSON.stringify({ items: ['one'] }))
+  return skillHandoff('Summarise one synthetic item', context)
+}
+`,
+    '.fleet/plugins/_shared/decoy.ts': 'export const decoy = true\n',
+    '.fleet/shared/util.ts': 'export const itemsOf = (doc: { items?: unknown }): unknown[] => (Array.isArray(doc.items) ? doc.items : [])\n',
+    '.fleet/scripts/shared/paths.ts': `import { homedir } from 'node:os'
+import { join } from 'node:path'
+
+export const STATE_DIR = process.env.FLEET_STATE_DIR ?? join(import.meta.dir, '..', '..', '..', '.fleet', 'state')
+export const warplineHomeDir = (): string => process.env.WARPLINE_HOME ?? homedir()
+export const runsDir = (): string => join(warplineHomeDir(), 'runs')
+`,
+    '.fleet/state/input.json': '{"items":[1,2]}',
+    '.fleet/state/alpha.json': '{"items":[],"run":"stale"}',
+    '.fleet/node_modules/warpline/package.json': '{"version":"0.5.0"}',
+  })
+  symlinkSync(join(REPO_ROOT, 'node_modules', 'zod'), join(repo, '.fleet', 'node_modules', 'zod'), 'dir')
+  writeTree(root, {
+    'staging/wh/preferences.json': '{"review_gate":false}',
+    'staging/wh/config/beta.json': '{}',
+    'prompts/agent.md': 'a synthetic agent prompt\n',
+    'prompts/consumer.md': 'a synthetic consumer prompt\n',
+    'notes.md': 'synthetic notes\n',
+  })
+  const fleet = (rel: string): string => join(repo, '.fleet', rel)
+  const config: PrivateConfig = {
+    plugins: ['alpha', 'beta'],
+    fleetDir: '.fleet',
+    warplineHomeDir: 'wh',
+    snapshot: { dir: join(root, 'snapshot') },
+    entries: [
+      { from: fleet('plugins/alpha'), to: '.fleet/plugins/alpha', scope: 'warpline' },
+      { from: fleet('plugins/beta'), to: '.fleet/plugins/beta', scope: 'warpline' },
+      { from: fleet('shared'), to: '.fleet/shared', scope: 'warpline' },
+      { from: fleet('scripts/shared'), to: '.fleet/scripts/shared', scope: 'warpline' },
+      { from: fleet('state'), to: '.fleet/state', scope: 'every-arm' },
+      { from: join(root, 'staging/wh/preferences.json'), to: 'wh/preferences.json', scope: 'warpline' },
+      { from: join(root, 'staging/wh/config/beta.json'), to: 'wh/config/beta.json', scope: 'warpline' },
+    ],
+    links: { from: fleet('node_modules'), packages: ['zod'] },
+    pathsSeam: { module: '.fleet/scripts/shared/paths.ts', exports: ['STATE_DIR', 'warplineHomeDir', 'runsDir'] },
+    envScrub: ['FLEET_STATE_DIR'],
+    fleetInstall: fleet('node_modules/warpline'),
+    prompts: { agent: join(root, 'prompts/agent.md'), consumer: join(root, 'prompts/consumer.md') },
+    notes: join(root, 'notes.md'),
+    copyMap: [{ plugin: 'alpha', from: '.fleet/state/alpha.json', to: 'graded/check-1.json' }],
+    checks: [
+      { id: 'check-1', path: 'graded/check-1.json', pointer: '/items', predicate: { kind: 'non_empty_array' } },
+      { id: 'check-2', path: 'graded/check-2.json', pointer: '', predicate: { kind: 'exists' } },
+    ],
+    resultsDir: join(root, 'results'),
+  }
+  return { root, config, liveState: join(repo, '.fleet', 'state') }
+}
+
+/** Put an environment variable back the way it was, absent included. */
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name]
+  else process.env[name] = value
+}
+
+/**
+ * Run `fn` over a fresh synthetic fleet, with the two variables the private
+ * mode touches restored and the whole tree removed afterwards.
+ */
+async function withFleet(fn: (fleet: ReturnType<typeof buildSyntheticFleet>) => Promise<void>): Promise<void> {
+  const fleet = buildSyntheticFleet()
+  const prior = { home: process.env.WARPLINE_HOME, state: process.env.FLEET_STATE_DIR }
+  try {
+    await fn(fleet)
+  } finally {
+    restoreEnv('WARPLINE_HOME', prior.home)
+    restoreEnv('FLEET_STATE_DIR', prior.state)
+    rmSync(fleet.root, { recursive: true, force: true })
+  }
+}
+
+describe('private warpline arm, end to end', () => {
+  test('a config-described fleet runs through the real engine in a mirrored home, graded by check id, and live state is untouched', async () => {
+    await withFleet(async ({ root, config, liveState }) => {
+      const liveBefore = treeDigest(liveState)
+      expect(await takeSnapshot(config)).toMatch(/^[0-9a-f]{64}$/)
+
+      process.env.FLEET_STATE_DIR = join(root, 'decoy-state')
+      scrubEnv(config.envScrub)
+      expect(process.env.FLEET_STATE_DIR).toBeUndefined()
+
+      const home = mkdtempSync(join(root, 'home-'))
+      const wh = await seedPrivateHome(home, config)
+      expect(wh).toBe(join(home, 'wh'))
+      process.env.WARPLINE_HOME = wh
+      assertHomeSeam(wh)
+      await assertPrivateSeam(home, config)
+
+      const arm = await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap))
+
+      expect(arm.parked_handoffs).toBe(1)
+      expect(existsSync(join(home, 'graded/check-1.json'))).toBe(true)
+      const graded = JSON.parse(readFileSync(join(home, 'graded/check-1.json'), 'utf8')) as { items: unknown[]; run: string }
+      expect(graded.run).toBe('fresh')
+      expect(graded.items.length).toBeGreaterThan(0)
+      expect(gradeWithChecks(home, config.checks).paths).toEqual({ 'check-1': true, 'check-2': false })
+      expect(treeDigest(liveState)).toBe(liveBefore)
+      expect(JSON.parse(readFileSync(join(home, '.fleet/state/alpha.json'), 'utf8')).run).toBe('fresh')
+    })
   })
 })
