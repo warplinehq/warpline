@@ -397,3 +397,76 @@ describe('agreement — the public ratios, recomputed', () => {
     expect(report.shortfalls).toEqual([])
   })
 })
+
+/** One arm with a median, as much of it as the rule reads. */
+function arm(wall_clock_ms: number, output: number): SummaryLike['warpline'] {
+  return { median: { wall_clock_ms, tokens: { output } } }
+}
+
+/**
+ * A literal set whose four ratios are 0.76, 0.80, 0.63 and 0.70, the public
+ * figures at two significant figures, from medians a reader can divide by hand.
+ */
+const LITERAL_PUBLIC: SummaryLike = {
+  warpline: arm(760, 630),
+  'agent-with-state': arm(1000, 1000),
+  'agent-from-scratch': arm(950, 900),
+}
+
+describe('agreement — the rule at its boundaries', () => {
+  test('a ratio of exactly 1 is on neither side, so it diverges from either position', () => {
+    expect(agrees(1, 0.76)).toBe('diverge')
+    expect(agrees(0.76, 1)).toBe('diverge')
+  })
+
+  test('exactly one order of magnitude apart diverges, including the float edge that lands a hair under it', () => {
+    // 0.05 / 0.5 is 0.1 and its log10 is exactly -1.
+    expect(agrees(0.05, 0.5)).toBe('diverge')
+    // 0.08 / 0.8 is 0.09999999999999999, and its log10 still rounds to -1.
+    expect(agrees(0.08, 0.8)).toBe('diverge')
+  })
+
+  test('the opposite side diverges, beyond one order diverges, and inside both agrees', () => {
+    expect(agrees(1.2, 0.76)).toBe('diverge')
+    expect(agrees(0.07, 0.76)).toBe('diverge')
+    expect(agrees(0.2, 0.76)).toBe('agree')
+    expect(agrees(0.9999999, 0.76)).toBe('agree')
+    expect(agrees(1.5, 1.2)).toBe('agree')
+    expect(agrees(5, 0.5)).toBe('diverge')
+  })
+
+  test('a ratio that is zero, negative, not a number or infinite is refused', () => {
+    expect(() => agrees(0, 0.76)).toThrow(/agreement:/)
+    expect(() => agrees(-1, 0.76)).toThrow(/agreement:/)
+    expect(() => agrees(NaN, 0.76)).toThrow(/agreement:/)
+    expect(() => agrees(0.76, Infinity)).toThrow(/agreement:/)
+  })
+
+  test('a private arm below the threshold withholds, naming the arm and its count, with no ratio computed', () => {
+    const priv: SummaryLike = { ...LITERAL_PUBLIC, 'agent-with-state': { shortfall: { count: 7, threshold: 10 } } }
+    const report = agreementVerdict(priv, LITERAL_PUBLIC)
+    expect(report.verdict).toBe('withhold')
+    expect(report.shortfalls).toEqual([{ arm: 'agent-with-state', count: 7, threshold: 10 }])
+    expect(report.ratios).toEqual([])
+  })
+
+  test('one measure pushed past 1 diverges, and names exactly the ratios it moved', () => {
+    // 0.76 × 1.5 = 1.14 and 0.80 × 1.5 = 1.2: both wall-clock ratios cross 1.
+    const priv: SummaryLike = { ...LITERAL_PUBLIC, warpline: arm(760 * 1.5, 630) }
+    const report = agreementVerdict(priv, LITERAL_PUBLIC)
+    expect(report.verdict).toBe('diverge')
+    expect(report.diverged).toEqual(['wall_clock:agent-with-state', 'wall_clock:agent-from-scratch'])
+  })
+
+  test('every ratio halved stays on the same side and inside one order, so it publishes', () => {
+    const priv: SummaryLike = { ...LITERAL_PUBLIC, warpline: arm(760 / 2, 630 / 2) }
+    const report = agreementVerdict(priv, LITERAL_PUBLIC)
+    expect(report.verdict).toBe('publish')
+    expect(report.diverged).toEqual([])
+  })
+
+  test('a public set with a shortfall is a caller error, not a withhold', () => {
+    const pub: SummaryLike = { ...LITERAL_PUBLIC, warpline: { shortfall: { count: 9, threshold: 10 } } }
+    expect(() => agreementVerdict(LITERAL_PUBLIC, pub)).toThrow(/public set/)
+  })
+})
