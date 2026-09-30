@@ -2250,7 +2250,8 @@ describe('#27: each scope prints and keeps its own window', () => {
     // b's own line: one hour, and none of the "beyond the ceiling" note that
     // used to follow it when it inherited a's window.
     expect(b.stdout).toMatch(/ {2}digest-sender — expires \S+ \((59|60)m remaining\)\n/)
-    expect(b.stdout).toMatch(/ {2}render-issue — expires \S+ \(4319\dm remaining\)\n/)
+    // 43200m only when both approves land in the same millisecond.
+    expect(b.stdout).toMatch(/ {2}render-issue — expires \S+ \((4319\d|43200)m remaining\)\n/)
     expect(b.stdout).not.toContain('beyond the')
 
     const grant = await readGrant()
