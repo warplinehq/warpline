@@ -32,6 +32,7 @@ import { execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
+import { COMMITMENTS_FILE, parseCommitments } from '../../bench/private.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
@@ -170,6 +171,158 @@ function preRegAncestry(repoRoot: string): AncestryFinding[] {
   }
 
   return findings
+}
+
+/**
+ * The private run's freeze, checked the way the public one is: from topology
+ * and blob identity, never from dates.
+ *
+ * The public method is a document in this repository. The private one is not,
+ * so what is committed here is its salted digest, one line in
+ * `bench/private-commitments`, and the properties are about that ledger:
+ *
+ *   1. **Append-only.** No line present in a parent is absent in a child.
+ *   2. **One method.** Exactly one `prereg` line is ever introduced, and at
+ *      most one `results` line.
+ *   3. **Method first, strictly.** The commit that introduces the results line
+ *      is a strict descendant of the one that introduces the prereg line. The
+ *      same commit adding both passes `merge-base --is-ancestor`, which is why
+ *      "distinct" is a separate rule rather than an assumption.
+ *   4. **The rule is frozen too.** Each path in `frozen` has the same blob at
+ *      HEAD as at the prereg commit, so the code that decides agreement cannot
+ *      move after the prose that describes it is fixed.
+ *
+ * Full history, merges included: checking HEAD alone passes "add A, dry-run,
+ * delete A, add B", and a line that enters in a merge is invisible without
+ * `-m`. Each touching commit is compared by content against EVERY parent, as a
+ * multiset of lines, rather than by patch text, which has no clean reading for
+ * a merge. A line is introduced by a commit when it appears there more times
+ * than in any parent, so a merge that only joins two branches introduces
+ * nothing, and the branch commit that brought the line in is the one named.
+ */
+type CommitmentFinding =
+  | { kind: 'line-removed' | 'second-prereg' | 'second-results' | 'results-before-prereg'; commit: string }
+  | { kind: 'frozen-changed-after-prereg'; path: string }
+
+/** Paths whose blob is fixed from the prereg commit on. */
+const FROZEN_AT_PREREG = ['bench/agreement.ts'] as const
+
+/**
+ * The blob id of `path` at `rev`, or null when the path is not in that tree.
+ * An empty `rev` reads the index. stderr is dropped for the reason `blobAt`
+ * gives.
+ */
+function blobOf(root: string, rev: string, path: string): string | null {
+  try {
+    return execFileSync('git', ['rev-parse', `${rev}:${path}`], {
+      cwd: root,
+      encoding: 'utf8',
+      env: GIT_ENV,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The ledger at `rev` as a count per line. Read by blob id and UNTRIMMED: the
+ * shared `git()` helper trims, and a trimmed body would let a trailing space or
+ * a stray blank line past the parser. A missing file is an empty ledger; a read
+ * that fails after the blob was found is an error, not an empty ledger.
+ */
+function ledgerAt(root: string, rev: string): Map<string, number> {
+  const blob = blobOf(root, rev, COMMITMENTS_FILE)
+  const counts = new Map<string, number>()
+  if (blob === null) return counts
+  const body = execFileSync('git', ['cat-file', 'blob', blob], { cwd: root, encoding: 'utf8', env: GIT_ENV })
+  for (const { kind, hex } of parseCommitments(body)) {
+    const line = `${kind} ${hex}`
+    counts.set(line, (counts.get(line) ?? 0) + 1)
+  }
+  return counts
+}
+
+function commitmentsFreeze(
+  root: string,
+  frozen: readonly string[] = FROZEN_AT_PREREG,
+): { findings: CommitmentFinding[]; vacuous: boolean } {
+  if (git(root, ['rev-parse', '--is-shallow-repository']) !== 'false') {
+    throw new Error(
+      'shallow clone: an ordering check over history it cannot see reports clean while meaning it did not look. Run `git fetch --unshallow`, or check out with fetch-depth: 0.',
+    )
+  }
+  if (git(root, ['ls-files', '--', COMMITMENTS_FILE]) === '') {
+    throw new Error(`blind: ${COMMITMENTS_FILE} is not tracked`)
+  }
+
+  // `-m` prints a merge once per parent, so the Set is load-bearing, and it
+  // keeps first occurrence so topological order survives the dedupe.
+  const touching = [
+    ...new Set(
+      git(root, ['log', '--full-history', '-m', '--topo-order', '--reverse', '--format=%H', '--', COMMITMENTS_FILE])
+        .split('\n')
+        .filter(Boolean),
+    ),
+  ]
+
+  const findings: CommitmentFinding[] = []
+  const introduced = new Map<string, number>()
+  let preregCommit: string | null = null
+  const resultsCommits: string[] = []
+
+  for (const c of touching) {
+    const short = c.slice(0, 7)
+    const here = ledgerAt(root, c)
+    const parents = git(root, ['rev-list', '--parents', '-n', '1', c]).split(' ').slice(1)
+    const before = parents.map((p) => ledgerAt(root, p))
+
+    if (before.some((p) => [...p].some(([line, n]) => (here.get(line) ?? 0) < n))) {
+      findings.push({ kind: 'line-removed', commit: short })
+    }
+
+    for (const [line, n] of here) {
+      // A root commit has no parent, so everything in it is introduced there.
+      const fresh = n - Math.max(0, ...before.map((p) => p.get(line) ?? 0))
+      for (let i = 0; i < fresh; i++) {
+        introduced.set(line, (introduced.get(line) ?? 0) + 1)
+        if (line.startsWith('prereg ')) {
+          if (preregCommit === null) preregCommit = c
+          else findings.push({ kind: 'second-prereg', commit: short })
+        } else {
+          if (resultsCommits.length > 0) findings.push({ kind: 'second-results', commit: short })
+          resultsCommits.push(c)
+        }
+      }
+    }
+  }
+
+  // Blind is not clean: a tracked line no commit introduces has no ancestry to
+  // check, and would otherwise read exactly like an unfrozen, empty ledger.
+  const staged = ledgerAt(root, '')
+  let unexplained = 0
+  for (const [line, n] of staged) unexplained += Math.max(0, n - (introduced.get(line) ?? 0))
+  if (unexplained > 0) {
+    throw new Error(`blind: ${unexplained} tracked commitment line(s) with no commit that adds them`)
+  }
+
+  for (const r of new Set(resultsCommits)) {
+    if (preregCommit === null || preregCommit === r || !isAncestor(root, preregCommit, r)) {
+      findings.push({ kind: 'results-before-prereg', commit: r.slice(0, 7) })
+    }
+  }
+
+  if (preregCommit !== null) {
+    for (const path of frozen) {
+      const atPrereg = blobOf(root, preregCommit, path)
+      if (atPrereg === null) {
+        throw new Error(`blind: ${path} is absent at the prereg commit, so its freeze has nothing to compare against`)
+      }
+      if (atPrereg !== blobOf(root, 'HEAD', path)) findings.push({ kind: 'frozen-changed-after-prereg', path })
+    }
+  }
+
+  return { findings, vacuous: introduced.size === 0 && staged.size === 0 }
 }
 
 /**
@@ -393,6 +546,66 @@ describe('the pre-registration is committed before the first result and frozen a
 
   test('this repository reports no offender', () => {
     expect(preRegAncestry(REPO_ROOT)).toEqual([])
+  })
+})
+
+/** Ledger fixtures. The hex is fake and distinct; only its shape is real. */
+const PREREG_A = `prereg ${'a'.repeat(64)}`
+const PREREG_B = `prereg ${'b'.repeat(64)}`
+const RESULTS_R = `results ${'c'.repeat(64)}`
+const RESULTS_S = `results ${'d'.repeat(64)}`
+const RULE_V1 = { path: FROZEN_AT_PREREG[0], body: 'rule v1\n' }
+const RULE_V2 = { path: FROZEN_AT_PREREG[0], body: 'rule v2\n' }
+
+/** One whole-file write of the ledger, as a `fixture` entry. */
+function ledger(...lines: string[]): { path: string; body: string } {
+  return { path: COMMITMENTS_FILE, body: lines.map((l) => `${l}\n`).join('') }
+}
+
+describe('the private commitments file is append-only and frozen by ancestry', () => {
+  test('the ledger parser accepts the two line kinds and names only the line number of anything else', () => {
+    expect(parseCommitments('')).toEqual([])
+    expect(parseCommitments(`${PREREG_A}\n`)).toEqual([{ kind: 'prereg', hex: 'a'.repeat(64) }])
+    expect(parseCommitments(`${PREREG_A}\n${RESULTS_R}`)).toEqual([
+      { kind: 'prereg', hex: 'a'.repeat(64) },
+      { kind: 'results', hex: 'c'.repeat(64) },
+    ])
+    for (const bad of [`${PREREG_A}\nsecret words`, `${PREREG_A}\n${PREREG_B.toUpperCase()}`, `${PREREG_A}\n${PREREG_B} `]) {
+      let message = ''
+      try {
+        parseCommitments(bad)
+      } catch (err) {
+        message = (err as Error).message
+      }
+      expect(message).toMatch(/line 2\b/)
+      expect(message).not.toContain(bad.split('\n')[1]!)
+    }
+    expect(() => parseCommitments(`${PREREG_A}\n\n`)).toThrow(/line 2\b/)
+  })
+
+  test('a second prereg line is reported at the commit that adds it', () => {
+    const { root, shas } = fixture([RULE_V1, ledger(), ledger(PREREG_A), ledger(PREREG_A, PREREG_B)])
+    try {
+      expect(commitmentsFreeze(root)).toEqual({
+        findings: [{ kind: 'second-prereg', commit: shas[3]!.slice(0, 7) }],
+        vacuous: false,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * The one vacuous pass in this describe, deliberate and named.
+   *
+   * While the private method is unfrozen the ledger is empty, and there is
+   * nothing to order. That is green, and the emptiness is asserted rather than
+   * assumed: `vacuous` must match the file's real length, so this test becomes
+   * a real check the moment a prereg line is committed, with no edit here.
+   */
+  test('this repository reports no offender, and is vacuous exactly while the ledger is empty', () => {
+    const empty = readFileSync(join(REPO_ROOT, COMMITMENTS_FILE)).length === 0
+    expect(commitmentsFreeze(REPO_ROOT)).toEqual({ findings: [], vacuous: empty })
   })
 })
 
