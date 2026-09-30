@@ -343,7 +343,9 @@ Stored in `<home>/preferences.json`, validated by `PreferencesSchema`. No verb
 writes this file — `warpline configure <plugin>` is the supported route for a
 plugin's own `<home>/config/<plugin>.json`, not for the guardrails — so edit it
 directly; an invalid one fails validation on read rather than being silently
-ignored.
+ignored. An unknown key is invalid too, at any level: the top level,
+`quiet_hours` or `retention`. The advance or `warpline run` that reads the file
+refuses rather than running on defaults (`runtime-spec.md` § 6 and § 11).
 
 | Field | Default | Meaning |
 |---|---|---|

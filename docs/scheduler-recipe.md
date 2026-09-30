@@ -478,7 +478,9 @@ There is one optional systemd setting worth knowing and not shipping.
 and the termination signal `SIGKILL` are considered clean service terminations."
 Adding it makes a retry-later advance read as success. The tradeoff is the whole
 decision: a lock held permanently by something that will not release it also
-exits `75`, and marking `75` clean hides it from the status command. Under a
+exits `75`, and marking `75` clean hides it from the status command. So does an
+invalid `preferences.json`, which is another `75` that does not clear on its
+own. Under a
 fifteen-minute tick, a failed state you can see is the more useful signal. It is
 not in the unit above.
 
@@ -520,12 +522,12 @@ Run history is bounded by three settings under `retention` in the home's
 (`runtime-spec.md` § 6). The prune deletes run records, not files in general,
 and the count bound applies per plugin rather than across the directory.
 
-One thing you cannot discover any other way: a misspelled key in
-`preferences.json` parses clean, because unknown keys are stripped rather than
-refused. Nothing warns you, and the bound you thought you set simply is not
-there. `warpline advance --json` reports a `pruned` count on every advance,
-`0` included, and that count is the only confirmation that a retention setting
-did anything at all.
+A misspelled key in `preferences.json` is an unknown key, and it refuses the
+advance: exit `75`, nothing on stdout, and one stderr line naming the file and
+the key. The timer fails every tick until you fix the file, and the dead-man
+file goes stale meanwhile. A correctly spelled bound is quieter.
+`warpline advance --json` reports a `pruned` count on every advance, `0`
+included, and that count says how many runs a bound removed.
 
 The log files the units above write are not run records. Nothing in warpline
 prunes them. Rotate them yourself, or let the systemd journal handle it by

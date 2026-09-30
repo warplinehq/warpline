@@ -964,6 +964,16 @@ Three bounds, all of them the operator's, set under `retention` in
 | `retention.keep_per_plugin` | `20` | how many records survive, per plugin |
 | `retention.max_bytes` | `104857600` | the total size of `<home>/runs/` |
 
+`preferences.json` is read strictly. An unknown key at the top level or inside
+`quiet_hours` or `retention` is refused, and so are a wrong type, an
+out-of-range value, a bad `HH:MM` and malformed JSON. An advance refuses before
+any write, exiting `75` with the home byte-identical (§ 11). `warpline run`
+refuses before the plugin runs, exiting `1` with `ok: false`. The message names
+the file, the key path and the expected shape, and never a value read out of
+the file. A missing file is the built-in defaults. The strictness has one
+accepted cost: a key added by a later release is refused by an earlier one, so
+remove it before downgrading.
+
 One policy object, read by every path that deletes. Three record formats pruned
 on three literals would be three retention rules that agree until somebody tunes
 one.
@@ -1057,8 +1067,9 @@ rule is in place ahead of the file it protects: with no transcript written today
 (§ 5), it has nothing to strand yet.
 
 **Confirming a retention setting took effect is still an observation, not a
-read.** Unknown keys in `preferences.json` are stripped rather than refused, so a
-misspelled key parses successfully and nothing warns.
+read.** A misspelled key no longer passes: it refuses the advance, as above.
+What a correctly spelled key did is another question, and the file cannot
+answer it.
 
 What an advance reports is how many runs it removed, not why. Removed means
 gone from the directory and not merely selected: a run whose files survive the
@@ -1067,8 +1078,7 @@ count. `warpline advance
 --json` carries a `pruned` count for the advance that just ran, and the dead-man
 file (§ 13) carries the same number for the last advance that returned. Read it
 for what it is: one integer standing for all three bounds, which cannot say
-which of them bound, over a prune that runs with the built-in defaults when your
-key was stripped. So a non-zero count does not attribute the eviction to the
+which of them bound. So a non-zero count does not attribute the eviction to the
 setting you just made, and a `0` says only that nothing was eligible. The count
 also covers one of the two deletion paths — `trimPluginHistory` runs after
 `warpline run` and never during an advance, so nothing it removes is in there.
@@ -2825,9 +2835,15 @@ advance. Treat this one as "retry later" rather than as a fault to page on:
 under a fifteen-minute timer the retry costs nothing.
 
 **This cause is not free of side effects, and the distinction matters to
-anything that retries automatically.** One arm of it is: a plugin root that
-cannot be read is refused above every writer in the advance, including the run
-lock, so that one does leave the home byte-identical. The rest do not.
+anything that retries automatically.** Two arms of it are: a plugin root that
+cannot be read, and a `preferences.json` that fails validation (§ 6), are both
+refused above every writer in the advance, including the run lock, so those two
+do leave the home byte-identical. The rest do not.
+
+**The preferences arm does not clear on its own.** Every tick refuses until the
+file is fixed or removed, and the dead-man file (§ 13) goes stale meanwhile.
+"Retry later" is the wrong reading for it: read the stderr line, which names
+the file, the key path and the expected shape.
 `warpline advance` maps *any* throw out of the advance to `75`, deliberately
 and with no chain of special cases, so a
 state write that hits a full disk, a run-log write that fails, or an append to
@@ -2999,10 +3015,11 @@ never says the word for an absent value in place of a process id. `advance.test.
 holds both arms, and asserts in each that the holder's lock is still on disk and
 that no run appeared under the home.
 
-**The lock is taken below the plugin-root refusal and above the state read, and
-released in a single `finally` below the return.** That placement is what keeps
-two promises at once: a plugin root that cannot be read is refused before any
-lock exists, and every write the advance makes happens while it holds one. The
+**The lock is taken below the plugin-root and preferences refusals and above the
+state read, and released in a single `finally` below the return.** That
+placement is what keeps two promises at once: a plugin root that cannot be read
+and a `preferences.json` that fails validation are both refused before any lock
+exists, and every write the advance makes happens while it holds one. The
 release covers every way out, including the quiet-hours early return and a throw
 from inside the span. `engine-lock.test.ts` holds all three of those arms, and
 the one that matters most is the quiet-hours one: a lock leaked there is

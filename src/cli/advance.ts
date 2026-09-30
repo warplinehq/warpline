@@ -108,29 +108,20 @@
  *      piped stream reports `isTTY` as `undefined` rather than `false`, so a
  *      strict comparison calls a pipe interactive in exactly the case that
  *      matters.
- *   7. The preferences report is a SECOND read beside the validated one, not a
- *      replacement for it. Every reader of preferences keeps its silent
- *      fallback to defaults, which is right for all of them; what is not right
- *      is that an operator who widened the retention window and fat-fingered
- *      the JSON gets the built-in 30-day rule, has the evidence they were
- *      preserving deleted, and is told so by an exit code of `0`. The report is
- *      honest about its own reach: malformed JSON and wrong value types are
- *      caught, a MISSPELLED key is not, because Zod strips unknown keys rather
- *      than refusing them. The pruned count in the machine-readable output is
- *      the only confirmation that a retention setting took effect.
- *
- * The preferences path comes from the accessor, which resolves to the home
- * level. The engine derives its own one directory deeper when a host passes a
- * state override, and that discrepancy is known and deliberately NOT fixed here
- * — fixing it would put a preferences-resolution change and a retention-policy
- * change in one bisect. This command passes no override, so both reads land on
- * the same file and the shipped verb is unaffected.
+ *   7. A preferences file that exists and cannot be used refuses the advance.
+ *      This file does not read it: the engine's own read sits above the run
+ *      lock, so a bad file reaches the single catch as a throw, exits `75` with
+ *      its one stderr line naming the file and the key path, writes nothing to
+ *      stdout and leaves the home byte-identical. It keeps refusing every tick
+ *      until the file is fixed or removed, and the dead-man file goes stale
+ *      meanwhile. Fail closed because running on defaults ran retention on the
+ *      30-day rule and deleted evidence the operator kept, and one bad field
+ *      discarded every sibling guardrail with it. This reverses the earlier
+ *      report-only choice, by operator decision on 2026-09-30.
  */
 import * as nodeUtil from 'node:util'
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
-import { preferencesPath, warplineHome } from '../lib/paths.js'
-import { PreferencesSchema } from '../lib/preferences.js'
+import { warplineHome } from '../lib/paths.js'
 import { runAdvance } from '../runtime/engine.js'
 import type { AdvanceResult, PluginFsmState } from '../runtime/engine.js'
 import { advanceCounts, advanceExitCode } from '../runtime/exit-codes.js'
@@ -189,9 +180,8 @@ export interface AdvancePayload {
    * Always present, `0` included — a monitor has to be able to tell "nothing to
    * prune" from "this warpline does not report pruning". Threaded from the
    * prune's own return value by way of the advance result, never recounted
-   * here; and because unknown keys in `preferences.json` are stripped rather
-   * than refused, this is the only signal that a retention bound did anything
-   * at all.
+   * here. It says how many runs went, not which retention bound removed
+   * them.
    */
   pruned: number
   /**
@@ -265,57 +255,6 @@ function render(payload: AdvancePayload, json?: boolean): string {
  */
 export interface AdvanceIo {
   stdin: { isTTY?: boolean }
-}
-
-/**
- * Say so, once, when the preferences file exists and cannot be used.
- *
- * Modelled on the lock read rather than on `readJsonOrNull`: three states, and
- * the middle one is the whole point. `readJsonOrNull` returns `null` for a
- * missing file but RETHROWS on malformed JSON, which is one of the two cases
- * this has to report rather than raise.
- *
- * Reports, never raises. A preferences file that cannot be parsed is not a
- * reason to refuse an advance — every reader falls back to defaults and the run
- * is valid. It is a reason to stop the fallback being silent.
- */
-async function reportUnusablePreferences(): Promise<void> {
-  const path = preferencesPath()
-
-  let raw: string
-  try {
-    raw = await readFile(path, 'utf-8')
-  } catch {
-    // Absent is the ordinary first-run shape and every default legitimately
-    // applies. Any other read error belongs to the engine's own read a moment
-    // later, which is the one that decides whether the advance can proceed.
-    return
-  }
-
-  let reason: string | null = null
-  try {
-    const result = PreferencesSchema.safeParse(JSON.parse(raw))
-    if (!result.success) {
-      const issue = result.error.issues[0]
-      const where = issue?.path.join('.')
-      reason = issue
-        ? `${where === undefined || where === '' ? '(root)' : where}: ${issue.message}`
-        : 'does not match the preferences schema'
-    }
-  } catch (err) {
-    reason = err instanceof Error ? err.message : String(err)
-  }
-
-  if (reason === null) return
-
-  // One line, whatever the runtime's parser put in its message — a multi-line
-  // diagnostic in a scheduler's mail is where a single actionable sentence goes
-  // to be skimmed past.
-  process.stderr.write(
-    `warpline advance: ${path} could not be used (${reason.replace(/\s+/g, ' ')}) — running on ` +
-      `built-in defaults, retention included. Malformed JSON and wrong value types are caught ` +
-      `here; a misspelled key is not, because unknown keys are stripped rather than refused.\n`,
-  )
 }
 
 export async function run(
@@ -442,9 +381,7 @@ export async function run(
       return 75
     }
 
-    await reportUnusablePreferences()
-
-    let result: AdvanceResult
+      let result: AdvanceResult
     try {
       result = await runAdvance({ trigger })
     } catch (err) {

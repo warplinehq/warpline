@@ -1,14 +1,13 @@
 /**
  * Read a plugin's `<home>/config/<plugin>.json` off disk.
  *
- * Shaped like `readPreferences` and split from it on one point. That loader
- * returns defaults on a missing file, on invalid JSON and on a failed
- * `safeParse` alike. Half of that is right: a missing config file is an empty
- * config, because a plugin that needs nothing configured should not have to
- * ship an empty document to say so. The other half is how a plugin runs against
- * the wrong target with a green board — an operator edits the config, fat-fingers
- * a brace, and the run proceeds on defaults nobody chose. A malformed config is
- * a hard failure here.
+ * Shaped like `readPreferences`, and both loaders now draw the same line. A
+ * missing file is the empty case: a missing config file is an empty config,
+ * because a plugin that needs nothing configured should not have to ship an
+ * empty document to say so. A present-but-invalid file is a hard failure,
+ * because defaulting it is how a plugin runs against the wrong target with a
+ * green board — an operator edits the config, fat-fingers a brace, and the run
+ * proceeds on defaults nobody chose.
  */
 import { readFile } from 'node:fs/promises'
 import { PluginConfigSchema, type PluginConfig } from '../schemas/plugin-config.js'

@@ -3,9 +3,9 @@
  *
  * The one rule this file exists to pin: **missing is not invalid**. An absent
  * `<home>/config/<plugin>.json` is an empty config; a present-but-malformed one
- * is a hard failure. `readPreferences` returns defaults on BOTH, which is the
- * behaviour this loader deliberately refuses — silently defaulting a bad value
- * is how a plugin runs against the wrong target with a green board.
+ * is a hard failure. `readPreferences` draws the same line for the same
+ * reason — silently defaulting a bad value is how a plugin runs against the
+ * wrong target with a green board.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, rm, writeFile, rename } from 'node:fs/promises'

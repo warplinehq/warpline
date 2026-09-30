@@ -2471,9 +2471,28 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         `             the default one at ${getDefaultPluginsDir()}`,
     )
   }
-  // The run lock. Acquired HERE — below the plugin-root refusal above, above
-  // the state read below — so a refused root still leaves the home
-  // byte-identical, while every write this advance makes sits inside the span.
+  // Read preferences HERE, below the plugin-root refusal and above the run
+  // lock, the state read and the step-2c tier-transition event. A file that
+  // exists and cannot be used throws `PreferencesInvalidError`, and sitting
+  // above every writer means that refusal leaves the home byte-identical,
+  // exactly as the plugin-root refusal does. It fails closed rather than
+  // falling back, by operator decision (2026-09-30, item 3): on a fallback,
+  // retention would have run on defaults nobody chose and deleted evidence the
+  // operator kept.
+  //
+  // Derived from the state file's directory when a custom stateDir was given
+  // (test isolation / relocated homes), else the warpline home default. The
+  // source system's comment promised this derivation but never implemented
+  // it, so its engine tests silently read the LIVE preferences file.
+  const resolvedPrefsPath =
+    preferencesPath ??
+    (options.stateDir ? join(dirname(options.stateDir), 'preferences.json') : defaultPreferencesPath())
+  const prefs = await readPreferences(resolvedPrefsPath)
+
+  // The run lock. Acquired HERE — below the plugin-root and preferences
+  // refusals above, above the state read below — so either refusal still
+  // leaves the home byte-identical, while every write this advance makes
+  // sits inside the span.
   // Inside the engine and not in the CLI, because a programmatic host has to be
   // guarded too: the benchmark harness calls this function with no options at
   // all under a per-iteration home swap.
@@ -2644,15 +2663,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       )
     }
 
-    // 2d. Read preferences — derive from the state file's directory when a
-    // custom stateDir was given (test isolation / relocated homes), else the
-    // warpline home default. The source system's comment promised this
-    // derivation but never implemented it, so its engine tests silently read
-    // the LIVE preferences file.
-    const resolvedPrefsPath =
-      preferencesPath ??
-      (options.stateDir ? join(dirname(options.stateDir), 'preferences.json') : defaultPreferencesPath())
-    const prefs = await readPreferences(resolvedPrefsPath)
+    // 2d. Preferences were read above the run lock; see there.
 
     // Guardrail: quiet hours — skip run if active (unless dryRun or force)
     if (isQuietHours(prefs) && !dryRun && !force) {

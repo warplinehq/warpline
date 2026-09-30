@@ -35,7 +35,8 @@
  *   0   — the invocation ran (check `ok` for the logical outcome; a handler
  *         that throws is converted to a failed SkillResult upstream and still
  *         exits 0, which is what the board expects)
- *   1   — usage error, or the invoker itself threw
+ *   1   — usage error, an invalid `preferences.json` (refused before the
+ *         plugin runs), or the invoker itself threw
  *   130 — SIGINT received (conventional bash exit code)
  */
 import * as util from 'node:util'
@@ -195,9 +196,12 @@ export async function runPlugin(
 
   try {
     // The one live path to the per-plugin artifact trim, so the one place the
-    // operator's cap has to be read. `readPreferences` falls back to defaults
-    // on a missing or invalid file, so this adds no failure mode to a manual
-    // run that it did not already have.
+    // operator's cap has to be read. A missing file means the built-in
+    // defaults. An invalid one throws, and the catch below turns that into
+    // `ok: false` with exit 1 before `invokePlugin`, so nothing runs and no
+    // artifact is written. That is a new failure mode for a manual run, and a
+    // deliberate one: a trim on a cap nobody chose deletes what the operator
+    // meant to keep.
     const prefs = await readPreferences(preferencesPath())
 
     // This verb reads no Grant, anywhere in this file, and it did not before
