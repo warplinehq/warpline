@@ -276,3 +276,28 @@ describe('check evaluator', () => {
     ])
   })
 })
+
+/**
+ * Every module specifier `source` imports that is not the standard library, a
+ * `./` sibling inside the bench, or zod. Static `from`, bare side-effect
+ * `import`, dynamic `import()` and `require()` are all read, because a guard
+ * blind to one import form is a guard with a door in it.
+ */
+function graderImportOffenders(source: string): string[] {
+  const IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)(['"`])([^'"`]+)\1/g
+  const allowed = (spec: string): boolean => spec.startsWith('node:') || /^\.\/[\w.-]+\.js$/.test(spec) || spec === 'zod'
+  return [...source.matchAll(IMPORT)].map((match) => match[2] ?? '').filter((spec) => !allowed(spec))
+}
+
+describe('grader imports', () => {
+  test('a planted plugin import is reported, and zod is not', () => {
+    const planted = "import { handler } from '../examples/plugins/x/handler.js'\nimport { z } from 'zod'"
+    expect(graderImportOffenders(planted)).toEqual(['../examples/plugins/x/handler.js'])
+    const otherForms = "import '../a.js'\nawait import('../b.js')\nrequire('c')\nexport { d } from './d.js'"
+    expect(graderImportOffenders(otherForms)).toEqual(['../a.js', '../b.js', 'c'])
+  })
+
+  test('the grader imports nothing outside the bench and the standard library', () => {
+    expect(graderImportOffenders(readFileSync(join(REPO_ROOT, 'bench', 'grade.ts'), 'utf8'))).toEqual([])
+  })
+})
