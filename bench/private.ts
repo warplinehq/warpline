@@ -14,7 +14,7 @@
  */
 import { createHash } from 'node:crypto'
 import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
-import { cp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { copyFile, cp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { AdvanceResult } from 'warpline'
@@ -22,7 +22,7 @@ import { RunLogSchema } from 'warpline/schemas/run-log'
 import { loadPluginManifests } from 'warpline/unstable-runtime'
 import { z } from 'zod'
 import { GradeCheckSchema } from './grade.js'
-import { GRADED_DIR, NOTES_PATH, writeSessionGrant } from './seed.js'
+import { ControlSeedError, GRADED_DIR, NOTES_PATH, writeSessionGrant } from './seed.js'
 
 /** The tracked ledger, relative to the repository root. */
 export const COMMITMENTS_FILE = 'bench/private-commitments'
@@ -401,4 +401,39 @@ export function materializeCopyMap(home: string, advance: AdvanceResult, copyMap
     mkdirSync(dirname(destination), { recursive: true })
     copyFileSync(source, destination)
   }
+}
+
+/**
+ * Seed one CONTROL arm home from the snapshot: the every-arm data, an empty
+ * graded directory, and, for the with-state arm alone, a byte copy of the
+ * configured notes.
+ *
+ * What a control home carries is stated as a property of the method: the same
+ * data every arm reads, the directory its deliverables go in, and nothing else.
+ * No plugin, no shared code, no package link, no warpline home and no prompt.
+ * A control session can read everything in its home, so a home carrying the
+ * implementation would be a control arm handed the answer. The config schema
+ * refuses an every-arm entry that reaches the plugin root or the warpline home,
+ * which is what makes "every-arm" mean "data".
+ *
+ * Both refusals run BEFORE anything is written, so a refused seed leaves no
+ * half-built home behind.
+ */
+export async function seedPrivateControl(
+  home: string,
+  arm: 'agent-with-state' | 'agent-from-scratch',
+  config: PrivateConfig,
+): Promise<void> {
+  if (arm !== 'agent-with-state' && arm !== 'agent-from-scratch') {
+    throw new ControlSeedError(`arm '${String(arm)}' is not a control arm — it is seeded by seedPrivateHome, and the control recipe would publish a contaminated measurement`)
+  }
+  if (arm === 'agent-with-state' && !existsSync(config.notes)) {
+    throw new ControlSeedError(`arm 'agent-with-state' has no notes source at '${config.notes}' — a with-state run without state is not the arm the method defines`)
+  }
+  for (const entry of config.entries) {
+    if (entry.scope === 'every-arm') await placeFromSnapshot(home, config, entry.to)
+  }
+  await mkdir(join(home, GRADED_DIR), { recursive: true })
+  // A byte COPY and never a link: a link would let a measured run's edits reach the live notes.
+  if (arm === 'agent-with-state') await copyFile(config.notes, join(home, NOTES_PATH))
 }

@@ -9,7 +9,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -19,20 +19,25 @@ import {
   resolvePointer,
   type GradeCheck,
 } from '../../bench/grade.js'
-import { runWarplineArm } from '../../bench/arms.js'
+import { assertControlHome, runWarplineArm } from '../../bench/arms.js'
 import {
+  assertPluginsPresent,
   assertPrivateSeam,
   flipAutonomy,
+  loadPrivateConfig,
   materializeCopyMap,
+  PrivateConfigSchema,
   privatePluginsDir,
   scrubEnv,
+  seedPrivateControl,
   seedPrivateHome,
   takeSnapshot,
   treeDigest,
   type PrivateConfig,
 } from '../../bench/private.js'
 import { BenchRunRecordSchema, GRADED_KEYS, parseRecord } from '../../bench/record.js'
-import { assertHomeSeam } from '../../bench/seed.js'
+import { RunLogSchema } from 'warpline/schemas/run-log'
+import { assertHomeSeam, ControlSeedError } from '../../bench/seed.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
@@ -577,6 +582,172 @@ describe('private snapshot', () => {
           expect(Buffer.compare(readFileSync(b!), readFileSync(source))).toBe(0)
         }
       }
+    })
+  })
+})
+
+/** A snapshot taken and one home seeded from it, with the env scrubbed and the warpline home exported. */
+async function seededHome(root: string, config: PrivateConfig): Promise<{ home: string; wh: string }> {
+  await takeSnapshot(config)
+  scrubEnv(config.envScrub)
+  const home = mkdtempSync(join(root, 'home-'))
+  const wh = await seedPrivateHome(home, config)
+  process.env.WARPLINE_HOME = wh
+  return { home, wh }
+}
+
+describe('private config and seeding refusals', () => {
+  // Paths only: the tree behind them is removed at once, so each case clones
+  // a config nothing on disk answers to.
+  const base = ((): PrivateConfig => {
+    const fleet = buildSyntheticFleet()
+    rmSync(fleet.root, { recursive: true, force: true })
+    return fleet.config
+  })()
+
+  test('the synthetic config parses, so each refusal below is refused for its own reason', () => {
+    expect(PrivateConfigSchema.safeParse(base).success).toBe(true)
+  })
+
+  const refusals: [string, (config: PrivateConfig) => void][] = [
+    ['a relative snapshot dir', (c) => (c.snapshot.dir = 'snapshot')],
+    ["an entry target holding '..'", (c) => (c.entries[0]!.to = '.fleet/../escape')],
+    ['an absolute entry target', (c) => (c.entries[0]!.to = '/abs/target')],
+    ['a check path outside graded/', (c) => (c.checks[0]!.path = 'state/x.json')],
+    ['a copy map naming an unconfigured plugin', (c) => (c.copyMap[0]!.plugin = 'gamma')],
+    ['duplicate check ids', (c) => (c.checks[1]!.id = 'check-1')],
+    ["'warpline' among the linked packages", (c) => c.links.packages.push('warpline')],
+    ['the fleet dir and the warpline home dir the same', (c) => (c.warplineHomeDir = c.fleetDir)],
+    ['an every-arm entry under the plugin root', (c) => c.entries.push({ from: '/x', to: '.fleet/plugins/data', scope: 'every-arm' })],
+    ['an every-arm entry above the plugin root', (c) => (c.entries[4]!.to = '.fleet')],
+    ['an every-arm entry under the warpline home', (c) => c.entries.push({ from: '/x', to: 'wh/data.json', scope: 'every-arm' })],
+    ['an every-arm entry at the notes path', (c) => c.entries.push({ from: '/x', to: 'notes.md', scope: 'every-arm' })],
+    ['an entry under graded/', (c) => c.entries.push({ from: '/x', to: 'graded/check-1.json', scope: 'warpline' })],
+    ['two overlapping entries', (c) => c.entries.push({ from: '/x', to: '.fleet/plugins/alpha/extra.ts', scope: 'warpline' })],
+    ['an unknown top-level key', (c) => Object.assign(c, { extra: true })],
+  ]
+  for (const [name, mutate] of refusals) {
+    test(`the config refuses ${name}`, () => {
+      const config = structuredClone(base)
+      mutate(config)
+      expect(PrivateConfigSchema.safeParse(config).success).toBe(false)
+    })
+  }
+
+  test('the config loader refuses a relative path and round-trips an absolute one', () => {
+    expect(() => loadPrivateConfig('relative.json')).toThrow(/absolute/)
+    const dir = mkdtempSync(join(tmpdir(), 'bench-private-config-'))
+    try {
+      writeFileSync(join(dir, 'private.json'), JSON.stringify(base))
+      expect(loadPrivateConfig(join(dir, 'private.json'))).toEqual(base)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('an extra directory in the plugin root refuses the seed, naming the loaded and configured sets', async () => {
+    await withFleet(async ({ root, config }) => {
+      config.entries.push({ from: join(root, 'repo/.fleet/plugins/_shared'), to: '.fleet/plugins/_shared', scope: 'warpline' })
+      await expect(seededHome(root, config)).rejects.toThrow(/loaded \[alpha, beta\] and failed \[_shared\] where \[alpha, beta\] are configured/)
+    })
+  })
+
+  test('a configured plugin missing from a seeded home is refused by name', async () => {
+    await withFleet(async ({ root, config }) => {
+      const { home } = await seededHome(root, config)
+      rmSync(join(home, '.fleet/plugins/beta'), { recursive: true })
+      expect(() => assertPluginsPresent(home, config)).toThrow(/'beta' is absent from the plugin root/)
+    })
+  })
+
+  test('an unscrubbed state override outside the home fails the seam', async () => {
+    await withFleet(async ({ root, config }) => {
+      const { home } = await seededHome(root, config)
+      process.env.FLEET_STATE_DIR = mkdtempSync(join(root, 'outside-'))
+      await expect(assertPrivateSeam(home, config)).rejects.toThrow(/export 'STATE_DIR'/)
+    })
+  })
+
+  test('an unset warpline home fails the seam, because the fleet falls back to the user home', async () => {
+    await withFleet(async ({ root, config }) => {
+      const { home } = await seededHome(root, config)
+      delete process.env.WARPLINE_HOME
+      await expect(assertPrivateSeam(home, config)).rejects.toThrow(/export 'warplineHomeDir'/)
+    })
+  })
+
+  test('a configured export the paths module lacks fails the seam', async () => {
+    await withFleet(async ({ root, config }) => {
+      const { home } = await seededHome(root, config)
+      config.pathsSeam.exports.push('cacheDir')
+      await expect(assertPrivateSeam(home, config)).rejects.toThrow(/no export 'cacheDir'/)
+    })
+  })
+
+  test('engine state seeded into the warpline home is refused by name', async () => {
+    await withFleet(async ({ root, config }) => {
+      writeFileSync(join(root, 'engine-state.json'), '{}')
+      config.entries.push({ from: join(root, 'engine-state.json'), to: 'wh/state/engine-state.json', scope: 'warpline' })
+      await expect(seededHome(root, config)).rejects.toThrow(/holds \[state\]/)
+    })
+  })
+
+  test('a plugin that failed this run is not graded on the stale output the snapshot carried', async () => {
+    await withFleet(async ({ root, config }) => {
+      const { home } = await seededHome(root, config)
+      rmSync(join(home, '.fleet/state/input.json'))
+      const arm = await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap))
+      const log = RunLogSchema.parse(JSON.parse(readFileSync(arm.advance.run_log_path, 'utf8')))
+      expect(log.plugin_entries.find((entry) => entry.plugin === 'alpha')?.status).toBe('failed')
+      expect(existsSync(join(home, 'graded/check-1.json'))).toBe(false)
+      expect(JSON.parse(readFileSync(join(home, '.fleet/state/alpha.json'), 'utf8')).run).toBe('stale')
+    })
+  })
+
+  test('a from-scratch control home holds the data and an empty graded dir, and nothing that reveals the implementation', async () => {
+    await withFleet(async ({ root, config }) => {
+      await takeSnapshot(config)
+      const home = mkdtempSync(join(root, 'control-'))
+      await seedPrivateControl(home, 'agent-from-scratch', config)
+      expect(existsSync(join(home, '.fleet/state/input.json'))).toBe(true)
+      expect(readdirSync(join(home, 'graded'))).toEqual([])
+      for (const absent of ['.fleet/plugins', '.fleet/shared', '.fleet/scripts', '.fleet/node_modules', 'node_modules', 'wh', 'notes.md']) {
+        expect(existsSync(join(home, absent))).toBe(false)
+      }
+      expect(() => assertControlHome('agent-from-scratch', home)).not.toThrow()
+    })
+  })
+
+  test('a with-state control home also holds a byte copy of the notes, not a link', async () => {
+    await withFleet(async ({ root, config }) => {
+      await takeSnapshot(config)
+      const home = mkdtempSync(join(root, 'control-'))
+      await seedPrivateControl(home, 'agent-with-state', config)
+      const notes = join(home, 'notes.md')
+      expect(existsSync(notes)).toBe(true)
+      expect(lstatSync(notes).isFile()).toBe(true)
+      expect(Buffer.compare(readFileSync(notes), readFileSync(config.notes))).toBe(0)
+      expect(existsSync(join(home, '.fleet/plugins'))).toBe(false)
+      expect(existsSync(join(home, 'wh'))).toBe(false)
+      expect(() => assertControlHome('agent-with-state', home)).not.toThrow()
+    })
+  })
+
+  test('a with-state control home with no notes is refused before anything is written', async () => {
+    await withFleet(async ({ root, config }) => {
+      await takeSnapshot(config)
+      rmSync(config.notes)
+      const home = mkdtempSync(join(root, 'control-'))
+      await expect(seedPrivateControl(home, 'agent-with-state', config)).rejects.toBeInstanceOf(ControlSeedError)
+      expect(readdirSync(home)).toEqual([])
+    })
+  })
+
+  test('the warpline arm is refused the control recipe', async () => {
+    await withFleet(async ({ root, config }) => {
+      await takeSnapshot(config)
+      const home = mkdtempSync(join(root, 'control-'))
+      await expect(seedPrivateControl(home, 'warpline' as never, config)).rejects.toBeInstanceOf(ControlSeedError)
     })
   })
 })
