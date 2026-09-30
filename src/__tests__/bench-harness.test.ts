@@ -45,16 +45,20 @@ import {
   ApiUnavailableError,
   ARM_ORDER,
   assertCleanWorktree,
+  auditTranscript,
   buildClaudeArgv,
   buildClaudeEnv,
   buildConsumerPrompt,
   CONSUMER_PLUGIN_PATH,
   ISOLATION_SETTINGS,
+  OutboundConfigError,
   parseClaudeResult,
+  parseSessionStdout,
   PINNED_MODEL,
   resolveDisposition,
   RUN_LOG_PLACEHOLDER,
   runClaudeArm,
+  runConsumerSession,
   runWarplineArm,
   runWarplineIteration,
   SESSION_BUDGET,
@@ -1086,6 +1090,168 @@ describe('bench harness — the isolated sessions', () => {
       })
     } finally {
       await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  test('the isolated consumer argv is frozen whole', () => {
+    expect(buildClaudeArgv('consumer', 'P', true)).toEqual([
+      '--print',
+      'P',
+      '--output-format',
+      'stream-json',
+      '--model',
+      'claude-opus-5',
+      '--max-budget-usd',
+      '5',
+      '--permission-mode',
+      'bypassPermissions',
+      '--setting-sources',
+      '',
+      '--strict-mcp-config',
+      '--no-session-persistence',
+      '--verbose',
+      '--settings',
+      '{"sandbox":{"enabled":true,"filesystem":{"disabled":true},"network":{"allowedDomains":[],"strictAllowlist":true},"allowUnsandboxedCommands":false}}',
+      '--plugin-dir',
+      join(REPO_ROOT, 'plugin'),
+      '--disallowedTools',
+      'WebFetch',
+      'WebSearch',
+      'RemoteTrigger',
+    ])
+  })
+
+  /** Each way the isolation can be missing, as a transcript that shows it. */
+  const CONFIG_FAILURES: ReadonlyArray<readonly [string, unknown[], unknown]> = [
+    ['a web tool in the init tool list', [{ ...STREAM_INIT, tools: ['Bash', 'WebFetch'] }], STREAM_RESULT],
+    ['a configured MCP server', [{ ...STREAM_INIT, mcp_servers: [{ name: 'x' }] }], STREAM_RESULT],
+    [
+      'a removed tool used',
+      [STREAM_INIT, { ...BASH_USE, message: { content: [{ type: 'tool_use', id: 'tu2', name: 'WebSearch', input: {} }] } }],
+      STREAM_RESULT,
+    ],
+    [
+      'an MCP tool used by a subagent',
+      [
+        STREAM_INIT,
+        {
+          type: 'assistant',
+          message: { content: [{ type: 'tool_use', id: 'tu3', name: 'mcp__x__y', input: {} }] },
+          parent_tool_use_id: 't1',
+        },
+      ],
+      STREAM_RESULT,
+    ],
+    [
+      'provider web requests',
+      [STREAM_INIT],
+      { ...STREAM_RESULT, usage: { ...STREAM_RESULT.usage, server_tool_use: { web_search_requests: 0, web_fetch_requests: 1 } } },
+    ],
+  ]
+
+  for (const [name, events, result] of CONFIG_FAILURES) {
+    test(`the audit refuses ${name}`, () => {
+      let thrown: unknown
+      try {
+        auditTranscript(events, result, 'agent-with-state')
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(OutboundConfigError)
+      expect((thrown as Error).message).toContain('agent-with-state')
+      // An MCP tool's full name is transcript content; the message never quotes it.
+      expect((thrown as Error).message).not.toContain('mcp__x__y')
+    })
+  }
+
+  test('the audit counts nothing in a clean transcript, and each refused tool result once', () => {
+    expect(auditTranscript([STREAM_INIT, BASH_USE], STREAM_RESULT, 'agent-with-state')).toBe(0)
+
+    const textArrayViolation = {
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu4',
+            content: [{ type: 'text', text: 'Forbidden <sandbox_violations>deny network-outbound api.example.com:443</sandbox_violations>' }],
+          },
+        ],
+      },
+    }
+    expect(
+      auditTranscript([STREAM_INIT, BASH_USE, BLOCKED_TOOL_RESULT, BASH_USE, textArrayViolation], STREAM_RESULT, 'agent-with-state'),
+    ).toBe(2)
+  })
+
+  test('an isolated stdout with a non-JSON line or no result line measures nothing', () => {
+    expect(() => parseSessionStdout(`${jsonl(STREAM_INIT)}not json\n`, 'warpline', true, '')).toThrow(/not JSON/)
+    expect(() => parseSessionStdout(jsonl(STREAM_INIT, BASH_USE), 'warpline', true, '')).toThrow(/no result object/)
+  })
+
+  test('a provider outage reads as one before the audit is asked anything', () => {
+    // The init line would fail the audit; the outage has to win.
+    const stdout = jsonl({ ...STREAM_INIT, tools: ['WebFetch'] }, { ...STREAM_RESULT, is_error: true, terminal_reason: 'api_error' })
+    expect(() => parseSessionStdout(stdout, 'agent-from-scratch', true, '')).toThrow(ApiUnavailableError)
+  })
+
+  test('a public session through a real spawn parses as today, with no blocked count', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'warpline-bench-public-'))
+    try {
+      await withFakeClaude({ stdout: JSON.stringify(SUCCESS_RESULT) }, async () => {
+        const run = await runClaudeArm('agent-from-scratch', home, 'P', { grade: () => gradeOutcome(true) })
+        expect(readFileSync(join(home, 'argv.txt'), 'utf8').split('\n')).toContain('json')
+        expect(run.outbound_blocked).toBeNull()
+        expect(run.parsed).toEqual(parseClaudeResult(SUCCESS_RESULT, 'agent-from-scratch'))
+      })
+    } finally {
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  test('the env points the warpline home at its own argument, and carries no configuration directory', () => {
+    const prior = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = '/tmp/would-suppress-the-credential'
+    try {
+      const same = buildClaudeEnv('/h')
+      const split = buildClaudeEnv('/h', '/h/wh')
+      expect(same.WARPLINE_HOME).toBe('/h')
+      expect(split.WARPLINE_HOME).toBe('/h/wh')
+      expect('CLAUDE_CONFIG_DIR' in same).toBe(false)
+      expect('CLAUDE_CONFIG_DIR' in split).toBe(false)
+    } finally {
+      if (prior === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = prior
+    }
+  })
+
+  test('an isolated consumer runs its own prompt in its home, against a separate warpline home', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'warpline-bench-consumer-'))
+    try {
+      const home = join(scratch, 'arm')
+      const wh = join(scratch, 'warpline-home')
+      await mkdir(home)
+      const promptPath = join(scratch, 'consumer.md')
+      await writeFile(promptPath, `Resolve every handoff in ${RUN_LOG_PLACEHOLDER} and write the results.\n`)
+      const runLog = join(wh, 'runs', 'run-1.json')
+
+      await withFakeClaude({ stdout: jsonl(STREAM_INIT, BASH_USE, BLOCKED_TOOL_RESULT, STREAM_RESULT) }, async () => {
+        const consumer = await runConsumerSession(home, runLog, { isolated: true, warplineHome: wh, promptPath })
+        expect(readFileSync(join(home, 'warpline-home.txt'), 'utf8')).toBe(wh)
+        // Written in the home, so the home is the working directory.
+        const argv = readFileSync(join(home, 'argv.txt'), 'utf8')
+        expect(argv).toContain(`Resolve every handoff in ${runLog} and write the results.`)
+        expect(argv).not.toContain(RUN_LOG_PLACEHOLDER)
+        expect(consumer.outbound_blocked).toBe(1)
+      })
+
+      // A prompt with nothing to substitute has no discovery path, and is refused before any spawn.
+      const bare = join(scratch, 'bare.md')
+      await writeFile(bare, 'Resolve every handoff.\n')
+      expect(() => buildConsumerPrompt(runLog, bare)).toThrow(/carries no/)
+      await expect(runConsumerSession(home, runLog, { promptPath: bare })).rejects.toThrow(/carries no/)
+    } finally {
+      await rm(scratch, { recursive: true, force: true })
     }
   })
 })

@@ -571,9 +571,15 @@ export function buildClaudeEnv(home: string, warplineHome: string = home): Recor
  * still reads fine, the session finds no handoffs, writes neither handoff
  * artifact, and the run is dispositioned a grader failure with nothing in the
  * output naming why.
+ *
+ * The prompt path defaults to the public consumer prompt; a caller with its own
+ * prompt passes the path, and both refusals hold for it unchanged.
  */
-export function buildConsumerPrompt(runLogPath: string): string {
-  const prompt = readFileSync(join(REPO_ROOT, 'bench', 'prompts', 'consumer.md'), 'utf8')
+export function buildConsumerPrompt(
+  runLogPath: string,
+  promptPath: string = join(REPO_ROOT, 'bench', 'prompts', 'consumer.md'),
+): string {
+  const prompt = readFileSync(promptPath, 'utf8')
   if (!prompt.includes(RUN_LOG_PLACEHOLDER)) {
     throw new Error(`the consumer prompt carries no '${RUN_LOG_PLACEHOLDER}' to substitute — it has no discovery path`)
   }
@@ -826,12 +832,23 @@ export async function runClaudeArm(
 export interface ConsumerSessionResult {
   parsed: ParsedClaudeResult
   consumer_ms: number
+  /** Sandbox-blocked attempts when the session was isolated; null or absent otherwise. */
+  outbound_blocked?: number | null
 }
 
-/** The warpline arm's judgment half: resolve the parked handoffs, and write them. */
-export async function runConsumerSession(home: string, runLogPath: string): Promise<ConsumerSessionResult> {
-  const outcome = await runSession('consumer', home, buildConsumerPrompt(runLogPath))
-  return { parsed: outcome.parsed, consumer_ms: outcome.wall_clock_ms }
+/**
+ * The warpline arm's judgment half: resolve the parked handoffs, and write them.
+ *
+ * The working directory is always the arm's home. The warpline home defaults to
+ * it too, and is passed separately when the runtime's home sits beside it.
+ */
+export async function runConsumerSession(
+  home: string,
+  runLogPath: string,
+  options: SessionOptions & { promptPath?: string } = {},
+): Promise<ConsumerSessionResult> {
+  const outcome = await runSession('consumer', home, buildConsumerPrompt(runLogPath, options.promptPath), options)
+  return { parsed: outcome.parsed, consumer_ms: outcome.wall_clock_ms, outbound_blocked: outcome.outbound_blocked }
 }
 
 /**
@@ -865,6 +882,8 @@ export interface WarplineIterationResult {
   advance: AdvanceResult
   consumer: ParsedClaudeResult
   grade: GradeResult
+  /** The consumer session's blocked count, or null when it was not isolated. */
+  outbound_blocked: number | null
 }
 
 /** The three seams a test replaces so the assembly is checkable without a key. */
@@ -913,5 +932,6 @@ export async function runWarplineIteration(
     advance: first.advance,
     consumer: second.parsed,
     grade: gradeFn(home),
+    outbound_blocked: second.outbound_blocked ?? null,
   }
 }
