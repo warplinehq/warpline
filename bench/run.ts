@@ -759,6 +759,53 @@ export async function runPrivateSet(
 }
 
 /**
+ * One disclosed iteration of the private set, written to a scratch dir, never
+ * the measured one.
+ *
+ * It exists because a mistake in the private prompts or checks found after the
+ * method is frozen costs a whole measured set. It runs behind the same gate,
+ * with the prereg not required, so its records carry the snapshot digest and
+ * no commitment. They are unbound by design: the private summary refuses any
+ * record without the commitment, so a shakedown record can never be counted.
+ * The pre-registration must disclose each shakedown iteration all the same.
+ */
+export async function runPrivateShakedown(
+  config: PrivateConfig,
+  scratchDir: string,
+  deps: PrivateSetDeps = {},
+): Promise<BenchRunRecord[]> {
+  if (resolve(scratchDir) === resolve(config.resultsDir)) {
+    throw new Error('the shakedown must write to a scratch dir, never the measured results dir')
+  }
+  const stamp = await privateGate(config, deps, false)
+  return runIteration({
+    iteration: (await resumeState(scratchDir)).nextIteration,
+    runner: deps.runner ?? makePrivateRunner(config),
+    resultsDir: scratchDir,
+    notesSource: config.notes,
+    provenance: deps.provenance ?? readProvenance,
+    privateHooks: privateHooks(config, stamp),
+  })
+}
+
+/**
+ * The private warm-up: the from-scratch arm once, in a private control home,
+ * behind the same gate, producing the notes the with-state arm is later handed.
+ *
+ * The prereg is not required, because the notes it produces are part of what
+ * the method freezes. It writes no record, and it refuses once the measured
+ * results dir holds any, exactly as the public warm-up does.
+ */
+export async function runPrivateWarmup(config: PrivateConfig, deps: PrivateSetDeps = {}): Promise<string> {
+  await privateGate(config, deps, false)
+  return runWarmup({
+    runner: deps.runner ?? makePrivateRunner(config),
+    resultsDir: config.resultsDir,
+    seed: (arm, home) => seedPrivateControl(home, arm, config),
+  })
+}
+
+/**
  * The entry point, and the ONE place the tracked defaults are bound.
  *
  * It prints the summary and writes no prose. The published table is transcribed

@@ -19,7 +19,7 @@ import {
   resolvePointer,
   type GradeCheck,
 } from '../../bench/grade.js'
-import { ARM_ORDER, assertControlHome, runWarplineArm, type Provenance } from '../../bench/arms.js'
+import { ARM_ORDER, assertControlHome, CanaryError, runWarplineArm, type Provenance } from '../../bench/arms.js'
 import {
   assertEngineUnchanged,
   assertFleetInstall,
@@ -50,6 +50,8 @@ import {
   makePrivateRunner,
   runIteration,
   runPrivateSet,
+  runPrivateShakedown,
+  runPrivateWarmup,
   summarisePrivate,
   summariseSet,
   type ArmRunner,
@@ -1362,4 +1364,154 @@ describe('private set, end to end', () => {
     },
     60_000,
   )
+})
+
+/** Every check passing, keyed as the synthetic config keys them. */
+const PASSING_CHECKS = { paths: { 'check-1': true, 'check-2': true }, passed: true }
+
+/**
+ * Spies for the three things a private entry point does before and while it
+ * spends, recording one shared call order. Either of the first two can be told
+ * to throw, and the runner reports a passing, blocked-once outcome.
+ */
+function orderSpies(digest: string, fail: { preconditions?: Error; canary?: Error } = {}) {
+  const calls: string[] = []
+  const requirePrereg: boolean[] = []
+  return {
+    calls,
+    requirePrereg,
+    deps: {
+      preconditions: (options: { requirePrereg: boolean }) => {
+        calls.push('preconditions')
+        requirePrereg.push(options.requirePrereg)
+        if (fail.preconditions) throw fail.preconditions
+        return options.requirePrereg ? { snapshot_sha256: digest, prereg_commitment: SUMMARY_PREREG } : { snapshot_sha256: digest }
+      },
+      canary: async () => {
+        calls.push('canary')
+        if (fail.canary) throw fail.canary
+        return 1
+      },
+      runner: (async (arm, home) => {
+        calls.push(`runner:${arm}`)
+        writeFileSync(join(home, 'notes.md'), 'notes a warm-up session wrote\n')
+        return privateOutcome(PASSING_CHECKS)
+      }) as ArmRunner,
+      provenance: testProvenance,
+    },
+  }
+}
+
+/** A synthetic fleet with its snapshot taken and frozen into the config. */
+async function withFrozenFleet(fn: (fleet: ReturnType<typeof buildSyntheticFleet> & { digest: string }) => Promise<void>): Promise<void> {
+  await withFleet(async (fleet) => {
+    const digest = await takeSnapshot(fleet.config)
+    fleet.config.snapshot.sha256 = digest
+    await fn({ ...fleet, digest })
+  })
+}
+
+/** The results dir holds no record: absent, or empty. */
+const noRecords = (dir: string): boolean => !existsSync(dir) || readdirSync(dir).length === 0
+
+describe('private set ordering', () => {
+  const ENTRY_POINTS: [string, (config: PrivateConfig, deps: ReturnType<typeof orderSpies>['deps'], root: string) => Promise<unknown>][] = [
+    ['the measured set', (config, deps) => runPrivateSet(config, deps)],
+    ['the shakedown', (config, deps, root) => runPrivateShakedown(config, join(root, 'scratch'), deps)],
+    ['the warm-up', (config, deps) => runPrivateWarmup(config, deps)],
+  ]
+
+  test.each(ENTRY_POINTS)('%s: a failed precondition runs no canary and no arm, and writes nothing', async (_name, run) => {
+    await withFrozenFleet(async ({ root, config, digest }) => {
+      const refused = new Error('a configured plugin is absent')
+      const { calls, deps } = orderSpies(digest, { preconditions: refused })
+      await expect(run(config, deps, root)).rejects.toBe(refused)
+      expect(calls).toEqual(['preconditions'])
+      expect(noRecords(config.resultsDir)).toBe(true)
+      expect(noRecords(join(root, 'scratch'))).toBe(true)
+    })
+  })
+
+  test.each(ENTRY_POINTS)('%s: a failed canary runs no arm and writes nothing', async (_name, run) => {
+    await withFrozenFleet(async ({ root, config, digest }) => {
+      const { calls, deps } = orderSpies(digest, { canary: new CanaryError(0) })
+      await expect(run(config, deps, root)).rejects.toBeInstanceOf(CanaryError)
+      expect(calls).toEqual(['preconditions', 'canary'])
+      expect(noRecords(config.resultsDir)).toBe(true)
+      expect(noRecords(join(root, 'scratch'))).toBe(true)
+    })
+  })
+
+  test('a measured set checks the preconditions with the prereg required, then the canary, then runs the arms', async () => {
+    await withFrozenFleet(async ({ config, digest }) => {
+      const { calls, requirePrereg, deps } = orderSpies(digest)
+      await runPrivateSet(config, deps)
+      expect(calls.slice(0, 3)).toEqual(['preconditions', 'canary', 'runner:warpline'])
+      expect(calls.filter((call) => !call.startsWith('runner:'))).toEqual(['preconditions', 'canary'])
+      expect(requirePrereg).toEqual([true])
+      expect(readdirSync(config.resultsDir)).toHaveLength(33)
+    })
+  })
+
+  test('a shakedown writes one unbound iteration to its scratch dir, and the private summary refuses it', async () => {
+    await withFrozenFleet(async ({ root, config, digest }) => {
+      const scratch = join(root, 'scratch')
+      const { calls, requirePrereg, deps } = orderSpies(digest)
+      const records = await runPrivateShakedown(config, scratch, deps)
+      expect(calls).toEqual(['preconditions', 'canary', 'runner:warpline', 'runner:agent-with-state', 'runner:agent-from-scratch'])
+      expect(requirePrereg).toEqual([false])
+      expect(records).toHaveLength(3)
+      expect(readdirSync(scratch)).toHaveLength(3)
+      for (const file of readdirSync(scratch)) {
+        const record = BenchRunRecordSchema.parse(JSON.parse(readFileSync(join(scratch, file), 'utf8')))
+        expect(record.prereg_commitment).toBeUndefined()
+        expect(record.snapshot_sha256).toBe(digest)
+      }
+      expect(noRecords(config.resultsDir)).toBe(true)
+      await expect(summarisePrivate(scratch, SUMMARY_PREREG)).rejects.toThrow(/carries no prereg commitment/)
+    })
+  })
+
+  test('a shakedown pointed at the measured results dir is refused before anything runs', async () => {
+    await withFrozenFleet(async ({ config, digest }) => {
+      const { calls, deps } = orderSpies(digest)
+      await expect(runPrivateShakedown(config, `${config.resultsDir}/`, deps)).rejects.toThrow(/scratch/)
+      expect(calls).toEqual([])
+      expect(noRecords(config.resultsDir)).toBe(true)
+    })
+  })
+
+  test('the warm-up runs the from-scratch arm once in a private control home and copies its notes out of it', async () => {
+    await withFrozenFleet(async ({ config, digest }) => {
+      const { calls, requirePrereg, deps } = orderSpies(digest)
+      const homes: { home: string; state: boolean; plugins: boolean }[] = []
+      const spied = deps.runner
+      deps.runner = async (arm, home, iteration) => {
+        homes.push({ home, state: existsSync(join(home, '.fleet/state')), plugins: existsSync(join(home, '.fleet/plugins')) })
+        return spied(arm, home, iteration)
+      }
+      const produced = await runPrivateWarmup(config, deps)
+      try {
+        expect(calls).toEqual(['preconditions', 'canary', 'runner:agent-from-scratch'])
+        expect(requirePrereg).toEqual([false])
+        expect(homes).toHaveLength(1)
+        expect(homes[0]!.state).toBe(true)
+        expect(homes[0]!.plugins).toBe(false)
+        expect(produced.startsWith(homes[0]!.home)).toBe(false)
+        expect(readFileSync(produced, 'utf8')).toBe('notes a warm-up session wrote\n')
+        expect(noRecords(config.resultsDir)).toBe(true)
+      } finally {
+        rmSync(dirname(produced), { recursive: true, force: true })
+      }
+    })
+  })
+
+  test('the warm-up refuses once a record exists', async () => {
+    await withFrozenFleet(async ({ config, digest }) => {
+      mkdirSync(config.resultsDir, { recursive: true })
+      writeRecords(config.resultsDir, [privateSample()])
+      const { deps } = orderSpies(digest)
+      await expect(runPrivateWarmup(config, deps)).rejects.toThrow(/belongs BEFORE the measured set/)
+    })
+  })
 })
