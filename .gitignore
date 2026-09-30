@@ -13,5 +13,9 @@ CLAUDE.local.md
 # Local-only by design: writing them into a tracked file IS the leak.
 .private-terms
 
+# Private-scale benchmark material (config, snapshot, notes, raw records, transcripts) is local only.
+# Its pre-registration and archive live in the private repository, never here.
+.bench-private/
+
 # Impeccable throwaway mock artboards and review captures — local only
 .impeccable/

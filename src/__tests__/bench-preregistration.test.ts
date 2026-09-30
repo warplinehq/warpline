@@ -29,10 +29,20 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
-import { COMMITMENTS_FILE, parseCommitments } from '../../bench/private.js'
+import { COMMITMENTS_FILE, commitment, parseCommitments, treeDigest } from '../../bench/private.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
@@ -852,6 +862,110 @@ describe('the private commitments file is append-only and frozen by ancestry', (
   test('this repository reports no offender, and is vacuous exactly while the ledger is empty', () => {
     const empty = readFileSync(join(REPO_ROOT, COMMITMENTS_FILE)).length === 0
     expect(commitmentsFreeze(REPO_ROOT)).toEqual({ findings: [], vacuous: empty })
+  })
+})
+
+describe('the private commitment digests', () => {
+  /**
+   * Known answers computed outside this module, with `shasum -a 256` over the
+   * same bytes, so the digest is pinned by something other than itself.
+   */
+  test('the salted commitment is sha256 over salt then document, and only a 32-byte salt is accepted', () => {
+    expect(commitment(Buffer.alloc(32), Buffer.from('abc'))).toBe(
+      '365aa7d8f7f9402c4b9434502b4cc89ddb09fe50d7cd95b493b834c62d5a5370',
+    )
+    expect(() => commitment(Buffer.alloc(31), Buffer.from('abc'))).toThrow(/32 bytes/)
+    expect(() => commitment(Buffer.alloc(33), Buffer.from('abc'))).toThrow(/32 bytes/)
+  })
+
+  test('the tree digest has a known answer, ignores write order, and moves with a name or a byte', () => {
+    const one = mkdtempSync(join(tmpdir(), 'warpline-tree-one-'))
+    const two = mkdtempSync(join(tmpdir(), 'warpline-tree-two-'))
+    try {
+      writeFileSync(join(one, 'a.txt'), 'A')
+      mkdirSync(join(one, 'sub'))
+      writeFileSync(join(one, 'sub', 'b.txt'), 'B')
+      const known = '5009efd9bb453bbe978efb18b959fbe9c2774915015e9fd464c478ec39185bf8'
+      expect(treeDigest(one)).toBe(known)
+
+      mkdirSync(join(two, 'sub'))
+      writeFileSync(join(two, 'sub', 'b.txt'), 'B')
+      writeFileSync(join(two, 'a.txt'), 'A')
+      expect(treeDigest(two)).toBe(known)
+
+      renameSync(join(two, 'a.txt'), join(two, 'c.txt'))
+      expect(treeDigest(two)).not.toBe(known)
+
+      writeFileSync(join(one, 'sub', 'b.txt'), 'C')
+      expect(treeDigest(one)).not.toBe(known)
+    } finally {
+      rmSync(one, { recursive: true, force: true })
+      rmSync(two, { recursive: true, force: true })
+    }
+  })
+
+  test('the tree digest refuses a symlink by its relative path, and an empty tree', () => {
+    const root = mkdtempSync(join(tmpdir(), 'warpline-tree-link-'))
+    try {
+      expect(() => treeDigest(root)).toThrow(/no regular file/)
+      mkdirSync(join(root, 'sub'))
+      writeFileSync(join(root, 'sub', 'b.txt'), 'B')
+      symlinkSync('b.txt', join(root, 'sub', 'link'))
+      expect(() => treeDigest(root)).toThrow(/'sub\/link'/)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
+/** The private benchmark directory, and the one ignore line that keeps it out. */
+const PRIVATE_DIR = '.bench-private'
+const PRIVATE_IGNORE_LINE = `${PRIVATE_DIR}/`
+
+/** Exit status 1 is "not ignored"; anything else is a broken invocation. */
+function isIgnored(root: string, path: string): boolean {
+  try {
+    execFileSync('git', ['check-ignore', '-q', path], { cwd: root, env: GIT_ENV, stdio: 'ignore' })
+    return true
+  } catch (err) {
+    if ((err as { status?: number }).status !== 1) throw err
+    return false
+  }
+}
+
+/** Every tracked path under `dir`. */
+function trackedUnder(root: string, dir: string): string[] {
+  return git(root, ['ls-files', '-z', '--', dir]).split('\0').filter(Boolean)
+}
+
+describe('the private benchmark directory is never tracked', () => {
+  test('this repository ignores it and tracks nothing under it', () => {
+    const lines = readFileSync(join(REPO_ROOT, '.gitignore'), 'utf8').split('\n')
+    expect(lines.filter((l) => l === PRIVATE_IGNORE_LINE)).toHaveLength(1)
+    expect(isIgnored(REPO_ROOT, `${PRIVATE_DIR}/probe.json`)).toBe(true)
+    expect(trackedUnder(REPO_ROOT, PRIVATE_DIR)).toEqual([])
+  })
+
+  /**
+   * The ignore rule stops `git add`, not `git add -f`, which is why the
+   * tracked-file assertion above exists at all. This is its red side: the
+   * same line in a fixture, a forced add, and the guard naming the file.
+   */
+  test('a file forced past the ignore rule is reported, and without the rule nothing is ignored', () => {
+    const { root } = fixture([{ path: '.gitignore', body: `${PRIVATE_IGNORE_LINE}\n` }])
+    try {
+      expect(isIgnored(root, `${PRIVATE_DIR}/x.json`)).toBe(true)
+      mkdirSync(join(root, PRIVATE_DIR))
+      writeFileSync(join(root, PRIVATE_DIR, 'x.json'), '{}\n')
+      git(root, ['add', '-f', '--', `${PRIVATE_DIR}/x.json`])
+      commit(root, 'a private file forced in')
+      expect(trackedUnder(root, PRIVATE_DIR)).toEqual([`${PRIVATE_DIR}/x.json`])
+
+      writeFileSync(join(root, '.gitignore'), '')
+      expect(isIgnored(root, `${PRIVATE_DIR}/y.json`)).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })
 
