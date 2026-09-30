@@ -1245,7 +1245,7 @@ reading a newer file ignores the field. Removing the field later would silently
 reset every ceiling anchor to the latest grant, which is the failure the field
 exists to prevent — treat it as permanent.
 
-`scope_windows` was added after 0.4.2. Before it, one `expires_at` covered every
+`scope_windows` was added in 0.5.0. Before it, one `expires_at` covered every
 scope, so `approve b --ttl 1h` after `approve a --long --ttl 30d` gave `b`
 thirty days. A file without it is read as one window over every listed scope,
 which is what it meant when it was written. The top-level `expires_at` and

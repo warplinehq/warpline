@@ -5,7 +5,7 @@
   "folders": ["docs", "examples"],
   "excludeFolders": ["dist", "node_modules", "src", "scripts", "test-utils"],
   "excludeFiles": ["EXTRACTION-NOTES.md", "AGENTS.md", "DESIGN.md", "PRODUCT.md", "llms.txt"],
-  "previousVersions": [{ "tag": "v0.1.2" }, { "tag": "v0.2.1" }, { "tag": "v0.3.4" }],
+  "previousVersions": [{ "tag": "v0.1.2" }, { "tag": "v0.2.1" }, { "tag": "v0.3.4" }, { "tag": "v0.4.2" }],
   "rules": [
     "A plugin is a manifest plus a handler. The manifest is a declaration of capability that the runtime enforces, not documentation.",
     "A non-empty side_effects array gates execution at EVERY autonomy level, autonomous included, behind the session grant by default or, from v0.4.0, behind content approval. autonomy_level describes how a plugin is scheduled, never what it may touch.",
