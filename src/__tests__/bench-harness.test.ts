@@ -34,10 +34,11 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { performance } from 'node:perf_hooks'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import type { AdvanceResult } from 'warpline'
 import { warplineHome } from 'warpline/lib/paths'
 import { loadPluginManifests } from 'warpline/unstable-runtime'
 import {
@@ -49,6 +50,8 @@ import {
   buildClaudeArgv,
   buildClaudeEnv,
   buildConsumerPrompt,
+  CANARY_PROMPT,
+  CanaryError,
   CONSUMER_PLUGIN_PATH,
   ISOLATION_SETTINGS,
   OutboundConfigError,
@@ -57,6 +60,7 @@ import {
   PINNED_MODEL,
   resolveDisposition,
   RUN_LOG_PLACEHOLDER,
+  runCanary,
   runClaudeArm,
   runConsumerSession,
   runWarplineArm,
@@ -1253,6 +1257,98 @@ describe('bench harness — the isolated sessions', () => {
     } finally {
       await rm(scratch, { recursive: true, force: true })
     }
+  })
+})
+
+/**
+ * The canary: one isolated session in a throwaway home, asked to reach the
+ * network, that has to be refused. Every case spawns the fake, which copies
+ * what it was handed next to itself, because the canary home it ran in is gone
+ * by the time the assertions read it.
+ */
+describe('bench harness — the canary', () => {
+  /** Keep the argv and the working directory where the test can read them afterwards. */
+  const KEEP = 'cp argv.txt "$(dirname "$0")/canary-argv.txt"; pwd -P > "$(dirname "$0")/canary-cwd.txt"'
+
+  test('a blocked attempt passes the canary, runs the isolated argv, and leaves no home behind', async () => {
+    await withFakeClaude({ stdout: jsonl(STREAM_INIT, BASH_USE, BLOCKED_TOOL_RESULT, STREAM_RESULT), before: KEEP }, async (bin) => {
+      expect(await runCanary()).toBe(1)
+
+      const lines = readFileSync(join(bin, 'canary-argv.txt'), 'utf8').replace(/\n$/, '').split('\n')
+      expect(lines).toEqual(buildClaudeArgv('agent-from-scratch', CANARY_PROMPT, true))
+      expect(lines[1]).toBe(CANARY_PROMPT)
+      expect(CANARY_PROMPT).toContain('curl')
+
+      const cwd = readFileSync(join(bin, 'canary-cwd.txt'), 'utf8').trim()
+      expect(existsSync(join(cwd, 'argv.txt'))).toBe(false)
+    })
+  })
+
+  test('a session the sandbox did not block is refused before anything is spent', async () => {
+    const reached = {
+      type: 'user',
+      message: { content: [{ type: 'tool_result', tool_use_id: 'tu1', content: '200' }] },
+    }
+    await withFakeClaude({ stdout: jsonl(STREAM_INIT, BASH_USE, reached, STREAM_RESULT) }, async () => {
+      let thrown: unknown
+      try {
+        await runCanary()
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(CanaryError)
+      expect((thrown as CanaryError).blocked).toBe(0)
+      expect((thrown as Error).message).toMatch(/not sandbox-blocked/)
+      expect((thrown as Error).message).toMatch(/refuses to spend/)
+    })
+  })
+
+  test('a canary with a web tool in its session is a configuration failure', async () => {
+    await withFakeClaude({ stdout: jsonl({ ...STREAM_INIT, tools: ['Bash', 'WebFetch'] }, STREAM_RESULT) }, async () => {
+      await expect(runCanary()).rejects.toBeInstanceOf(OutboundConfigError)
+    })
+  })
+})
+
+/**
+ * The warpline arm over a plugin root that is not the home's default. The
+ * layout is the seeded one with its plugin root moved, so the default under the
+ * home holds no plugin and only the explicit root can park anything.
+ */
+describe('bench harness — the plugin root parameter', () => {
+  test('an explicit plugin root parks the handoffs, and the materialiser runs once with the advance', async () => {
+    await withArmHome(async (home) => {
+      await seedArmHome(home)
+      await rename(join(home, 'plugins'), join(home, 'moved-plugins'))
+      // The writer's three reference inputs default to HOME-relative paths that
+      // happen to sit under the default root's name, so the move takes them
+      // along. Put them back where the manifest points: the plugin root moved,
+      // the operator's reference files did not.
+      await cp(
+        join(home, 'moved-plugins', 'draft-writer', 'reference'),
+        join(home, 'plugins', 'draft-writer', 'reference'),
+        { recursive: true },
+      )
+
+      const calls: Array<[string, AdvanceResult]> = []
+      const arm = await runWarplineArm(home, join(home, 'moved-plugins'), (at, advance) => {
+        calls.push([at, advance])
+      })
+
+      expect(arm.parked_handoffs).toBe(2)
+      expect(calls.length).toBe(1)
+      const [at, advance] = calls[0] as [string, AdvanceResult]
+      expect(at).toBe(home)
+      expect(existsSync(advance.run_log_path)).toBe(true)
+    })
+  })
+
+  test('without the parameter a moved plugin root is refused, because the default root is not there', async () => {
+    await withArmHome(async (home) => {
+      await seedArmHome(home)
+      await rename(join(home, 'plugins'), join(home, 'moved-plugins'))
+      await expect(runWarplineArm(home)).rejects.toThrow()
+    })
   })
 })
 

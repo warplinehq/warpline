@@ -9,6 +9,8 @@
  */
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { performance } from 'node:perf_hooks'
 import { dirname, join, resolve } from 'node:path'
 import { runAdvance, type AdvanceResult } from 'warpline'
@@ -89,15 +91,24 @@ export function materializeDeterministic(home: string): void {
 }
 
 /**
- * One warpline iteration. No options: the plugin root, state, runs,
- * configuration and grant all derive from the home the caller has already
- * assigned and asserted, which is what makes this arm's isolation a property
- * of the home rather than of a list of overrides someone has to keep complete.
+ * One warpline iteration. State, runs, configuration and grant all derive from
+ * the home the caller has already assigned and asserted, which is what makes
+ * this arm's isolation a property of the home rather than of a list of
+ * overrides someone has to keep complete.
+ *
+ * The plugin root is the one optional override, supplied when the root is not
+ * the home's default. No profile is ever passed, so every caller runs the same
+ * unprofiled advance. Materialisation is the caller's to choose and stays
+ * inside the measured segment either way.
  */
-export async function runWarplineArm(home: string): Promise<WarplineArmResult> {
+export async function runWarplineArm(
+  home: string,
+  pluginsDir?: string,
+  materialize: (home: string, advance: AdvanceResult) => void = materializeDeterministic,
+): Promise<WarplineArmResult> {
   const started = performance.now()
-  const advance = await runAdvance()
-  materializeDeterministic(home)
+  const advance = await runAdvance(pluginsDir ? { pluginsDir } : undefined)
+  materialize(home, advance)
   const runtime_ms = performance.now() - started
   return { runtime_ms, parked_handoffs: countParkedHandoffs(advance), advance }
 }
@@ -826,6 +837,51 @@ export async function runClaudeArm(
   assertControlHome(arm, home)
   const outcome = await runSession(arm, home, promptBody, options)
   return { ...outcome, grade: (options.grade ?? gradeHome)(home) }
+}
+
+/**
+ * What the canary asks for: one outbound request through the shell. One line,
+ * so it is also one argument line wherever an argv is written out.
+ */
+export const CANARY_PROMPT =
+  "Run this exact command with your shell tool, then reply with only what it printed: curl -sS -o /dev/null -w '%{http_code}' https://example.com"
+
+/**
+ * The canary session was not sandbox-blocked, so the isolation cannot be shown
+ * to be in place and nothing is spent.
+ */
+export class CanaryError extends Error {
+  readonly blocked: number
+
+  constructor(blocked: number) {
+    super(
+      `the canary session was not sandbox-blocked from the network (blocked ${blocked}) — the isolation is absent or broken, so the set refuses to spend`,
+    )
+    this.name = 'CanaryError'
+    this.blocked = blocked
+  }
+}
+
+/**
+ * Prove the sandbox is live on this host before any measured session runs.
+ *
+ * The session's init message does not report whether the sandbox is active, so
+ * an absent sandbox looks exactly like a working one: the tools run, the result
+ * reads `success`, and the transcript shows a request that went out. This is the
+ * one live check of the mechanism, with the measured sessions' own isolated
+ * argv, in a throwaway home. It runs at every set start and every resume,
+ * refuses unless at least one attempt was blocked, and writes no record.
+ */
+export async function runCanary(): Promise<number> {
+  const home = await mkdtemp(join(tmpdir(), 'warpline-bench-canary-'))
+  try {
+    const { outbound_blocked } = await runSession('agent-from-scratch', home, CANARY_PROMPT, { isolated: true })
+    const blocked = outbound_blocked ?? 0
+    if (blocked < 1) throw new CanaryError(blocked)
+    return blocked
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
 }
 
 /** The consumer session's own segment, timed separately from the advance. */
