@@ -49,6 +49,7 @@ import { BenchRunRecordSchema, GRADED_KEYS, parseRecord } from '../../bench/reco
 import {
   runIteration,
   summarisePrivate,
+  summariseSet,
   type ArmRunner,
   type ArmRunOutcome,
   type PrivateIterationHooks,
@@ -1108,6 +1109,119 @@ describe('private preconditions', () => {
   test('without a required prereg it returns the digest alone over an empty ledger', async () => {
     await validSetup(({ config, root, base, digest }) => {
       expect(assertPrivatePreconditions(config, root, { requirePrereg: false, engineBase: base })).toEqual({ snapshot_sha256: digest })
+    })
+  })
+})
+
+const SUMMARY_PREREG = 'c'.repeat(64)
+
+/** A bound private record with every field, so a test can vary one thing. */
+function privateSample(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    arm: 'warpline',
+    iteration: 1,
+    arm_order_index: 0,
+    cold: true,
+    disposition: 'passed',
+    truncation_subtype: null,
+    tokens: { input: 1, output: 2, cache_creation: 3, cache_read: 4 },
+    wall_clock_ms: 10,
+    runtime_ms: null,
+    consumer_ms: null,
+    parked_handoffs: 0,
+    graded: { 'check-1': true, 'check-2': true },
+    git_sha: 'abcdef0',
+    package_version: '0.5.0',
+    claude_cli_version: '0.0.0 (test)',
+    model_id: 'claude-opus-5',
+    snapshot_sha256: 'd'.repeat(64),
+    prereg_commitment: SUMMARY_PREREG,
+    ...overrides,
+  }
+}
+
+/** Write each record through the one parse boundary, named as the driver names them. */
+function writeRecords(dir: string, records: Record<string, unknown>[]): void {
+  for (const raw of records) {
+    const record = parseRecord(raw, dir)
+    writeFileSync(join(dir, `${record.arm}-${String(record.iteration).padStart(3, '0')}.json`), `${JSON.stringify(record, null, 2)}\n`)
+  }
+}
+
+/** One cold run then `warm` warm passing runs, for every arm. */
+function fullSet(warm: number, overrides: (arm: string, iteration: number) => Record<string, unknown> = () => ({})): Record<string, unknown>[] {
+  return ARM_ORDER.flatMap((arm, index) =>
+    Array.from({ length: warm + 1 }, (_, i) =>
+      privateSample({ arm, arm_order_index: index, iteration: i + 1, cold: i === 0, wall_clock_ms: 10 + i, ...overrides(arm, i + 1) }),
+    ),
+  )
+}
+
+/** Run `fn` over a fresh results dir, removed afterwards whatever happens. */
+async function withResults(fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = mkdtempSync(join(tmpdir(), 'bench-private-summary-'))
+  try {
+    await fn(dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+describe('private summary', () => {
+  const withoutField = (field: string): Record<string, unknown> => {
+    const record = privateSample({ arm: 'agent-with-state', iteration: 2, cold: false })
+    delete record[field]
+    return record
+  }
+
+  const REFUSED: [string, Record<string, unknown>[], RegExp][] = [
+    ['a record lacking the prereg commitment', [privateSample(), withoutField('prereg_commitment')], /agent-with-state-2 carries no prereg commitment/],
+    ['a record under another commitment', [privateSample(), privateSample({ iteration: 2, cold: false, prereg_commitment: 'e'.repeat(64) })], /prereg/],
+    ['a record lacking the snapshot digest', [privateSample(), withoutField('snapshot_sha256')], /snapshot/],
+    ['two snapshot digests', [privateSample(), privateSample({ iteration: 2, cold: false, snapshot_sha256: 'f'.repeat(64) })], /2 snapshot/],
+    ['two package versions', [privateSample(), privateSample({ iteration: 2, cold: false, package_version: '0.5.1' })], /package version/],
+    ['every record on another package version', fullSet(1, () => ({ package_version: '0.4.0' })), /0\.5\.0/],
+    ['two CLI versions', [privateSample(), privateSample({ iteration: 2, cold: false, claude_cli_version: '9.9.9' })], /claude_cli_version/],
+    ['two model ids', [privateSample(), privateSample({ iteration: 2, cold: false, model_id: 'claude-other' })], /model_id/],
+    ['two git SHAs', [privateSample(), privateSample({ iteration: 2, cold: false, git_sha: '1234567' })], /git_sha/],
+    [
+      'a record with the public graded keys',
+      [privateSample(), privateSample({ iteration: 2, cold: false, graded: Object.fromEntries(GRADED_KEYS.map((key) => [key, true])) })],
+      /public/,
+    ],
+  ]
+
+  test.each(REFUSED)('refuses %s', async (_name, records, message) => {
+    await withResults(async (dir) => {
+      writeRecords(dir, records)
+      await expect(summarisePrivate(dir, SUMMARY_PREREG)).rejects.toThrow(message)
+    })
+  })
+
+  test('refuses an empty results dir', async () => {
+    await withResults(async (dir) => {
+      await expect(summarisePrivate(dir, SUMMARY_PREREG)).rejects.toThrow(/no record/)
+    })
+  })
+
+  test('a bound set of ten warm passing runs per arm is summarised by the public implementation, medians and all', async () => {
+    await withResults(async (dir) => {
+      writeRecords(dir, fullSet(10))
+      const summary = await summarisePrivate(dir, SUMMARY_PREREG)
+      expect(summary).toEqual(await summariseSet(dir))
+      for (const arm of ARM_ORDER) expect('median' in summary[arm]).toBe(true)
+    })
+  })
+
+  test('nine warm passing runs per arm is a shortfall with no median', async () => {
+    await withResults(async (dir) => {
+      writeRecords(dir, fullSet(9))
+      const summary = await summarisePrivate(dir, SUMMARY_PREREG)
+      for (const arm of ARM_ORDER) {
+        const row = summary[arm]
+        expect('shortfall' in row ? row.shortfall : null).toEqual({ count: 9, threshold: 10 })
+        expect('median' in row).toBe(false)
+      }
     })
   })
 })

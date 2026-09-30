@@ -43,7 +43,7 @@ import {
   type Provenance,
 } from './arms.js'
 import type { GradeResult } from './grade.js'
-import type { PrivateStamp } from './private.js'
+import { PINNED_PACKAGE_VERSION, type PrivateStamp } from './private.js'
 import { BenchRunRecordSchema, parseRecord, type BenchRunRecord, type TokenClasses } from './record.js'
 import { assertHomeSeam, assertHomesDistinct, NOTES_FIXTURE, NOTES_PATH, seedArmHome, seedControlHome } from './seed.js'
 import { SHORTFALL_N, summariseArm, type ArmSummary, type SummarisableRun } from './stats.js'
@@ -450,16 +450,54 @@ export async function runSet(options: SetOptions): Promise<SetSummary> {
   return summariseSet(options.resultsDir)
 }
 
+/** The fields that must each hold one value across a private set, with the words a refusal uses for them. */
+const ONE_CONFIGURATION: readonly (readonly [keyof BenchRunRecord, string])[] = [
+  ['snapshot_sha256', 'snapshot digest'],
+  ['package_version', 'package version'],
+  ['claude_cli_version', 'tool version'],
+  ['model_id', 'model'],
+  ['git_sha', 'commit'],
+]
+
 /**
  * The private set's published rows: the public summary, over records bound to
- * the one committed method.
+ * the one committed method, and nothing else.
+ *
+ * This is the one gate between a record on disk and a published ratio. The
+ * records sit in a gitignored dir that anything could have written, so a record
+ * the method did not bind is not data, whatever else it says: one lacking the
+ * commitment or the snapshot digest, one under another commitment, one in the
+ * public graded shape, and any set whose snapshot, package, tool, model or
+ * commit varies. The model for these refusals is the tool-version refusal in
+ * `runSet`, widened to every field that makes a set one configuration. After
+ * them the statistics are the public module's, unchanged.
+ *
+ * It summarises a set `runSet` finished. Called mid-set, an arm with no warm
+ * run yet throws from the statistics module, and that is not a shortfall.
  */
 export async function summarisePrivate(resultsDir: string, prereg: string): Promise<SetSummary> {
   const { runs } = await resumeState(resultsDir)
+  if (runs.length === 0) throw new Error(`blind: no record in ${resultsDir} to summarise`)
+
   for (const run of runs) {
+    const id = `${run.arm}-${run.iteration}`
+    if (run.prereg_commitment === undefined) throw new Error(`${id} carries no prereg commitment, so it is not data for a private set`)
     if (run.prereg_commitment !== prereg) {
-      throw new Error(`${run.arm}-${run.iteration}: its prereg commitment is not the committed one, so it is not data for this set`)
+      throw new Error(`${id} was made under another prereg commitment than the committed one, so it is not data for this set`)
     }
+    if (run.snapshot_sha256 === undefined) throw new Error(`${id} carries no snapshot digest, so its input is unbound`)
+    if ('announce-fanout' in run.graded) throw new Error(`${id} is graded in the public workload's shape, so it is not a private record`)
+  }
+
+  for (const [field, words] of ONE_CONFIGURATION) {
+    const values = new Set(runs.map((run) => run[field]))
+    if (values.size > 1) {
+      throw new Error(`the private records carry ${values.size} ${words} values (${field}) — the set is not one configuration`)
+    }
+  }
+  const version = runs[0]!.package_version
+  if (version !== PINNED_PACKAGE_VERSION) {
+    throw new Error(`the private records were made on package version ${version}, and the private set is pinned to ${PINNED_PACKAGE_VERSION}`)
   }
   return summariseSet(resultsDir)
 }
