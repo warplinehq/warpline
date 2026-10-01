@@ -133,10 +133,23 @@ export function agreementVerdict(privateSummary: SummaryLike, publicSummary: Sum
   return { verdict: diverged.length === 0 ? 'publish' : 'diverge', ratios, diverged, shortfalls: [] }
 }
 
-/** A ratio as it is published: two significant figures. */
+/**
+ * A ratio as it is published: two significant figures, as a plain decimal at
+ * every magnitude. `toPrecision` switches to exponent form at 100 and above and
+ * below one millionth (`150` would print `1.5e+2`), and this file cannot change
+ * once the pre-registration freezes it, so that form is ruled out now. Its two
+ * digits are kept and the exponent is written out as zeros. No float is
+ * re-rounded and no locale is consulted, so `0.80` and `1.0` keep their
+ * trailing zero.
+ */
 export function twoSigFigs(x: number): string {
   requirePositive(x, 'a published ratio')
-  return x.toPrecision(2)
+  const rendered = x.toPrecision(2)
+  if (!rendered.includes('e')) return rendered
+  const [mantissa, exponent] = rendered.split('e')
+  const digits = mantissa.replace('.', '')
+  const power = Number(exponent)
+  return power > 0 ? digits + '0'.repeat(power - 1) : `0.${'0'.repeat(-power - 1)}${digits}`
 }
 
 /** An order of magnitude as it is published: the power of ten at or below it. */

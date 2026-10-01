@@ -541,6 +541,17 @@ describe('publication shape', () => {
     expect(twoSigFigs(0.6347868487043745)).toBe('0.63')
     expect(twoSigFigs(0.7041415546283418)).toBe('0.70')
     expect(twoSigFigs(1.049)).toBe('1.0')
+
+    // A plain decimal at every magnitude, never exponent notation.
+    expect(twoSigFigs(150)).toBe('150')
+    expect(twoSigFigs(100)).toBe('100')
+    expect(twoSigFigs(99.5)).toBe('100')
+    expect(twoSigFigs(999)).toBe('1000')
+    expect(twoSigFigs(1234)).toBe('1200')
+    expect(twoSigFigs(12)).toBe('12')
+    expect(twoSigFigs(0.0000012)).toBe('0.0000012')
+    expect(twoSigFigs(1.2e-7)).toBe('0.00000012')
+    for (const x of [150, 100, 99.5, 999, 1234, 12, 0.0000012, 1.2e-7]) expect(twoSigFigs(x)).not.toContain('e')
   })
 
   test('an order of magnitude is the power of ten at or below the value', () => {
