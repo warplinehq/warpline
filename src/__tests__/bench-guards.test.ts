@@ -485,9 +485,15 @@ describe('agreement — the rule at its boundaries', () => {
  * it is caught inside a code span too. A version inside a code span is the one
  * number allowed outside those forms.
  *
- * Its ceiling: a count that is itself a power of ten (`1`, `100`) passes, as
- * `10` already does under the two-figure rule. So the rule against stating a
- * count stays a reviewed judgment, and this scanner does not replace it.
+ * A number is admitted in exactly two forms: a decimal ratio exactly as
+ * `twoSigFigs` renders it (`0.76`, `1.0`), or a power of ten exactly as
+ * `powerOfTenBucket` renders it (`0.1`, `1`, `10`). A bare integer is never a
+ * ratio, even when `toPrecision(2)` would print it unchanged, so `12` and `45`
+ * are counts and are refused.
+ *
+ * Its ceiling: a count that is itself a power of ten (`1`, `10`, `100`)
+ * passes. So the rule against stating a count stays a reviewed judgment, and
+ * this scanner does not replace it.
  */
 function publicationShapeOffenders(section: string): string[] {
   const offenders: string[] = []
@@ -501,7 +507,9 @@ function publicationShapeOffenders(section: string): string[] {
     // ratios rather than two tokens with a trailing comma.
     for (const [tok] of line.replace(/`[^`]*`/g, '').matchAll(/\d(?:[\d,]*\d)?(?:\.\d+)?/g)) {
       const v = Number(tok.replace(/,/g, ''))
-      const admitted = tok === v.toPrecision(2) || (v > 0 && tok === String(powerOfTenBucket(v)))
+      // `v > 0` first: both formatters refuse zero, and zero is never a ratio.
+      const ratio = v > 0 && /^\d+\.\d+$/.test(tok) && tok === twoSigFigs(v)
+      const admitted = ratio || (v > 0 && tok === String(powerOfTenBucket(v)))
       if (!admitted) offenders.push(`line ${n}: ${tok}`)
     }
   })
@@ -571,6 +579,10 @@ describe('publication shape', () => {
     ['a raw token median', 'The median output was 4556.5 tokens.', '4556.5'],
     ['an unrounded ratio', 'The wall-clock ratio was 0.7572.', '0.7572'],
     ['a plugin count', 'The workload ran across 7 plugins.', '7'],
+    // Two digits, so `toPrecision(2)` renders them unchanged. That is how they
+    // passed as "ratios" before the decimal-form rule.
+    ['a two-digit plugin count', 'The workload ran across 12 plugins.', '12'],
+    ['a two-digit handoff count', 'It parked 45 handoffs.', '45'],
     ['a version outside a code span', 'Run against warpline 0.5.0 on the day.', '0.5'],
     ['a digest inside a code span', `The snapshot digest was \`${'a1'.repeat(32)}\`.`, 'hex'],
     ['a provenance phrasing', 'Measured on model `claude-opus-5`.', 'provenance phrasing'],
@@ -590,5 +602,110 @@ describe('publication shape', () => {
       [],
     )
     expect(publicationShapeOffenders(planted('within 0.2 of the public figure'))).toEqual([`line ${PLANTED_LINE}: 0.2`])
+  })
+})
+
+// ─── the published private-scale section ─────────────────────────────────────
+
+import { COMMITMENTS_FILE, parseCommitments } from '../../bench/private.js'
+
+const PRIVATE_HEADING = '\n## At private scale\n'
+
+/**
+ * The private-scale section of a README, from its heading to the end of the
+ * file, so line 1 is the heading.
+ *
+ * Fail closed on absence. Once the ledger binds a results entry the finding
+ * has to be published in every outcome, so a README without the section is an
+ * error, never a pass. `null` means neither exists yet, and only that.
+ */
+function privateSection(readme: string, ledger: string): string | null {
+  const at = readme.indexOf(PRIVATE_HEADING)
+  if (at >= 0) return readme.slice(at + 1)
+  if (parseCommitments(ledger).some((line) => line.kind === 'results')) {
+    throw new Error('the ledger binds a results entry, and the README carries no ## At private scale section')
+  }
+  return null
+}
+
+const OUTCOME_RE = /\*\*Outcome: (publish|diverge|withhold)\.\*\*/g
+
+describe('bench README — the private-scale section', () => {
+  const HEX = 'a1'.repeat(32)
+  const WITH_SECTION = `# The benchmark\n\n### Reproducing these figures\n\nText.\n${PRIVATE_HEADING}\n**Outcome: withhold.**\n`
+  const WITHOUT_SECTION = '# The benchmark\n\n### Reproducing these figures\n\nText.\n'
+
+  test('a present section is returned from its heading to the end of the file', () => {
+    expect(privateSection(WITH_SECTION, `prereg ${HEX}\nresults ${HEX}\n`)).toBe(
+      '## At private scale\n\n**Outcome: withhold.**\n',
+    )
+  })
+
+  test('an absent section with a results line in the ledger throws', () => {
+    expect(() => privateSection(WITHOUT_SECTION, `prereg ${HEX}\nresults ${HEX}\n`)).toThrow(/results entry/)
+  })
+
+  test('an absent section with no results line is null, the one vacuous case', () => {
+    expect(privateSection(WITHOUT_SECTION, `prereg ${HEX}\n`)).toBeNull()
+    expect(privateSection(WITHOUT_SECTION, '')).toBeNull()
+  })
+
+  const README = readFileSync(join(GUARDS_REPO_ROOT, 'bench', 'README.md'), 'utf8')
+  const LEDGER = readFileSync(join(GUARDS_REPO_ROOT, COMMITMENTS_FILE), 'utf8')
+
+  /** The real section. Absent is red here: it is published and stays published. */
+  function real(): string {
+    const section = privateSection(README, LEDGER)
+    if (section === null) throw new Error('bench/README.md carries no ## At private scale section')
+    return section
+  }
+
+  test('it is the last section, after the reproduction notes, with no heading of its own inside', () => {
+    expect(README.indexOf(PRIVATE_HEADING)).toBeGreaterThan(README.indexOf('### Reproducing these figures\n'))
+    expect(README.indexOf('### Reproducing these figures\n')).toBeGreaterThan(0)
+    expect(real().split('\n').filter((line) => /^#{1,6} /.test(line))).toEqual(['## At private scale'])
+  })
+
+  test('it passes the publication-shape scan', () => {
+    expect(publicationShapeOffenders(real())).toEqual([])
+  })
+
+  test('it carries exactly one outcome marker', () => {
+    expect([...real().matchAll(OUTCOME_RE)].length).toBe(1)
+  })
+
+  test.each([
+    'set to run unattended',
+    'a seeded input record',
+    'no network',
+    'scoped to the snapshot',
+    'git history proves order, not time',
+    '`0.3.4`',
+    '`0.5.0`',
+  ])('it states %s', (phrase) => {
+    expect(real()).toContain(phrase)
+  })
+
+  test("its figures match its outcome: agreeing ratios if it publishes, no digit outside a code span if not", async () => {
+    const section = real()
+    const outcome = [...section.matchAll(OUTCOME_RE)][0]?.[1]
+    if (outcome !== 'publish') {
+      expect(section.replace(/`[^`]*`/g, '')).not.toMatch(/\d/)
+      return
+    }
+    const pub = gatingRatios(await summariseSet(join(GUARDS_REPO_ROOT, 'bench/results')))
+    if (!('ratios' in pub)) throw new Error('the public set carries a shortfall')
+
+    const lines = section.split('\n').filter((line) => line.startsWith('|'))
+    expect(lines[0]).toBe('| Ratio | Public | Private |')
+    const rows = lines.slice(2).map((line) => line.split('|').slice(1, -1).map((cell) => cell.trim()))
+    expect(rows).toHaveLength(GATING_RATIOS.length)
+    GATING_RATIOS.forEach(({ id, measure, control }, i) => {
+      const [label, publicCell, privateCell] = rows[i] as [string, string, string]
+      expect(label).toContain(measure === 'wall_clock' ? 'wall-clock' : 'output tokens')
+      expect(label).toContain(`\`${control}\``)
+      expect(publicCell).toBe(twoSigFigs(pub.ratios[id]))
+      expect(agrees(Number(privateCell), pub.ratios[id])).toBe('agree')
+    })
   })
 })

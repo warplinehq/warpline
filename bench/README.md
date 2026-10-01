@@ -163,3 +163,75 @@ Every run in the set carries the same four provenance strings, so a reader can
 check that the set is one configuration rather than take it on trust: git SHA
 `e6cd569`, package version `0.3.4`, tool version `2.1.269 (Claude Code)`, and
 model `claude-opus-5`.
+
+## At private scale
+
+**Outcome: publish.**
+
+The four ratios held on a real workload. I ran this harness once over a private
+production workload, under a method I froze before the run, and every gating
+ratio agreed with its public counterpart. So they're published below, as ratios
+and nothing else.
+
+**What ran.** The same harness and the same result schema, pointed at a frozen
+subset of a private production fleet on `0.5.0`. The subset was picked by a
+fixed rule, and no plugin in it is named here. It's the same three arms in the
+same fixed order, each in its own fresh home. It's the same N, ten warm passing
+runs per arm plus one cache-cold run that sits in no median. And it's the same
+quantile rule, with the four token classes kept apart. Every arm reached its
+warm target, and every run passed the grader.
+
+**Where it differs from the public run.** It isn't the public scenario on bigger
+data, and these are the changes.
+
+- The fleet runs some of these plugins under supervision or by hand, and an
+  unattended advance would stop at the first kind and skip the second. So in the
+  snapshot they were set to run unattended. Nothing else in their manifests
+  changed.
+- A plugin with no pending input at snapshot time got a seeded input record. It's
+  the same record in every arm, and without it that plugin would've failed every
+  run.
+- Every session in every arm ran with no network beyond the provider. Each one
+  ran in a sandbox with no allowed hosts and with the web tools removed, and a
+  transcript audit and a canary checked that. Removing tools changes each
+  session's fixed overhead, so that's a cause of divergence on its own.
+- The judgment the sessions supplied was scoped to the snapshot. Their prompts
+  point at the snapshot's inputs and at nothing live.
+- The versions differ. The public run was warpline `0.3.4` on CLI `2.1.269`, and
+  this one was `0.5.0` on CLI `2.1.286`.
+
+**How the order is checked.** The private method went into this repository as a
+salted digest before the first measured run, and the results went in as a second
+one after the last. They're the two lines of `bench/private-commitments`, and a
+test checks that the method's line came first and hasn't changed since. The salt
+stays private, so each digest binds its document without showing it. That's also
+the limit. Its git history proves order, not time. It can't show when a commit was
+made, and nothing here can show that no dry run happened. There were dry runs. A
+warm-up session wrote the notes the stateful agent starts from, and shakedowns
+tried the prompts and the grader before the freeze. The private pre-registration
+discloses them, and none of their records can enter the summary.
+
+**The figures.** The four gating ratios are `warpline` over each control, at two
+significant figures. The public column is recomputed from the records under
+`results/`. The private records stay private.
+
+| Ratio | Public | Private |
+|---|---|---|
+| wall-clock, `warpline` over `agent-with-state` | 0.76 | 0.78 |
+| wall-clock, `warpline` over `agent-from-scratch` | 0.80 | 0.73 |
+| output tokens, `warpline` over `agent-with-state` | 0.63 | 0.75 |
+| output tokens, `warpline` over `agent-from-scratch` | 0.70 | 0.73 |
+
+A private ratio agrees when it's on the same side of one as the public ratio and
+within one order of magnitude of it. All four do. Below one means `warpline`
+spent less.
+
+The other three token classes are published as shape only. `warpline`'s
+`cache_read` was higher than `agent-with-state`'s and lower than
+`agent-from-scratch`'s, so the public ordering, where `warpline` read the most,
+didn't hold here. Its `cache_creation` was lower than both controls'. Its `input`
+was higher than `agent-with-state`'s and lower than `agent-from-scratch`'s.
+
+What this doesn't say: it isn't a forecast for any other fleet, and the private
+figures aren't the public ones. It says the direction and the rough size held
+when the work wasn't a scenario I wrote for the benchmark.
