@@ -777,16 +777,29 @@ export function privateHooks(
  * before its commitment is computed.
  *
  * The prereg block must already be in the config, because it is inside the
- * config digest. A dirty tree is refused: a digest printed from it is one that
- * HEAD could never reproduce, and the method frozen on it could never run.
- * It spends nothing and runs no session.
+ * config digest. Bind refuses everything the gate's non-measured half refuses
+ * (plugins, snapshot, package, engine, fleet install), a dirty tree, and a
+ * configured salt inside this checkout or not 32 bytes, all before it prints a
+ * line: a binding frozen over a state the gate refuses is a method no set can
+ * run. It spends nothing and runs no session.
+ *
+ * `build` and `engineBase` are fixture seams, as in the gate. The `bind` mode
+ * passes neither.
  */
-export function bindingLines(config: PrivateConfig, repoRoot: string, build?: (outDir: string) => void): string {
+export function bindingLines(
+  config: PrivateConfig,
+  repoRoot: string,
+  overrides: { build?: (outDir: string) => void; engineBase?: string } = {},
+): string {
   if (config.prereg === undefined) {
     throw new Error('the config has no prereg block — add it before printing the bindings, because it is part of the config digest')
   }
+  refuseInsideRepository(config.prereg.salt)
+  const saltBytes = readFileSync(config.prereg.salt).length
+  if (saltBytes !== 32) throw new Error(`the configured salt is ${saltBytes} bytes, and a commitment needs exactly 32`)
   assertCleanWorktree(repoRoot)
-  return formatBindings(methodBindings(config, repoRoot, build))
+  assertPrivatePreconditions(config, repoRoot, { requirePrereg: false, engineBase: overrides.engineBase })
+  return formatBindings(methodBindings(config, repoRoot, overrides.build))
 }
 
 /** Everything a private entry point may be handed in place of the real thing. */

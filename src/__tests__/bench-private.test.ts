@@ -53,8 +53,10 @@ import {
   parseBindings,
   parseCommitments,
   PrivateConfigSchema,
+  preregCommitment,
   privatePluginsDir,
   privateWarplineHome,
+  readFrozenMethod,
   readPreregCommitment,
   recordStamp,
   scrubEnv,
@@ -1468,13 +1470,13 @@ describe('private method binding', () => {
   })
 
   test('bindingLines prints exactly what the gate compares, and refuses a dirty tree or a config without its prereg block', async () => {
-    await withMeasuredFixture(async ({ config, root, build }) => {
-      expect(bindingLines(config, root, build)).toBe(formatBindings(methodBindings(config, root, build)))
+    await withMeasuredFixture(async ({ config, root, base, build }) => {
+      expect(bindingLines(config, root, { build, engineBase: base })).toBe(formatBindings(methodBindings(config, root, build)))
       writeTree(root, { 'untracked.txt': 'not committed\n' })
-      expect(() => bindingLines(config, root, build)).toThrow(/not clean/)
+      expect(() => bindingLines(config, root, { build, engineBase: base })).toThrow(/not clean/)
       rmSync(join(root, 'untracked.txt'))
       delete config.prereg
-      expect(() => bindingLines(config, root, build)).toThrow(/prereg/)
+      expect(() => bindingLines(config, root, { build, engineBase: base })).toThrow(/prereg/)
     })
   })
 
@@ -1508,6 +1510,67 @@ describe('private method binding', () => {
     for (const parent of fixtureGit(REPO_ROOT, ['rev-list', '--parents', '-n', '1', freeze]).split(' ').slice(1)) {
       expect(holds(parent)).toBe(false)
     }
+  })
+})
+
+/**
+ * Bind prints the method an operator is about to freeze, so it must refuse
+ * every state the measured gate would refuse before it measures anything. A
+ * binding frozen over such a state is a method no set can ever run.
+ */
+describe('private bind contract', () => {
+  type Fixture = Parameters<Parameters<typeof withMeasuredFixture>[0]>[0]
+  const inCheckoutSalt = join(REPO_ROOT, '.bench-private', `salt-probe-${process.pid}.bin`)
+
+  const REFUSALS: [string, (fixture: Fixture) => void, RegExp][] = [
+    ['a configured plugin removed from the snapshot', ({ config }) => rmSync(join(config.snapshot.dir, '.fleet/plugins/beta'), { recursive: true }), /'beta' is absent/],
+    [
+      'a snapshot byte flipped under its frozen digest',
+      ({ config }) => {
+        const file = join(config.snapshot.dir, '.fleet/state/input.json')
+        const bytes = readFileSync(file)
+        bytes[0] = bytes[0]! ^ 1
+        writeFileSync(file, bytes)
+      },
+      /the snapshot digests to/,
+    ],
+    ['the package at 0.4.0', ({ root }) => void commitFixture(root, { 'package.json': '{ "version": "0.4.0" }\n' }, 'an older package'), /package\.json reads 0\.4\.0/],
+    ['a commit to the engine', ({ root }) => void commitFixture(root, { 'src/runtime/x.ts': 'export const x = 2\n' }, 'the engine moves'), /engine under test changed/],
+    ['the fleet install at 0.4.0', ({ config }) => writeFileSync(config.fleetInstall, '{"version":"0.4.0"}'), /fleet install reads 0\.4\.0/],
+    ['a salt inside this checkout', ({ config }) => void (config.prereg = { ...config.prereg!, salt: inCheckoutSalt }), /inside this repository/],
+    [
+      'a salt of 31 bytes',
+      ({ config }) => {
+        const salt = join(dirname(config.prereg!.salt), 'short-salt.bin')
+        writeFileSync(salt, randomBytes(31))
+        config.prereg = { ...config.prereg!, salt }
+      },
+      /32/,
+    ],
+  ]
+
+  test.each(REFUSALS)('bind refuses %s, before printing any line', async (_name, move, message) => {
+    await withMeasuredFixture(async (fixture) => {
+      const { config, root, base, build } = fixture
+      move(fixture)
+      expect(() => bindingLines(config, root, { build, engineBase: base })).toThrow(message)
+      expect(existsSync(inCheckoutSalt)).toBe(false)
+    })
+  })
+
+  test('the clean fixture still binds exactly its six lines, and the gate and the operator share one prereg derivation', async () => {
+    await withMeasuredFixture(async ({ config, root, base, freeze, build }) => {
+      const printed = bindingLines(config, root, { build, engineBase: base })
+      expect(printed).toBe(formatBindings(methodBindings(config, root, build)))
+      expect(printed.split('\n').filter(Boolean)).toHaveLength(6)
+      expect(preregCommitment(config)).toBe(readPreregCommitment(root))
+      expect(readFrozenMethod(config, root)).toEqual({
+        ...methodBindings(config, root, build),
+        prereg_commitment: readPreregCommitment(root),
+        freeze_commit: freeze,
+        check_ids: ['check-1', 'check-2'],
+      })
+    })
   })
 })
 

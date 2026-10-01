@@ -860,6 +860,25 @@ export function methodBindings(config: PrivateConfig, repoRoot: string, build?: 
   }
 }
 
+/** The configured pre-registration's bytes, and the prereg digest they derive under the configured salt. */
+function preregDocument(config: PrivateConfig): { doc: Buffer; hex: string } {
+  if (config.prereg === undefined) {
+    throw new Error('the config names no private pre-registration (prereg), so the frozen method cannot be read')
+  }
+  const doc = readFileSync(config.prereg.doc)
+  return { doc, hex: commitment(readFileSync(config.prereg.salt), doc) }
+}
+
+/**
+ * The one derivation of the prereg digest from the configured salt and
+ * document. The gate compares the ledger line with it, and the operator
+ * compares the hex they are about to commit with it, so the two cannot use
+ * different salts.
+ */
+export function preregCommitment(config: PrivateConfig): string {
+  return preregDocument(config).hex
+}
+
 /**
  * The method the committed pre-registration states, read only after the
  * configured document and salt re-derive the committed prereg digest, so the
@@ -873,11 +892,8 @@ export function methodBindings(config: PrivateConfig, repoRoot: string, build?: 
  */
 export function readFrozenMethod(config: PrivateConfig, repoRoot: string): FrozenMethod {
   const hex = readPreregCommitment(repoRoot)
-  if (config.prereg === undefined) {
-    throw new Error('the config names no private pre-registration (prereg), so the frozen method cannot be read')
-  }
-  const doc = readFileSync(config.prereg.doc)
-  if (commitment(readFileSync(config.prereg.salt), doc) !== hex) {
+  const { doc, hex: derived } = preregDocument(config)
+  if (derived !== hex) {
     throw new Error('the configured pre-registration does not reproduce the committed prereg commitment, so it is not the document that was frozen')
   }
   return {
