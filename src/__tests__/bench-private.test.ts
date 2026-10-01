@@ -10,7 +10,7 @@
 import { describe, expect, test } from 'bun:test'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -35,9 +35,12 @@ import {
   ENGINE_BASE_SHA,
   flipAutonomy,
   formatBindings,
+  freezeCommit,
+  freshBuildDigest,
   loadPrivateConfig,
   materializeCopyMap,
   methodBindings,
+  parseBindings,
   parseCommitments,
   PrivateConfigSchema,
   privatePluginsDir,
@@ -50,10 +53,12 @@ import {
   takeSnapshot,
   treeDigest,
   type FrozenMethod,
+  type MethodBindings,
   type PrivateConfig,
 } from '../../bench/private.js'
 import { BenchRunRecordSchema, GRADED_KEYS, parseRecord } from '../../bench/record.js'
 import {
+  bindingLines,
   makePrivateRunner,
   privateHooks,
   runIteration,
@@ -1173,6 +1178,21 @@ describe('private preconditions', () => {
   })
 })
 
+const SUMMARY_PREREG = 'c'.repeat(64)
+
+/** A frozen method for records that never touch a repository: one distinct digest per key. */
+const FROZEN: FrozenMethod = {
+  snapshot_sha256: 'd'.repeat(64),
+  build_sha256: '1'.repeat(64),
+  agent_prompt_sha256: '2'.repeat(64),
+  consumer_prompt_sha256: '3'.repeat(64),
+  notes_sha256: '4'.repeat(64),
+  config_sha256: '5'.repeat(64),
+  prereg_commitment: SUMMARY_PREREG,
+  freeze_commit: 'abcdef0',
+  check_ids: ['check-1', 'check-2'],
+}
+
 /** The bytes the synthetic checkout's build emits, until a case changes them. */
 const BUILT = 'export const built = 1\n'
 
@@ -1296,22 +1316,120 @@ describe('private method binding', () => {
       expect(message).toContain(after.slice(0, 7))
     })
   })
+
+  type Fixture = Parameters<Parameters<typeof withMeasuredFixture>[0]>[0]
+  const appendOne = (path: string): void => appendFileSync(path, 'x')
+
+  const MOVES: [string, (fixture: Fixture) => void][] = [
+    [
+      'snapshot_sha256',
+      ({ config }) => {
+        const file = join(config.snapshot.dir, '.fleet/state/input.json')
+        const bytes = readFileSync(file)
+        bytes[0] = bytes[0]! ^ 1
+        writeFileSync(file, bytes)
+        config.snapshot.sha256 = treeDigest(config.snapshot.dir)
+      },
+    ],
+    ['build_sha256', ({ setBuild }) => setBuild('export const built = 2\n')],
+    ['agent_prompt_sha256', ({ config }) => appendOne(config.prompts.agent)],
+    ['consumer_prompt_sha256', ({ config }) => appendOne(config.prompts.consumer)],
+    ['notes_sha256', ({ config }) => appendOne(config.notes)],
+    ['config_sha256', ({ config }) => void (config.checks[0]!.pointer = '/other')],
+  ]
+
+  test.each(MOVES)('a moved %s refuses naming itself', async (key, move) => {
+    await withMeasuredFixture(async (fixture) => {
+      const { config, root, base, build } = fixture
+      move(fixture)
+      expect(() => assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build })).toThrow(new RegExp(`^${key} `))
+    })
+  })
+
+  test('a stale dist/ refuses, asking for a fresh build', async () => {
+    await withMeasuredFixture(async ({ config, root, base, build }) => {
+      writeTree(root, { 'dist/stale.js': 'export const stale = true\n' })
+      expect(() => assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build })).toThrow(/bun run build/)
+    })
+  })
+
+  test('a pre-registration edited after the freeze refuses', async () => {
+    await withMeasuredFixture(async ({ config, root, base, build }) => {
+      appendOne(config.prereg!.doc)
+      expect(() => assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build })).toThrow(/does not reproduce/)
+    })
+  })
+
+  test('a prereg line no commit introduces refuses as blind', async () => {
+    await withMeasuredFixture(async ({ config, root, base, build }) => {
+      fixtureGit(root, ['reset', '-q', '--soft', 'HEAD~1'])
+      expect(() => assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build })).toThrow(/blind/)
+    })
+  })
+
+  const bound = Object.fromEntries(BIND_KEYS.map((key) => [key, FROZEN[key]])) as MethodBindings
+
+  test('bind lines round-trip, and prose around them is ignored', () => {
+    expect(parseBindings(formatBindings(bound))).toEqual(bound)
+    expect(parseBindings(`a binding prose line\n${formatBindings(bound)}binding is prose too\n`)).toEqual(bound)
+  })
+
+  const lines = formatBindings(bound).split('\n').filter(Boolean)
+  const BAD_BINDINGS: [string, string, RegExp][] = [
+    ['a missing key', lines.slice(1).join('\n'), /snapshot_sha256/],
+    ['a duplicate key', [...lines, lines[1]!].join('\n'), /twice/],
+    ['an unknown key', [...lines, `bind other_sha256 ${'6'.repeat(64)}`].join('\n'), /unknown key/],
+    ['uppercase hex', [...lines.slice(1), `bind snapshot_sha256 ${'D'.repeat(64)}`].join('\n'), /line 6 /],
+    ['a trailing space', [`${lines[0]} `, ...lines.slice(1)].join('\n'), /line 1 /],
+  ]
+
+  test.each(BAD_BINDINGS)('bind lines refuse %s', (_name, text, message) => {
+    expect(() => parseBindings(text)).toThrow(message)
+  })
+
+  test('bindingLines prints exactly what the gate compares, and refuses a dirty tree or a config without its prereg block', async () => {
+    await withMeasuredFixture(async ({ config, root, build }) => {
+      expect(bindingLines(config, root, build)).toBe(formatBindings(methodBindings(config, root, build)))
+      writeTree(root, { 'untracked.txt': 'not committed\n' })
+      expect(() => bindingLines(config, root, build)).toThrow(/not clean/)
+      rmSync(join(root, 'untracked.txt'))
+      delete config.prereg
+      expect(() => bindingLines(config, root, build)).toThrow(/prereg/)
+    })
+  })
+
+  test("the real checkout's dist is a fresh build of it", () => {
+    expect(freshBuildDigest(REPO_ROOT)).toMatch(/^[0-9a-f]{64}$/)
+  }, 60_000)
+
+  /**
+   * Read from the real ledger with the parser, never `readPreregCommitment`,
+   * which refuses once a results line exists. While the ledger holds no prereg
+   * line there is no freeze commit to find, and the vacuous branch says so.
+   */
+  test("the real repository's freeze commit is the commit that added its prereg line", () => {
+    const entries = parseCommitments(readFileSync(join(REPO_ROOT, COMMITMENTS_FILE), 'utf8'))
+    const prereg = entries.find((entry) => entry.kind === 'prereg')
+    if (prereg === undefined) {
+      expect(entries.filter((entry) => entry.kind === 'prereg')).toEqual([])
+      return
+    }
+    const holds = (rev: string): boolean => {
+      let body = ''
+      try {
+        body = execFileSync('git', ['show', `${rev}:${COMMITMENTS_FILE}`], { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+      } catch {
+        body = ''
+      }
+      return parseCommitments(body).some((entry) => entry.kind === 'prereg' && entry.hex === prereg.hex)
+    }
+    const freeze = freezeCommit(REPO_ROOT, prereg.hex)
+    expect(holds(freeze)).toBe(true)
+    for (const parent of fixtureGit(REPO_ROOT, ['rev-list', '--parents', '-n', '1', freeze]).split(' ').slice(1)) {
+      expect(holds(parent)).toBe(false)
+    }
+  })
 })
-
-const SUMMARY_PREREG = 'c'.repeat(64)
-
-/** A frozen method for records that never touch a repository: one distinct digest per key. */
-const FROZEN: FrozenMethod = {
-  snapshot_sha256: 'd'.repeat(64),
-  build_sha256: '1'.repeat(64),
-  agent_prompt_sha256: '2'.repeat(64),
-  consumer_prompt_sha256: '3'.repeat(64),
-  notes_sha256: '4'.repeat(64),
-  config_sha256: '5'.repeat(64),
-  prereg_commitment: SUMMARY_PREREG,
-  freeze_commit: 'abcdef0',
-  check_ids: ['check-1', 'check-2'],
-}
 
 /** A bound private record with every field, so a test can vary one thing. */
 function privateSample(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1756,6 +1874,12 @@ describe('private command line', () => {
     expect(run.stderr).toMatch(/absolute/)
   })
 
+  test('bind refuses a relative config path', () => {
+    const run = bench('bind', 'relative.json')
+    expect(run.status).not.toBe(0)
+    expect(run.stderr).toMatch(/absolute/)
+  })
+
   test('a relative shakedown scratch dir is refused', async () => {
     await withFrozenFleet(async ({ root, config }) => {
       const run = bench('private-shakedown', writeConfig(root, config), 'scratch')
@@ -1769,6 +1893,7 @@ describe('private command line', () => {
     const run = bench('privat', '/nowhere/private.json')
     expect(run.status).not.toBe(0)
     expect(run.stderr).toMatch(/unknown mode 'privat'/)
+    expect(run.stderr).toMatch(/\bbind\b/)
   })
 
   test('snapshot prints the digest of the snapshot it took, and no other digest', async () => {

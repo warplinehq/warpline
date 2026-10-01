@@ -29,6 +29,11 @@
  * private entry points take the same seams, plus the preconditions and the
  * canary, as optional dependencies that default to the real ones, and
  * `main()` is the one caller that leaves them unset.
+ *
+ * The private modes that spend are `private`, `private-warmup` and
+ * `private-shakedown`. The rest spend nothing: `snapshot`, `salt`, `commit`,
+ * and `bind`, which prints the six digests a measured set is bound to, for
+ * the private pre-registration.
  */
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
@@ -58,8 +63,10 @@ import {
   assertPrivateSeam,
   BIND_KEYS,
   commitment,
+  formatBindings,
   loadPrivateConfig,
   materializeCopyMap,
+  methodBindings,
   PINNED_PACKAGE_VERSION,
   privatePluginsDir,
   privateWarplineHome,
@@ -126,6 +133,9 @@ export const SALT_MODE = 'salt'
 
 /** Print one salted digest of a file or a directory: `commit <absolute salt path> <absolute document path>`. */
 export const COMMIT_MODE = 'commit'
+
+/** Print the six bind lines the measured gate compares: `bind <absolute config path>`. */
+export const BIND_MODE = 'bind'
 
 /** The arm the warm-up pass runs: the one that starts with no notes. */
 const WARMUP_ARM: ControlArmId = 'agent-from-scratch'
@@ -732,6 +742,24 @@ export function privateHooks(config: PrivateConfig, stamp: PrivateStamp): Privat
   }
 }
 
+/**
+ * The six bind lines of the method as it stands, exactly what the measured
+ * gate compares, for the operator to paste into the private pre-registration
+ * before its commitment is computed.
+ *
+ * The prereg block must already be in the config, because it is inside the
+ * config digest. A dirty tree is refused: a digest printed from it is one that
+ * HEAD could never reproduce, and the method frozen on it could never run.
+ * It spends nothing and runs no session.
+ */
+export function bindingLines(config: PrivateConfig, repoRoot: string, build?: (outDir: string) => void): string {
+  if (config.prereg === undefined) {
+    throw new Error('the config has no prereg block — add it before printing the bindings, because it is part of the config digest')
+  }
+  assertCleanWorktree(repoRoot)
+  return formatBindings(methodBindings(config, repoRoot, build))
+}
+
 /** Everything a private entry point may be handed in place of the real thing. */
 export interface PrivateSetDeps {
   preconditions?: (options: { requirePrereg: boolean }) => PrivateStamp | FrozenMethod
@@ -943,6 +971,13 @@ async function main(argv: readonly string[]): Promise<void> {
     return
   }
 
+  // The method's bind lines, for the private pre-registration. Spends nothing.
+  if (argv[2] === BIND_MODE) {
+    process.stdout.write(bindingLines(loadPrivateConfig(argv[3] ?? ''), REPO_ROOT))
+    process.stdout.write('paste these lines into the private pre-registration before computing its commitment.\n')
+    return
+  }
+
   if (argv[2] === WARMUP_MODE) {
     const produced = await runWarmup({ runner: runRealArm, resultsDir })
     process.stdout.write(`the warm-up session's notes were copied out to:\n  ${produced}\n`)
@@ -954,7 +989,7 @@ async function main(argv: readonly string[]): Promise<void> {
   // spends. The public set is the invocation with no mode at all.
   if (argv[2] !== undefined) {
     throw new Error(
-      `unknown mode '${argv[2]}' — expected no mode, or one of ${[WARMUP_MODE, PRIVATE_MODE, PRIVATE_WARMUP_MODE, PRIVATE_SHAKEDOWN_MODE, SNAPSHOT_MODE, SALT_MODE, COMMIT_MODE].join(', ')}`,
+      `unknown mode '${argv[2]}' — expected no mode, or one of ${[WARMUP_MODE, PRIVATE_MODE, PRIVATE_WARMUP_MODE, PRIVATE_SHAKEDOWN_MODE, SNAPSHOT_MODE, SALT_MODE, COMMIT_MODE, BIND_MODE].join(', ')}`,
     )
   }
 
