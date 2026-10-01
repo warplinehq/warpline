@@ -522,12 +522,12 @@ const CLEAN_SECTION = [
   '',
   'The same harness, run against a private workload, agreed with the public figures.',
   '',
-  '| Ratio | Figure |',
-  '|---|---|',
-  '| wall-clock, warpline over the agent with state | 0.76 |',
-  '| wall-clock, warpline over the agent from scratch | 0.80 |',
-  '| output tokens, warpline over the agent with state | 0.63 |',
-  '| output tokens, warpline over the agent from scratch | 0.70 |',
+  '| Ratio | Public | Private |',
+  '|---|---|---|',
+  '| wall-clock, `warpline` over `agent-with-state` | 0.76 | 0.78 |',
+  '| wall-clock, `warpline` over `agent-from-scratch` | 0.80 | 0.73 |',
+  '| output tokens, `warpline` over `agent-with-state` | 0.63 | 0.75 |',
+  '| output tokens, `warpline` over `agent-from-scratch` | 0.70 | 0.73 |',
   '',
   'In shape, cache reads were higher than both controls.',
   '',
@@ -540,6 +540,14 @@ const PLANTED_LINE = PLANT_AT + 1
 
 function planted(line: string): string {
   return [...CLEAN_SECTION.slice(0, PLANT_AT), line, ...CLEAN_SECTION.slice(PLANT_AT)].join('\n')
+}
+
+/** Where a planted ratio-table row goes: after the last data row, still inside the table. */
+const ROW_AT = CLEAN_SECTION.indexOf('', CLEAN_SECTION.indexOf('|---|---|---|'))
+const PLANTED_ROW = ROW_AT + 1
+
+function plantedRow(row: string): string {
+  return [...CLEAN_SECTION.slice(0, ROW_AT), row, ...CLEAN_SECTION.slice(ROW_AT)].join('\n')
 }
 
 describe('publication shape', () => {
@@ -586,9 +594,20 @@ describe('publication shape', () => {
     ['a version outside a code span', 'Run against warpline 0.5.0 on the day.', '0.5'],
     ['a digest inside a code span', `The snapshot digest was \`${'a1'.repeat(32)}\`.`, 'hex'],
     ['a provenance phrasing', 'Measured on model `claude-opus-5`.', 'provenance phrasing'],
+    // Backticks are not a hiding place: a count, a raw figure or a median in a
+    // code span is the same leak as the bare one.
+    ['a plugin count in a code span', 'The workload ran across `12` plugins.', '12'],
+    ['a raw millisecond figure in a code span', 'The median run took `77259` ms.', '77259'],
+    ['a count and a raw median in code spans', 'It parked `45` handoffs and read `4556.5` tokens.', ['45', '4556.5']],
+    // A decimal in ratio form is still an absolute when a unit follows it.
+    ['a ratio-shaped figure with a magnitude', 'The median output was 4.6k tokens.', '4.6'],
+    ['ratio-shaped figures with units', 'A warm run took 1.3 minutes and cost 2.4 USD.', ['1.3', '2.4']],
+    // A count spelled out is still a count.
+    ['counts as number words', 'The fleet holds twelve plugins and parked forty-five handoffs.', ['twelve', 'forty-five']],
+    ['a method word stating the plugin count', 'The fleet holds four plugins.', 'four plugins'],
   ])('%s is named on its own line', (_what, line, token) => {
     const offenders = publicationShapeOffenders(planted(line))
-    expect(offenders).toContain(`line ${PLANTED_LINE}: ${token}`)
+    for (const t of [token].flat()) expect(offenders).toContain(`line ${PLANTED_LINE}: ${t}`)
     expect(offenders.every((o) => o.startsWith(`line ${PLANTED_LINE}: `))).toBe(true)
   })
 
@@ -602,6 +621,12 @@ describe('publication shape', () => {
       [],
     )
     expect(publicationShapeOffenders(planted('within 0.2 of the public figure'))).toEqual([`line ${PLANTED_LINE}: 0.2`])
+  })
+
+  test('a ratio cell with a magnitude after it is refused, naming the cell', () => {
+    expect(
+      publicationShapeOffenders(plantedRow('| wall-clock, `warpline` over `agent-with-state` | 4.6k | 0.78 |')),
+    ).toEqual([`line ${PLANTED_ROW}: 4.6k`])
   })
 })
 
@@ -630,7 +655,17 @@ function privateSection(readme: string, ledger: string): string | null {
 
 const OUTCOME_RE = /\*\*Outcome: (publish|diverge|withhold)\.\*\*/g
 
+/** What a section that does not publish may not carry. */
+function nonPublishOffenders(section: string): string[] {
+  return section.replace(/`[^`]*`/g, '').match(/\d/g) ?? []
+}
+
 describe('bench README — the private-scale section', () => {
+  test('a withholding section cannot carry a count in code spans', () => {
+    const section = '## At private scale\n\n**Outcome: withhold.**\n\nThe agent with state reached `7` of `10` runs.\n'
+    expect(nonPublishOffenders(section)).toEqual(['line 5: 7', 'line 5: 10'])
+  })
+
   const HEX = 'a1'.repeat(32)
   const WITH_SECTION = `# The benchmark\n\n### Reproducing these figures\n\nText.\n${PRIVATE_HEADING}\n**Outcome: withhold.**\n`
   const WITHOUT_SECTION = '# The benchmark\n\n### Reproducing these figures\n\nText.\n'
@@ -690,7 +725,7 @@ describe('bench README — the private-scale section', () => {
     const section = real()
     const outcome = [...section.matchAll(OUTCOME_RE)][0]?.[1]
     if (outcome !== 'publish') {
-      expect(section.replace(/`[^`]*`/g, '')).not.toMatch(/\d/)
+      expect(nonPublishOffenders(section)).toEqual([])
       return
     }
     const pub = gatingRatios(await summariseSet(join(GUARDS_REPO_ROOT, 'bench/results')))
