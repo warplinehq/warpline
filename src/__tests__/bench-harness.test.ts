@@ -1208,6 +1208,34 @@ describe('bench harness — the isolated sessions', () => {
     ).toBe(2)
   })
 
+  /**
+   * The shape a real isolated session printed when it was cut off at its turn
+   * limit, with every name invented. It is one sample, and it says nothing about
+   * a session killed before it prints a result line, which measures nothing.
+   */
+  test('a truncated isolated session of the probed shape passes the audit and dispositions as truncated', () => {
+    const tools = Array.from({ length: 22 }, (_, i) => `Tool${String.fromCharCode(65 + i)}`)
+    const stdout = jsonl({ type: 'system', subtype: 'init', tools, mcp_servers: [] }, BASH_USE, {
+      type: 'result',
+      subtype: 'error_max_turns',
+      is_error: true,
+      duration_ms: 900,
+      num_turns: 1,
+      usage: {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_creation_input_tokens: 3,
+        cache_read_input_tokens: 4,
+        server_tool_use: { web_search_requests: 0, web_fetch_requests: 0 },
+      },
+      modelUsage: { 'claude-opus-5': {} },
+    })
+    const { parsed, outbound_blocked } = parseSessionStdout(stdout, 'agent-with-state', true, '')
+    expect(parsed.subtype).toBe('error_max_turns')
+    expect(outbound_blocked).toBe(0)
+    expect(resolveDisposition({ parsed, graded: gradeOutcome(false) })).toEqual({ disposition: 'truncated', truncation_subtype: 'error_max_turns' })
+  })
+
   test('an isolated stdout with a non-JSON line or no result line measures nothing', () => {
     expect(() => parseSessionStdout(`${jsonl(STREAM_INIT)}not json\n`, 'warpline', true, '')).toThrow(/not JSON/)
     expect(() => parseSessionStdout(jsonl(STREAM_INIT, BASH_USE), 'warpline', true, '')).toThrow(/no result object/)

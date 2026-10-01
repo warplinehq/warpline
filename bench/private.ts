@@ -205,10 +205,14 @@ const REPO_ROOT = resolve(import.meta.dir, '..')
 const PRIVATE_DIR = '.bench-private'
 
 /**
- * The spelling the filesystem writes `path` to: its nearest existing ancestor
- * resolved through every link, with the rest re-appended. A path that does not
- * exist yet resolves too, so a dir reached through a link, or under a linked
- * temp dir, compares as the place a write would land.
+ * `path` with its nearest EXISTING ancestor resolved through every link and
+ * the rest re-appended, so a path that does not exist yet, or one reached
+ * through a link to a dir, compares as the place a write would land.
+ *
+ * A dangling link is the exception: it is not an existing ancestor, so it
+ * resolves to its own path, never its target. A write through a dangling dir
+ * link fails, so nothing lands there. Two spellings that differ only in case
+ * and do not exist yet compare unequal even on a case-insensitive volume.
  */
 export function realPathOf(path: string): string {
   const rest: string[] = []
@@ -818,9 +822,21 @@ export function freezeCommit(repoRoot: string, prereg: string): string {
  * maps, so a build into another dir changes no byte. The digest covers both
  * trees.
  *
+ * Any file under `plugin/` that git does not track, untracked or ignored, is
+ * refused by name. The tracked content of `plugin/` is already bound by the
+ * freeze commit, so the digest's only extra reach is untracked files, and
+ * those are exactly the fragile ones: an editor or Finder file frozen into
+ * the digest would make the binding unreproducible the next time it changed.
+ *
  * `build` is a fixture seam. Absent, it is this checkout's own compiler.
  */
 export function freshBuildDigest(repoRoot: string, build?: (outDir: string) => void): string {
+  const stray = git(repoRoot, ['-c', 'core.quotePath=false', 'status', '--porcelain', '--ignored', '--untracked-files=all', '--', 'plugin'])
+  if (stray !== '') {
+    // Each line is the status letters, then the path. The status may start with a space.
+    const paths = stray.split('\n').map((line) => line.replace(/^\s*\S+ /, ''))
+    throw new Error(`plugin/ holds ${paths.join(', ')}, which git does not track — the build digest would bind a file git does not track, so remove it`)
+  }
   const out = mkdtempSync(join(tmpdir(), 'warpline-bench-build-'))
   try {
     try {
@@ -865,6 +881,9 @@ function preregDocument(config: PrivateConfig): { doc: Buffer; hex: string } {
   if (config.prereg === undefined) {
     throw new Error('the config names no private pre-registration (prereg), so the frozen method cannot be read')
   }
+  if (!statSync(config.prereg.doc).isFile()) {
+    throw new Error('the configured pre-registration is not a file — the gate digests a file\'s bytes, so a directory could never be re-derived')
+  }
   const doc = readFileSync(config.prereg.doc)
   return { doc, hex: commitment(readFileSync(config.prereg.salt), doc) }
 }
@@ -884,11 +903,10 @@ export function preregCommitment(config: PrivateConfig): string {
  * configured document and salt re-derive the committed prereg digest, so the
  * gate enforces the frozen document and never an editable stand-in.
  *
- * `check_ids` come from the live config, not from the document, and that is
- * safe. The config is bound by `config_sha256`: the measured gate compares that
- * digest before any check id is used, and every record's `config_sha256` is
- * compared with the document's at summary, so an edited config fails closed.
- * It never widens what counts.
+ * Frozen values come only from the document. `check_ids` are read from the
+ * config, and only after the config's own digest equals the document's
+ * `config_sha256`, so an edited config is refused here, inside the gate or
+ * outside it, before any check id is read.
  */
 export function readFrozenMethod(config: PrivateConfig, repoRoot: string): FrozenMethod {
   const hex = readPreregCommitment(repoRoot)
@@ -896,8 +914,15 @@ export function readFrozenMethod(config: PrivateConfig, repoRoot: string): Froze
   if (derived !== hex) {
     throw new Error('the configured pre-registration does not reproduce the committed prereg commitment, so it is not the document that was frozen')
   }
+  const bindings = parseBindings(doc.toString('utf8'))
+  const config_sha256 = sha256hex(Buffer.from(JSON.stringify(config)))
+  if (config_sha256 !== bindings.config_sha256) {
+    throw new Error(
+      `config_sha256 is ${short(config_sha256)} where the method froze ${short(bindings.config_sha256)} — the config was edited after the freeze, so its check ids are not the frozen ones`,
+    )
+  }
   return {
-    ...parseBindings(doc.toString('utf8')),
+    ...bindings,
     prereg_commitment: hex,
     freeze_commit: freezeCommit(repoRoot, hex),
     check_ids: config.checks.map((check) => check.id),

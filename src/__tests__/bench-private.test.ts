@@ -1402,7 +1402,13 @@ describe('private method binding', () => {
   type Fixture = Parameters<Parameters<typeof withMeasuredFixture>[0]>[0]
   const appendOne = (path: string): void => appendFileSync(path, 'x')
 
-  const MOVES: [string, (fixture: Fixture) => void][] = [
+  /**
+   * Each input moved after the freeze, and the binding that refuses it. A moved
+   * snapshot passes its own digest check only once the config re-records that
+   * digest, and an edited config is refused by its own digest before any other
+   * binding is compared, so that row is refused as the config.
+   */
+  const MOVES: [string, (fixture: Fixture) => void, string?][] = [
     [
       'snapshot_sha256',
       ({ config }) => {
@@ -1412,6 +1418,7 @@ describe('private method binding', () => {
         writeFileSync(file, bytes)
         config.snapshot.sha256 = treeDigest(config.snapshot.dir)
       },
+      'config_sha256',
     ],
     ['build_sha256', ({ setBuild }) => setBuild('export const built = 2\n')],
     ['agent_prompt_sha256', ({ config }) => appendOne(config.prompts.agent)],
@@ -1420,11 +1427,11 @@ describe('private method binding', () => {
     ['config_sha256', ({ config }) => void (config.checks[0]!.pointer = '/other')],
   ]
 
-  test.each(MOVES)('a moved %s refuses naming itself', async (key, move) => {
+  test.each(MOVES)('a moved %s refuses before anything is measured', async (key, move, refusedAs = key) => {
     await withMeasuredFixture(async (fixture) => {
       const { config, root, base, build } = fixture
       move(fixture)
-      expect(() => assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build })).toThrow(new RegExp(`^${key} `))
+      expect(() => assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build })).toThrow(new RegExp(`^${refusedAs} `))
     })
   })
 
@@ -1570,6 +1577,51 @@ describe('private bind contract', () => {
         freeze_commit: freeze,
         check_ids: ['check-1', 'check-2'],
       })
+    })
+  })
+
+  /** A file in `plugin/` git does not track, untracked or ignored, which the build digest would otherwise bind. */
+  const STRAY: [string, string, (root: string) => void][] = [
+    ['an untracked file', 'plugin/skills/x/notes.txt', (root) => writeTree(root, { 'plugin/skills/x/notes.txt': 'a stray note\n' })],
+    [
+      'an ignored file',
+      'plugin/.DS_Store',
+      (root) => {
+        commitFixture(root, { '.gitignore': 'dist/\n.DS_Store\n' }, 'ignore finder files')
+        writeTree(root, { 'plugin/.DS_Store': 'finder state\n' })
+      },
+    ],
+  ]
+
+  test.each(STRAY)('%s under plugin/ is refused by the build digest, so by bind and the gate, naming it', async (_name, rel, place) => {
+    await withMeasuredFixture(async ({ config, root, base, build }) => {
+      place(root)
+      for (const fn of [() => freshBuildDigest(root, build), () => methodBindings(config, root, build)]) {
+        const message = messageOf(fn)
+        expect(message).toContain(rel)
+        expect(message).toMatch(/remove it/)
+      }
+      expect(() => bindingLines(config, root, { build, engineBase: base })).toThrow()
+    })
+  })
+
+  test('a pre-registration that is not a regular file is refused by the derivation, the gate and bind', async () => {
+    await withMeasuredFixture(async ({ config, root, base, build }) => {
+      const dir = join(dirname(config.prereg!.doc), 'prereg-dir')
+      mkdirSync(dir)
+      writeFileSync(join(dir, 'a.md'), 'a synthetic pre-registration\n')
+      config.prereg = { ...config.prereg!, doc: dir }
+      expect(() => preregCommitment(config)).toThrow(/not a file/)
+      expect(() => readFrozenMethod(config, root)).toThrow(/not a file/)
+      expect(() => assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build })).toThrow(/not a file/)
+      expect(() => bindingLines(config, root, { build, engineBase: base })).toThrow(/not a file/)
+    })
+  })
+
+  test('the frozen method is never read from a config edited after the freeze, even outside the gate', async () => {
+    await withMeasuredFixture(async ({ config, root }) => {
+      config.checks[0]!.pointer = '/other'
+      expect(() => readFrozenMethod(config, root)).toThrow(/^config_sha256 /)
     })
   })
 })
@@ -2184,10 +2236,23 @@ describe('private command line', () => {
     expect(benchSpawn(found, []).status).toBe(97)
   })
 
+  /**
+   * The scan's scope is this file, the only test file that launches the
+   * harness. The other bench test files spawn only git, or bash for the pack
+   * whitelist, and run every session in process under the fake tool. A test
+   * that spawns the harness from another file is a review item. Every token is
+   * built at runtime, so the scan never counts itself.
+   */
   test('every command-line spawn in this file goes through the stubbed helper', () => {
-    const call = ['spawn', 'Sync('].join('')
     const source = readFileSync(import.meta.path, 'utf8')
-    expect(source.split(call).length - 1).toBe(1)
+    const count = (token: string): number => source.split(token).length - 1
+    expect(count(['spawn', 'Sync('].join(''))).toBe(1)
+    const harness = ['bench', 'run.ts'].join('/')
+    expect(count(harness)).toBe(1)
+    expect(source.split('\n').filter((line) => line.includes(harness))).toEqual([`  return benchSpawn('bun', ['${harness}', ...args])`])
+    expect(count(['Bun', 'spawn'].join('.'))).toBe(0)
+    expect(count(['execFileSync', "('bun'"].join(''))).toBe(0)
+    expect(source.match(new RegExp(`(^|[^\\w.$])${['spa', 'wn'].join('')}\\(`, 'gm')) ?? []).toEqual([])
   })
 
   test('a configured plugin absent from the snapshot is named, and nothing runs or is written', async () => {

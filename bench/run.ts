@@ -778,8 +778,9 @@ export function privateHooks(
  *
  * The prereg block must already be in the config, because it is inside the
  * config digest. Bind refuses everything the gate's non-measured half refuses
- * (plugins, snapshot, package, engine, fleet install), a dirty tree, and a
- * configured salt inside this checkout or not 32 bytes, all before it prints a
+ * (plugins, snapshot, package, engine, fleet install), a dirty tree, a
+ * configured salt inside this checkout or not 32 bytes, and a configured
+ * pre-registration that exists but is not a file, all before it prints a
  * line: a binding frozen over a state the gate refuses is a method no set can
  * run. It spends nothing and runs no session.
  *
@@ -797,6 +798,9 @@ export function bindingLines(
   refuseInsideRepository(config.prereg.salt)
   const saltBytes = readFileSync(config.prereg.salt).length
   if (saltBytes !== 32) throw new Error(`the configured salt is ${saltBytes} bytes, and a commitment needs exactly 32`)
+  if (existsSync(config.prereg.doc) && !statSync(config.prereg.doc).isFile()) {
+    throw new Error('the configured pre-registration is not a file — the gate digests a file\'s bytes, so it could never re-derive a directory')
+  }
   assertCleanWorktree(repoRoot)
   assertPrivatePreconditions(config, repoRoot, { requirePrereg: false, engineBase: overrides.engineBase })
   return formatBindings(methodBindings(config, repoRoot, overrides.build))
