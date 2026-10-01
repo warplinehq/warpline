@@ -20,7 +20,15 @@ import {
   resolvePointer,
   type GradeCheck,
 } from '../../bench/grade.js'
-import { ARM_ORDER, assertControlHome, CanaryError, runWarplineArm, type Provenance } from '../../bench/arms.js'
+import {
+  ARM_ORDER,
+  assertControlHome,
+  CanaryError,
+  parseClaudeResult,
+  runWarplineArm,
+  type ConsumerSessionResult,
+  type Provenance,
+} from '../../bench/arms.js'
 import {
   assertEngineUnchanged,
   assertFleetInstall,
@@ -32,6 +40,7 @@ import {
   BIND_KEYS,
   commitment,
   COMMITMENTS_FILE,
+  copyMapMtimes,
   ENGINE_BASE_SHA,
   flipAutonomy,
   formatBindings,
@@ -511,7 +520,8 @@ describe('private warpline arm, end to end', () => {
       assertHomeSeam(wh)
       await assertPrivateSeam(home, config)
 
-      const arm = await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap))
+      const before = copyMapMtimes(home, config.copyMap)
+      const arm = await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap, before))
 
       expect(arm.parked_handoffs).toBe(1)
       expect(existsSync(join(home, 'graded/check-1.json'))).toBe(true)
@@ -542,7 +552,8 @@ export const handler = async () => ({ ...skillOk('alpha: skipped, gated off'), s
       process.env.WARPLINE_HOME = await seedPrivateHome(home, config)
       await assertPrivateSeam(home, config)
 
-      const arm = await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap))
+      const before = copyMapMtimes(home, config.copyMap)
+      const arm = await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap, before))
 
       const log = RunLogSchema.parse(JSON.parse(readFileSync(arm.advance.run_log_path, 'utf8')))
       expect(log.plugin_entries.find((entry) => entry.plugin === 'alpha')?.status).toBe('completed')
@@ -559,12 +570,13 @@ export const handler = async () => ({ ...skillOk('alpha: skipped, gated off'), s
       process.env.WARPLINE_HOME = await seedPrivateHome(home, config)
       await assertPrivateSeam(home, config)
 
+      const before = copyMapMtimes(home, config.copyMap)
       const arm = await runWarplineArm(home, privatePluginsDir(home, config), () => {})
       expect(existsSync(join(home, '.fleet/state/alpha.json'))).toBe(true)
 
-      materializeCopyMap(home, { ...arm.advance, run_id: 'a-different-run' }, config.copyMap)
+      materializeCopyMap(home, { ...arm.advance, run_id: 'a-different-run' }, config.copyMap, before)
       expect(existsSync(join(home, 'graded/check-1.json'))).toBe(false)
-      materializeCopyMap(home, arm.advance, config.copyMap)
+      materializeCopyMap(home, arm.advance, config.copyMap, before)
       expect(existsSync(join(home, 'graded/check-1.json'))).toBe(true)
     })
   })
@@ -777,7 +789,8 @@ describe('private config and seeding refusals', () => {
     await withFleet(async ({ root, config }) => {
       const { home } = await seededHome(root, config)
       rmSync(join(home, '.fleet/state/input.json'))
-      const arm = await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap))
+      const before = copyMapMtimes(home, config.copyMap)
+      const arm = await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap, before))
       const log = RunLogSchema.parse(JSON.parse(readFileSync(arm.advance.run_log_path, 'utf8')))
       expect(log.plugin_entries.find((entry) => entry.plugin === 'alpha')?.status).toBe('failed')
       expect(existsSync(join(home, 'graded/check-1.json'))).toBe(false)
@@ -891,7 +904,8 @@ describe('private iteration', () => {
         if (arm === 'warpline') {
           seams.push({ expected: privateWarplineHome(home, config), actual: process.env.WARPLINE_HOME })
           await assertPrivateSeam(home, config)
-          await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap))
+          const before = copyMapMtimes(home, config.copyMap)
+          await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap, before))
         } else {
           writeFileSync(join(home, 'graded/check-1.json'), '{"items":[1]}')
         }
@@ -946,6 +960,69 @@ describe('private iteration', () => {
     } finally {
       rmSync(scratch, { recursive: true, force: true })
     }
+  })
+})
+
+describe('private copy map freshness', () => {
+  /** A consumer that spawns nothing: a successful session on the pinned model. */
+  const consume = async (): Promise<ConsumerSessionResult> => ({
+    parsed: parseClaudeResult(
+      {
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        usage: { input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 },
+        modelUsage: { 'claude-opus-5': {} },
+      },
+      'warpline',
+    ),
+    consumer_ms: 1,
+    outbound_blocked: 0,
+  })
+
+  /**
+   * One iteration through the production wiring, the private hooks and the
+   * private runner's warpline arm, with only the consumer session injected.
+   * Returns what the warpline record graded for the copied check.
+   */
+  async function warplineCheckOne(root: string, config: PrivateConfig): Promise<boolean> {
+    const digest = await takeSnapshot(config)
+    scrubEnv(config.envScrub)
+    const warpline = makePrivateRunner(config, { consume })
+    const runner: ArmRunner = async (arm, home, iteration) =>
+      arm === 'warpline' ? warpline(arm, home, iteration) : privateOutcome(gradeWithChecks(home, config.checks))
+    const resultsDir = join(root, 'results')
+    await runIteration({
+      iteration: 1,
+      runner,
+      resultsDir,
+      notesSource: config.notes,
+      provenance: testProvenance,
+      privateHooks: privateHooks(config, { snapshot_sha256: digest }),
+    })
+    const record = BenchRunRecordSchema.parse(JSON.parse(readFileSync(join(resultsDir, 'warpline-001.json'), 'utf8')))
+    return (record.graded as Record<string, boolean>)['check-1']!
+  }
+
+  test('a plugin that reports success without writing is never graded on the stale output the snapshot carries', async () => {
+    await withFleet(async ({ root, config }) => {
+      // A no-op success: a dedupe hit, "nothing new", an idempotent early return.
+      // The engine records success for this run, and the stale file would pass.
+      writeTree(join(root, 'repo'), {
+        '.fleet/plugins/alpha/handler.ts': `import { skillOk } from 'warpline/unstable-result'
+
+export const handler = async () => skillOk('alpha: nothing new since the last run')
+`,
+        '.fleet/state/alpha.json': '{"items":[1],"run":"stale"}',
+      })
+      expect(await warplineCheckOne(root, config)).toBe(false)
+    })
+  })
+
+  test('a plugin that writes its output in this advance is graded on it', async () => {
+    await withFleet(async ({ root, config }) => {
+      expect(await warplineCheckOne(root, config)).toBe(true)
+    })
   })
 })
 
@@ -1259,7 +1336,8 @@ function syntheticRunner(config: PrivateConfig): ArmRunner {
   return async (arm, home) => {
     if (arm === 'warpline') {
       await assertPrivateSeam(home, config)
-      await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap))
+      const before = copyMapMtimes(home, config.copyMap)
+      await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap, before))
     } else {
       writeFileSync(join(home, 'graded/check-1.json'), '{"items":[1]}')
     }

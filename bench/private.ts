@@ -489,10 +489,23 @@ export async function assertPrivateSeam(home: string, config: PrivateConfig): Pr
 }
 
 /**
+ * The modification time of each copy-map source that exists in `home`, keyed
+ * by the entry's `from`. Taken before an advance, so the copy decision after
+ * it can tell a file this advance wrote from one it was handed.
+ */
+export function copyMapMtimes(home: string, copyMap: PrivateConfig['copyMap']): Map<string, number> {
+  const mtimes = new Map<string, number>()
+  for (const { from } of copyMap) {
+    const source = join(home, from)
+    if (existsSync(source)) mtimes.set(from, statSync(source).mtimeMs)
+  }
+  return mtimes
+}
+
+/**
  * Put each mapped deterministic output at its graded path, but only for a
- * plugin the engine's own record says ran in THIS advance and succeeded. The
- * snapshot carries the fleet's previous outputs, so a file that merely exists
- * may be stale, and grading it would credit this run with work it did not do.
+ * plugin the engine's own record says ran in THIS advance and succeeded, and
+ * only when the file itself was written during that advance.
  *
  * The run log is not that record. It writes `completed` for every handler that
  * returned without failing, which includes one that skipped itself behind its
@@ -500,10 +513,24 @@ export async function assertPrivateSeam(home: string, config: PrivateConfig): Pr
  * and the run that wrote it, so a `skipped` plugin, or one this advance never
  * wrote, leaves its graded file absent, and its check fails.
  *
+ * A success proves the handler ran, not that it wrote this file. The snapshot
+ * carries the previous run's output at the same path, so a handler that
+ * succeeds on a no-op path (nothing new, a dedupe hit, an idempotent early
+ * return) leaves a stale file that would pass its check. The signal is the
+ * file's own timestamp across the advance: `before` is `copyMapMtimes` taken
+ * before it, and a source is fresh when it was absent then or its timestamp
+ * has moved since. No clock is compared. An equal timestamp withholds credit,
+ * so the rule fails closed.
+ *
  * The engine state lives under the warpline home the advance just ran in,
  * which is the one `warplineHome()` names until the caller changes it.
  */
-export function materializeCopyMap(home: string, advance: AdvanceResult, copyMap: PrivateConfig['copyMap']): void {
+export function materializeCopyMap(
+  home: string,
+  advance: AdvanceResult,
+  copyMap: PrivateConfig['copyMap'],
+  before: ReadonlyMap<string, number>,
+): void {
   const statePath = join(warplineHome(), 'state', 'engine-state.json')
   if (!existsSync(statePath)) return
   const runs = EngineStateSchema.parse(JSON.parse(readFileSync(statePath, 'utf8'))).plugin_runs
@@ -514,6 +541,8 @@ export function materializeCopyMap(home: string, advance: AdvanceResult, copyMap
   for (const { plugin, from, to } of copyMap) {
     const source = join(home, from)
     if (!ran(plugin) || !existsSync(source)) continue
+    const prior = before.get(from)
+    if (prior !== undefined && statSync(source).mtimeMs === prior) continue
     const destination = join(home, to)
     mkdirSync(dirname(destination), { recursive: true })
     copyFileSync(source, destination)

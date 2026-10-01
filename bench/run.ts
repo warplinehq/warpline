@@ -63,6 +63,7 @@ import {
   assertPrivateSeam,
   BIND_KEYS,
   commitment,
+  copyMapMtimes,
   formatBindings,
   loadPrivateConfig,
   materializeCopyMap,
@@ -715,7 +716,11 @@ export function makePrivateRunner(config: PrivateConfig, deps: PrivateRunnerDeps
       const warplineHome = privateWarplineHome(home, config)
       await assertPrivateSeam(home, config)
       const result = await runWarplineIteration(home, iteration, {
-        advance: (h) => runWarplineArm(h, privatePluginsDir(h, config), (h2, a) => materializeCopyMap(h2, a, config.copyMap)),
+        advance: (h) => {
+          // Taken before the timed segment: what each source was before this advance.
+          const before = copyMapMtimes(h, config.copyMap)
+          return runWarplineArm(h, privatePluginsDir(h, config), (h2, a) => materializeCopyMap(h2, a, config.copyMap, before))
+        },
         consume:
           deps.consume ??
           ((h, runLogPath) => runConsumerSession(h, runLogPath, { isolated: true, warplineHome, promptPath: config.prompts.consumer })),
