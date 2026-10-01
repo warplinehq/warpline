@@ -7,10 +7,10 @@
  * one record schema both runs share, and the data-driven grader a private
  * configuration drives without ever naming what it is grading.
  */
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { appendFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -71,6 +71,7 @@ import {
   bindingLines,
   makePrivateRunner,
   privateHooks,
+  realPreconditions,
   runIteration,
   runPrivateSet,
   runPrivateShakedown,
@@ -1962,6 +1963,21 @@ describe('private set ordering', () => {
   })
 })
 
+describe('private preconditions, as the entry point binds them', () => {
+  test('the measured preconditions return the frozen method on a clean fixture, and refuse one untracked file', async () => {
+    await withMeasuredFixture(async ({ config, root, base, freeze, build }) => {
+      const preconditions = realPreconditions(config, root, { engineBase: base, build })
+      const frozen = preconditions({ requirePrereg: true }) as FrozenMethod
+      expect(frozen.freeze_commit).toBe(freeze)
+      expect(frozen.freeze_commit).toBe(fixtureGit(root, ['rev-parse', 'HEAD']).trim())
+
+      writeFileSync(join(root, 'untracked.txt'), 'one untracked file\n')
+      expect(() => preconditions({ requirePrereg: true })).toThrow(/not clean/)
+      expect(() => preconditions({ requirePrereg: false })).toThrow(/not clean/)
+    })
+  })
+})
+
 describe('private output paths', () => {
   // Pure path checks: nothing is created inside the checkout, and any probe
   // name is removed afterwards whatever happens.
@@ -2045,14 +2061,36 @@ describe('private output paths', () => {
   })
 })
 
+/** A directory holding a `claude` that refuses with exit 97, removed after the file's tests. */
+const STUB_DIR = mkdtempSync(join(tmpdir(), 'bench-private-stub-'))
+const STUB_CLAUDE = join(STUB_DIR, 'claude')
+writeFileSync(STUB_CLAUDE, "#!/bin/sh\necho 'a test reached the command-line tool' >&2\nexit 97\n")
+chmodSync(STUB_CLAUDE, 0o755)
+afterAll(() => rmSync(STUB_DIR, { recursive: true, force: true }))
+
 /**
- * The harness's own entry point, as an operator runs it, in a subprocess from
- * the checkout root. PATH is inherited untouched, so no case below may reach a
- * session: each one must finish or refuse before anything is spent.
+ * Every command-line spawn in this file, in a subprocess from the checkout
+ * root. PATH starts with the refusing stub, so a regression that reaches a
+ * session fails loudly with exit 97 instead of spending. A case below keeps
+ * this the file's only spawn, and another proves the stub is what resolves.
+ */
+function benchSpawn(command: string, args: string[]): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync(command, args, {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${STUB_DIR}:${process.env.PATH ?? ''}` },
+  })
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr }
+}
+
+/**
+ * The harness's own entry point, as an operator runs it. It spawns only
+ * through `benchSpawn`, so the refusing stub is first on its PATH, and no case
+ * below may reach a session: each one must finish or refuse before anything
+ * is spent.
  */
 function bench(...args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const result = spawnSync('bun', ['bench/run.ts', ...args], { cwd: REPO_ROOT, encoding: 'utf8' })
-  return { status: result.status, stdout: result.stdout, stderr: result.stderr }
+  return benchSpawn('bun', ['bench/run.ts', ...args])
 }
 
 /** Write the config where the operator keeps it: a file outside this repository. */
@@ -2075,6 +2113,20 @@ async function withScratch(fn: (dir: string) => Promise<void> | void): Promise<v
 const HEX64 = /[0-9a-f]{64}/g
 
 describe('private command line', () => {
+  test('no command-line case can reach the real tool: claude resolves to the refusing stub through the spawn bench() uses', () => {
+    // The lookup only resolves the name. The stub runs only after it is proven
+    // to be what resolved, so no mutation here can execute the real tool.
+    const found = benchSpawn('/bin/sh', ['-c', 'command -v claude']).stdout.trim()
+    expect(found).toBe(STUB_CLAUDE)
+    expect(benchSpawn(found, []).status).toBe(97)
+  })
+
+  test('every command-line spawn in this file goes through the stubbed helper', () => {
+    const call = ['spawn', 'Sync('].join('')
+    const source = readFileSync(import.meta.path, 'utf8')
+    expect(source.split(call).length - 1).toBe(1)
+  })
+
   test('a configured plugin absent from the snapshot is named, and nothing runs or is written', async () => {
     await withFrozenFleet(async ({ root, config }) => {
       config.plugins.push('gamma')

@@ -806,11 +806,17 @@ export interface PrivateSetDeps {
  * plugin is the one mistake an operator can make in the config alone, and it
  * must be named as itself whatever state the checkout is in. Nothing is spent
  * until both have passed, so the order between them costs nothing.
+ *
+ * `main()` binds it with no overrides, and tests pass a fixture repository.
  */
-function realPreconditions(config: PrivateConfig): NonNullable<PrivateSetDeps['preconditions']> {
+export function realPreconditions(
+  config: PrivateConfig,
+  repoRoot: string = REPO_ROOT,
+  overrides: { engineBase?: string; build?: (outDir: string) => void } = {},
+): NonNullable<PrivateSetDeps['preconditions']> {
   return (options) => {
-    const stamp = assertPrivatePreconditions(config, REPO_ROOT, options)
-    assertCleanWorktree(REPO_ROOT)
+    const stamp = assertPrivatePreconditions(config, repoRoot, { ...options, ...overrides })
+    assertCleanWorktree(repoRoot)
     return stamp
   }
 }
