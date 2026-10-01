@@ -2236,6 +2236,9 @@ describe('private output paths', () => {
 
   test('the config refuses a linked package at or under warpline, which is this checkout', () => {
     expect(parse((c) => (c.links.packages = ['warpline/x'])).success).toBe(false)
+    // On a case-folding volume, macOS's default, these name the same link.
+    expect(parse((c) => (c.links.packages = ['Warpline/x'])).success).toBe(false)
+    expect(parse((c) => (c.links.packages = ['WARPLINE'])).success).toBe(false)
     expect(parse((c) => (c.links.packages = ['zod'])).success).toBe(true)
   })
 })
