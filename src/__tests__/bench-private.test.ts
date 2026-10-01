@@ -723,6 +723,13 @@ describe('private config and seeding refusals', () => {
     ['an entry under graded/', (c) => c.entries.push({ from: '/x', to: 'graded/check-1.json', scope: 'warpline' })],
     ['two overlapping entries', (c) => c.entries.push({ from: '/x', to: '.fleet/plugins/alpha/extra.ts', scope: 'warpline' })],
     ['an unknown top-level key', (c) => Object.assign(c, { extra: true })],
+    ["a paths seam module holding '..'", (c) => (c.pathsSeam.module = '../escape.ts')],
+    ['an absolute paths seam module', (c) => (c.pathsSeam.module = '/abs/paths.ts')],
+    ["a copy source holding '..'", (c) => (c.copyMap[0]!.from = '.fleet/../escape.json')],
+    ['an absolute copy source', (c) => (c.copyMap[0]!.from = '/abs/out.json')],
+    ["a copy target holding '..' after graded/", (c) => (c.copyMap[0]!.to = 'graded/../escape.json')],
+    ["a linked package holding '..'", (c) => c.links.packages.push('../escape')],
+    ['an absolute linked package', (c) => c.links.packages.push('/abs/pkg')],
   ]
   for (const [name, mutate] of refusals) {
     test(`the config refuses ${name}`, () => {
