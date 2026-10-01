@@ -591,6 +591,15 @@ export function copyMapMtimes(home: string, copyMap: PrivateConfig['copyMap']): 
  * has moved since. No clock is compared. An equal timestamp withholds credit,
  * so the rule fails closed.
  *
+ * What the timestamp can't see: a handler that writes the carried bytes back
+ * unchanged. The seeded home keeps each graded source at its path, because the
+ * measured handlers read their prior output as an input, so that re-save moves
+ * the timestamp and is credited. The method states this as a disclosed limit.
+ * The guarantee holds for the measured set only because each of its graded
+ * handlers always recomputes from its inputs and writes, which is a fact about
+ * those handlers, read from their code, and not something this function
+ * enforces. A pinned test keeps that disclosed behaviour from drifting.
+ *
  * The engine state lives under the warpline home the advance just ran in,
  * which is the one `warplineHome()` names until the caller changes it.
  */

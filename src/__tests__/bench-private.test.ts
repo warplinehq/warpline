@@ -1028,6 +1028,34 @@ export const handler = async () => skillOk('alpha: nothing new since the last ru
       expect(await warplineCheckOne(root, config)).toBe(true)
     })
   })
+
+  /**
+   * A pin of a disclosed limit, not a guarantee. The home keeps the carried
+   * file at its graded source path, and a timestamp can't tell "re-saved" from
+   * "recomputed". So a handler that writes the carried bytes back is credited.
+   * The private pre-registration says so, and says the guarantee holds for the
+   * measured handlers only because each one always recomputes and writes. If
+   * this goes false the seeding changed, and the method changed with it.
+   */
+  test('a handler that re-saves the carried state is credited with it, as the pre-registration discloses', async () => {
+    await withFleet(async ({ root, config }) => {
+      writeTree(join(root, 'repo'), {
+        '.fleet/plugins/alpha/handler.ts': `import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { skillOk } from 'warpline/unstable-result'
+import { STATE_DIR } from '../../scripts/shared/paths.ts'
+
+export const handler = async () => {
+  const p = join(STATE_DIR, 'alpha.json')
+  if (existsSync(p)) writeFileSync(p, readFileSync(p))
+  return skillOk('alpha: nothing new')
+}
+`,
+        '.fleet/state/alpha.json': '{"items":[1],"run":"stale"}',
+      })
+      expect(await warplineCheckOne(root, config)).toBe(true)
+    })
+  })
 })
 
 /** The published 0.5.0 release commit, tagged v0.5.0: one runtime JSDoc comment behind the pinned base. */
