@@ -313,14 +313,21 @@ export async function resumeState(resultsDir: string): Promise<ResumeState> {
 }
 
 /**
- * The three things a privately configured scenario changes about one
- * iteration: how each home is seeded, where the warpline arm's engine home
- * sits inside its arm home, and what every record is stamped with.
+ * What a privately configured scenario changes about one iteration: how each
+ * home is seeded, where the warpline arm's engine home sits inside its arm
+ * home, what every record is stamped with, and, on a measured set, which
+ * records already on disk it refuses before it spends.
  */
 export interface PrivateIterationHooks {
   seed(arm: ArmId, home: string): Promise<unknown>
   warplineHomeOf(home: string): string
   stamp: PrivateStamp
+  /**
+   * Refuse the records already on disk before this iteration spends. A record
+   * that arrived during the set must not move `cold`, the passing counts or the
+   * stop rule, so it is refused before any home exists.
+   */
+  assertBound?(runs: readonly BenchRunRecord[]): void
 }
 
 /**
@@ -357,7 +364,8 @@ export interface IterationOptions {
  * Homes are removed in a `finally`, whatever happened, including a throw from
  * the runner.
  *
- * With `privateHooks`, three things change and nothing else: each home is
+ * With `privateHooks`, four things change and nothing else: the records
+ * already on disk are checked by the hook before any home exists, each home is
  * seeded by the hook instead of the tracked recipe, the home variable points at
  * the warpline home inside the arm home, and the stamp joins the raw record
  * BEFORE the scrub and the parse, so a stamped record passes the same one write
@@ -369,6 +377,7 @@ export async function runIteration(options: IterationOptions): Promise<BenchRunR
   // Read ONCE, before the iteration starts, so every arm in one iteration reads
   // the same pre-iteration state and `cold` cannot depend on arm order.
   const prior = await resumeState(resultsDir)
+  privateHooks?.assertBound?.(prior.runs)
 
   const homes = new Map<ArmId, string>()
   for (const arm of ARM_ORDER) {
@@ -507,19 +516,21 @@ export async function runSet(options: SetOptions): Promise<SetSummary> {
   return summariseSet(options.resultsDir)
 }
 
-/** The fields that must each hold one value across a private set, with the words a refusal uses for them. */
+/**
+ * The fields that must each hold one value across a private set, with the
+ * words a refusal uses for them. The snapshot, the package and the commit are
+ * not here: each record is pinned to its frozen value instead.
+ */
 const ONE_CONFIGURATION: readonly (readonly [keyof BenchRunRecord, string])[] = [
-  ['snapshot_sha256', 'snapshot digest'],
-  ['package_version', 'package version'],
   ['claude_cli_version', 'tool version'],
   ['model_id', 'model'],
-  ['git_sha', 'commit'],
 ]
 
 /**
  * Refuse unless every record is bound to the frozen method: made under its
- * commitment, at its freeze commit, with each of its six digests, and in the
- * private graded shape.
+ * commitment, at its freeze commit, on the pinned package, with each of its
+ * six digests, under the isolation's count of blocked attempts, and graded on
+ * exactly the frozen checks.
  *
  * The records sit in a gitignored dir that anything could have written, so a
  * record the method did not bind is not data, whatever else it says.
@@ -539,7 +550,17 @@ export function assertRecordsBound(runs: readonly BenchRunRecord[], frozen: Froz
     if (run.git_sha !== frozen.freeze_commit) {
       throw new Error(`${id} carries git_sha ${short(run.git_sha)} where the method was frozen at ${short(frozen.freeze_commit)}`)
     }
+    if (run.package_version !== PINNED_PACKAGE_VERSION) {
+      throw new Error(`the private records were made on package version ${run.package_version}, and the private set is pinned to ${PINNED_PACKAGE_VERSION}`)
+    }
+    // A record made without the isolation's count is not a record of the isolated method.
+    if (typeof run.outbound_blocked !== 'number') throw new Error(`${id} carries no outbound_blocked, so it was not made under the isolation`)
     if ('announce-fanout' in run.graded) throw new Error(`${id} is graded in the public workload's shape, so it is not a private record`)
+    const graded = Object.keys(run.graded).sort()
+    const checks = [...frozen.check_ids].sort()
+    if (graded.join('\0') !== checks.join('\0')) {
+      throw new Error(`${id} is graded on [${graded.join(', ')}] where the method checks [${checks.join(', ')}]`)
+    }
   }
 }
 
@@ -567,10 +588,6 @@ export async function summarisePrivate(resultsDir: string, frozen: FrozenMethod)
     if (values.size > 1) {
       throw new Error(`the private records carry ${values.size} ${words} values (${field}) — the set is not one configuration`)
     }
-  }
-  const version = runs[0]!.package_version
-  if (version !== PINNED_PACKAGE_VERSION) {
-    throw new Error(`the private records were made on package version ${version}, and the private set is pinned to ${PINNED_PACKAGE_VERSION}`)
   }
   return summariseSet(resultsDir)
 }
@@ -733,12 +750,17 @@ export function makePrivateRunner(config: PrivateConfig, deps: PrivateRunnerDeps
   }
 }
 
-/** How a private iteration seeds each home, where its warpline home sits, and what it stamps. */
-export function privateHooks(config: PrivateConfig, stamp: PrivateStamp): PrivateIterationHooks {
+/** How a private iteration seeds each home, where its warpline home sits, what it stamps, and what it refuses first. */
+export function privateHooks(
+  config: PrivateConfig,
+  stamp: PrivateStamp,
+  assertBound?: (runs: readonly BenchRunRecord[]) => void,
+): PrivateIterationHooks {
   return {
     seed: (arm, home) => (arm === 'warpline' ? seedPrivateHome(home, config) : seedPrivateControl(home, arm, config)),
     warplineHomeOf: (home) => privateWarplineHome(home, config),
     stamp,
+    ...(assertBound ? { assertBound } : {}),
   }
 }
 
@@ -787,18 +809,44 @@ function realPreconditions(config: PrivateConfig): NonNullable<PrivateSetDeps['p
 }
 
 /**
+ * Refuse unless a measured set's preconditions returned a whole frozen method:
+ * its freeze commit, its check ids, its commitment and all six digests.
+ * Anything less binds nothing, so nothing is spent on it.
+ */
+function requireFrozen(stamp: PrivateStamp | FrozenMethod): FrozenMethod {
+  const frozen = stamp as Partial<FrozenMethod>
+  const whole =
+    typeof frozen.freeze_commit === 'string' &&
+    Array.isArray(frozen.check_ids) &&
+    typeof frozen.prereg_commitment === 'string' &&
+    BIND_KEYS.every((key) => typeof frozen[key] === 'string')
+  if (!whole) throw new Error("a measured set's preconditions bound no frozen method, so nothing is spent")
+  return stamp as FrozenMethod
+}
+
+/**
  * The gate every private entry point passes before it spends: scrub the
- * configured variables, check the preconditions, then run the canary.
+ * configured variables, check the preconditions, check the records already on
+ * disk when the set is a measured one, then run the canary.
  *
  * The order is the safety property. The scrub is first, so no fleet override
  * survives into anything that follows. The preconditions are next, so a missing
- * plugin is named before anything is spent. The canary is last, so an absent
+ * plugin is named before anything is spent. The records already in the
+ * measured results dir are next, so an unbound or foreign one stops the set
+ * before it is paid for rather than after. The canary is last, so an absent
  * sandbox refuses before the first paid session. Each step throws, and a throw
  * here runs no arm and writes no record.
  */
+async function privateGate(config: PrivateConfig, deps: PrivateSetDeps, requirePrereg: true): Promise<FrozenMethod>
+async function privateGate(config: PrivateConfig, deps: PrivateSetDeps, requirePrereg: false): Promise<PrivateStamp>
 async function privateGate(config: PrivateConfig, deps: PrivateSetDeps, requirePrereg: boolean): Promise<PrivateStamp | FrozenMethod> {
   scrubEnv(config.envScrub)
-  const stamp = (deps.preconditions ?? realPreconditions(config))({ requirePrereg })
+  let stamp = (deps.preconditions ?? realPreconditions(config))({ requirePrereg })
+  if (requirePrereg) {
+    const frozen = requireFrozen(stamp)
+    assertRecordsBound((await resumeState(config.resultsDir)).runs, frozen)
+    stamp = frozen
+  }
   await (deps.canary ?? runCanary)()
   return stamp
 }
@@ -807,8 +855,10 @@ async function privateGate(config: PrivateConfig, deps: PrivateSetDeps, requireP
  * The measured private set, then its summary and the verdict against the
  * public one, computed together and mechanically.
  *
- * The gate runs first, so nothing is spent unless the preconditions and the
- * canary pass. The set runs on the public driver through the private hooks, so
+ * The gate runs first, so nothing is spent unless the preconditions, the
+ * records already on disk and the canary pass, and the same records are
+ * checked again before every iteration. The set runs on the public driver
+ * through the private hooks, so
  * the order, the cap, the cold flag and the exclusive write are the ones the
  * public set was measured with. The verdict is computed only over a set
  * `runSet` finished, from the private summary, which refuses any record not
@@ -818,13 +868,13 @@ export async function runPrivateSet(
   config: PrivateConfig,
   deps: PrivateSetDeps = {},
 ): Promise<{ summary: SetSummary; agreement: AgreementReport }> {
-  const frozen = (await privateGate(config, deps, true)) as FrozenMethod
+  const frozen = await privateGate(config, deps, true)
   await runSet({
     runner: deps.runner ?? makePrivateRunner(config),
     resultsDir: config.resultsDir,
     notesSource: config.notes,
     provenance: deps.provenance ?? readProvenance,
-    privateHooks: privateHooks(config, recordStamp(frozen)),
+    privateHooks: privateHooks(config, recordStamp(frozen), (runs) => assertRecordsBound(runs, frozen)),
   })
   const summary = await summarisePrivate(config.resultsDir, frozen)
   const agreement = agreementVerdict(summary, await summariseSet(deps.publicResultsDir ?? join(REPO_ROOT, 'bench/results')))

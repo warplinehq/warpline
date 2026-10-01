@@ -1505,6 +1505,20 @@ describe('private summary', () => {
       [privateSample(), privateSample({ iteration: 2, cold: false, graded: Object.fromEntries(GRADED_KEYS.map((key) => [key, true])) })],
       /public/,
     ],
+    ['a record without its blocked-attempt count', [privateSample(), withoutField('outbound_blocked')], /outbound_blocked/],
+    [
+      'a record graded on a check the method does not name',
+      [privateSample(), privateSample({ iteration: 2, cold: false, graded: { 'check-1': true, 'check-2': true, 'check-3': true } })],
+      /graded/,
+    ],
+    ['a record missing a frozen check', [privateSample(), privateSample({ iteration: 2, cold: false, graded: { 'check-1': true } })], /graded/],
+    ['a record whose git_sha is not the freeze commit', [privateSample({ git_sha: '1234567' })], /git_sha/],
+    ...BIND_KEYS.map((key): [string, Record<string, unknown>[], RegExp] => [`a record lacking ${key}`, [privateSample(), withoutField(key)], new RegExp(key)]),
+    ...BIND_KEYS.map((key): [string, Record<string, unknown>[], RegExp] => [
+      `a record with another ${key}`,
+      [privateSample(), privateSample({ iteration: 2, cold: false, [key]: 'f'.repeat(64) })],
+      new RegExp(key),
+    ]),
   ]
 
   test.each(REFUSED)('refuses %s', async (_name, records, message) => {
@@ -1761,6 +1775,48 @@ describe('private set ordering', () => {
       expect(calls.filter((call) => !call.startsWith('runner:'))).toEqual(['preconditions', 'canary'])
       expect(requirePrereg).toEqual([true])
       expect(readdirSync(config.resultsDir)).toHaveLength(33)
+    })
+  })
+
+  test('a measured set refuses an unbound record already in the results dir, before the canary and before any arm', async () => {
+    await withFrozenFleet(async ({ config, digest }) => {
+      mkdirSync(config.resultsDir, { recursive: true })
+      writeRecords(config.resultsDir, [privateSample({ prereg_commitment: 'e'.repeat(64) })])
+      const { calls, deps } = orderSpies(digest)
+      await expect(runPrivateSet(config, deps)).rejects.toThrow(/prereg/)
+      expect(calls).toEqual(['preconditions'])
+      expect(readdirSync(config.resultsDir)).toEqual(['warpline-001.json'])
+    })
+  })
+
+  test('a record that appears mid-set stops the set before the next iteration spends', async () => {
+    await withFrozenFleet(async ({ config, digest }) => {
+      const { deps } = orderSpies(digest)
+      const spied = deps.runner
+      let runs = 0
+      deps.runner = async (arm, home, iteration) => {
+        runs += 1
+        if (arm === 'agent-from-scratch' && iteration === 1) {
+          writeRecords(config.resultsDir, [privateSample({ iteration: 2, cold: false, prereg_commitment: 'e'.repeat(64) })])
+        }
+        return spied(arm, home, iteration)
+      }
+      await expect(runPrivateSet(config, deps)).rejects.toThrow(/prereg/)
+      expect(runs).toBe(3)
+      expect(readdirSync(config.resultsDir).filter((file) => file.endsWith('-003.json'))).toEqual([])
+    })
+  })
+
+  test('a measured set whose preconditions bind no frozen method refuses before the canary', async () => {
+    await withFrozenFleet(async ({ config, digest }) => {
+      const { calls, deps } = orderSpies(digest)
+      deps.preconditions = () => {
+        calls.push('preconditions')
+        return { snapshot_sha256: digest, prereg_commitment: SUMMARY_PREREG }
+      }
+      await expect(runPrivateSet(config, deps)).rejects.toThrow(/no frozen method/)
+      expect(calls).toEqual(['preconditions'])
+      expect(noRecords(config.resultsDir)).toBe(true)
     })
   })
 
