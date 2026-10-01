@@ -91,7 +91,12 @@ const PRIVATE_NAME_PATTERNS: string[] = readFileSync(join(REPO_ROOT, PATTERN_FIL
 if (PRIVATE_NAME_PATTERNS.length === 0) {
   throw new Error(`${PATTERN_FILE} yielded no patterns; an empty list is a guard that cannot fail`)
 }
-const PRIVATE_NAME = new RegExp(PRIVATE_NAME_PATTERNS.map((p) => `\\b${p}\\b`).join('|'), 'i')
+// Letter-and-digit lookarounds, not `\b`, exactly as the leak suite bounds them:
+// `_` is a boundary, so a term inside an identifier is caught.
+const PRIVATE_NAME = new RegExp(
+  PRIVATE_NAME_PATTERNS.map((p) => `(?<![A-Za-z0-9])(?:${p})(?![A-Za-z0-9])`).join('|'),
+  'i',
+)
 
 const LOCAL_TERMS: string[] = (() => {
   try {
@@ -105,7 +110,8 @@ const LOCAL_TERMS: string[] = (() => {
 })()
 
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-const bounded = (t: string) => `${/^\w/.test(t) ? '\\b' : ''}${esc(t)}${/\w$/.test(t) ? '\\b' : ''}`
+const bounded = (t: string) =>
+  `${/^\w/.test(t) ? '(?<![A-Za-z0-9])' : ''}${esc(t)}${/\w$/.test(t) ? '(?![A-Za-z0-9])' : ''}`
 const LOCAL_NAME = LOCAL_TERMS.length ? new RegExp(LOCAL_TERMS.map(bounded).join('|'), 'i') : null
 
 /** True when a default, whatever its type, carries a term from either list. */
