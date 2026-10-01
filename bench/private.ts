@@ -308,8 +308,8 @@ export const PrivateConfigSchema = z
       from: AbsolutePath,
       packages: z.array(
         RelativePath.refine(
-          (p) => p !== 'warpline' && !p.startsWith('warpline/'),
-          "'warpline' and everything under it is this checkout, never the fleet's install, and linking under it would write into the checkout",
+          (p) => p.toLowerCase() !== 'warpline' && !p.toLowerCase().startsWith('warpline/'),
+          "'warpline' and everything under it, in any case, is this checkout, never the fleet's install, and linking under it would write into the checkout",
         ),
       ),
     }),
