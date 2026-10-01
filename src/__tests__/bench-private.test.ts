@@ -23,6 +23,7 @@ import {
 import {
   ARM_ORDER,
   assertControlHome,
+  buildClaudeEnv,
   CanaryError,
   parseClaudeResult,
   runWarplineArm,
@@ -2271,6 +2272,26 @@ function bench(...args: string[]): { status: number | null; stdout: string; stde
   return benchSpawn('bun', ['bench/run.ts', ...args])
 }
 
+/**
+ * What in `source` could spawn the real tool without the refusing stub. Only
+ * `benchSpawn` passes the stub on PATH, so it must hold the file's one
+ * `spawnSync`, and the harness may be named on its delegate line alone.
+ */
+function spawnSiteOffenders(source: string): string[] {
+  const offenders: string[] = []
+  const count = (token: string): number => source.split(token).length - 1
+  const spawnSync = ['spawn', 'Sync('].join('')
+  if (count(spawnSync) !== 1) offenders.push(`${count(spawnSync)} ${spawnSync} sites`)
+  const harness = ['bench', 'run.ts'].join('/')
+  const harnessLines = source.split('\n').filter((line) => line.includes(harness))
+  const delegate = `  return benchSpawn('bun', ['${harness}', ...args])`
+  if (harnessLines.length !== 1 || harnessLines[0] !== delegate) offenders.push(...harnessLines.filter((line) => line !== delegate))
+  if (count(['Bun', 'spawn'].join('.')) > 0) offenders.push(['Bun', 'spawn'].join('.'))
+  if (count(['execFileSync', "('bun'"].join('')) > 0) offenders.push(['execFileSync', "('bun'"].join(''))
+  offenders.push(...(source.match(new RegExp(`(^|[^\\w.$])${['spa', 'wn'].join('')}\\(`, 'gm')) ?? []))
+  return offenders
+}
+
 /** Write the config where the operator keeps it: a file outside this repository. */
 function writeConfig(root: string, config: PrivateConfig): string {
   const path = join(root, 'private.json')
@@ -2299,6 +2320,15 @@ describe('private command line', () => {
     expect(benchSpawn(found, []).status).toBe(97)
   })
 
+  test('an in-process session resolves claude to the refusing stub', () => {
+    // runSession spawns the tool by name under buildClaudeEnv, which copies
+    // process.env. withFakeClaude puts its fake ahead of this for its length;
+    // outside it, a case that reaches a session must find the stub, never the
+    // real tool. Resolution is read off the PATH, so nothing is spawned.
+    const dirs = (buildClaudeEnv(STUB_DIR).PATH ?? '').split(':')
+    expect(dirs.map((dir) => join(dir, 'claude')).find((bin) => existsSync(bin))).toBe(STUB_CLAUDE)
+  })
+
   /**
    * The scan's scope is this file, the only test file that launches the
    * harness. The other bench test files spawn only git, or bash for the pack
@@ -2307,15 +2337,21 @@ describe('private command line', () => {
    * built at runtime, so the scan never counts itself.
    */
   test('every command-line spawn in this file goes through the stubbed helper', () => {
-    const source = readFileSync(import.meta.path, 'utf8')
-    const count = (token: string): number => source.split(token).length - 1
-    expect(count(['spawn', 'Sync('].join(''))).toBe(1)
-    const harness = ['bench', 'run.ts'].join('/')
-    expect(count(harness)).toBe(1)
-    expect(source.split('\n').filter((line) => line.includes(harness))).toEqual([`  return benchSpawn('bun', ['${harness}', ...args])`])
-    expect(count(['Bun', 'spawn'].join('.'))).toBe(0)
-    expect(count(['execFileSync', "('bun'"].join(''))).toBe(0)
-    expect(source.match(new RegExp(`(^|[^\\w.$])${['spa', 'wn'].join('')}\\(`, 'gm')) ?? []).toEqual([])
+    expect(spawnSiteOffenders(readFileSync(import.meta.path, 'utf8'))).toEqual([])
+  })
+
+  const EXEC = ['execFile', 'Sync('].join('')
+  const PLANTED_SPAWNS: [string, string][] = [
+    ['the tool by name', `${EXEC}'claude', [])`],
+    ['the harness through a path built at runtime', `${EXEC}process.execPath, [join(REPO_ROOT, 'bench', 'run' + '.ts')])`],
+    ['bun in double quotes', `${EXEC}"bun", ['x'])`],
+  ]
+  test.each(PLANTED_SPAWNS)('the spawn scan refuses a planted spawn of %s', (_name, line) => {
+    expect(spawnSiteOffenders(`${readFileSync(import.meta.path, 'utf8')}\n${line}\n`)).not.toEqual([])
+  })
+
+  test('the spawn scan admits a planted git spawn', () => {
+    expect(spawnSiteOffenders(`${readFileSync(import.meta.path, 'utf8')}\n${EXEC}'git', ['status'])\n`)).toEqual([])
   })
 
   test('a configured plugin absent from the snapshot is named, and nothing runs or is written', async () => {
