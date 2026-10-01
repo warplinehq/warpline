@@ -36,10 +36,10 @@
  * the private pre-registration.
  */
 import { randomBytes } from 'node:crypto'
-import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { isAbsolute, join, resolve, sep } from 'node:path'
 import { agreementVerdict, type AgreementReport } from './agreement.js'
 import {
   ARM_ORDER,
@@ -61,6 +61,7 @@ import { gradeWithChecks, type GradeResult } from './grade.js'
 import {
   assertPrivatePreconditions,
   assertPrivateSeam,
+  assertScratchDir,
   BIND_KEYS,
   commitment,
   copyMapMtimes,
@@ -71,6 +72,7 @@ import {
   PINNED_PACKAGE_VERSION,
   privatePluginsDir,
   privateWarplineHome,
+  realPathOf,
   scrubEnv,
   seedPrivateControl,
   seedPrivateHome,
@@ -902,9 +904,7 @@ export async function runPrivateShakedown(
   scratchDir: string,
   deps: PrivateSetDeps = {},
 ): Promise<BenchRunRecord[]> {
-  if (resolve(scratchDir) === resolve(config.resultsDir)) {
-    throw new Error('the shakedown must write to a scratch dir, never the measured results dir')
-  }
+  assertScratchDir(scratchDir, config.resultsDir)
   const stamp = await privateGate(config, deps, false)
   return runIteration({
     iteration: (await resumeState(scratchDir)).nextIteration,
@@ -940,23 +940,16 @@ function absoluteArg(value: string | undefined, what: string): string {
 }
 
 /**
- * Refuse a salt path inside this checkout, under either spelling of it.
+ * Refuse a salt path inside this checkout, under any spelling of it, its
+ * private dir included.
  *
- * The parent is resolved through any link, so a path reached through a link
- * into the checkout is refused as well. A parent that does not exist cannot
- * be written through either, so its plain spelling is enough.
+ * Both sides are resolved through every link by `realPathOf`, so a path
+ * reached through a link into the checkout is refused as well.
  */
 function refuseInsideRepository(path: string): void {
-  const real = (p: string): string => {
-    try {
-      return realpathSync(p)
-    } catch {
-      return resolve(p)
-    }
-  }
-  const candidates = [resolve(path), join(real(dirname(path)), basename(path))]
-  const roots = [REPO_ROOT, real(REPO_ROOT)]
-  if (candidates.some((candidate) => roots.some((root) => candidate === root || candidate.startsWith(root + sep)))) {
+  const real = realPathOf(path)
+  const root = realPathOf(REPO_ROOT)
+  if (real === root || real.startsWith(root + sep)) {
     throw new Error('the salt must live in the private repository, never inside this repository')
   }
 }

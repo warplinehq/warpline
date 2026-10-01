@@ -28,7 +28,7 @@ import {
 } from 'node:fs'
 import { copyFile, cp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { AdvanceResult } from 'warpline'
 import { warplineHome } from 'warpline/lib/paths'
@@ -201,6 +201,63 @@ export function parseBindings(text: string): MethodBindings {
 /** The checkout root, which is also the package root a seeded fleet resolves `warpline` to. */
 const REPO_ROOT = resolve(import.meta.dir, '..')
 
+/** The one gitignored dir in this checkout where private output may live. */
+const PRIVATE_DIR = '.bench-private'
+
+/**
+ * The spelling the filesystem writes `path` to: its nearest existing ancestor
+ * resolved through every link, with the rest re-appended. A path that does not
+ * exist yet resolves too, so a dir reached through a link, or under a linked
+ * temp dir, compares as the place a write would land.
+ */
+export function realPathOf(path: string): string {
+  const rest: string[] = []
+  for (let head = resolve(path); ; ) {
+    try {
+      return join(realpathSync(head), ...rest)
+    } catch {
+      const parent = dirname(head)
+      if (parent === head) return resolve(path)
+      rest.unshift(basename(head))
+      head = parent
+    }
+  }
+}
+
+/** `path` is `dir` or sits under it at a separator boundary. Both are real, absolute spellings. */
+const underDir = (path: string, dir: string): boolean => path === dir || path.startsWith(dir.endsWith(sep) ? dir : dir + sep)
+
+/**
+ * True when `path` lands inside this checkout but outside its private dir.
+ * Private output there can be tracked, or folded into the public records, so
+ * only the gitignored private dir is a legal place for it inside the checkout.
+ */
+export function inCheckoutOutsidePrivateDir(path: string, repoRoot: string = REPO_ROOT): boolean {
+  const at = realPathOf(path)
+  const root = realPathOf(repoRoot)
+  return underDir(at, root) && !underDir(at, join(root, PRIVATE_DIR))
+}
+
+/**
+ * Refuse a shakedown scratch dir that could put its unbound records where they
+ * would be counted or published: inside this checkout outside its private dir
+ * (the tracked public results included), or overlapping the measured results
+ * dir in either direction. Both sides are compared as real spellings, so a link
+ * or a different spelling of the same place is refused as that place.
+ */
+export function assertScratchDir(scratchDir: string, resultsDir: string, repoRoot: string = REPO_ROOT): void {
+  if (inCheckoutOutsidePrivateDir(scratchDir, repoRoot)) {
+    throw new Error(
+      `the shakedown scratch dir is inside this checkout outside ${PRIVATE_DIR}/, where its private records could be tracked or folded into the public records`,
+    )
+  }
+  const scratch = realPathOf(scratchDir)
+  const results = realPathOf(resultsDir)
+  if (underDir(scratch, results) || underDir(results, scratch)) {
+    throw new Error('the shakedown scratch dir must never be the measured results dir, contain it, or sit inside it')
+  }
+}
+
 /**
  * A path relative to a home or a snapshot: not empty, not absolute, and no
  * empty, `.` or `..` segment. Normalised by construction, so a plain string
@@ -245,7 +302,12 @@ export const PrivateConfigSchema = z
       .min(1),
     links: z.strictObject({
       from: AbsolutePath,
-      packages: z.array(RelativePath.refine((p) => p !== 'warpline', "'warpline' is linked to this checkout, never to the fleet's install")),
+      packages: z.array(
+        RelativePath.refine(
+          (p) => p !== 'warpline' && !p.startsWith('warpline/'),
+          "'warpline' and everything under it is this checkout, never the fleet's install, and linking under it would write into the checkout",
+        ),
+      ),
     }),
     pathsSeam: z.strictObject({ module: RelativePath, exports: z.array(z.string().min(1)).min(1) }),
     envScrub: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]*$/)),
@@ -272,6 +334,9 @@ export const PrivateConfigSchema = z
   .superRefine((config, ctx) => {
     const issue = (message: string): void => ctx.addIssue({ code: 'custom', message })
     if (config.fleetDir === config.warplineHomeDir) issue('fleetDir and warplineHomeDir must differ')
+    // Private output inside the checkout can be tracked, or folded into the public records.
+    if (inCheckoutOutsidePrivateDir(config.resultsDir)) issue(`resultsDir is inside this checkout outside ${PRIVATE_DIR}/`)
+    if (inCheckoutOutsidePrivateDir(config.snapshot.dir)) issue(`snapshot.dir is inside this checkout outside ${PRIVATE_DIR}/`)
     const plugins = new Set(config.plugins)
     for (const { plugin } of config.copyMap) {
       if (!plugins.has(plugin)) issue(`copyMap names '${plugin}', which is not a configured plugin`)

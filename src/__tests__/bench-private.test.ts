@@ -36,6 +36,7 @@ import {
   assertPluginsPresent,
   assertPrivatePreconditions,
   assertPrivateSeam,
+  assertScratchDir,
   assertSnapshotDigest,
   BIND_KEYS,
   commitment,
@@ -1958,6 +1959,89 @@ describe('private set ordering', () => {
       const { deps } = orderSpies(digest)
       await expect(runPrivateWarmup(config, deps)).rejects.toThrow(/belongs BEFORE the measured set/)
     })
+  })
+})
+
+describe('private output paths', () => {
+  // Pure path checks: nothing is created inside the checkout, and any probe
+  // name is removed afterwards whatever happens.
+  const pid = process.pid
+  const probes = [
+    join(REPO_ROOT, `scratch-probe-${pid}`),
+    join(REPO_ROOT, `snap-probe-${pid}`),
+    join(REPO_ROOT, '.bench-private', `shakedown-probe-${pid}`),
+    join(REPO_ROOT, '.bench-private', `results-probe-${pid}`),
+  ]
+  const removeProbes = (): void => {
+    for (const probe of probes) rmSync(probe, { recursive: true, force: true })
+  }
+
+  // Each row gets a temp dir holding an existing results dir and a link to it.
+  const SCRATCH_ROWS: [string, (dir: string, results: string) => string, RegExp | null][] = [
+    ['a link to the results dir', (dir) => join(dir, 'link'), /scratch/],
+    ["the results dir's parent", (dir) => dir, /scratch/],
+    ['a child of the results dir', (_dir, results) => join(results, 'sub'), /scratch/],
+    ["the checkout's tracked public results", () => join(REPO_ROOT, 'bench', 'results'), /checkout/],
+    ['a new dir at the checkout root', () => join(REPO_ROOT, `scratch-probe-${pid}`), /checkout/],
+    ['a sibling temp dir', (dir) => join(dir, 'sibling'), null],
+    ["a dir under the checkout's private dir", () => join(REPO_ROOT, '.bench-private', `shakedown-probe-${pid}`), null],
+  ]
+  test.each(SCRATCH_ROWS)('scratch dir: %s', async (_name, scratchOf, refused) => {
+    try {
+      await withScratch((dir) => {
+        const results = join(dir, 'results')
+        mkdirSync(results)
+        symlinkSync(results, join(dir, 'link'), 'dir')
+        const check = (): void => assertScratchDir(scratchOf(dir, results), results)
+        if (refused) expect(check).toThrow(refused)
+        else expect(check).not.toThrow()
+      })
+    } finally {
+      removeProbes()
+    }
+  })
+
+  test('a shakedown pointed at the measured results dir through a link is refused before anything runs', async () => {
+    await withFrozenFleet(async ({ root, config, digest }) => {
+      mkdirSync(config.resultsDir)
+      symlinkSync(config.resultsDir, join(root, 'results-link'), 'dir')
+      const { calls, deps } = orderSpies(digest)
+      await expect(runPrivateShakedown(config, join(root, 'results-link'), deps)).rejects.toThrow(/scratch/)
+      expect(calls).toEqual([])
+      expect(noRecords(config.resultsDir)).toBe(true)
+    })
+  })
+
+  // Paths only, like the seeding refusals above.
+  const base = ((): PrivateConfig => {
+    const fleet = buildSyntheticFleet()
+    rmSync(fleet.root, { recursive: true, force: true })
+    return fleet.config
+  })()
+  const parse = (mutate: (config: PrivateConfig) => void) => {
+    const config = structuredClone(base)
+    mutate(config)
+    try {
+      return PrivateConfigSchema.safeParse(config)
+    } finally {
+      removeProbes()
+    }
+  }
+
+  const OUTPUT_DIR_ROWS: [string, (config: PrivateConfig) => void, string | null][] = [
+    ["a results dir at the checkout's tracked public results", (c) => (c.resultsDir = join(REPO_ROOT, 'bench', 'results')), 'resultsDir'],
+    ['a snapshot dir at the checkout root', (c) => (c.snapshot.dir = join(REPO_ROOT, `snap-probe-${pid}`)), 'snapshot.dir'],
+    ["a results dir under the checkout's private dir", (c) => (c.resultsDir = join(REPO_ROOT, '.bench-private', `results-probe-${pid}`)), null],
+  ]
+  test.each(OUTPUT_DIR_ROWS)('the config output dirs: %s', (_name, mutate, refusedField) => {
+    const result = parse(mutate)
+    expect(result.success).toBe(refusedField === null)
+    if (refusedField) expect(result.error?.issues.map((issue) => issue.message).join('\n')).toContain(refusedField)
+  })
+
+  test('the config refuses a linked package at or under warpline, which is this checkout', () => {
+    expect(parse((c) => (c.links.packages = ['warpline/x'])).success).toBe(false)
+    expect(parse((c) => (c.links.packages = ['zod'])).success).toBe(true)
   })
 })
 
