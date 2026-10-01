@@ -750,10 +750,14 @@ export function assertFleetInstall(packageJsonPath: string, expected: string = P
  * measured set is closed. The ledger is read from the checkout, so it is the
  * committed ledger only when the tree is clean, which the entry point refuses
  * to start without.
+ *
+ * `allowClosed` is the audit's opt-in, and only the audit's. It admits a
+ * results line so a closed set's method can still be re-derived. The gate
+ * never passes it, so a closed set never starts or resumes.
  */
-export function readPreregCommitment(repoRoot: string): string {
+export function readPreregCommitment(repoRoot: string, opts: { allowClosed?: boolean } = {}): string {
   const entries = parseCommitments(readFileSync(join(repoRoot, COMMITMENTS_FILE), 'utf8'))
-  if (entries.some((entry) => entry.kind === 'results')) {
+  if (!opts.allowClosed && entries.some((entry) => entry.kind === 'results')) {
     throw new Error(`a results commitment already exists in ${COMMITMENTS_FILE} — the measured set is closed`)
   }
   const prereg = entries.filter((entry) => entry.kind === 'prereg')
@@ -916,9 +920,15 @@ export function preregCommitment(config: PrivateConfig): string {
  * config, and only after the config's own digest equals the document's
  * `config_sha256`, so an edited config is refused here, inside the gate or
  * outside it, before any check id is read.
+ *
+ * With `allowClosed` set, it is the audit read: it re-derives the method from a
+ * closed ledger, to re-summarise the records the results line binds. Every
+ * check above still runs. HEAD is never compared here, and the freeze commit
+ * is found by walking HEAD's own history, so it is an ancestor of HEAD by
+ * construction. The gate passes nothing, so it still refuses a closed set.
  */
-export function readFrozenMethod(config: PrivateConfig, repoRoot: string): FrozenMethod {
-  const hex = readPreregCommitment(repoRoot)
+export function readFrozenMethod(config: PrivateConfig, repoRoot: string, opts: { allowClosed?: boolean } = {}): FrozenMethod {
+  const hex = readPreregCommitment(repoRoot, opts)
   const { doc, hex: derived } = preregDocument(config)
   if (derived !== hex) {
     throw new Error('the configured pre-registration does not reproduce the committed prereg commitment, so it is not the document that was frozen')
