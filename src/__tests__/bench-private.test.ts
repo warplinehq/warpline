@@ -511,6 +511,51 @@ describe('private warpline arm, end to end', () => {
       expect(JSON.parse(readFileSync(join(home, '.fleet/state/alpha.json'), 'utf8')).run).toBe('fresh')
     })
   })
+
+  test('a handler that skips itself is never graded on the stale output the snapshot carries, though the run log says completed', async () => {
+    await withFleet(async ({ root, config }) => {
+      // The handler returns `skipped` without writing anything, the way a plugin
+      // behind its own gate does. The stale output it leaves behind would pass
+      // its check, so only the copy decision can fail it.
+      writeTree(join(root, 'repo'), {
+        '.fleet/plugins/alpha/handler.ts': `import { skillOk } from 'warpline/unstable-result'
+
+export const handler = async () => ({ ...skillOk('alpha: skipped, gated off'), status: 'skipped' as const })
+`,
+        '.fleet/state/alpha.json': '{"items":[1],"run":"stale"}',
+      })
+      await takeSnapshot(config)
+      scrubEnv(config.envScrub)
+      const home = mkdtempSync(join(root, 'home-'))
+      process.env.WARPLINE_HOME = await seedPrivateHome(home, config)
+      await assertPrivateSeam(home, config)
+
+      const arm = await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap))
+
+      const log = RunLogSchema.parse(JSON.parse(readFileSync(arm.advance.run_log_path, 'utf8')))
+      expect(log.plugin_entries.find((entry) => entry.plugin === 'alpha')?.status).toBe('completed')
+      expect(existsSync(join(home, 'graded/check-1.json'))).toBe(false)
+      expect(gradeWithChecks(home, config.checks).paths['check-1']).toBe(false)
+    })
+  })
+
+  test('a success the engine recorded for a different run is not this advance’s, so nothing is graded', async () => {
+    await withFleet(async ({ root, config }) => {
+      await takeSnapshot(config)
+      scrubEnv(config.envScrub)
+      const home = mkdtempSync(join(root, 'home-'))
+      process.env.WARPLINE_HOME = await seedPrivateHome(home, config)
+      await assertPrivateSeam(home, config)
+
+      const arm = await runWarplineArm(home, privatePluginsDir(home, config), () => {})
+      expect(existsSync(join(home, '.fleet/state/alpha.json'))).toBe(true)
+
+      materializeCopyMap(home, { ...arm.advance, run_id: 'a-different-run' }, config.copyMap)
+      expect(existsSync(join(home, 'graded/check-1.json'))).toBe(false)
+      materializeCopyMap(home, arm.advance, config.copyMap)
+      expect(existsSync(join(home, 'graded/check-1.json'))).toBe(true)
+    })
+  })
 })
 
 /** Indices of the lines that differ between two texts of the same line count. */

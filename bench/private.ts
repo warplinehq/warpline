@@ -19,7 +19,8 @@ import { copyFile, cp, mkdir, readFile, symlink, writeFile } from 'node:fs/promi
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { AdvanceResult } from 'warpline'
-import { RunLogSchema } from 'warpline/schemas/run-log'
+import { warplineHome } from 'warpline/lib/paths'
+import { EngineStateSchema } from 'warpline/schemas/engine-state'
 import { loadPluginManifests } from 'warpline/unstable-runtime'
 import { z } from 'zod'
 import { GradeCheckSchema } from './grade.js'
@@ -397,16 +398,30 @@ export async function assertPrivateSeam(home: string, config: PrivateConfig): Pr
 
 /**
  * Put each mapped deterministic output at its graded path, but only for a
- * plugin THIS advance's run log records as `completed`. The snapshot carries
- * the fleet's previous outputs, so a file that merely exists may be stale, and
- * grading it would credit this run with work it did not do.
+ * plugin the engine's own record says ran in THIS advance and succeeded. The
+ * snapshot carries the fleet's previous outputs, so a file that merely exists
+ * may be stale, and grading it would credit this run with work it did not do.
+ *
+ * The run log is not that record. It writes `completed` for every handler that
+ * returned without failing, which includes one that skipped itself behind its
+ * own gate and wrote nothing. The engine state keeps the handler's own status
+ * and the run that wrote it, so a `skipped` plugin, or one this advance never
+ * wrote, leaves its graded file absent, and its check fails.
+ *
+ * The engine state lives under the warpline home the advance just ran in,
+ * which is the one `warplineHome()` names until the caller changes it.
  */
 export function materializeCopyMap(home: string, advance: AdvanceResult, copyMap: PrivateConfig['copyMap']): void {
-  const log = RunLogSchema.parse(JSON.parse(readFileSync(advance.run_log_path, 'utf8')))
-  const completed = new Set(log.plugin_entries.filter((entry) => entry.status === 'completed').map((entry) => entry.plugin))
+  const statePath = join(warplineHome(), 'state', 'engine-state.json')
+  if (!existsSync(statePath)) return
+  const runs = EngineStateSchema.parse(JSON.parse(readFileSync(statePath, 'utf8'))).plugin_runs
+  const ran = (plugin: string): boolean => {
+    const run = Object.hasOwn(runs, plugin) ? runs[plugin] : undefined
+    return run?.run_id === advance.run_id && (run.status === 'success' || run.status === 'partial')
+  }
   for (const { plugin, from, to } of copyMap) {
     const source = join(home, from)
-    if (!completed.has(plugin) || !existsSync(source)) continue
+    if (!ran(plugin) || !existsSync(source)) continue
     const destination = join(home, to)
     mkdirSync(dirname(destination), { recursive: true })
     copyFileSync(source, destination)
