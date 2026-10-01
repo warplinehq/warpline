@@ -2240,12 +2240,23 @@ describe('private output paths', () => {
   })
 })
 
-/** A directory holding a `claude` that refuses with exit 97, removed after the file's tests. */
+/**
+ * A directory holding a `claude` that refuses with exit 97, first on this
+ * process's PATH while the file runs, then removed. An in-process session
+ * builds its env from `process.env`, so it finds the stub. A spawn left to
+ * the default env does not: bun 1.3.11 hands a child the environment the
+ * process started with. That is why every other spawn must name git.
+ */
 const STUB_DIR = mkdtempSync(join(tmpdir(), 'bench-private-stub-'))
 const STUB_CLAUDE = join(STUB_DIR, 'claude')
 writeFileSync(STUB_CLAUDE, "#!/bin/sh\necho 'a test reached the command-line tool' >&2\nexit 97\n")
 chmodSync(STUB_CLAUDE, 0o755)
-afterAll(() => rmSync(STUB_DIR, { recursive: true, force: true }))
+const INHERITED_PATH = process.env.PATH
+process.env.PATH = `${STUB_DIR}:${INHERITED_PATH ?? ''}`
+afterAll(() => {
+  process.env.PATH = INHERITED_PATH
+  rmSync(STUB_DIR, { recursive: true, force: true })
+})
 
 /**
  * Every command-line spawn in this file, in a subprocess from the checkout
@@ -2275,7 +2286,8 @@ function bench(...args: string[]): { status: number | null; stdout: string; stde
 /**
  * What in `source` could spawn the real tool without the refusing stub. Only
  * `benchSpawn` passes the stub on PATH, so it must hold the file's one
- * `spawnSync`, and the harness may be named on its delegate line alone.
+ * `spawnSync`, the harness may be named on its delegate line alone, and every
+ * `execFileSync` must spawn git.
  */
 function spawnSiteOffenders(source: string): string[] {
   const offenders: string[] = []
@@ -2287,7 +2299,8 @@ function spawnSiteOffenders(source: string): string[] {
   const delegate = `  return benchSpawn('bun', ['${harness}', ...args])`
   if (harnessLines.length !== 1 || harnessLines[0] !== delegate) offenders.push(...harnessLines.filter((line) => line !== delegate))
   if (count(['Bun', 'spawn'].join('.')) > 0) offenders.push(['Bun', 'spawn'].join('.'))
-  if (count(['execFileSync', "('bun'"].join('')) > 0) offenders.push(['execFileSync', "('bun'"].join(''))
+  const exec = ['execFile', 'Sync('].join('')
+  offenders.push(...source.split(exec).slice(1).filter((rest) => !rest.startsWith("'git',")).map((rest) => exec + rest.split('\n')[0]))
   offenders.push(...(source.match(new RegExp(`(^|[^\\w.$])${['spa', 'wn'].join('')}\\(`, 'gm')) ?? []))
   return offenders
 }
