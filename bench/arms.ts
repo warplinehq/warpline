@@ -759,20 +759,33 @@ function toolResultText(block: Record<string, unknown>): string {
  * by a subagent, whose tool uses appear in the same stream — or a provider-side
  * web request. Each throws `OutboundConfigError`. A blocked attempt is the arm's
  * own behaviour under the rule every arm shares, so the run is kept and counted.
+ *
+ * It fails closed: missing configuration evidence is itself a configuration
+ * failure. No init event, an init event without its tool list or server list, a
+ * result without server tool counts, or a count that is not a number, each
+ * throws. Read as empty or zero instead, a change in the CLI's stream format
+ * would leave every check here vacuous while the audit still returned a count,
+ * and a format change has to stop the set rather than hollow out its isolation.
+ *
+ * At least one init event is required and every one is audited. Not exactly
+ * one: the hole was an absent init, and nothing shows how many a long session
+ * can emit, so a stricter count would refuse paid runs on no evidence.
  */
 export function auditTranscript(events: readonly unknown[], result: unknown, arm: ArmId): number {
   const removed: ReadonlySet<string> = new Set(ISOLATION_REMOVED_TOOLS)
   let blocked = 0
+  let inits = 0
   for (const raw of events) {
     const event = asRecord(raw)
     if (event.type === 'system' && event.subtype === 'init') {
-      const tools = Array.isArray(event.tools) ? event.tools : []
+      inits++
+      const tools = event.tools
+      if (!Array.isArray(tools)) throw new OutboundConfigError(arm, 'the init event carries no tool list')
       for (const name of ISOLATION_REMOVED_TOOLS) {
         if (tools.includes(name)) throw new OutboundConfigError(arm, `the tool list carries ${name}`)
       }
-      if (Array.isArray(event.mcp_servers) && event.mcp_servers.length > 0) {
-        throw new OutboundConfigError(arm, 'an MCP server is configured')
-      }
+      if (!Array.isArray(event.mcp_servers)) throw new OutboundConfigError(arm, 'the init event carries no server list')
+      if (event.mcp_servers.length > 0) throw new OutboundConfigError(arm, 'an MCP server is configured')
     }
     if (event.type === 'assistant') {
       for (const block of contentBlocks(event)) {
@@ -787,12 +800,20 @@ export function auditTranscript(events: readonly unknown[], result: unknown, arm
       }
     }
   }
-  const serverTools = asRecord(asRecord(asRecord(result).usage).server_tool_use)
-  for (const key of ['web_search_requests', 'web_fetch_requests']) {
+  if (inits === 0) {
+    throw new OutboundConfigError(arm, 'the session reported no init event, so its configuration cannot be audited')
+  }
+  const rawServerTools = asRecord(asRecord(result).usage).server_tool_use
+  if (rawServerTools === null || typeof rawServerTools !== 'object' || Array.isArray(rawServerTools)) {
+    throw new OutboundConfigError(arm, 'the provider usage carries no server tool counts')
+  }
+  const serverTools = rawServerTools as Record<string, unknown>
+  for (const key of ['web_search_requests', 'web_fetch_requests'] as const) {
     const count = serverTools[key]
-    if (typeof count === 'number' && count > 0) {
-      throw new OutboundConfigError(arm, 'the provider reports web requests')
+    if (typeof count !== 'number' || !Number.isFinite(count)) {
+      throw new OutboundConfigError(arm, `the provider usage does not report ${key}`)
     }
+    if (count > 0) throw new OutboundConfigError(arm, 'the provider reports web requests')
   }
   return blocked
 }

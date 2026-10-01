@@ -1151,6 +1151,26 @@ describe('bench harness — the isolated sessions', () => {
       [STREAM_INIT],
       { ...STREAM_RESULT, usage: { ...STREAM_RESULT.usage, server_tool_use: { web_search_requests: 0, web_fetch_requests: 1 } } },
     ],
+    // A missing piece of configuration evidence is a failure, never a clean read.
+    ['no init event', [BASH_USE], STREAM_RESULT],
+    ['an init event with no tool list', [{ type: 'system', subtype: 'init', mcp_servers: [] }], STREAM_RESULT],
+    ['an init event with no server list', [{ type: 'system', subtype: 'init', tools: ['Bash', 'Read'] }], STREAM_RESULT],
+    [
+      'a result with no server tool counts',
+      [STREAM_INIT],
+      { ...STREAM_RESULT, usage: { ...STREAM_RESULT.usage, server_tool_use: undefined } },
+    ],
+    [
+      'a server tool count that is not reported',
+      [STREAM_INIT],
+      { ...STREAM_RESULT, usage: { ...STREAM_RESULT.usage, server_tool_use: { web_search_requests: 0 } } },
+    ],
+    [
+      'a server tool count that is not a number',
+      [STREAM_INIT],
+      { ...STREAM_RESULT, usage: { ...STREAM_RESULT.usage, server_tool_use: { web_search_requests: 0, web_fetch_requests: '0' } } },
+    ],
+    ['a second init event carrying a removed tool', [STREAM_INIT, { ...STREAM_INIT, tools: ['Bash', 'WebFetch'] }], STREAM_RESULT],
   ]
 
   for (const [name, events, result] of CONFIG_FAILURES) {
@@ -1300,6 +1320,12 @@ describe('bench harness — the canary', () => {
       expect((thrown as CanaryError).blocked).toBe(0)
       expect((thrown as Error).message).toMatch(/not sandbox-blocked/)
       expect((thrown as Error).message).toMatch(/refuses to spend/)
+    })
+  })
+
+  test('a canary whose stream has no init event is a configuration failure, though an attempt was blocked', async () => {
+    await withFakeClaude({ stdout: jsonl(BASH_USE, BLOCKED_TOOL_RESULT, STREAM_RESULT) }, async () => {
+      await expect(runCanary()).rejects.toBeInstanceOf(OutboundConfigError)
     })
   })
 
