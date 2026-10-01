@@ -1646,6 +1646,41 @@ describe('private bind contract', () => {
     })
   })
 
+  test('an audit reads a closed ledger while the gate still refuses it', async () => {
+    await withMeasuredFixture(async ({ config, root, base, freeze, build }) => {
+      const open = readFrozenMethod(config, root)
+      const ledger = readFileSync(join(root, COMMITMENTS_FILE), 'utf8')
+      commitFixture(root, { [COMMITMENTS_FILE]: `${ledger}results ${RESULTS_HEX}\n` }, 'the measured set is closed')
+
+      // The gate: every path that could start or resume a measured set refuses the closed set as closed.
+      expect(() => readPreregCommitment(root)).toThrow(/results commitment already exists/)
+      expect(() => readFrozenMethod(config, root)).toThrow(/results commitment already exists/)
+      expect(() => assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build })).toThrow(
+        /results commitment already exists/,
+      )
+      expect(() => realPreconditions(config, root, { engineBase: base, build })({ requirePrereg: true })).toThrow(
+        /results commitment already exists/,
+      )
+
+      // The audit: the same frozen method, re-derived from the closed ledger at a HEAD past the freeze.
+      expect(readPreregCommitment(root, { allowClosed: true })).toBe(open.prereg_commitment)
+      expect(readFrozenMethod(config, root, { allowClosed: true })).toEqual(open)
+      expect(fixtureGit(root, ['rev-parse', 'HEAD'])).not.toBe(freeze)
+      expect(() => fixtureGit(root, ['merge-base', '--is-ancestor', freeze, 'HEAD'])).not.toThrow()
+
+      // It still binds: an edited config is refused there too.
+      config.checks[0]!.pointer = '/other'
+      expect(() => readFrozenMethod(config, root, { allowClosed: true })).toThrow(/^config_sha256 /)
+    })
+  })
+
+  test('no bench source opts into reading a closed ledger, so no gate path can', () => {
+    const benchDir = join(REPO_ROOT, 'bench')
+    for (const file of readdirSync(benchDir).filter((f) => f.endsWith('.ts'))) {
+      expect([file, readFileSync(join(benchDir, file), 'utf8').includes('allowClosed: true')]).toEqual([file, false])
+    }
+  })
+
   test('the frozen method is never read from a config edited after the freeze, even outside the gate', async () => {
     await withMeasuredFixture(async ({ config, root }) => {
       config.checks[0]!.pointer = '/other'
