@@ -56,6 +56,7 @@ import { gradeWithChecks, type GradeResult } from './grade.js'
 import {
   assertPrivatePreconditions,
   assertPrivateSeam,
+  BIND_KEYS,
   commitment,
   loadPrivateConfig,
   materializeCopyMap,
@@ -65,8 +66,10 @@ import {
   scrubEnv,
   seedPrivateControl,
   seedPrivateHome,
+  recordStamp,
   takeSnapshot,
   treeDigest,
+  type FrozenMethod,
   type PrivateConfig,
   type PrivateStamp,
 } from './private.js'
@@ -504,34 +507,50 @@ const ONE_CONFIGURATION: readonly (readonly [keyof BenchRunRecord, string])[] = 
 ]
 
 /**
- * The private set's published rows: the public summary, over records bound to
- * the one committed method, and nothing else.
+ * Refuse unless every record is bound to the frozen method: made under its
+ * commitment, at its freeze commit, with each of its six digests, and in the
+ * private graded shape.
  *
- * This is the one gate between a record on disk and a published ratio. The
- * records sit in a gitignored dir that anything could have written, so a record
- * the method did not bind is not data, whatever else it says: one lacking the
- * commitment or the snapshot digest, one under another commitment, one in the
- * public graded shape, and any set whose snapshot, package, tool, model or
- * commit varies. The model for these refusals is the tool-version refusal in
- * `runSet`, widened to every field that makes a set one configuration. After
- * them the statistics are the public module's, unchanged.
+ * The records sit in a gitignored dir that anything could have written, so a
+ * record the method did not bind is not data, whatever else it says.
+ */
+export function assertRecordsBound(runs: readonly BenchRunRecord[], frozen: FrozenMethod): void {
+  const short = (sha: string): string => sha.slice(0, 7)
+  for (const run of runs) {
+    const id = `${run.arm}-${run.iteration}`
+    if (run.prereg_commitment === undefined) throw new Error(`${id} carries no prereg commitment, so it is not data for a private set`)
+    if (run.prereg_commitment !== frozen.prereg_commitment) {
+      throw new Error(`${id} was made under another prereg commitment than the committed one, so it is not data for this set`)
+    }
+    for (const key of BIND_KEYS) {
+      if (run[key] === undefined) throw new Error(`${id} carries no ${key}, so its method is unbound`)
+      if (run[key] !== frozen[key]) throw new Error(`${id} carries a ${key} other than the frozen one`)
+    }
+    if (run.git_sha !== frozen.freeze_commit) {
+      throw new Error(`${id} carries git_sha ${short(run.git_sha)} where the method was frozen at ${short(frozen.freeze_commit)}`)
+    }
+    if ('announce-fanout' in run.graded) throw new Error(`${id} is graded in the public workload's shape, so it is not a private record`)
+  }
+}
+
+/**
+ * The private set's published rows: the public summary, over records bound to
+ * the one frozen method, and nothing else.
+ *
+ * This is the one gate between a record on disk and a published ratio. Every
+ * record must pass `assertRecordsBound`, and the set must be one configuration:
+ * the model for that refusal is the tool-version refusal in `runSet`, widened
+ * to every field that makes a set one. After them the statistics are the
+ * public module's, unchanged.
  *
  * It summarises a set `runSet` finished. Called mid-set, an arm with no warm
  * run yet throws from the statistics module, and that is not a shortfall.
  */
-export async function summarisePrivate(resultsDir: string, prereg: string): Promise<SetSummary> {
+export async function summarisePrivate(resultsDir: string, frozen: FrozenMethod): Promise<SetSummary> {
   const { runs } = await resumeState(resultsDir)
   if (runs.length === 0) throw new Error(`blind: no record in ${resultsDir} to summarise`)
 
-  for (const run of runs) {
-    const id = `${run.arm}-${run.iteration}`
-    if (run.prereg_commitment === undefined) throw new Error(`${id} carries no prereg commitment, so it is not data for a private set`)
-    if (run.prereg_commitment !== prereg) {
-      throw new Error(`${id} was made under another prereg commitment than the committed one, so it is not data for this set`)
-    }
-    if (run.snapshot_sha256 === undefined) throw new Error(`${id} carries no snapshot digest, so its input is unbound`)
-    if ('announce-fanout' in run.graded) throw new Error(`${id} is graded in the public workload's shape, so it is not a private record`)
-  }
+  assertRecordsBound(runs, frozen)
 
   for (const [field, words] of ONE_CONFIGURATION) {
     const values = new Set(runs.map((run) => run[field]))
@@ -715,7 +734,7 @@ export function privateHooks(config: PrivateConfig, stamp: PrivateStamp): Privat
 
 /** Everything a private entry point may be handed in place of the real thing. */
 export interface PrivateSetDeps {
-  preconditions?: (options: { requirePrereg: boolean }) => PrivateStamp
+  preconditions?: (options: { requirePrereg: boolean }) => PrivateStamp | FrozenMethod
   canary?: () => Promise<number>
   runner?: ArmRunner
   provenance?: ProvenanceReader
@@ -749,7 +768,7 @@ function realPreconditions(config: PrivateConfig): NonNullable<PrivateSetDeps['p
  * sandbox refuses before the first paid session. Each step throws, and a throw
  * here runs no arm and writes no record.
  */
-async function privateGate(config: PrivateConfig, deps: PrivateSetDeps, requirePrereg: boolean): Promise<PrivateStamp> {
+async function privateGate(config: PrivateConfig, deps: PrivateSetDeps, requirePrereg: boolean): Promise<PrivateStamp | FrozenMethod> {
   scrubEnv(config.envScrub)
   const stamp = (deps.preconditions ?? realPreconditions(config))({ requirePrereg })
   await (deps.canary ?? runCanary)()
@@ -771,15 +790,15 @@ export async function runPrivateSet(
   config: PrivateConfig,
   deps: PrivateSetDeps = {},
 ): Promise<{ summary: SetSummary; agreement: AgreementReport }> {
-  const stamp = await privateGate(config, deps, true)
+  const frozen = (await privateGate(config, deps, true)) as FrozenMethod
   await runSet({
     runner: deps.runner ?? makePrivateRunner(config),
     resultsDir: config.resultsDir,
     notesSource: config.notes,
     provenance: deps.provenance ?? readProvenance,
-    privateHooks: privateHooks(config, stamp),
+    privateHooks: privateHooks(config, recordStamp(frozen)),
   })
-  const summary = await summarisePrivate(config.resultsDir, stamp.prereg_commitment as string)
+  const summary = await summarisePrivate(config.resultsDir, frozen)
   const agreement = agreementVerdict(summary, await summariseSet(deps.publicResultsDir ?? join(REPO_ROOT, 'bench/results')))
   return { summary, agreement }
 }

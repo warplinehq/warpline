@@ -123,6 +123,16 @@ export const BenchRunRecordSchema = z.object({
   snapshot_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   /** The salted public commitment of the method this run was made under. Absent on a run whose method is tracked in full. */
   prereg_commitment: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** The digest of the build this run executed, its consumer skills included. Absent on a run whose method is tracked in full. */
+  build_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** The digest of the control arms' prompt this run's method froze. Absent on a run whose method is tracked in full. */
+  agent_prompt_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** The digest of the consumer's prompt this run's method froze. Absent on a run whose method is tracked in full. */
+  consumer_prompt_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** The digest of the notes the with-state arm is handed under this run's method. Absent on a run whose method is tracked in full. */
+  notes_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  /** The digest of the private config, checks included, this run's method froze. Absent on a run whose method is tracked in full. */
+  config_sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   /** How many outbound attempts the session sandbox blocked. Absent on a run that had no sandbox to count them. */
   outbound_blocked: z.number().int().nonnegative().optional(),
 })

@@ -14,8 +14,20 @@
  */
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+} from 'node:fs'
 import { copyFile, cp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { AdvanceResult } from 'warpline'
@@ -105,12 +117,85 @@ export function treeDigest(root: string): string {
 }
 
 /**
- * What binds a private record to its input and its method: the snapshot digest
- * always, and the prereg commitment whenever the set is a measured one.
+ * The six digests that bind a measured record to the method that was frozen:
+ * the snapshot it was seeded from, the build that ran, both prompts, the notes
+ * and the config, which carries the checks. Their order is the order of the
+ * bind lines in the private pre-registration.
  */
-export interface PrivateStamp {
+export const BIND_KEYS = [
+  'snapshot_sha256',
+  'build_sha256',
+  'agent_prompt_sha256',
+  'consumer_prompt_sha256',
+  'notes_sha256',
+  'config_sha256',
+] as const
+export type BindKey = (typeof BIND_KEYS)[number]
+
+/** One 64-hex digest per bound input. */
+export type MethodBindings = Record<BindKey, string>
+
+/**
+ * What binds a private record to its input and its method: the snapshot digest
+ * always, and on a measured record the prereg commitment and the other five
+ * digests as well.
+ */
+export interface PrivateStamp extends Partial<Omit<MethodBindings, 'snapshot_sha256'>> {
   snapshot_sha256: string
   prereg_commitment?: string
+}
+
+/**
+ * The method a measured set is bound to, read from the committed private
+ * pre-registration: its six digests, its public commitment, the commit that
+ * froze it, and the check ids every record must be graded on.
+ */
+export interface FrozenMethod extends MethodBindings {
+  prereg_commitment: string
+  freeze_commit: string
+  check_ids: readonly string[]
+}
+
+/**
+ * What a measured record is stamped with: the six digests and the commitment,
+ * and nothing else. The freeze commit reaches a record as its `git_sha`, and
+ * the check ids as its graded keys, so neither is copied in a second time.
+ */
+export function recordStamp(frozen: FrozenMethod): PrivateStamp {
+  const stamp: PrivateStamp = { snapshot_sha256: frozen.snapshot_sha256, prereg_commitment: frozen.prereg_commitment }
+  for (const key of BIND_KEYS) stamp[key] = frozen[key]
+  return stamp
+}
+
+/** One `bind <key> <hex>` line per key, in key order, each newline-terminated. */
+export function formatBindings(bindings: MethodBindings): string {
+  return BIND_KEYS.map((key) => `bind ${key} ${bindings[key]}\n`).join('')
+}
+
+const BIND_LINE = /^bind ([a-z0-9_]+) ([0-9a-f]{64})$/
+
+/**
+ * The bindings a pre-registration states. A line that starts with the word
+ * `bind` is a binding and must be well formed; every other line is prose.
+ * Exactly one line per key: a missing, duplicate or unknown key is refused, as
+ * is a malformed binding line, which is named by its 1-based number and never
+ * by its text.
+ */
+export function parseBindings(text: string): MethodBindings {
+  const found = new Map<string, string>()
+  text.split('\n').forEach((line, i) => {
+    if (!/^bind(\s|$)/.test(line)) return
+    const m = BIND_LINE.exec(line)
+    if (!m) throw new Error(`bindings: line ${i + 1} is not a bind line of a key and 64 lowercase hex`)
+    const [, key, hex] = m as unknown as [string, string, string]
+    if (!(BIND_KEYS as readonly string[]).includes(key)) throw new Error(`bindings: line ${i + 1} binds the unknown key '${key}'`)
+    if (found.has(key)) throw new Error(`bindings: '${key}' is bound twice — a method binds each input once`)
+    found.set(key, hex)
+  })
+  for (const key of BIND_KEYS) {
+    if (!found.has(key)) throw new Error(`bindings: no bind line for '${key}', so that input is unbound`)
+  }
+  return Object.fromEntries(BIND_KEYS.map((key) => [key, found.get(key)!])) as MethodBindings
 }
 
 /** The checkout root, which is also the package root a seeded fleet resolves `warpline` to. */
@@ -176,6 +261,13 @@ export const PrivateConfigSchema = z
     ),
     checks: z.array(GradeCheckSchema).min(1),
     resultsDir: AbsolutePath,
+    /**
+     * The private pre-registration and its salt, both outside this repository.
+     * The measured gate re-derives the committed prereg digest from this pair
+     * before it reads a binding. The block is inside the config digest, so it
+     * is set before the bindings are printed.
+     */
+    prereg: z.strictObject({ doc: AbsolutePath, salt: AbsolutePath }).optional(),
   })
   .superRefine((config, ctx) => {
     const issue = (message: string): void => ctx.addIssue({ code: 'custom', message })
@@ -579,6 +671,129 @@ export function assertSnapshotDigest(config: PrivateConfig): string {
   return actual
 }
 
+/** git in `repoRoot`, stdout trimmed, stderr kept off the terminal. */
+function git(repoRoot: string, args: string[]): string {
+  return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+}
+
+/** The ledger as committed at `commit`. A commit without the file has an empty ledger. */
+function ledgerAt(repoRoot: string, commit: string): CommitmentLine[] {
+  let blob: string
+  try {
+    blob = git(repoRoot, ['rev-parse', '--verify', '--quiet', `${commit}:${COMMITMENTS_FILE}`])
+  } catch {
+    return []
+  }
+  return parseCommitments(execFileSync('git', ['cat-file', 'blob', blob], { cwd: repoRoot, encoding: 'utf8' }))
+}
+
+/**
+ * The freeze commit: the first commit, over full history, whose ledger holds
+ * the line `prereg <prereg>`. The ledger is append-only, so that is the commit
+ * that introduced it.
+ *
+ * A shallow clone is refused, because a walk over history it cannot see would
+ * name a later commit or none. No commit holding the line is refused too: a
+ * line in the checkout that history never recorded has no freeze to bind to.
+ */
+export function freezeCommit(repoRoot: string, prereg: string): string {
+  if (git(repoRoot, ['rev-parse', '--is-shallow-repository']) !== 'false') {
+    throw new Error('shallow clone: the freeze commit cannot be found over history this checkout cannot see — a refusal, never a pass')
+  }
+  const touching = [
+    ...new Set(
+      git(repoRoot, ['-c', 'log.showSignature=false', 'log', '--full-history', '-m', '--topo-order', '--reverse', '--format=%H', '--', COMMITMENTS_FILE])
+        .split('\n')
+        .filter(Boolean),
+    ),
+  ]
+  const found = touching.find((c) => ledgerAt(repoRoot, c).some((entry) => entry.kind === 'prereg' && entry.hex === prereg))
+  if (found === undefined) throw new Error(`blind: no commit introduces the committed prereg line in ${COMMITMENTS_FILE}`)
+  return found
+}
+
+/**
+ * The digest of what a measured run executes, refused unless `dist/` is a
+ * fresh build of this checkout.
+ *
+ * `warpline` resolves through the package's exports map into the gitignored
+ * `dist/`: the arms import it, and so, through the seeded link, do the fleet's
+ * handlers. The consumer's skills load from `plugin/`. Neither is seen by the
+ * engine diff or the clean-tree check, so the checkout is built again into a
+ * temp dir and `dist/` must match it byte for byte. The build emits no source
+ * maps, so a build into another dir changes no byte. The digest covers both
+ * trees.
+ *
+ * `build` is a fixture seam. Absent, it is this checkout's own compiler.
+ */
+export function freshBuildDigest(repoRoot: string, build?: (outDir: string) => void): string {
+  const out = mkdtempSync(join(tmpdir(), 'warpline-bench-build-'))
+  try {
+    try {
+      ;(build ??
+        ((dir: string) =>
+          execFileSync(join(repoRoot, 'node_modules', '.bin', 'tsc'), ['-p', 'tsconfig.build.json', '--outDir', dir], {
+            cwd: repoRoot,
+            stdio: 'pipe',
+          })))(out)
+    } catch (error) {
+      throw new Error('the checkout could not be built, so what a measured run executes cannot be bound', { cause: error })
+    }
+    const dist = join(repoRoot, 'dist')
+    if (!existsSync(dist) || treeDigest(out) !== treeDigest(dist)) {
+      throw new Error('dist/ is not a fresh build of this checkout — run `bun run build` and start again')
+    }
+    return sha256hex(Buffer.from(`dist ${treeDigest(dist)}\nplugin ${treeDigest(join(repoRoot, 'plugin'))}\n`))
+  } finally {
+    rmSync(out, { recursive: true, force: true })
+  }
+}
+
+/**
+ * The six digests of the method as it stands: the snapshot (refused unless it
+ * still has the config's frozen digest), the fresh build, both prompts, the
+ * notes, and the parsed config, which binds every check, entry, path and the
+ * prereg block itself.
+ */
+export function methodBindings(config: PrivateConfig, repoRoot: string, build?: (outDir: string) => void): MethodBindings {
+  return {
+    snapshot_sha256: assertSnapshotDigest(config),
+    build_sha256: freshBuildDigest(repoRoot, build),
+    agent_prompt_sha256: sha256hex(readFileSync(config.prompts.agent)),
+    consumer_prompt_sha256: sha256hex(readFileSync(config.prompts.consumer)),
+    notes_sha256: sha256hex(readFileSync(config.notes)),
+    config_sha256: sha256hex(Buffer.from(JSON.stringify(config))),
+  }
+}
+
+/**
+ * The method the committed pre-registration states, read only after the
+ * configured document and salt re-derive the committed prereg digest, so the
+ * gate enforces the frozen document and never an editable stand-in.
+ *
+ * `check_ids` come from the live config, not from the document, and that is
+ * safe. The config is bound by `config_sha256`: the measured gate compares that
+ * digest before any check id is used, and every record's `config_sha256` is
+ * compared with the document's at summary, so an edited config fails closed.
+ * It never widens what counts.
+ */
+export function readFrozenMethod(config: PrivateConfig, repoRoot: string): FrozenMethod {
+  const hex = readPreregCommitment(repoRoot)
+  if (config.prereg === undefined) {
+    throw new Error('the config names no private pre-registration (prereg), so the frozen method cannot be read')
+  }
+  const doc = readFileSync(config.prereg.doc)
+  if (commitment(readFileSync(config.prereg.salt), doc) !== hex) {
+    throw new Error('the configured pre-registration does not reproduce the committed prereg commitment, so it is not the document that was frozen')
+  }
+  return {
+    ...parseBindings(doc.toString('utf8')),
+    prereg_commitment: hex,
+    freeze_commit: freezeCommit(repoRoot, hex),
+    check_ids: config.checks.map((check) => check.id),
+  }
+}
+
 /**
  * Every precondition of a private set, checked before the first spend, in a
  * pinned order:
@@ -588,23 +803,57 @@ export function assertSnapshotDigest(config: PrivateConfig): string {
  *   3. this checkout's package version;
  *   4. the engine unchanged since the pinned base;
  *   5. the fleet install's version;
- *   6. exactly one prereg commitment, when the set is a measured one.
+ *   6. exactly one prereg commitment, when the set is a measured one;
+ *   7. the configured pre-registration reproduces it, and its bindings are read;
+ *   8. HEAD is the commit that froze it;
+ *   9. every input digests to its frozen value, the fresh build included.
  *
  * Plugin presence is first because a missing plugin also changes the digest,
  * and the operator must be told which plugin, not that a hash moved.
  *
- * `engineBase` exists for fixture repositories, which cannot contain the
- * pinned commit. The private entry point never passes it.
+ * `engineBase` and `build` are fixture seams: a fixture repository cannot
+ * contain the pinned commit, and builds without a compiler. The private entry
+ * point never passes either.
  */
 export function assertPrivatePreconditions(
   config: PrivateConfig,
   repoRoot: string,
-  options: { requirePrereg: boolean; engineBase?: string },
-): PrivateStamp {
+  options: { requirePrereg: true; engineBase?: string; build?: (outDir: string) => void },
+): FrozenMethod
+export function assertPrivatePreconditions(
+  config: PrivateConfig,
+  repoRoot: string,
+  options: { requirePrereg: false; engineBase?: string; build?: (outDir: string) => void },
+): PrivateStamp
+export function assertPrivatePreconditions(
+  config: PrivateConfig,
+  repoRoot: string,
+  options: { requirePrereg: boolean; engineBase?: string; build?: (outDir: string) => void },
+): PrivateStamp | FrozenMethod
+export function assertPrivatePreconditions(
+  config: PrivateConfig,
+  repoRoot: string,
+  options: { requirePrereg: boolean; engineBase?: string; build?: (outDir: string) => void },
+): PrivateStamp | FrozenMethod {
   assertPluginsPresent(config.snapshot.dir, config)
   const snapshot_sha256 = assertSnapshotDigest(config)
   assertPackageVersion(repoRoot)
   assertEngineUnchanged(repoRoot, options.engineBase)
   assertFleetInstall(config.fleetInstall)
-  return options.requirePrereg ? { snapshot_sha256, prereg_commitment: readPreregCommitment(repoRoot) } : { snapshot_sha256 }
+  if (!options.requirePrereg) return { snapshot_sha256 }
+
+  const frozen = readFrozenMethod(config, repoRoot)
+  const head = git(repoRoot, ['rev-parse', 'HEAD'])
+  if (head !== frozen.freeze_commit) {
+    throw new Error(
+      `HEAD is ${short(head)} where the method was frozen at ${short(frozen.freeze_commit)} — a measured set runs the freeze commit and nothing after it`,
+    )
+  }
+  const now = methodBindings(config, repoRoot, options.build)
+  for (const key of BIND_KEYS) {
+    if (now[key] !== frozen[key]) {
+      throw new Error(`${key} is ${short(now[key])} where the method froze ${short(frozen[key])} — that input moved after the freeze`)
+    }
+  }
+  return frozen
 }

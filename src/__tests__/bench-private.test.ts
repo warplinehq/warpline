@@ -9,6 +9,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync, spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -28,27 +29,33 @@ import {
   assertPrivatePreconditions,
   assertPrivateSeam,
   assertSnapshotDigest,
+  BIND_KEYS,
   commitment,
   COMMITMENTS_FILE,
   ENGINE_BASE_SHA,
   flipAutonomy,
+  formatBindings,
   loadPrivateConfig,
   materializeCopyMap,
+  methodBindings,
   parseCommitments,
   PrivateConfigSchema,
   privatePluginsDir,
   privateWarplineHome,
   readPreregCommitment,
+  recordStamp,
   scrubEnv,
   seedPrivateControl,
   seedPrivateHome,
   takeSnapshot,
   treeDigest,
+  type FrozenMethod,
   type PrivateConfig,
 } from '../../bench/private.js'
 import { BenchRunRecordSchema, GRADED_KEYS, parseRecord } from '../../bench/record.js'
 import {
   makePrivateRunner,
+  privateHooks,
   runIteration,
   runPrivateSet,
   runPrivateShakedown,
@@ -867,11 +874,12 @@ describe('private iteration', () => {
     await withFleet(async ({ root, config }) => {
       const digest = await takeSnapshot(config)
       scrubEnv(config.envScrub)
-      const prereg = 'c'.repeat(64)
+      const frozen: FrozenMethod = { ...FROZEN, snapshot_sha256: digest }
+      const prereg = frozen.prereg_commitment
       const hooks: PrivateIterationHooks = {
         seed: (arm, home) => (arm === 'warpline' ? seedPrivateHome(home, config) : seedPrivateControl(home, arm, config)),
         warplineHomeOf: (home) => privateWarplineHome(home, config),
-        stamp: { snapshot_sha256: digest, prereg_commitment: prereg },
+        stamp: recordStamp(frozen),
       }
       const seams: { expected: string; actual: string | undefined }[] = []
       const runner: ArmRunner = async (arm, home) => {
@@ -903,7 +911,7 @@ describe('private iteration', () => {
       expect(seams).toHaveLength(2)
       for (const { expected, actual } of seams) expect(actual).toBe(expected)
 
-      const summary = await summarisePrivate(resultsDir, prereg)
+      const summary = await summarisePrivate(resultsDir, frozen)
       for (const arm of ARM_ORDER) {
         const row = summary[arm]
         expect('shortfall' in row ? row.shortfall : null).toEqual({ count: 1, threshold: 10 })
@@ -1147,12 +1155,13 @@ describe('private preconditions', () => {
     })
   })
 
-  test('with every precondition met it returns the digest and the prereg commitment', async () => {
-    await validSetup(({ config, root, base, digest }) => {
-      commitFixture(root, { [COMMITMENTS_FILE]: `prereg ${PREREG_HEX}\n` }, 'the method is frozen')
-      expect(assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base })).toEqual({
-        snapshot_sha256: digest,
-        prereg_commitment: PREREG_HEX,
+  test('with every precondition met it returns the frozen method', async () => {
+    await withMeasuredFixture(async ({ config, root, base, freeze, build }) => {
+      expect(assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build })).toEqual({
+        ...methodBindings(config, root, build),
+        prereg_commitment: readPreregCommitment(root),
+        freeze_commit: freeze,
+        check_ids: ['check-1', 'check-2'],
       })
     })
   })
@@ -1164,7 +1173,145 @@ describe('private preconditions', () => {
   })
 })
 
+/** The bytes the synthetic checkout's build emits, until a case changes them. */
+const BUILT = 'export const built = 1\n'
+
+/**
+ * Every part of a frozen method, synthetic, and removed afterwards whatever
+ * happens: the fleet with its snapshot frozen into the config, an engine
+ * fixture that also tracks a consumer skill and ignores `dist/`, an ignored
+ * `dist/` the injected build reproduces, a salt and a pre-registration outside
+ * the repository whose bind lines are the method's own, and the ledger line
+ * committed as the freeze commit. `setBuild` moves `dist/` and the build's
+ * output together.
+ */
+async function withMeasuredFixture(
+  fn: (fixture: {
+    config: PrivateConfig
+    root: string
+    base: string
+    freeze: string
+    build: (outDir: string) => void
+    setBuild: (body: string) => void
+  }) => Promise<void>,
+): Promise<void> {
+  await withFleet(async ({ root: fleetRoot, config }) => {
+    config.snapshot.sha256 = await takeSnapshot(config)
+    const { root, base } = engineFixture()
+    try {
+      commitFixture(root, { '.gitignore': 'dist/\n', 'plugin/skills/x/SKILL.md': 'a synthetic skill\n' }, 'the consumer skill')
+      let built = BUILT
+      const setBuild = (body: string): void => {
+        built = body
+        writeTree(root, { 'dist/index.js': body })
+      }
+      setBuild(BUILT)
+      const build = (outDir: string): void => writeTree(outDir, { 'index.js': built })
+      const salt = join(fleetRoot, 'salt.bin')
+      const doc = join(fleetRoot, 'prereg.md')
+      writeFileSync(salt, randomBytes(32))
+      config.prereg = { doc, salt }
+      writeFileSync(doc, `a synthetic pre-registration\n${formatBindings(methodBindings(config, root, build))}`)
+      const freeze = commitFixture(
+        root,
+        { [COMMITMENTS_FILE]: `prereg ${commitment(readFileSync(salt), readFileSync(doc))}\n` },
+        'the method is frozen',
+      )
+      await fn({ config, root, base, freeze, build, setBuild })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+}
+
+/** The message `fn` throws, or the empty string when it does not. */
+function messageOf(fn: () => unknown): string {
+  try {
+    fn()
+  } catch (error) {
+    return (error as Error).message
+  }
+  return ''
+}
+
+/** A runner shaped like the private iteration's: the real engine for warpline, a written check for a control. */
+function syntheticRunner(config: PrivateConfig): ArmRunner {
+  return async (arm, home) => {
+    if (arm === 'warpline') {
+      await assertPrivateSeam(home, config)
+      await runWarplineArm(home, privatePluginsDir(home, config), (h, a) => materializeCopyMap(h, a, config.copyMap))
+    } else {
+      writeFileSync(join(home, 'graded/check-1.json'), '{"items":[1]}')
+    }
+    writeFileSync(join(home, 'graded/check-2.json'), '{}')
+    return privateOutcome(gradeWithChecks(home, config.checks))
+  }
+}
+
+describe('private method binding', () => {
+  test('a measured set is bound end to end to the frozen pre-registration and the commit that froze it', async () => {
+    await withMeasuredFixture(async ({ config, root, base, freeze, build }) => {
+      const frozen = assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build })
+      expect(frozen.freeze_commit).toBe(freeze)
+      expect(frozen.freeze_commit).toBe(fixtureGit(root, ['rev-parse', 'HEAD']))
+      expect(frozen.prereg_commitment).toBe(readPreregCommitment(root))
+      expect(frozen).toMatchObject(methodBindings(config, root, build))
+      expect(frozen.check_ids).toEqual(['check-1', 'check-2'])
+
+      scrubEnv(config.envScrub)
+      const provenance = (model: string): Provenance => ({ ...testProvenance(model), git_sha: frozen.freeze_commit })
+      for (const iteration of [1, 2]) {
+        await runIteration({
+          iteration,
+          runner: syntheticRunner(config),
+          resultsDir: config.resultsDir,
+          notesSource: config.notes,
+          provenance,
+          privateHooks: privateHooks(config, recordStamp(frozen)),
+        })
+      }
+      const files = readdirSync(config.resultsDir).sort()
+      expect(files).toHaveLength(6)
+      for (const file of files) {
+        const raw = JSON.parse(readFileSync(join(config.resultsDir, file), 'utf8')) as Record<string, unknown>
+        for (const key of BIND_KEYS) expect(raw[key]).toBe(frozen[key])
+        expect(raw.prereg_commitment).toBe(frozen.prereg_commitment)
+        expect(raw).not.toHaveProperty('freeze_commit')
+        expect(raw).not.toHaveProperty('check_ids')
+      }
+
+      const summary = await summarisePrivate(config.resultsDir, frozen)
+      for (const arm of ARM_ORDER) {
+        const row = summary[arm]
+        expect('shortfall' in row ? row.shortfall : null).toEqual({ count: 1, threshold: 10 })
+      }
+
+      const written = JSON.parse(readFileSync(join(config.resultsDir, 'warpline-002.json'), 'utf8')) as Record<string, unknown>
+      writeFileSync(join(config.resultsDir, 'warpline-003.json'), JSON.stringify({ ...written, iteration: 3, git_sha: 'e'.repeat(40) }))
+      await expect(summarisePrivate(config.resultsDir, frozen)).rejects.toThrow(/git_sha/)
+
+      const after = commitFixture(root, { 'later.txt': 'a commit after the freeze\n' }, 'after the freeze')
+      const message = messageOf(() => assertPrivatePreconditions(config, root, { requirePrereg: true, engineBase: base, build }))
+      expect(message).toContain(freeze.slice(0, 7))
+      expect(message).toContain(after.slice(0, 7))
+    })
+  })
+})
+
 const SUMMARY_PREREG = 'c'.repeat(64)
+
+/** A frozen method for records that never touch a repository: one distinct digest per key. */
+const FROZEN: FrozenMethod = {
+  snapshot_sha256: 'd'.repeat(64),
+  build_sha256: '1'.repeat(64),
+  agent_prompt_sha256: '2'.repeat(64),
+  consumer_prompt_sha256: '3'.repeat(64),
+  notes_sha256: '4'.repeat(64),
+  config_sha256: '5'.repeat(64),
+  prereg_commitment: SUMMARY_PREREG,
+  freeze_commit: 'abcdef0',
+  check_ids: ['check-1', 'check-2'],
+}
 
 /** A bound private record with every field, so a test can vary one thing. */
 function privateSample(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1185,8 +1332,8 @@ function privateSample(overrides: Record<string, unknown> = {}): Record<string, 
     package_version: '0.5.0',
     claude_cli_version: '0.0.0 (test)',
     model_id: 'claude-opus-5',
-    snapshot_sha256: 'd'.repeat(64),
-    prereg_commitment: SUMMARY_PREREG,
+    ...recordStamp(FROZEN),
+    outbound_blocked: 0,
     ...overrides,
   }
 }
@@ -1229,7 +1376,7 @@ describe('private summary', () => {
     ['a record lacking the prereg commitment', [privateSample(), withoutField('prereg_commitment')], /agent-with-state-2 carries no prereg commitment/],
     ['a record under another commitment', [privateSample(), privateSample({ iteration: 2, cold: false, prereg_commitment: 'e'.repeat(64) })], /prereg/],
     ['a record lacking the snapshot digest', [privateSample(), withoutField('snapshot_sha256')], /snapshot/],
-    ['two snapshot digests', [privateSample(), privateSample({ iteration: 2, cold: false, snapshot_sha256: 'f'.repeat(64) })], /2 snapshot/],
+    ['two snapshot digests', [privateSample(), privateSample({ iteration: 2, cold: false, snapshot_sha256: 'f'.repeat(64) })], /snapshot_sha256/],
     ['two package versions', [privateSample(), privateSample({ iteration: 2, cold: false, package_version: '0.5.1' })], /package version/],
     ['every record on another package version', fullSet(1, () => ({ package_version: '0.4.0' })), /0\.5\.0/],
     ['two CLI versions', [privateSample(), privateSample({ iteration: 2, cold: false, claude_cli_version: '9.9.9' })], /claude_cli_version/],
@@ -1245,20 +1392,20 @@ describe('private summary', () => {
   test.each(REFUSED)('refuses %s', async (_name, records, message) => {
     await withResults(async (dir) => {
       writeRecords(dir, records)
-      await expect(summarisePrivate(dir, SUMMARY_PREREG)).rejects.toThrow(message)
+      await expect(summarisePrivate(dir, FROZEN)).rejects.toThrow(message)
     })
   })
 
   test('refuses an empty results dir', async () => {
     await withResults(async (dir) => {
-      await expect(summarisePrivate(dir, SUMMARY_PREREG)).rejects.toThrow(/no record/)
+      await expect(summarisePrivate(dir, FROZEN)).rejects.toThrow(/no record/)
     })
   })
 
   test('a bound set of ten warm passing runs per arm is summarised by the public implementation, medians and all', async () => {
     await withResults(async (dir) => {
       writeRecords(dir, fullSet(10))
-      const summary = await summarisePrivate(dir, SUMMARY_PREREG)
+      const summary = await summarisePrivate(dir, FROZEN)
       expect(summary).toEqual(await summariseSet(dir))
       for (const arm of ARM_ORDER) expect('median' in summary[arm]).toBe(true)
     })
@@ -1267,7 +1414,7 @@ describe('private summary', () => {
   test('nine warm passing runs per arm is a shortfall with no median', async () => {
     await withResults(async (dir) => {
       writeRecords(dir, fullSet(9))
-      const summary = await summarisePrivate(dir, SUMMARY_PREREG)
+      const summary = await summarisePrivate(dir, FROZEN)
       for (const arm of ARM_ORDER) {
         const row = summary[arm]
         expect('shortfall' in row ? row.shortfall : null).toEqual({ count: 9, threshold: 10 })
@@ -1373,7 +1520,7 @@ describe('private set, end to end', () => {
 
         const { summary, agreement } = await withFakeClaude({ stdout: FAKE_SESSION, before: FAKE_DELIVERABLES }, () =>
           runPrivateSet(config, {
-            preconditions: () => ({ snapshot_sha256: digest, prereg_commitment: prereg }),
+            preconditions: () => ({ ...FROZEN, snapshot_sha256: digest, prereg_commitment: prereg, freeze_commit: setProvenance('').git_sha }),
             provenance: setProvenance,
             runner,
           }),
@@ -1431,7 +1578,7 @@ function orderSpies(digest: string, fail: { preconditions?: Error; canary?: Erro
         calls.push('preconditions')
         requirePrereg.push(options.requirePrereg)
         if (fail.preconditions) throw fail.preconditions
-        return options.requirePrereg ? { snapshot_sha256: digest, prereg_commitment: SUMMARY_PREREG } : { snapshot_sha256: digest }
+        return options.requirePrereg ? { ...FROZEN, snapshot_sha256: digest } : { snapshot_sha256: digest }
       },
       canary: async () => {
         calls.push('canary')
@@ -1514,7 +1661,7 @@ describe('private set ordering', () => {
         expect(record.snapshot_sha256).toBe(digest)
       }
       expect(noRecords(config.resultsDir)).toBe(true)
-      await expect(summarisePrivate(scratch, SUMMARY_PREREG)).rejects.toThrow(/carries no prereg commitment/)
+      await expect(summarisePrivate(scratch, FROZEN)).rejects.toThrow(/carries no prereg commitment/)
     })
   })
 
