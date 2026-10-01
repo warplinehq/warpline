@@ -318,6 +318,22 @@ describe('the guard goes red on a planted default', () => {
     )
   })
 
+  /**
+   * The leak suite bounds a term by letters and digits, so one inside an
+   * identifier is caught. This guard must agree, or a default assembled into
+   * an environment variable name reaches it alone and passes. Booleans only,
+   * so a failure never prints the term.
+   */
+  test('a term embedded in an identifier is caught by both lists, as in the leak suite', () => {
+    const term = PRIVATE_NAME_PATTERNS.find((p) => /^[a-z]+$/.test(p))
+    if (term === undefined) throw new Error('no plain single-word entry in the committed list; this pin has no sample')
+    expect(carriesPrivateTerm(`X_${term.toUpperCase()}_ROOT`)).toBe(true)
+    expect(carriesPrivateTerm(`${term}x`)).toBe(false)
+    const local = new RegExp(bounded('plain'), 'i')
+    expect(local.test('X_PLAIN_ROOT')).toBe(true)
+    expect(local.test('plain9')).toBe(false)
+  })
+
   test('a default carrying a private term is an offender even when it looks like a placeholder', async () => {
     // Built at run time from the tracked list, so the term is never written
     // in this file: the first pattern that is a plain literal.
