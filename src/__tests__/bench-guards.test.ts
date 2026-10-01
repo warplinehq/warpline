@@ -474,47 +474,100 @@ describe('agreement — the rule at its boundaries', () => {
 // ─── publication shape ───────────────────────────────────────────────────────
 
 /**
- * Every number in a published private-scale section that is not in a
+ * Every token in a published private-scale section that is not in a
  * publishable form, as `line <n>: <token>`, plus every hex run as `hex` and
  * every provenance phrasing the README-versus-records test reads first-match.
  *
- * A published private-scale figure is a ratio at two significant figures, an
- * order of magnitude or a shape. A digit in any other form is either a raw
- * count, which leaks fleet size and cadence, or false precision. A hex run of
- * seven or more characters holding a digit is a hash of private material, and
- * it is caught inside a code span too. A version inside a code span is the one
- * number allowed outside those forms.
+ * The rule is an allowlist, because only ratios are ever published. A digit
+ * is admitted in exactly two places, and nowhere else in the section:
  *
- * A number is admitted in exactly two forms: a decimal ratio exactly as
- * `twoSigFigs` renders it (`0.76`, `1.0`), or a power of ten exactly as
- * `powerOfTenBucket` renders it (`0.1`, `1`, `10`). A bare integer is never a
- * ratio, even when `toPrecision(2)` would print it unchanged, so `12` and `45`
- * are counts and are refused.
+ * - a figure cell of a ratio-table data row, the rows under a
+ *   `| Ratio | Public | Private |` header and its separator. The whole cell
+ *   must be a ratio exactly as `twoSigFigs` renders it (`0.76`, `1.0`) or a
+ *   power of ten exactly as `powerOfTenBucket` renders it (`0.1`, `1`, `10`),
+ *   and above zero. A bare integer is never a ratio, even when
+ *   `toPrecision(2)` would print it unchanged, and `4.6k` is not a cell.
+ * - a code span whose whole content is a dotted version (`0.5.0`, `2.1.286`).
  *
- * Its ceiling: a count that is itself a power of ten (`1`, `10`, `100`)
- * passes. So the rule against stating a count stays a reviewed judgment, and
- * this scanner does not replace it.
+ * So a count, a raw figure or a ratio-shaped decimal with a unit after it is
+ * refused in prose, in a heading, in a table's label cell, and inside a code
+ * span. No identifier with a digit in it (`check-1`, a step number) is
+ * admitted either. The published section has none, so none is allowed.
+ *
+ * A cardinal number word is refused too, since a count spelled out is still a
+ * count. The exceptions are the method's own words, `one`, `two`, `three`,
+ * `four` and `ten` (one order of magnitude, two significant figures, three
+ * arms, four ratios, ten warm passing runs), and even those are refused
+ * directly before `plugin`. A hex run of seven or more characters holding a
+ * digit is a hash of private material, and it is caught everywhere.
+ *
+ * Its ceiling. The scan reads `bench/README.md` from `## At private scale` to
+ * the end of the file and no other surface, so a figure written anywhere else
+ * public is never scanned. It checks a cell's form, not what it measures, so a
+ * ratio-shaped absolute in a ratio cell (`1.3` that is minutes) passes, and so
+ * does a count that is itself a power of ten. A method word can still count
+ * something other than plugins (`ten handoffs`), a word that is not a
+ * cardinal (`several`, `half`, `second`) passes, and a version span passes
+ * whatever it encodes. So the rule against stating a count stays a reviewed
+ * judgment, and this scanner does not replace it.
  */
 function publicationShapeOffenders(section: string): string[] {
   const offenders: string[] = []
+  let table: 'out' | 'header' | 'rows' = 'out'
   section.split('\n').forEach((line, i) => {
-    const n = i + 1
-    for (const _ of line.matchAll(/\b(?=[0-9a-f]*\d)[0-9a-f]{7,}\b/g)) offenders.push(`line ${n}: hex`)
-    if (/git SHA\s+`|package version\s+`|tool version\s+`|model\s+`/.test(line)) {
-      offenders.push(`line ${n}: provenance phrasing`)
+    const name = (token: string): void => void offenders.push(`line ${i + 1}: ${token}`)
+    for (const _ of line.matchAll(/\b(?=[0-9a-f]*\d)[0-9a-f]{7,}\b/g)) name('hex')
+    if (/git SHA\s+`|package version\s+`|tool version\s+`|model\s+`/.test(line)) name('provenance phrasing')
+
+    if (table === 'rows' && !line.startsWith('|')) table = 'out'
+    let text = line
+    if (table === 'rows') {
+      const [label = '', ...figures] = line.trim().replace(/^\||\|$/g, '').split('|').map((cell) => cell.trim())
+      text = label
+      for (const cell of figures) if (!isRatioCell(cell)) name(cell)
     }
-    // Commas only BETWEEN digits, so a list like `0.76, 0.80` reads as two
-    // ratios rather than two tokens with a trailing comma.
-    for (const [tok] of line.replace(/`[^`]*`/g, '').matchAll(/\d(?:[\d,]*\d)?(?:\.\d+)?/g)) {
-      const v = Number(tok.replace(/,/g, ''))
-      // `v > 0` first: both formatters refuse zero, and zero is never a ratio.
-      const ratio = v > 0 && /^\d+\.\d+$/.test(tok) && tok === twoSigFigs(v)
-      const admitted = ratio || (v > 0 && tok === String(powerOfTenBucket(v)))
-      if (!admitted) offenders.push(`line ${n}: ${tok}`)
+    // Any digit left is an offender. Commas only BETWEEN digits, so `1,234`
+    // is named whole and a list's trailing comma is not part of a token.
+    for (const [tok] of text.replace(VERSION_SPAN, '').matchAll(/\d(?:[\d,]*\d)?(?:\.\d+)?/g)) name(tok)
+
+    for (const [word] of line.matchAll(/[a-z]+(?:-[a-z]+)*/gi)) {
+      const w = word.toLowerCase()
+      if (w.split('-').some((part) => CARDINALS.has(part)) && !METHOD_WORDS.has(w)) name(word)
     }
+    for (const [phrase] of line.matchAll(/\b(?:one|two|three|four|ten)\s+plugins?\b/gi)) name(phrase)
+
+    if (line === RATIO_HEADER) table = 'header'
+    else if (table === 'header') table = /^\|(?:\s*:?-+:?\s*\|)+$/.test(line) ? 'rows' : 'out'
   })
   return offenders
 }
+
+const RATIO_HEADER = '| Ratio | Public | Private |'
+
+/** A code span that is a whole dotted version, the one digit-bearing form outside a ratio cell. */
+const VERSION_SPAN = /`\d+\.\d+\.\d+`/g
+
+/** A ratio cell: above zero, and exactly as one of the two formatters renders it. */
+function isRatioCell(cell: string): boolean {
+  const v = Number(cell)
+  if (!(v > 0)) return false
+  return (/^\d+\.\d+$/.test(cell) && cell === twoSigFigs(v)) || cell === String(powerOfTenBucket(v))
+}
+
+const CARDINALS = new Set(
+  [
+    'zero one two three four five six seven eight nine ten',
+    'eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty',
+    'thirty forty fifty sixty seventy eighty ninety hundred thousand million billion dozen',
+    // The plural magnitudes count too. `ones` is a pronoun, so it is not here.
+    'tens dozens hundreds thousands millions billions',
+  ]
+    .join(' ')
+    .split(' '),
+)
+
+/** The cardinals the public method's own wording uses, read from the real section. */
+const METHOD_WORDS = new Set(['one', 'two', 'three', 'four', 'ten'])
 
 /** A clean section, in the shape the published one will take. */
 const CLEAN_SECTION = [
@@ -616,11 +669,57 @@ describe('publication shape', () => {
     expect(offenders).toEqual([`line ${PLANTED_LINE}: 0.5`, `line ${PLANTED_LINE}: 0`])
   })
 
-  test('an order of magnitude written as the formatter renders it is admitted, and any other value is not', () => {
-    expect(publicationShapeOffenders(planted('within 0.1 to 1 of the public figure, and 0.01 at the extreme'))).toEqual(
-      [],
-    )
+  test('an order of magnitude written as the formatter renders it is admitted in a ratio cell, and any other value is not', () => {
+    const row = (pub: string, priv: string): string => `| wall-clock, \`warpline\` over \`agent-with-state\` | ${pub} | ${priv} |`
+    expect(publicationShapeOffenders(plantedRow(row('0.1', '1')))).toEqual([])
+    expect(publicationShapeOffenders(plantedRow(row('0.01', '10')))).toEqual([])
+    expect(publicationShapeOffenders(plantedRow(row('0.2', '0')))).toEqual([`line ${PLANTED_ROW}: 0.2`, `line ${PLANTED_ROW}: 0`])
     expect(publicationShapeOffenders(planted('within 0.2 of the public figure'))).toEqual([`line ${PLANTED_LINE}: 0.2`])
+  })
+
+  test('outside a ratio cell even a formatter-shaped figure is refused', () => {
+    expect(publicationShapeOffenders(planted('within 0.1 to 1 of the public figure, and 0.76 overall'))).toEqual([
+      `line ${PLANTED_LINE}: 0.1`,
+      `line ${PLANTED_LINE}: 1`,
+      `line ${PLANTED_LINE}: 0.76`,
+    ])
+  })
+
+  test('a table under any other header has no ratio cells', () => {
+    const section = CLEAN_SECTION.join('\n').replace(RATIO_HEADER, '| Ratio | Figure | Private |')
+    expect(publicationShapeOffenders(section)).toContain('line 7: 0.76')
+  })
+
+  test('a digit in a label cell, a heading or an identifier is refused, and a whole version span is not', () => {
+    expect(
+      publicationShapeOffenders(plantedRow('| wall-clock over `12` plugins | 0.76 | 0.78 |')),
+    ).toEqual([`line ${PLANTED_ROW}: 12`])
+    expect(publicationShapeOffenders(planted('### Step 2'))).toEqual([`line ${PLANTED_LINE}: 2`])
+    expect(publicationShapeOffenders(planted('The grader ran check-1..9.'))).toEqual([
+      `line ${PLANTED_LINE}: 1`,
+      `line ${PLANTED_LINE}: 9`,
+    ])
+    expect(publicationShapeOffenders(planted('`warpline`\'s `cache_read` on `0.5.0` and CLI `2.1.286`.'))).toEqual([])
+    expect(publicationShapeOffenders(planted('Run on `0.5`.'))).toEqual([`line ${PLANTED_LINE}: 0.5`])
+  })
+
+  test("the method's own number words are admitted, and every other cardinal is not", () => {
+    const method =
+      "It's the same three arms, ten warm passing runs and one cache-cold run, four ratios at two significant figures, each one within one order of magnitude, and not the public ones."
+    expect(publicationShapeOffenders(planted(method))).toEqual([])
+    expect(publicationShapeOffenders(planted('Five arms, a dozen runs and hundreds of plugins.'))).toEqual([
+      `line ${PLANTED_LINE}: Five`,
+      `line ${PLANTED_LINE}: dozen`,
+      `line ${PLANTED_LINE}: hundreds`,
+    ])
+    expect(publicationShapeOffenders(planted('It touched ten plugins and one-off runs.'))).toEqual([
+      `line ${PLANTED_LINE}: one-off`,
+      `line ${PLANTED_LINE}: ten plugins`,
+    ])
+  })
+
+  test('the ceiling: a ratio-shaped absolute in a ratio cell passes, because the scan reads form, not meaning', () => {
+    expect(publicationShapeOffenders(plantedRow('| wall-clock, minutes per run | 1.3 | 2.4 |'))).toEqual([])
   })
 
   test('a ratio cell with a magnitude after it is refused, naming the cell', () => {
@@ -655,15 +754,23 @@ function privateSection(readme: string, ledger: string): string | null {
 
 const OUTCOME_RE = /\*\*Outcome: (publish|diverge|withhold)\.\*\*/g
 
-/** What a section that does not publish may not carry. */
+/**
+ * What a section that does not publish may not carry: a ratio table, and so,
+ * through the scan, any digit outside a whole version span.
+ */
 function nonPublishOffenders(section: string): string[] {
-  return section.replace(/`[^`]*`/g, '').match(/\d/g) ?? []
+  return [...(section.includes(RATIO_HEADER) ? ['a ratio table'] : []), ...publicationShapeOffenders(section)]
 }
 
 describe('bench README — the private-scale section', () => {
   test('a withholding section cannot carry a count in code spans', () => {
     const section = '## At private scale\n\n**Outcome: withhold.**\n\nThe agent with state reached `7` of `10` runs.\n'
     expect(nonPublishOffenders(section)).toEqual(['line 5: 7', 'line 5: 10'])
+  })
+
+  test('a withholding section cannot carry a ratio table', () => {
+    const section = `## At private scale\n\n**Outcome: withhold.**\n\n${CLEAN_SECTION.slice(4, 10).join('\n')}\n`
+    expect(nonPublishOffenders(section)).toEqual(['a ratio table'])
   })
 
   const HEX = 'a1'.repeat(32)
