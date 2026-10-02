@@ -1620,26 +1620,46 @@ describe('private bind contract', () => {
     })
   })
 
-  /** A file in `plugin/` git does not track, untracked or ignored, which the build digest would otherwise bind. */
-  const STRAY: [string, string, (root: string) => void][] = [
-    ['an untracked file', 'plugin/skills/x/notes.txt', (root) => writeTree(root, { 'plugin/skills/x/notes.txt': 'a stray note\n' })],
+  /**
+   * A file in `plugin/` the build digest would otherwise bind: one git does not
+   * track (untracked or ignored), or a tracked one with an uncommitted change.
+   * Each is named with its own reason and remedy, never the other's.
+   */
+  const STRAY: [string, string, RegExp, RegExp, (root: string) => void][] = [
+    [
+      'an untracked file',
+      'plugin/skills/x/notes.txt',
+      /does not track.*remove it/,
+      /uncommitted/,
+      (root) => writeTree(root, { 'plugin/skills/x/notes.txt': 'a stray note\n' }),
+    ],
     [
       'an ignored file',
       'plugin/.DS_Store',
+      /does not track.*remove it/,
+      /uncommitted/,
       (root) => {
         commitFixture(root, { '.gitignore': 'dist/\n.DS_Store\n' }, 'ignore finder files')
         writeTree(root, { 'plugin/.DS_Store': 'finder state\n' })
       },
     ],
+    [
+      'a tracked file with an uncommitted change',
+      'plugin/skills/x/SKILL.md',
+      /uncommitted change.*commit or revert it/,
+      /does not track/,
+      (root) => writeTree(root, { 'plugin/skills/x/SKILL.md': 'an edited skill\n' }),
+    ],
   ]
 
-  test.each(STRAY)('%s under plugin/ is refused by the build digest, so by bind and the gate, naming it', async (_name, rel, place) => {
+  test.each(STRAY)('%s under plugin/ is refused by the build digest, so by bind and the gate, naming it', async (_name, rel, says, never, place) => {
     await withMeasuredFixture(async ({ config, root, base, build }) => {
       place(root)
       for (const fn of [() => freshBuildDigest(root, build), () => methodBindings(config, root, build)]) {
         const message = messageOf(fn)
         expect(message).toContain(rel)
-        expect(message).toMatch(/remove it/)
+        expect(message).toMatch(says)
+        expect(message).not.toMatch(never)
       }
       expect(() => bindingLines(config, root, { build, engineBase: base })).toThrow()
     })
