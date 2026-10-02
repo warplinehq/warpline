@@ -2300,8 +2300,9 @@ function bench(...args: string[]): { status: number | null; stdout: string; stde
 /**
  * What in `source` could spawn the real tool without the refusing stub. Only
  * `benchSpawn` passes the stub on PATH, so it must hold the file's one
- * `spawnSync`, the harness may be named on its delegate line alone, and every
- * `execFileSync` must spawn git.
+ * `spawnSync`, the harness may be named on its delegate line alone, every
+ * `execFileSync` must spawn git, and no other spawn form appears at all, bare
+ * or as a member, nor bun's shell.
  */
 function spawnSiteOffenders(source: string): string[] {
   const offenders: string[] = []
@@ -2315,7 +2316,9 @@ function spawnSiteOffenders(source: string): string[] {
   if (count(['Bun', 'spawn'].join('.')) > 0) offenders.push(['Bun', 'spawn'].join('.'))
   const exec = ['execFile', 'Sync('].join('')
   offenders.push(...source.split(exec).slice(1).filter((rest) => !rest.startsWith("'git',")).map((rest) => exec + rest.split('\n')[0]))
-  offenders.push(...(source.match(new RegExp(`(^|[^\\w.$])${['spa', 'wn'].join('')}\\(`, 'gm')) ?? []))
+  const others = ['spawn', 'exec', 'execSync', 'execFile', 'fork']
+  offenders.push(...(source.match(new RegExp(`(^|[^\\w$])(${others.join('|')})\\(`, 'gm')) ?? []))
+  if (count(['$', '`'].join('')) > 0) offenders.push(['$', '`'].join(''))
   return offenders
 }
 
