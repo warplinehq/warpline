@@ -2372,6 +2372,12 @@ describe('private command line', () => {
     ['the tool by name', `${EXEC}'claude', [])`],
     ['the harness through a path built at runtime', `${EXEC}process.execPath, [join(REPO_ROOT, 'bench', 'run' + '.ts')])`],
     ['bun in double quotes', `${EXEC}"bun", ['x'])`],
+    ['the tool through a shell string', `${['exec', 'Sync('].join('')}'claude')`],
+    ['the tool through an async shell', `${['ex', 'ec('].join('')}'claude', () => {})`],
+    ['the tool through an async execFile', `${['exec', 'File('].join('')}'claude', [], () => {})`],
+    ['the harness through a fork', `${['fo', 'rk('].join('')}'bench/x.ts')`],
+    ['the tool through a member spawn', `require('node:child_process')${['.spa', 'wn('].join('')}'claude', [])`],
+    ['the tool through the bun shell', `await ${['$', '`'].join('')}claude\``],
   ]
   test.each(PLANTED_SPAWNS)('the spawn scan refuses a planted spawn of %s', (_name, line) => {
     expect(spawnSiteOffenders(`${readFileSync(import.meta.path, 'utf8')}\n${line}\n`)).not.toEqual([])
