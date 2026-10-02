@@ -657,7 +657,7 @@ describe('publication shape', () => {
     ['ratio-shaped figures with units', 'A warm run took 1.3 minutes and cost 2.4 USD.', ['1.3', '2.4']],
     // A count spelled out is still a count.
     ['counts as number words', 'The fleet holds twelve plugins and parked forty-five handoffs.', ['twelve', 'forty-five']],
-    ['a method word stating the plugin count', 'The fleet holds four plugins.', 'four plugins'],
+    ['a method word stating the plugin count', 'The fleet holds three plugins.', 'three plugins'],
   ])('%s is named on its own line', (_what, line, token) => {
     const offenders = publicationShapeOffenders(planted(line))
     for (const t of [token].flat()) expect(offenders).toContain(`line ${PLANTED_LINE}: ${t}`)
@@ -695,9 +695,9 @@ describe('publication shape', () => {
       publicationShapeOffenders(plantedRow('| wall-clock over `12` plugins | 0.76 | 0.78 |')),
     ).toEqual([`line ${PLANTED_ROW}: 12`])
     expect(publicationShapeOffenders(planted('### Step 2'))).toEqual([`line ${PLANTED_LINE}: 2`])
-    expect(publicationShapeOffenders(planted('The grader ran check-1..9.'))).toEqual([
+    expect(publicationShapeOffenders(planted('The grader ran check-1..99.'))).toEqual([
       `line ${PLANTED_LINE}: 1`,
-      `line ${PLANTED_LINE}: 9`,
+      `line ${PLANTED_LINE}: 99`,
     ])
     expect(publicationShapeOffenders(planted('`warpline`\'s `cache_read` on `0.5.0` and CLI `2.1.286`.'))).toEqual([])
     expect(publicationShapeOffenders(planted('Run on `0.5`.'))).toEqual([`line ${PLANTED_LINE}: 0.5`])
