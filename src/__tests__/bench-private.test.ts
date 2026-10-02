@@ -730,6 +730,10 @@ describe('private config and seeding refusals', () => {
     ["a copy target holding '..' after graded/", (c) => (c.copyMap[0]!.to = 'graded/../escape.json')],
     ["a linked package holding '..'", (c) => c.links.packages.push('../escape')],
     ['an absolute linked package', (c) => c.links.packages.push('/abs/pkg')],
+    ["a fleet dir of '..'", (c) => (c.fleetDir = '..')],
+    ['a fleet dir of two segments', (c) => (c.fleetDir = 'a/.fleet')],
+    ["a warpline home dir of '..'", (c) => (c.warplineHomeDir = '..')],
+    ['a warpline home dir of two segments', (c) => (c.warplineHomeDir = 'a/wh')],
   ]
   for (const [name, mutate] of refusals) {
     test(`the config refuses ${name}`, () => {
