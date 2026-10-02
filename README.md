@@ -121,7 +121,11 @@ unless `WARPLINE_PLUGINS_DIR` names another directory.
 - **The `[needs-llm]` contract** — plugins emit judgment work as a typed
   handoff; a Claude Code companion skill picks it up. Deterministic work costs
   nothing to run; judgment work uses your existing Claude subscription. See
-  [docs/needs-llm-contract.md](docs/needs-llm-contract.md).
+  [docs/needs-llm-contract.md](docs/needs-llm-contract.md). Measured against
+  an agent doing the same day's work, warpline used 20–27% less wall-clock and
+  25–37% fewer output tokens, on a public scenario and again at private scale.
+  Cache reads were not lower in the public run. The method was committed before
+  the first result: [bench/README.md](https://github.com/warplinehq/warpline/blob/main/bench/README.md).
 
 ## Writing a plugin
 
