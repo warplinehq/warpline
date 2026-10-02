@@ -90,6 +90,35 @@ it that way round because a document claiming an absolute ceiling would be
 contradicted by the program's own `--help` output, and a safety claim a reader
 can falsify in one command is worse than no claim at all.
 
+## A second way through, for one exact message
+
+There's a second path through the gate now, and everything above is about the
+first one. It's for a plugin that sends something you'd want to read first, like
+an email going out on Thursday. A session grant says a plugin may act. It
+doesn't say what the plugin will send, and by Thursday it might send something
+you never saw.
+
+So you approve the content itself. `warpline approve <plugin> --content` shows
+you the exact bytes before it writes anything. Control characters are escaped so
+nothing hides in them, and the fingerprint sits on a line of its own. You have
+to pass `--not-after`, because a content approval must say when it stops being
+true. The command won't write one that doesn't. See
+[approve.ts](https://github.com/warplinehq/warpline/blob/main/src/cli/approve.ts).
+
+When an advance reaches that plugin, it doesn't read the grant file at all. It
+asks two things. Are these still the bytes you read? Is the window still open?
+If both are yes, they go out verbatim. If either is no, the plugin refuses with
+a named reason, `content_moved` or `outside_window`, and nothing is sent.
+There's no close enough. The reasons are a closed list in
+[run-log.ts](https://github.com/warplinehq/warpline/blob/main/src/schemas/run-log.ts).
+
+Here's the limit, stated before anyone asks. The window is yours, and there's no
+23-hour ceiling on it. That's the point of a send you approve on Monday for
+Thursday. What holds is narrower. You read those bytes, you named the end of the
+window, and no run can change either one. It's the same four things I claim at
+the end. A human decided, it's written down, it expires, and no run takes the
+decision on its own behalf.
+
 ## Seven objections, and what I would say back
 
 I've argued this in enough rooms to know which seven come back. Here they are in
@@ -336,4 +365,16 @@ grants itself anything" is tied below to the search that established it. Run
    is the post-execution supervised path, and the level-end check that follows
    it sets `stopped = true`. `warpline plan` prints the first as
    `skipped (unapproved)`, which is the one-command check.
+
+7. "A second way through" — added 2026-10-02. Each clause and its source:
+     "doesn't read the grant file at all": docs/runtime-spec.md:1355, the
+       content branch sits ABOVE the grant read.
+     "must say when it stops being true": src/cli/approve.ts:395, the
+       --not-after refusal, quoted.
+     "fingerprint ... a line of its own", "bytes before it writes": approve.ts
+       around :476, header, fingerprint, window, then the bytes.
+     "a closed list": src/schemas/run-log.ts:47, RefusalReasonSchema.
+     "no 23-hour ceiling": approve.ts:392-421 resolves --not-after with no
+       CEILING_H check. Re-run the greps; line numbers drift.
 -->
+
