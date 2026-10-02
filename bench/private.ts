@@ -836,7 +836,8 @@ export function freezeCommit(repoRoot: string, prereg: string): string {
  * trees.
  *
  * Any file under `plugin/` that git does not track, untracked or ignored, is
- * refused by name. The tracked content of `plugin/` is already bound by the
+ * refused by name, and so is a tracked one with an uncommitted change, each
+ * with its own reason. The tracked content of `plugin/` is already bound by the
  * freeze commit, so the digest's only extra reach is untracked files, and
  * those are exactly the fragile ones: an editor or Finder file frozen into
  * the digest would make the binding unreproducible the next time it changed.
@@ -846,9 +847,15 @@ export function freezeCommit(repoRoot: string, prereg: string): string {
 export function freshBuildDigest(repoRoot: string, build?: (outDir: string) => void): string {
   const stray = git(repoRoot, ['-c', 'core.quotePath=false', 'status', '--porcelain', '--ignored', '--untracked-files=all', '--', 'plugin'])
   if (stray !== '') {
-    // Each line is the status letters, then the path. The status may start with a space.
-    const paths = stray.split('\n').map((line) => line.replace(/^\s*\S+ /, ''))
-    throw new Error(`plugin/ holds ${paths.join(', ')}, which git does not track — the build digest would bind a file git does not track, so remove it`)
+    // Each line is the status letters, then the path. The status may start with a space, which the trim
+    // drops from the first line. `??` is untracked, `!!` ignored, anything else a tracked change.
+    const entries = stray.split('\n').map((line) => /^\s*(\S+) (.*)$/.exec(line)!)
+    const untracked = entries.filter(([, status]) => status === '??' || status === '!!').map(([, , path]) => path)
+    const changed = entries.filter(([, status]) => status !== '??' && status !== '!!').map(([, , path]) => path)
+    const reasons: string[] = []
+    if (untracked.length > 0) reasons.push(`${untracked.join(', ')}, which git does not track, so remove it`)
+    if (changed.length > 0) reasons.push(`${changed.join(', ')}, with an uncommitted change, so commit or revert it`)
+    throw new Error(`plugin/ holds ${reasons.join('; and ')} — the build digest binds every byte under plugin/`)
   }
   const out = mkdtempSync(join(tmpdir(), 'warpline-bench-build-'))
   try {
