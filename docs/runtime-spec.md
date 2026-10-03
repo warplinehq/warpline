@@ -2505,6 +2505,14 @@ its manifest failed to load, or its `side_effects` changed.
 Re-approving a consumer over an existing record withdraws the old record the
 same way, in the same write. When the new record names the same producer, it binds that
 producer's current Output and holds it.
+A re-approve onto a different producer says so. Right after the
+`Answering the content gate:` line it prints
+`Withdrew the earlier content approval for <plugin>, which named a different producer.`
+and, only when that withdrawal erased the earlier producer's bytes,
+`The bytes it held were erased, since no open approval still holds them.`
+Both lines come before the bytes. It never names the earlier producer, which may
+no longer be the consumer's dependency. A re-approve onto the same producer is a
+renewal and prints nothing new.
 
 **Two refusals protect a marked-unconfirmed record.** For a record with
 `marked_at` set, `confirmed_at` still null and no `not_shipped_at`, both a fresh

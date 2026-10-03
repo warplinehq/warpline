@@ -467,9 +467,24 @@ async function approveContent(
       confirmed_at: null,
     }
     // Replacing a record withdraws it. The new record is already in the table,
-    // so it holds whatever it binds.
+    // so it holds whatever it binds. A different-producer replacement says so
+    // on stdout, and says it erased only when it did, while a same-producer
+    // replacement is a renewal and prints nothing new.
+    let withdrawal = ''
     if (replaced !== undefined) {
-      eraseIfReleased(state.plugin_runs, state.pending_gates, replaced.producer, state.approvals, manifests, now, replaced)
+      const erased = eraseIfReleased(
+        state.plugin_runs,
+        state.pending_gates,
+        replaced.producer,
+        state.approvals,
+        manifests,
+        now,
+        replaced,
+      )
+      if (replaced.producer !== producer) {
+        withdrawal = `Withdrew the earlier content approval for ${consumer}, which named a different producer.\n`
+        if (erased) withdrawal += `The bytes it held were erased, since no open approval still holds them.\n`
+      }
     }
     await writeEngineState(state, statePath)
 
@@ -477,6 +492,7 @@ async function approveContent(
     // the plugin authored precedes the values the runtime computed.
     process.stdout.write(
       `Answering the content gate: ${consumer} may ship what ${producer} has already produced.\n` +
+        withdrawal +
         `Bound to the fingerprint on the next line, whole and untruncated:\n` +
         `${fingerprint}\n` +
         `Window ${notBefore ?? 'now'} to ${notAfter} read in ${zone}, which resolves to\n` +

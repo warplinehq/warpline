@@ -1535,6 +1535,9 @@ function bindsHeldContent(
  * It takes `pendingGates` as a required parameter, so a caller cannot release
  * content and leave an applied gate's copy of it behind: one that forgot would
  * not compile.
+ *
+ * It returns whether it erased, true only after the erasure write. Only the
+ * re-approve reads the value, to tell the operator the bytes went.
  */
 export function eraseIfReleased(
   pluginRuns: EngineState['plugin_runs'],
@@ -1544,19 +1547,19 @@ export function eraseIfReleased(
   manifests: ReadonlyMap<string, PluginManifest>,
   now: number,
   withdrawn?: Approval,
-): void {
+): boolean {
   const run = Object.hasOwn(pluginRuns, plugin) ? pluginRuns[plugin] : undefined
   const out = run?.last_output
-  if (run === undefined || out === undefined) return
-  if (out.body === undefined || out.erased_at !== undefined) return
+  if (run === undefined || out === undefined) return false
+  if (out.body === undefined || out.erased_at !== undefined) return false
   const runId = out.run_id
-  if (runId === undefined) return
+  if (runId === undefined) return false
   const binds = (a: Approval): boolean => a.producer === plugin && bindsHeldContent(a, pluginRuns, manifests)
   const records = Object.values(approvals)
   const released = records.filter((a) => windowClosed(a, now))
   if (withdrawn !== undefined) released.push(withdrawn)
-  if (!released.some(binds)) return
-  if (records.some((a) => !windowClosed(a, now) && binds(a))) return
+  if (!released.some(binds)) return false
+  if (records.some((a) => !windowClosed(a, now) && binds(a))) return false
   const { body, ...rest } = out
   const erasedAt = new Date(now).toISOString()
   // The stored schema's key order. The next read's parse emits it, so any other is rewritten.
@@ -1565,6 +1568,7 @@ export function eraseIfReleased(
     last_output: { ...rest, erased_at: erasedAt, body_sha256: sha256(body) },
   }
   eraseGateCopies(pendingGates, plugin, sha256(body), erasedAt)
+  return true
 }
 
 /**
