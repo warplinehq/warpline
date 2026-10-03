@@ -357,6 +357,21 @@ describe('loadPluginManifests — per-plugin load failures', () => {
     expect(failures.map((f) => f.plugin)).toEqual(['fx-noexport'])
     expect(failures[0]!.error).toContain("no 'manifest' export")
   })
+
+  // An export that exists is the author's, so the schema reports what is wrong
+  // with it. Only a module with no such export at all is told to add one.
+  test('Test 12: a manifest export that is null is reported as invalid, not as missing', async () => {
+    const dir = join(pluginsDir, 'fx-null')
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'manifest.ts'), 'export const manifest = null')
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(manifests.size).toBe(0)
+    expect(failures.map((f) => f.plugin)).toEqual(['fx-null'])
+    expect(failures[0]!.error).toContain('not a valid plugin manifest object')
+    expect(failures[0]!.error).not.toContain("no 'manifest' export")
+  })
 })
 
 // ---------------------------------------------------------------------------
