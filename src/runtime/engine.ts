@@ -4071,7 +4071,7 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
       try {
         // import() needs a file:// URL, not a bare absolute path.
         const mod = await import(pathToFileURL(manifestPath).href)
-        if (mod.manifest) {
+        if ('manifest' in mod) {
           // A manifest is UNTRUSTED INPUT. `manifest.ts` is hand-written, and
           // the cast that used to stand here meant every invariant the schema
           // states was decorative at runtime — the schema described a shape
@@ -4091,11 +4091,13 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
           }
           plugins.set(entry, parsed.data)
         } else {
-          // A module that imports cleanly with no `manifest` export (a misnamed
-          // export, a half-finished scaffold) used to vanish here with no
-          // failure row. Kept apart from the schema check above, because
-          // `safeParse(undefined)` would call it a malformed object. The text
-          // is fixed, so no author-supplied value reaches the operator.
+          // For a module with no `manifest` export at all (a misnamed export,
+          // a half-finished scaffold), which used to vanish here with no
+          // failure row. The test above is presence, not truthiness: a
+          // `manifest` export that exists but is `null`, `0`, `''`, `false` or
+          // `undefined` is the author's, so it goes to `safeParse`, which
+          // reports it as malformed. Only an absent export is told to add one.
+          // The text is fixed, so no author-supplied value reaches the operator.
           failures.push({ plugin: entry, error: "manifest.ts has no 'manifest' export" })
         }
       } catch (err) {
