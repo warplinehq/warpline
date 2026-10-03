@@ -4086,6 +4086,13 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
             return
           }
           plugins.set(entry, parsed.data)
+        } else {
+          // A module that imports cleanly with no `manifest` export (a misnamed
+          // export, a half-finished scaffold) used to vanish here with no
+          // failure row. Kept apart from the schema check above, because
+          // `safeParse(undefined)` would call it a malformed object. The text
+          // is fixed, so no author-supplied value reaches the operator.
+          failures.push({ plugin: entry, error: "manifest.ts has no 'manifest' export" })
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)

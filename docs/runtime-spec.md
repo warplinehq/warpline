@@ -1147,6 +1147,20 @@ name (a broken manifest has no trustworthy `name` field) and `error` is the
 thrown `Error.message` — no stack trace. A directory whose name is a member of
 `Object.prototype` fails the same way, without being imported at all.
 
+A `manifest.ts` that imports cleanly but has no `manifest` export is a load
+failure of the same shape, reported as `manifest.ts has no 'manifest' export`.
+That text is fixed, so it carries no value the manifest author wrote.
+
+A broken manifest is reported on **every call** within one process, with the
+error it threw the first time, because both supported runtimes re-throw a
+module's cached evaluation error on a later import of the same file. Bun does
+so from 1.4.2, which is why `engines.bun` names it. The loader keeps no memo of
+its own. A `manifest.ts` written after a call that found none loads on the next
+call. A `manifest.ts` fixed in place after it failed, whether it threw or had no
+`manifest` export, keeps reporting that first failure for the rest of the
+process, because both runtimes serve the file's URL from their module cache. A
+new process loads the fixed file.
+
 A manifest that imports cleanly is then **validated against
 `PluginManifestSchema`**, and one that does not satisfy it is a load failure of
 the same shape — absent from `manifests`, present in `failures`. The loader

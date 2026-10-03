@@ -569,15 +569,15 @@ describe('the advance exit-code matrix, in process', () => {
   /**
    * A failed load is `1`, and `--strict` moves nothing.
    *
-   * Two test bodies rather than two advances in one body, and the reason is
-   * worth writing down: a broken manifest is only broken ONCE per process.
-   * `loadPluginManifests` reaches the manifest through `await import`, so the
-   * second import of the same file URL is served from the runtime's module
-   * cache, resolves without throwing, and carries no `manifest` export — the
-   * plugin then lands in neither the loaded map nor the failure list and the
-   * advance reports `0`. Each test gets its own temp home from `beforeEach`, so
-   * each run imports a URL nothing has seen. The fixture is one helper so the
-   * two halves cannot drift into testing different things.
+   * Two test bodies, one advance each. They used to be split because a broken
+   * manifest was broken only once per process: bun before 1.4.2 served the
+   * second import from its module cache without re-throwing, and the plugin
+   * dropped out of both the loaded map and the failure list. The runtime now
+   * re-throws the cached error and the loader reports a broken manifest on
+   * every load (`engine-loader.test.ts` Test 10), so the split is no longer
+   * needed for correctness. It stays so each case reads on its own. The
+   * fixture is one helper so the two halves cannot drift into testing
+   * different things.
    */
   const writeBrokenFleet = async (): Promise<void> => {
     await writePlugin(home, 'healthy')
