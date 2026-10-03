@@ -10,7 +10,7 @@ gate refuse to run it, and approved it. About ten minutes. Everything here has
 been run exactly as written; if a command does something other than what this
 page shows, that is a bug in warpline, not in you.
 
-You need Node 22.18+ (or Bun 1.3+). Nothing else — no API key, no account, no
+You need Node 22.18+ (or Bun 1.4.2+). Nothing else — no API key, no account, no
 model. Warpline never calls an LLM.
 
 ## 1. Install

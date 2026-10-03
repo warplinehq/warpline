@@ -95,7 +95,7 @@ npm i warpline          # or: bun add warpline
 npx warpline --help
 ```
 
-Runs on Node 22.18+ or 23.6+ (`engines.node` excludes 23.0–23.5), or Bun ≥ 1.3.
+Runs on Node 22.18+ or 23.6+ (`engines.node` excludes 23.0–23.5), or Bun ≥ 1.4.2.
 Node alone is enough. You don't need Bun to use warpline. v0.1 supports POSIX
 systems (macOS, Linux). Windows is untested and unclaimed.
 
@@ -337,7 +337,7 @@ bun install
 bun run test                  # builds, then runs the full suite
 ```
 
-Requires [bun](https://bun.sh) ≥ 1.3. This is the one place it's genuinely
+Requires [bun](https://bun.sh) ≥ 1.4.2. This is the one place it's genuinely
 required, because the suite is written against `bun:test`.
 
 ```bash

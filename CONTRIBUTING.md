@@ -2,7 +2,7 @@
 
 ## Setup
 
-Bun ≥ 1.3. `bun install`, then:
+Bun ≥ 1.4.2. `bun install`, then:
 
 ```bash
 bun run test               # builds, then runs the suite
