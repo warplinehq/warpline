@@ -1,7 +1,6 @@
 /**
- * `warpline advance`'s SIGINT->130 contract — one of the two process-launching
- * test files in this repository, and the reason this one exists is not the
- * reason the other one does.
+ * `warpline advance` through the real bin: the SIGINT/SIGTERM->130 contract,
+ * and the drain that keeps queued output whole when the process exits.
  *
  * Every other exit code this command can report is proven in process, through
  * the dispatcher entry, in `advance.test.ts`: `0`, `1` and `75` are all values
@@ -9,20 +8,30 @@
  * those. It is a signal disposition plus a `process.exit`, and there is no
  * in-process seam for either half — a test that sent itself SIGINT would be
  * testing the test runner, and one that called the handler directly would exit
- * the runner.
+ * the runner. The drain has no in-process seam either: what it guards is what
+ * happens to bytes still queued when the process ends.
  *
- * Two launches, one per signal, one exit-code assertion each. The budget was
- * one until SIGTERM became a published fact in § 11: a second SIGNAL is a
- * second disposition, and a disposition is exactly the thing no in-process
- * test can observe. It is not a second assertion about the same mechanism.
- * Launching a process is where this repository's documented ~3% timeout flake
- * concentrates, so the budget does not widen past that. Any further interrupt
- * behaviour — the handler being removed again, for instance — belongs in
- * `advance.test.ts`, which can observe it without spending a launch.
+ * So this file launches the real bin four times. Two are the exit-code cases,
+ * one per signal, because a second signal is a second disposition. Two are the
+ * drain cases. Any further interrupt behaviour — the handler being removed
+ * again, for instance — belongs in `advance.test.ts`, which can observe it
+ * without a launch.
+ *
+ * The normal-exit drain guard pipes a document larger than the pipe buffer
+ * into a reader that waits before it reads. Against a bin that exits without
+ * draining, it goes red on bun and on node alike: the reader gets the first
+ * 65,536 bytes and nothing parses.
+ *
+ * The signal drain guard reads stderr, not stdout. `advance` writes its
+ * document and removes its handler in one synchronous stretch, so a signal
+ * never finds the document queued. What is queued is plugin output, which the
+ * runtime redirects to stderr while a handler runs. This guard is red only
+ * under bun: node's older handler already waited for that output, and this
+ * suite spawns bun only.
  */
 import { test, expect, beforeAll, afterAll } from 'bun:test'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
@@ -37,7 +46,36 @@ const ENTRY = testFixturesDir(import.meta.url, '../../bin/warpline.ts')
  */
 const HANDLER_SLEEP_MS = 60_000
 
+/** How many 499-character lines the `slow` plugin prints: 200,000 bytes, over a 64 KiB pipe buffer. */
+const CHATTY_LINES = 400
+
+/**
+ * Every field spelled out. The loader validates manifests (`safeParse`), and
+ * naming each one keeps the fixtures off the schema defaults, so a default
+ * changing can't change what these launches exercise.
+ */
+const MANIFEST = {
+  version: '1.0.0',
+  description: 'sleeps until interrupted',
+  inputs: {},
+  outputs: {},
+  capabilities: [],
+  secrets: [],
+  schedule: 'on_run',
+  autonomy_level: 'autonomous',
+  side_effects: [],
+  ttl_hours: 0.001,
+  dependencies: [],
+  timeout_ms: 120_000,
+  max_parallelism: 1,
+  max_retries: 0,
+  retry_delay_ms: 10,
+  min_tier: 'normal',
+}
+
 let home: string
+/** A home of 300 manifest-only plugins, whose `advance --json` document is larger than a pipe buffer. */
+let fleet: string
 
 beforeAll(() => {
   home = mkdtempSync(join(tmpdir(), 'warpline-advance-sigint-'))
@@ -53,33 +91,21 @@ beforeAll(() => {
   // gates instead of running, and the child exits before it can be signalled.
   writeFileSync(join(home, 'preferences.json'), JSON.stringify({ review_gate: false }))
 
-  // Every field spelled out: the loader casts rather than parses, so an omitted
-  // field arrives as undefined instead of picking up a schema default.
   writeFileSync(
     join(plugin, 'manifest.ts'),
-    `export const manifest = ${JSON.stringify({
-      name: 'slow',
-      version: '1.0.0',
-      description: 'sleeps until interrupted',
-      inputs: {},
-      outputs: {},
-      capabilities: [],
-      secrets: [],
-      schedule: 'on_run',
-      autonomy_level: 'autonomous',
-      side_effects: [],
-      ttl_hours: 0.001,
-      dependencies: [],
-      timeout_ms: 120_000,
-      max_parallelism: 1,
-      max_retries: 0,
-      retry_delay_ms: 10,
-      min_tier: 'normal',
-    })}\n`,
+    `export const manifest = ${JSON.stringify({ name: 'slow', ...MANIFEST })}\n`,
   )
+  // The output before the sleep is what the signal drain case reads. While a
+  // handler runs, the runtime sends its `console.log` lines to stderr, and a
+  // pipe reader that hasn't started leaves them queued in this process. The
+  // pid file is that case's readiness marker: written after the last line, so
+  // all of them are queued by the time the signal is sent.
   writeFileSync(
     join(plugin, 'handler.ts'),
-    `export async function handler() {
+    `import { writeFileSync } from 'node:fs'
+export async function handler() {
+  for (let i = 0; i < ${CHATTY_LINES}; i++) console.log('z'.repeat(499))
+  writeFileSync(${JSON.stringify(join(home, 'pid'))}, String(process.pid))
   await new Promise(resolve => setTimeout(resolve, ${HANDLER_SLEEP_MS}))
   return {
     status: 'success',
@@ -93,11 +119,53 @@ beforeAll(() => {
   }
 }\n`,
   )
+
+  // Long directory names make a large document from few plugins: each name
+  // appears in it once, so 300 of them give about 70 KB. `manual` means none
+  // of them is due, and the advance only reports them.
+  fleet = mkdtempSync(join(tmpdir(), 'warpline-advance-drain-'))
+  writeFileSync(join(fleet, 'preferences.json'), JSON.stringify({ review_gate: false }))
+  for (let i = 0; i < 300; i++) {
+    const name = `p${String(i).padStart(4, '0')}-${'0'.repeat(195)}`
+    const dir = join(fleet, 'plugins', name)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify({ name, ...MANIFEST, schedule: 'manual' })}\n`,
+    )
+  }
 })
 
 afterAll(() => {
   rmSync(home, { recursive: true, force: true })
+  rmSync(fleet, { recursive: true, force: true })
 })
+
+/**
+ * Runs `cmd` under `sh -c` with `home` as the warpline home, and collects what
+ * reaches the pipeline's stdout. A shell pipeline is the only reader that can
+ * hold bytes back the way a real consumer does: a delayed reader in this
+ * process, or a paused `child.stdout`, still lets the child's writes complete,
+ * so a test built on either can't go red.
+ *
+ * The env is passed explicitly. A bun child spawned with the default env sees
+ * the env as it was when this process started, not as it is now.
+ */
+function sh(cmd: string, home: string): Promise<{ out: string; code: number | null }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('sh', ['-c', cmd], {
+      env: { ...process.env, WARPLINE_HOME: home },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    })
+    let out = ''
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      out += chunk
+    })
+    child.on('error', reject)
+    child.on('close', code => resolve({ out, code }))
+  })
+}
 
 /**
  * One launch, signalled once the advance is unambiguously mid-invocation.
@@ -163,4 +231,59 @@ test('SIGTERM during an advance exits 130, the same as SIGINT', async () => {
 
   expect(signal).toBeNull()
   expect(code).toBe(130)
+})
+
+test('advance --json through a slow pipe reader is one whole document', async () => {
+  // The control first: the same command into a file, which a process exit
+  // can't cut. It must be larger than a pipe buffer, or the case below would
+  // pass with no drain at all.
+  const control = join(fleet, 'control.json')
+  await sh(`"${process.execPath}" "${ENTRY}" advance --json > "${control}"`, fleet)
+  expect(readFileSync(control, 'utf8').length).toBeGreaterThan(65_536)
+
+  // The reader sleeps before it reads, so the pipe fills and the rest of the
+  // document is still queued in the process when the command returns. Not
+  // compared byte for byte with the control: counters can differ between runs.
+  const { out } = await sh(`"${process.execPath}" "${ENTRY}" advance --json | (sleep 1; cat)`, fleet)
+  const doc = JSON.parse(out)
+  expect(doc.plugins).toHaveLength(300)
+})
+
+/**
+ * The reader is gated on a file written after the kill, not on a timer. A
+ * timed reader races the signal; this one proves the plugin's lines were
+ * still queued when the signal landed. `rc` is the bin's own exit code, taken
+ * by the shell inside the pipeline.
+ */
+test('SIGTERM drains the plugin output still queued on stderr before exiting 130', async () => {
+  const pidFile = join(home, 'pid')
+  const signalled = join(home, 'signalled')
+  const rc = join(home, 'rc')
+  // The earlier cases leave their lock and pid behind, for the same reason
+  // `advanceKilledWith` clears the lock.
+  for (const stale of [join(home, 'state', '.lock'), pidFile, signalled, rc]) {
+    rmSync(stale, { force: true })
+  }
+
+  const result = sh(
+    `{ "${process.execPath}" "${ENTRY}" advance 2>&1 >/dev/null; echo $? > "${rc}"; } | (while [ ! -e "${signalled}" ]; do sleep 0.05; done; sleep 0.3; cat)`,
+    home,
+  )
+
+  const deadline = Date.now() + 15_000
+  let pid = ''
+  while ((pid = existsSync(pidFile) ? readFileSync(pidFile, 'utf8') : '') === '') {
+    if (Date.now() > deadline) {
+      writeFileSync(signalled, '') // release the reader so the pipeline can end
+      throw new Error('the slow plugin never wrote its pid')
+    }
+    await new Promise<void>(resolve => setTimeout(resolve, 20))
+  }
+
+  process.kill(Number(pid), 'SIGTERM')
+  writeFileSync(signalled, '')
+  const { out } = await result
+
+  expect(readFileSync(rc, 'utf8').trim()).toBe('130')
+  expect(out.split('\n').filter(line => line === 'z'.repeat(499))).toHaveLength(CHATTY_LINES)
 })
