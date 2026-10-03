@@ -15,6 +15,9 @@
  *
  * `engines.node` in package.json does NOT gate execution — npm emits a
  * warning at install time and nothing at run time. This is the actual gate.
+ *
+ * Every dispatched verb exits here, after stdout and stderr have drained, so
+ * a piped document is never cut.
  */
 
 const REQUIRED_NODE = '^22.18.0 || >=23.6.0'
@@ -31,4 +34,5 @@ if (!supported) {
 }
 
 const { main } = await import('../cli/warpline.js')
-process.exit(await main(process.argv.slice(2)))
+const { exitAfterFlush } = await import('../lib/exit-after-flush.js')
+await exitAfterFlush(await main(process.argv.slice(2)))

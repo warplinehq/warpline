@@ -2672,7 +2672,7 @@ them.
 | `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, a plugin is holding at an approval gate, or a content approval declined to authorise a fire. |
 | `1` | At least one plugin failed, the plugin root loaded no manifests at all, or the command line was not valid. Or, under `--strict`, an approval gate is still waiting or a content approval refused a fire. |
 | `75` | Could not finish. Often nothing ran and nothing was written, but not always — see below before treating it as a free retry. |
-| `130` | Interrupted by SIGINT or SIGTERM. The process stopped; the work may not have. |
+| `130` | Interrupted by a SIGINT or SIGTERM that warpline caught. The process stopped; the work may not have. |
 
 **A `1` before the advance starts is a usage error.** An unregistered flag and a
 positional argument are both refused by the argument parser: the command writes
@@ -2689,18 +2689,25 @@ root and a `--strict` promotion each write a document to stdout, the last with
 
 `130` is the conventional code for a process ended by SIGINT, and this command
 reports it deliberately rather than by default: it installs a handler for the
-length of the run, and the handler flushes whatever is queued on stdout before
-terminating, so an interrupt arriving between the document being written and the
-command returning cannot cut that document in half.
+length of the run, and `130` is what a signal warpline catches reports. A signal
+before the run starts or after it returns kills the process outright, and a
+shell shows that as 143 or 130. A death by signal is not an exit code, so the
+table above stays a closed enumeration. After the run returns, the advance has
+finished and released its lock, so a signal there costs only the tail of the
+output.
 
-That window is the honest size of the claim, and it is small. The document is
-the last thing the command writes and it returns a few statements later, at
-which point the handler comes off — so the barrier covers the tail of a run that
-lasted seconds or minutes, and an interrupt landing anywhere earlier finds
-nothing queued because nothing has been written. It is free and it is correct
-and it is not a general promise about this stream: a command that exits without
-draining a pipe can truncate on the ordinary path too, with no signal involved
-at all.
+The handler ends stdout and stderr, and exits `130` once both have drained.
+What it drains is plugin output: while a handler runs, its prints go to stderr
+(§ What reaches stdout), and an interrupted plugin can leave them queued. The
+document is never queued while the handler can run. It is written and the
+handler comes off in one synchronous stretch, and a signal can't land between
+the two.
+
+On the ordinary path the promise is general: every verb drains stdout and
+stderr before the process exits, so a piped `--json` document reaches a slow
+reader whole. There is no ceiling there. A reader that stops reading blocks the
+writer, as it would any Unix writer. A reader that has gone away (`| head`)
+ends the command quietly, with its own exit code.
 
 **SIGTERM takes the same handler and reports the same code.** That is the signal
 a scheduler sends — `systemctl stop`, a launchd `bootout` and a container stop
@@ -2711,11 +2718,11 @@ is far likelier to take. Everything the rest of this section says about an
 interrupt now reads for both signals. What your scheduler makes of a `130`
 afterwards is its own question and `scheduler-recipe.md` is where it is asked.
 
-The handler also puts a ceiling on itself. It exits as soon as stdout has
-drained, and after two seconds it exits anyway. Without that, a stdout pipe
-whose reader has stopped consuming left the process unkillable by further
+The handler also puts a ceiling on itself. It exits once stdout and stderr have
+drained, and after two seconds it exits anyway. Without that, a pipe whose
+reader has stopped consuming would leave the process unkillable by further
 signals — the default disposition is gone while the handler is installed, so
-each one only queued another write.
+each further signal only asks for the same drain.
 
 Read `130` as "the process stopped", never as "the work stopped". The advance is
 not interruptible — no abort is threaded into a plugin invocation — so the plugin
@@ -3096,8 +3103,8 @@ plugin call is bounded by its `timeout_ms`, so that takes a fault in the runtime
 itself. An operator who finds one deletes `.lock` by hand.
 
 **An interrupted advance can leave a plugin running.** An advance interrupted by
-SIGINT or SIGTERM exits `130` (§ 11) as soon as its stdout has drained, or after
-two seconds if it has not, which ends the process and not the work: the plugin that was in flight may run to completion in a process
+SIGINT or SIGTERM exits `130` (§ 11) once its stdout and stderr have drained, or
+after two seconds if they have not, which ends the process and not the work: the plugin that was in flight may run to completion in a process
 the operator believes is dead. The lock that interruption leaves behind is
 reclaimed by the heal described above: on the next advance if the holder's
 process is gone and the lock's `host` and this machine's are both known and

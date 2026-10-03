@@ -54,9 +54,9 @@
  *      writes its sentence to stderr and returns; the single emission site is
  *      past all of them. The engine holds up the other half of that contract:
  *      it writes nothing to stdout either, which is asserted structurally
- *      because no in-process capture can observe it. The interrupt handler's
- *      own write is a flush barrier carrying no bytes, so it adds nothing to
- *      that stream and cannot be mistaken for a document. The third writer on
+ *      because no in-process capture can observe it. The interrupt handler
+ *      writes nothing at all: it ends the stream, which adds no bytes to it
+ *      and cannot be mistaken for a document. The third writer on
  *      this stream is the plugin handler, which is not ours at all: its stdout
  *      is redirected to stderr for the length of its invocation, in
  *      `invokePlugin` rather than here, because `warpline run` needs the same
@@ -126,6 +126,7 @@ import { runAdvance } from '../runtime/engine.js'
 import type { AdvanceResult, PluginFsmState } from '../runtime/engine.js'
 import { advanceCounts, advanceExitCode } from '../runtime/exit-codes.js'
 import { isInteractive } from './prompt.js'
+import { exitAfterFlush } from '../lib/exit-after-flush.js'
 import { RunTriggerSchema, type RunTrigger } from '../schemas/run-log.js'
 
 export const USAGE = `Usage: warpline advance [--strict] [--json]
@@ -273,19 +274,23 @@ export async function run(
   // therefore has no return path: ending the process is the only way the signal
   // ends anything at all.
   //
-  // The empty write is a flush barrier carrying no bytes. Under a scheduler
-  // stdout is a pipe, writes to a pipe are asynchronous, and the one `--json`
-  // document this command emits may still be queued when the signal lands;
-  // exiting without waiting for it can cut that document in half. Chunks flush
-  // in order, so a zero-length write's callback runs after every byte handed to
-  // `write` before it.
+  // The handler ends stdout and stderr through the same helper the bin exits
+  // by, and exits once both have drained. Under a scheduler both streams are
+  // pipes, writes to a pipe are asynchronous, and exiting without waiting can
+  // cut off whatever is still queued. What is queued when a signal lands is
+  // never the `--json` document: it is written and this handler removed in one
+  // synchronous stretch, so no signal can arrive between the two. It is plugin
+  // output. While a handler runs, `invokePlugin` sends its stdout to stderr, so
+  // a chatty plugin interrupted mid-run has its lines queued on stderr, and
+  // that is why stderr is drained too.
   //
-  // The bounded fallback beside the barrier is the other half. While this
-  // handler is installed, SIGINT no longer terminates by default — so if stdout
-  // is a pipe whose reader has stopped consuming, the callback never runs and
-  // every further Ctrl-C just queues another empty write. The process becomes
-  // unkillable by the operator sitting in front of it. Two seconds, and
-  // `unref` so the timer cannot hold the event loop open on any other path.
+  // The bounded fallback beside the drain is the other half. While this
+  // handler is installed, SIGINT no longer terminates by default — so if either
+  // stream is a pipe whose reader has stopped consuming, the drain never
+  // finishes and every further Ctrl-C only asks for the same drain again. The
+  // process becomes unkillable by the operator sitting in front of it. Two
+  // seconds, and `unref` so the timer cannot hold the event loop open on any
+  // other path.
   //
   // SIGTERM is handled the same way and for a plainer reason: `systemctl stop`,
   // a launchd `bootout` and a container stop all send SIGTERM, not SIGINT. Left
@@ -296,7 +301,7 @@ export async function run(
   // fact before this line could be written.
   const onInterrupt = (): void => {
     setTimeout(() => process.exit(130), 2000).unref()
-    process.stdout.write('', () => process.exit(130))
+    void exitAfterFlush(130)
   }
   const INTERRUPTS = ['SIGINT', 'SIGTERM'] as const
   for (const sig of INTERRUPTS) process.on(sig, onInterrupt)
