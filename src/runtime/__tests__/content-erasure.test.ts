@@ -572,6 +572,112 @@ export async function handler() {
     expect(after.approvals['sender']!.approved_at).not.toBe('2000-01-01T00:00:00.000Z')
   })
 
+  /**
+   * The replaced record's producer is `courier`, a name that is not a
+   * substring of `prod`, `prod2` or `sender`. So "stdout does not contain
+   * courier" can only pass when the output really never names it.
+   */
+  describe('a re-approve onto another producer says what it withdrew', () => {
+    const COURIER_BYTES = 'courier-bytes'
+    const WITHDREW = 'Withdrew the earlier content approval for sender, which named a different producer.'
+    const ERASED = 'The bytes it held were erased, since no open approval still holds them.'
+
+    beforeEach(async () => {
+      await h.writePlugin('courier', {
+        outputs: { brief: {} },
+        handlerBody: `
+import { existsSync } from 'node:fs'
+export async function handler() {
+  const base = { status: 'success', phases_completed: ['courier'], phases_failed: [], errors: [], data_freshness: {}, schema_version: 1 }
+  if (existsSync(${JSON.stringify(h.marker)})) return { ...base, summary: 'courier produced nothing', artifacts_produced: [] }
+  return { ...base, summary: 'courier produced', artifacts_produced: [{ type: 'brief', format: 'text', body: ${JSON.stringify(COURIER_BYTES)} }] }
+}
+`,
+      })
+    })
+
+    /** Runs the CLI verb with stderr swallowed, and returns its exit code and stdout. */
+    async function cliOut(args: string[]): Promise<{ code: number; stdout: string }> {
+      const realOut = process.stdout.write
+      const realErr = process.stderr.write
+      let stdout = ''
+      process.stdout.write = ((chunk: unknown) => {
+        stdout += String(chunk)
+        return true
+      }) as typeof process.stdout.write
+      process.stderr.write = (() => true) as typeof process.stderr.write
+      try {
+        const { run } = await import('../../cli/approve.js')
+        return { code: await run(args), stdout }
+      } finally {
+        process.stdout.write = realOut
+        process.stderr.write = realErr
+      }
+    }
+
+    /** Advance 1, then checks courier holds its bytes under the shared run id. */
+    async function produceAll(): Promise<string> {
+      const runId = await produceBoth()
+      const courier = (await readState()).plugin_runs['courier']!.last_output!
+      expect(courier.run_id).toBe(runId)
+      expect(courier.body).toBe(COURIER_BYTES)
+      return runId
+    }
+
+    const reapprove = () => cliOut(['sender', '--content', '--not-after', OPEN, '--zone', 'UTC'])
+
+    test('onto another producer, with the old bytes erased: both lines, and the old producer is never named', async () => {
+      const runId = await produceAll()
+      await writeSender('prod')
+      await seed({ sender: binding('sender', 'courier', runId, OPEN) })
+
+      const { code, stdout } = await reapprove()
+      expect(code).toBe(0)
+
+      expect(stdout).toContain(WITHDREW)
+      expect(stdout).toContain(ERASED)
+      const header = stdout.indexOf('Answering the content gate:')
+      expect(header).toBeGreaterThanOrEqual(0)
+      expect(header).toBeLessThan(stdout.indexOf(WITHDREW))
+      expect(stdout.indexOf(WITHDREW)).toBeLessThan(stdout.indexOf(ERASED))
+      expect(stdout.indexOf(ERASED)).toBeLessThan(stdout.indexOf('----- begin approved bytes -----'))
+      expect(stdout).not.toContain('courier')
+      expect((await readState()).plugin_runs['courier']!.last_output!.erased_at).toBeDefined()
+    })
+
+    test('onto another producer while another open approval holds the bytes: the withdrawal line only', async () => {
+      const runId = await produceAll()
+      await writeSender('prod')
+      await seed({
+        sender: binding('sender', 'courier', runId, OPEN),
+        keeper: binding('keeper', 'courier', runId, OPEN),
+      })
+
+      const { code, stdout } = await reapprove()
+      expect(code).toBe(0)
+
+      expect(stdout).toContain(WITHDREW)
+      expect(stdout).not.toContain(ERASED)
+      expect(stdout).not.toContain('courier')
+      const courier = (await readState()).plugin_runs['courier']!.last_output!
+      expect(courier.erased_at).toBeUndefined()
+      expect(courier.body).toBe(COURIER_BYTES)
+    })
+
+    test('onto the same producer: neither line', async () => {
+      const runId = await produceAll()
+      await writeSender('courier')
+      await seed({ sender: binding('sender', 'courier', runId, OPEN) })
+
+      const { code, stdout } = await reapprove()
+      expect(code).toBe(0)
+
+      expect(stdout).not.toContain(WITHDREW)
+      expect(stdout).not.toContain(ERASED)
+      expect((await readState()).plugin_runs['courier']!.last_output!.body).toBe(COURIER_BYTES)
+    })
+  })
+
   test('a closed fingerprint binding is kept while a holder for the same producer is open, and releases the content once that holder has fired and its window has closed', async () => {
     await produceBoth()
     const { manifests } = await loadPluginManifests(h.pluginsDir)
