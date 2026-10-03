@@ -8,15 +8,14 @@
  * their callback, so a drain of the real stream from inside the suite would
  * either wait forever or silence every file after this one.
  *
- * This file is the only guard on the EPIPE listener. bun exits 0 quietly on
- * EPIPE with or without it, so no spawn of bun can see it removed. node, which
- * runs the published bin, prints an unhandled 'error' stack and exits 1
- * without it.
+ * This file pins the drain's error policy in-process. Where the guard is
+ * placed on the real streams, which only node can see, is pinned by
+ * src/cli/__tests__/closed-reader.test.ts.
  */
 import { describe, it, expect } from 'bun:test'
 import { Writable } from 'node:stream'
 
-import { drained } from '../exit-after-flush.js'
+import { drained, guardStream } from '../exit-after-flush.js'
 
 /** A stream whose every write fails the way a real pipe's does: asynchronously, with `code`. */
 function failingWith(code: string): Writable {
@@ -26,6 +25,9 @@ function failingWith(code: string): Writable {
     },
   })
 }
+
+/** One turn of the event loop, so a failing write's error has been raised. */
+const tick = (): Promise<void> => new Promise(resolve => setImmediate(resolve))
 
 describe('drained', () => {
   it('settles quietly when the reader has gone away (EPIPE)', async () => {
@@ -49,5 +51,34 @@ describe('drained', () => {
     const p = drained(w)
     w.write('late')
     await p
+  })
+
+  it('a second drain of the same stream settles with the first', async () => {
+    const w = new Writable({
+      write(_chunk, _enc, cb) {
+        cb()
+      },
+    })
+    w.write('document')
+    await drained(w)
+    await drained(w)
+  })
+
+  it('a reader that went away before the drain leaves it quiet', async () => {
+    const w = failingWith('EPIPE')
+    guardStream(w)
+    w.write('document')
+    await tick()
+    await tick()
+    await drained(w)
+  })
+
+  it('any other write error before the drain still fails it (EIO)', async () => {
+    const w = failingWith('EIO')
+    guardStream(w)
+    w.write('document')
+    await tick()
+    await tick()
+    await expect(drained(w)).rejects.toMatchObject({ code: 'EIO' })
   })
 })
