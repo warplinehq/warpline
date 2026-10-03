@@ -69,6 +69,17 @@ async function writeBrokenPlugin(name: string): Promise<void> {
   await writeFile(join(dir, 'manifest.ts'), `export const manifest = { name: '${name}',`)
 }
 
+/**
+ * A manifest that parses but throws when evaluated. Unlike `writeBrokenPlugin`,
+ * the module is syntactically fine, so whether a second import reports the
+ * same error is up to the runtime's module cache, not the parser.
+ */
+async function writeThrowingPlugin(name: string): Promise<void> {
+  const dir = join(pluginsDir, name)
+  await mkdir(dir, { recursive: true })
+  await writeFile(join(dir, 'manifest.ts'), `throw new Error('${name} manifest is broken')`)
+}
+
 beforeEach(async () => {
   root = join(tmpdir(), `warpline-loader-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
   pluginsDir = join(root, 'plugins')
@@ -313,6 +324,38 @@ describe('loadPluginManifests — per-plugin load failures', () => {
 
     expect(Array.from(manifests.keys())).toEqual(['fx-good'])
     expect(failures).toEqual([])
+  })
+
+  // A long-lived process loads the same root more than once. If the runtime
+  // caches the failed module and hands back an empty namespace on the second
+  // import, the broken plugin leaves the due-set with no failure row at all.
+  // Load 2 is compared with load 1, so the original message has to survive.
+  test('Test 10: a manifest that throws on import is reported again on a second load', async () => {
+    await writeValidPlugin('fx-good')
+    await writeThrowingPlugin('fx-throws')
+
+    const first = await loadPluginManifests(pluginsDir)
+    expect(first.failures.map((f) => f.plugin)).toEqual(['fx-throws'])
+    expect(first.failures[0]!.error).toContain('fx-throws manifest is broken')
+
+    const second = await loadPluginManifests(pluginsDir)
+    expect(second.failures).toEqual(first.failures)
+    expect(Array.from(second.manifests.keys())).toEqual(['fx-good'])
+  })
+
+  // A module that imports cleanly but exports no `manifest` is a misnamed
+  // export or a half-finished scaffold. Dropping it silently is the same
+  // failure mode Test 7 guards for a directory with no manifest file.
+  test('Test 11: a manifest that imports cleanly with no manifest export is a failure, not dropped', async () => {
+    const dir = join(pluginsDir, 'fx-noexport')
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'manifest.ts'), 'export const notTheManifest = 1')
+
+    const { manifests, failures } = await loadPluginManifests(pluginsDir)
+
+    expect(manifests.size).toBe(0)
+    expect(failures.map((f) => f.plugin)).toEqual(['fx-noexport'])
+    expect(failures[0]!.error).toContain("no 'manifest' export")
   })
 })
 
