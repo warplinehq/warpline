@@ -17,7 +17,9 @@
  * warning at install time and nothing at run time. This is the actual gate.
  *
  * Every dispatched verb exits here, after stdout and stderr have drained, so
- * a piped document is never cut.
+ * a piped document is never cut. The drain's error policy is on both streams
+ * before any verb runs, so a reader that leaves while a verb is still working,
+ * inside the state lock for instance, is as quiet as one that leaves at the end.
  */
 
 const REQUIRED_NODE = '^22.18.0 || >=23.6.0'
@@ -33,6 +35,8 @@ if (!supported) {
   process.exit(1)
 }
 
+const { exitAfterFlush, guardStream } = await import('../lib/exit-after-flush.js')
+guardStream(process.stdout)
+guardStream(process.stderr)
 const { main } = await import('../cli/warpline.js')
-const { exitAfterFlush } = await import('../lib/exit-after-flush.js')
 await exitAfterFlush(await main(process.argv.slice(2)))

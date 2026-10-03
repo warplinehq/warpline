@@ -2692,7 +2692,7 @@ them.
 | Code | Meaning |
 |------|---------|
 | `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, a plugin is holding at an approval gate, or a content approval declined to authorise a fire. |
-| `1` | At least one plugin failed, the plugin root loaded no manifests at all, or the command line was not valid. Or, under `--strict`, an approval gate is still waiting or a content approval refused a fire. |
+| `1` | At least one plugin failed, the plugin root loaded no manifests at all, or the command line was not valid. Or, under `--strict`, an approval gate is still waiting or a content approval refused a fire. Or a write to stdout or stderr failed for a reason other than a reader that has gone away. |
 | `75` | Could not finish. Often nothing ran and nothing was written, but not always — see below before treating it as a free retry. |
 | `130` | Interrupted by a SIGINT or SIGTERM that warpline caught. The process stopped; the work may not have. |
 
@@ -2729,7 +2729,9 @@ On the ordinary path the promise is general: every verb drains stdout and
 stderr before the process exits, so a piped `--json` document reaches a slow
 reader whole. There is no ceiling there. A reader that stops reading blocks the
 writer, as it would any Unix writer. A reader that has gone away (`| head`)
-ends the command quietly, with its own exit code.
+ends the command quietly, with its own exit code. Any other write error on
+either stream is not quiet. The process ends with a stack trace and exit `1`,
+whatever the command would have returned, a caught signal included.
 
 **SIGTERM takes the same handler and reports the same code.** That is the signal
 a scheduler sends — `systemctl stop`, a launchd `bootout` and a container stop
