@@ -41,7 +41,7 @@ import type { AdvanceOutcome } from './exit-codes.js'
 import { acquireLock, releaseLock, startHeartbeat } from './lock.js'
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
 import { PluginManifestSchema, type PluginManifest } from '../schemas/plugin-manifest.js'
-import { invokePlugin } from './invoke-plugin.js'
+import { invokePlugin, redirectPluginOutput, releasePluginOutput } from './invoke-plugin.js'
 import type { CapabilityGrantWitness, DependencyRun } from './capabilities.js'
 
 /**
@@ -4070,7 +4070,17 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
       const manifestPath = join(pluginsDir, entry, 'manifest.ts')
       try {
         // import() needs a file:// URL, not a bare absolute path.
-        const mod = await import(pathToFileURL(manifestPath).href)
+        // A manifest can print at module scope, and that happens on this await,
+        // before any handler, so it gets the redirect invokePlugin puts around
+        // its own load (§ What reaches stdout). The release sits in a `finally`
+        // so a manifest that throws can't leave the redirect on.
+        redirectPluginOutput()
+        let mod: Record<string, unknown>
+        try {
+          mod = await import(pathToFileURL(manifestPath).href)
+        } finally {
+          releasePluginOutput()
+        }
         if ('manifest' in mod) {
           // A manifest is UNTRUSTED INPUT. `manifest.ts` is hand-written, and
           // the cast that used to stand here meant every invariant the schema

@@ -329,7 +329,8 @@ let restoreStdout: (() => void) | null = null
 
 const STDOUT_CONSOLE = ['log', 'info', 'debug'] as const
 
-function redirectPluginOutput(): void {
+// Exported for the engine's manifest load, the other place plugin code runs.
+export function redirectPluginOutput(): void {
   printingPlugins += 1
   if (printingPlugins > 1) return
 
@@ -340,9 +341,10 @@ function redirectPluginOutput(): void {
   // caller that wraps stderr after this point still sees the plugin's line.
   // Every argument is forwarded, the callback among them — a dropped callback
   // is a writer that never learns its chunk flushed.
-  process.stdout.write = function (...writeArgs: unknown[]): boolean {
+  const shim = function (...writeArgs: unknown[]): boolean {
     return (process.stderr.write as (...a: unknown[]) => boolean)(...writeArgs)
   } as typeof process.stdout.write
+  process.stdout.write = shim
 
   for (const [method] of realConsole) {
     console[method] = (...args: unknown[]): void => {
@@ -351,12 +353,13 @@ function redirectPluginOutput(): void {
   }
 
   restoreStdout = () => {
-    process.stdout.write = realWrite
+    // A drain that began while the plugin ran put its own write there. It stays.
+    if (process.stdout.write === shim) process.stdout.write = realWrite
     for (const [method, fn] of realConsole) console[method] = fn
   }
 }
 
-function releasePluginOutput(): void {
+export function releasePluginOutput(): void {
   printingPlugins -= 1
   if (printingPlugins > 0) return
   restoreStdout?.()
