@@ -11,8 +11,8 @@
  * the runner. The drain has no in-process seam either: what it guards is what
  * happens to bytes still queued when the process ends.
  *
- * So this file launches the real bin six times. Two are the exit-code cases,
- * one per signal, because a second signal is a second disposition. Four are
+ * So this file launches the real bin eight times. Two are the exit-code cases,
+ * one per signal, because a second signal is a second disposition. Six are
  * the drain cases. Any further interrupt behaviour — the handler being removed
  * again, for instance — belongs in `advance.test.ts`, which can observe it
  * without a launch.
@@ -34,9 +34,20 @@
  * the built bin as well as bun on the source entry. `bun run test` builds
  * first. A bare `bun test` runs whatever dist holds.
  *
+ * The load-print case is the one stdout drain case. A manifest that printed at
+ * module scope used to queue its lines on stdout, and the plugin's return put
+ * the stream's real write back over the drain's. The next write then cut the
+ * queue at 131 of 400 lines, on node and on bun. Either half of the fix keeps
+ * this case green alone: the load redirect leaves stdout nothing queued, and
+ * the release leaves the drain's write in place. So it goes red only when both
+ * are gone. advance.test.ts pins the load redirect, and invoke-plugin.test.ts
+ * pins the release.
+ *
  * The handler's two-second ceiling exits 130 even when the drain never
- * settles, so this file can't see a drain that hangs. The run case in
- * closed-reader.test.ts has no ceiling, and that one can.
+ * settles. So the keep-printing and load-print cases also time the exit from
+ * the signal, and one that ends after 1.5 s is the ceiling, not the drain. The
+ * run case in closed-reader.test.ts has no ceiling and still guards a drain
+ * that never settles on that path.
  */
 import { test, expect, beforeAll, afterAll } from 'bun:test'
 import { spawn } from 'node:child_process'
@@ -136,6 +147,50 @@ ${tick ? "  setInterval(() => console.log('tick'), 20)\n" : ''}  writeFileSync($
     errors: [],
     data_freshness: {},
     summary: 'slow completed',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}\n`,
+  )
+}
+
+/**
+ * Writes the `loud` plugin into `dir`. Its manifest prints CHATTY_LINES lines
+ * to stdout at module scope, and its handler returns 100 ms after the signal.
+ *
+ * A manifest that prints at module scope is the one input that queues bytes on
+ * advance's stdout before a signal: the engine imports the manifest before any
+ * handler runs. The handler returns during the drain because its return is what
+ * took the plugin redirect off stdout, and the drain's own write with it. The
+ * next stdout write then reached an ended stream, and the drain settled before
+ * the queue had flushed.
+ */
+function loudPlugin(dir: string): void {
+  const plugin = join(dir, 'plugins', 'loud')
+  mkdirSync(plugin, { recursive: true })
+  writeFileSync(join(dir, 'preferences.json'), JSON.stringify({ review_gate: false }))
+
+  writeFileSync(
+    join(plugin, 'manifest.ts'),
+    `for (let i = 0; i < ${CHATTY_LINES}; i++) process.stdout.write('m'.repeat(499) + '\\n')
+export const manifest = ${JSON.stringify({ name: 'loud', ...MANIFEST })}\n`,
+  )
+  writeFileSync(
+    join(plugin, 'handler.ts'),
+    `import { existsSync, writeFileSync } from 'node:fs'
+export async function handler() {
+  writeFileSync(${JSON.stringify(join(dir, 'pid'))}, String(process.pid))
+  while (!existsSync(${JSON.stringify(join(dir, 'signalled'))})) {
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  await new Promise(resolve => setTimeout(resolve, 100))
+  return {
+    status: 'success',
+    phases_completed: ['loud'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'loud completed',
     artifacts_produced: [],
     schema_version: 1,
   }
@@ -280,15 +335,26 @@ test('advance --json through a slow pipe reader is one whole document', async ()
 })
 
 /**
- * One SIGTERM'd advance in `dir`, with its stderr into a reader that starts
- * 0.3 s after the signal. Returns the bin's exit code and what the reader got.
+ * One SIGTERM'd advance in `dir`, with one of its streams into a reader that
+ * starts 0.3 s after the signal. The reader gets stderr by default, and
+ * `streams` can send stdout there instead. Returns the bin's exit code, what
+ * the reader got, and `elapsed`.
  *
  * The reader is gated on a file written after the kill, not on a timer. A
  * timed reader races the signal. This one proves the plugin's lines were
  * still queued when the signal landed. `rc` is the bin's own exit code, taken
  * by the shell inside the pipeline.
+ *
+ * `elapsed` runs from the signal to the pipeline's end, so it includes the
+ * reader's 0.3 s wait. An exit by the two-second ceiling can't come in under
+ * 1.5 s.
  */
-async function sigtermDrain(dir: string, runtime: string, entry: string): Promise<{ rc: string; out: string }> {
+async function sigtermDrain(
+  dir: string,
+  runtime: string,
+  entry: string,
+  streams = '2>&1 >/dev/null',
+): Promise<{ rc: string; out: string; elapsed: number }> {
   const pidFile = join(dir, 'pid')
   const signalled = join(dir, 'signalled')
   const rc = join(dir, 'rc')
@@ -299,7 +365,7 @@ async function sigtermDrain(dir: string, runtime: string, entry: string): Promis
   }
 
   const result = sh(
-    `{ "${runtime}" "${entry}" advance 2>&1 >/dev/null; echo $? > "${rc}"; } | (while [ ! -e "${signalled}" ]; do sleep 0.05; done; sleep 0.3; cat)`,
+    `{ "${runtime}" "${entry}" advance ${streams}; echo $? > "${rc}"; } | (while [ ! -e "${signalled}" ]; do sleep 0.05; done; sleep 0.3; cat)`,
     dir,
   )
 
@@ -314,9 +380,10 @@ async function sigtermDrain(dir: string, runtime: string, entry: string): Promis
   }
 
   process.kill(Number(pid), 'SIGTERM')
+  const killedAt = Date.now()
   writeFileSync(signalled, '')
   const { out } = await result
-  return { rc: readFileSync(rc, 'utf8').trim(), out }
+  return { rc: readFileSync(rc, 'utf8').trim(), out, elapsed: Date.now() - killedAt }
 }
 
 test('SIGTERM drains the plugin output still queued on stderr before exiting 130', async () => {
@@ -331,9 +398,35 @@ for (const [name, runtime, entry] of [
   ['bun', process.execPath, ENTRY],
 ] as const) {
   test(`SIGTERM keeps the queued plugin output whole while the plugin is still printing (${name})`, async () => {
-    const { rc, out } = await sigtermDrain(ticking, runtime, entry)
+    const { rc, out, elapsed } = await sigtermDrain(ticking, runtime, entry)
 
     expect(rc).toBe('130')
     expect(out.split('\n').filter(line => line === 'z'.repeat(499))).toHaveLength(CHATTY_LINES)
+    // The ceiling exits 130 at two seconds with the queue already flushed, so
+    // only the clock tells the drain from it.
+    expect(elapsed).toBeLessThan(1_500)
+  }, 30_000)
+
+  test(`SIGTERM keeps what the manifest printed at load whole when the plugin returns during the drain (${name})`, async () => {
+    // A fresh home per run, because this plugin completes, unlike the slow and
+    // ticking ones. A completed run stays fresh for `ttl_hours: 0.001` (3.6 s),
+    // so the second runtime would find nothing due and never write its pid.
+    const dir = mkdtempSync(join(tmpdir(), 'warpline-advance-loud-'))
+    try {
+      loudPlugin(dir)
+      const stderrFile = join(dir, 'stderr')
+      const { rc, out, elapsed } = await sigtermDrain(dir, runtime, entry, `2> "${stderrFile}"`)
+
+      // Both streams are counted. Where the lines land is advance.test.ts's
+      // question, and this case asks only that none is lost. Once the load is
+      // redirected they are on stderr. The newline between keeps a line cut at
+      // the pipe buffer from fusing with the first line of the other stream.
+      const both = `${readFileSync(stderrFile, 'utf8')}\n${out}`
+      expect(rc).toBe('130')
+      expect(both.split('\n').filter(line => line === 'm'.repeat(499))).toHaveLength(CHATTY_LINES)
+      expect(elapsed).toBeLessThan(1_500)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   }, 30_000)
 }

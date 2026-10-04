@@ -461,3 +461,49 @@ describe('invokePlugin: a name declared in both inputs and secrets', () => {
     })
   })
 })
+
+describe('invokePlugin: the output redirect', () => {
+  /**
+   * The handler stands in for a drain that begins while a plugin runs: the
+   * drain puts its own write on stdout so a late write never reaches an ended
+   * stream. The release used to put the real write back over it no matter
+   * what. Nothing writes to stdout between the swap and the `finally`, so the
+   * stand-in swallows nothing. Through `invokePlugin`, not the redirect
+   * functions directly, because the release that matters is the one a real
+   * invocation runs.
+   */
+  test('the redirect takes back only its own write, so a write put in its place while the handler ran stays', async () => {
+    const original = process.stdout.write
+    const drainWrite = (() => true) as typeof process.stdout.write
+    ;(globalThis as Record<string, unknown>).__warplineDrainWrite = drainWrite
+
+    await writePlugin(tmpDir, 'replaces-write', `
+      export async function handler(manifest, args) {
+        process.stdout.write = globalThis.__warplineDrainWrite
+        return {
+          status: 'success',
+          phases_completed: ['good-plugin'],
+          phases_failed: [],
+          errors: [],
+          data_freshness: {},
+          summary: 'good plugin succeeded',
+          artifacts_produced: [],
+          schema_version: 1,
+        }
+      }
+    `)
+
+    try {
+      // The control: with nothing put in the shim's place, the original is back.
+      await invokePlugin('good-plugin', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
+      expect(process.stdout.write).toBe(original)
+
+      const result = await invokePlugin('replaces-write', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
+      expect(result.result.status).toBe('success')
+      expect(process.stdout.write).toBe(drainWrite)
+    } finally {
+      process.stdout.write = original
+      delete (globalThis as Record<string, unknown>).__warplineDrainWrite
+    }
+  })
+})

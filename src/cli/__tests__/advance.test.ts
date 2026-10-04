@@ -920,6 +920,30 @@ export async function handler() {
   })
 
   /**
+   * The other moment plugin code runs is its manifest's module scope, on the
+   * engine's load. That comes before any handler, and before invokePlugin's
+   * own load redirect: the module is cached, so invokePlugin's import never
+   * re-runs it. Both writers, for the reason the case above gives. Through the
+   * bin, node and bun showed the same print above the document.
+   */
+  test('a manifest that prints at load cannot corrupt the document; its output goes to stderr', async () => {
+    await writePlugin(home, 'loud')
+    const manifestPath = join(home.pluginsDir, 'loud', 'manifest.ts')
+    const manifest = await readFile(manifestPath, 'utf-8')
+    await writeFile(
+      manifestPath,
+      `console.log('MODULE CONSOLE')\nprocess.stdout.write('MODULE RAW\\n')\n${manifest}`,
+    )
+
+    const { code, stdout, stderr } = await capture(() => main(['advance', '--json']))
+
+    expect(code).toBe(0)
+    expect(soleDocument(stdout).plugins).toEqual([{ name: 'loud', state: 'completed' }])
+    expect(stderr).toContain('MODULE CONSOLE')
+    expect(stderr).toContain('MODULE RAW')
+  })
+
+  /**
    * Two chatty plugins in one level, which run concurrently.
    *
    * This is the case that punishes the obvious implementation. A save/restore
