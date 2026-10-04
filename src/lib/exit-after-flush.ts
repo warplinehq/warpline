@@ -68,7 +68,7 @@ const QUIET = new Set(['EPIPE', 'ERR_STREAM_WRITE_AFTER_END'])
  * writer awaiting its callback carries on, and returns true, so no writer waits
  * for a 'drain' that will never come.
  */
-function dropLateWrite(...args: unknown[]): boolean {
+export function dropLateWrite(...args: unknown[]): boolean {
   const cb = args[args.length - 1]
   if (typeof cb === 'function') setImmediate(cb as () => void)
   return true

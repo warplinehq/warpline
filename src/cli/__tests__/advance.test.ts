@@ -944,6 +944,26 @@ export async function handler() {
   })
 
   /**
+   * A manifest that wraps stdout at load and never unwraps it. Under the load
+   * redirect it wraps the shim, so if the release keeps the wrapper the
+   * document goes to stderr and stdout comes back empty, on exit code 0.
+   */
+  test('a manifest that wraps stdout at load cannot take the document off stdout', async () => {
+    await writePlugin(home, 'wrapper')
+    const manifestPath = join(home.pluginsDir, 'wrapper', 'manifest.ts')
+    const manifest = await readFile(manifestPath, 'utf-8')
+    await writeFile(
+      manifestPath,
+      `const prev = process.stdout.write\nprocess.stdout.write = function (...a) { return prev.apply(process.stdout, a) }\n${manifest}`,
+    )
+
+    const { code, stdout } = await capture(() => main(['advance', '--json']))
+
+    expect(code).toBe(0)
+    expect(soleDocument(stdout).plugins).toEqual([{ name: 'wrapper', state: 'completed' }])
+  })
+
+  /**
    * Two chatty plugins in one level, which run concurrently.
    *
    * This is the case that punishes the obvious implementation. A save/restore

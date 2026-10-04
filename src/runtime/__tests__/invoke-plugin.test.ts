@@ -3,6 +3,7 @@ import { mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { invokePlugin, deriveRunStatus } from '../invoke-plugin.js'
+import { dropLateWrite } from '../../lib/exit-after-flush.js'
 import { _setHome, pluginConfigPath } from '../../lib/paths.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
@@ -467,14 +468,15 @@ describe('invokePlugin: the output redirect', () => {
    * The handler stands in for a drain that begins while a plugin runs: the
    * drain puts its own write on stdout so a late write never reaches an ended
    * stream. The release used to put the real write back over it no matter
-   * what. Nothing writes to stdout between the swap and the `finally`, so the
-   * stand-in swallows nothing. Through `invokePlugin`, not the redirect
-   * functions directly, because the release that matters is the one a real
-   * invocation runs.
+   * what. It's the drain's own `dropLateWrite`, because that one write is the
+   * only one allowed to stay. Nothing writes to stdout between the swap and
+   * the `finally`, so it swallows nothing. Through `invokePlugin`, not the
+   * redirect functions directly, because the release that matters is the one
+   * a real invocation runs.
    */
-  test('the redirect takes back only its own write, so a write put in its place while the handler ran stays', async () => {
+  test("the drain's write put in place while the handler ran stays", async () => {
     const original = process.stdout.write
-    const drainWrite = (() => true) as typeof process.stdout.write
+    const drainWrite = dropLateWrite as typeof process.stdout.write
     ;(globalThis as Record<string, unknown>).__warplineDrainWrite = drainWrite
 
     await writePlugin(tmpDir, 'replaces-write', `
@@ -482,7 +484,7 @@ describe('invokePlugin: the output redirect', () => {
         process.stdout.write = globalThis.__warplineDrainWrite
         return {
           status: 'success',
-          phases_completed: ['good-plugin'],
+          phases_completed: ['replaces-write'],
           phases_failed: [],
           errors: [],
           data_freshness: {},
@@ -504,6 +506,40 @@ describe('invokePlugin: the output redirect', () => {
     } finally {
       process.stdout.write = original
       delete (globalThis as Record<string, unknown>).__warplineDrainWrite
+    }
+  })
+
+  /**
+   * A plugin that wraps stdout and never unwraps it is wrapping the redirect's
+   * shim. Keep the wrapper and every later stdout write, the runtime's own
+   * document included, goes to stderr for the life of the process.
+   */
+  test('a wrapper a plugin left on stdout is taken back with the redirect', async () => {
+    const original = process.stdout.write
+
+    await writePlugin(tmpDir, 'wraps-write', `
+      export async function handler(manifest, args) {
+        const prev = process.stdout.write
+        process.stdout.write = function (...a) { return prev.apply(process.stdout, a) }
+        return {
+          status: 'success',
+          phases_completed: ['wraps-write'],
+          phases_failed: [],
+          errors: [],
+          data_freshness: {},
+          summary: 'wrapped stdout',
+          artifacts_produced: [],
+          schema_version: 1,
+        }
+      }
+    `)
+
+    try {
+      const result = await invokePlugin('wraps-write', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, { granted: false, reason: 'manual-run' })
+      expect(result.result.status).toBe('success')
+      expect(process.stdout.write).toBe(original)
+    } finally {
+      process.stdout.write = original
     }
   })
 })
