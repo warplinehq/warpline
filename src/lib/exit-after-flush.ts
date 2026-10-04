@@ -29,10 +29,10 @@
  *      state lock's release: the EPIPE arrives before any drain exists. So the
  *      bin puts `guardStream` on both streams before any verb runs.
  *   3. `end`'s callback carries the write error, and `settle` reads it. EPIPE
- *      (the reader left) and ERR_STREAM_WRITE_AFTER_END (a plugin still
- *      printing after the end) settle quietly, so the command keeps its own
- *      exit code. Anything else rejects, and the exit becomes a crash rather
- *      than a clean code over lost output. A callback that ignored its
+ *      settles quietly at once: the reader has left, nothing still queued can
+ *      reach anyone, and the command keeps its own exit code. Anything else
+ *      rejects, and the exit becomes a crash rather than a clean code over
+ *      lost output. A callback that ignored its
  *      argument would resolve on EIO. A non-quiet error raised before the
  *      drain is kept by the guard and becomes the drain's rejection.
  *   4. No ceiling. A reader that stops reading blocks this like any Unix
@@ -40,6 +40,18 @@
  *   5. There is one drain per stream. A second call, as when a second signal
  *      arrives, gets the first one's outcome, and the first code to reach
  *      `process.exit` wins.
+ *   6. A write that arrives after the drain began is dropped before it
+ *      reaches the stream. A stream that has seen a write after its end never
+ *      finishes, so waiting for `end`'s callback after one never ends: node
+ *      exits 13 on the unsettled await, and bun waits for minutes. The signal
+ *      handler's two-second ceiling hides that, so it looks like a drain.
+ *      Settling on that error instead exits before the queue has flushed.
+ *      Only the late output is lost, and what was queued before it still
+ *      drains. ERR_STREAM_WRITE_AFTER_END stays quiet as a last resort, for a
+ *      write that reaches the stream another way. Settling at once may cut
+ *      what is queued, but waiting would never end. The runtime prints a crash
+ *      report itself, not through the stream's `write`, so dropping writes
+ *      can't hide a non-quiet error.
  *
  * The memory of an earlier error or drain is the map below, never the
  * stream's own `destroyed` or `writableFinished` flags. Node's
@@ -51,10 +63,24 @@
 
 const QUIET = new Set(['EPIPE', 'ERR_STREAM_WRITE_AFTER_END'])
 
+/**
+ * Stands in for a draining stream's `write`. It calls back with no error, so a
+ * writer awaiting its callback carries on, and returns true, so no writer waits
+ * for a 'drain' that will never come.
+ */
+function dropLateWrite(...args: unknown[]): boolean {
+  const cb = args[args.length - 1]
+  if (typeof cb === 'function') setImmediate(cb as () => void)
+  return true
+}
+
 /** One drain per stream: an outcome the guard recorded, or the drain itself. */
 const drains = new WeakMap<NodeJS.WritableStream, Promise<void>>()
 
-/** Resolves once `stream` has flushed and finished. Rejects on any error but the two quiet ones. */
+/**
+ * Resolves once `stream` has flushed and finished. Rejects on any error but the
+ * two quiet ones. Writes that arrive after it starts are dropped.
+ */
 export function drained(stream: NodeJS.WritableStream): Promise<void> {
   const existing = drains.get(stream)
   if (existing) return existing
@@ -64,6 +90,7 @@ export function drained(stream: NodeJS.WritableStream): Promise<void> {
       else resolve()
     }
     stream.on('error', settle)
+    stream.write = dropLateWrite as NodeJS.WritableStream['write']
     stream.end(settle)
   })
   drains.set(stream, drain)
