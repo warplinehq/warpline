@@ -28,6 +28,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { format } from 'node:util'
 import { pluginsDir, pluginConfigPath } from '../lib/paths.js'
+import { dropLateWrite } from '../lib/exit-after-flush.js'
 import { loadPluginConfig, PluginConfigError } from '../lib/plugin-config.js'
 import { resolvePluginArgs } from '../schemas/plugin-config.js'
 import { SkillResultSchema, makeSkillError } from '../schemas/skill-result.js'
@@ -353,8 +354,10 @@ export function redirectPluginOutput(): void {
   }
 
   restoreStdout = () => {
-    // A drain that began while the plugin ran put its own write there. It stays.
-    if (process.stdout.write === shim) process.stdout.write = realWrite
+    // A drain that began while the plugin ran put its own write there, and it
+    // is terminal, so it stays. Anything else a plugin left wraps the shim, and
+    // keeping it would send the document to stderr.
+    if (process.stdout.write !== dropLateWrite) process.stdout.write = realWrite
     for (const [method, fn] of realConsole) console[method] = fn
   }
 }
