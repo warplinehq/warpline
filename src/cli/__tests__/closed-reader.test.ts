@@ -23,6 +23,16 @@
  * The rows are checked against the dispatcher's switch, so a verb added later
  * can't sit outside this file's reach.
  *
+ * The ticker case is `run` with a plugin still printing to stderr as run
+ * exits. Those late writes must not cut what was queued before them. Its
+ * pipeline runs under a deadline that kills the whole process group, so a
+ * drain that never settles is a named failure here, never a hung runner.
+ *
+ * The closed-stderr case sends stderr, not stdout, into the closed pipe. On
+ * node, a stderr with no 'error' listener crashes the bin with exit 1. Bun
+ * carries on, with its stack written to nowhere. So that case can only go red
+ * on node.
+ *
  * The child env drops NODE_ENV. bun test sets it to `test`, and run-plugin.ts
  * skips its process tail under that value, so an inherited NODE_ENV makes
  * `run` exit 1 through the dispatcher's fallback.
@@ -30,7 +40,7 @@
  * Everything this file writes goes under temp dirs (AGENTS.md Rule 2).
  */
 import { test, expect } from 'bun:test'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -100,10 +110,11 @@ function plugin(home: string, name: string, manifestSource: string, handlerSourc
 }
 
 /**
- * A home with four plugins. `mailer` takes a session approval. `chatty` floods
- * stdout, which the runtime redirects to stderr while a handler runs. `builder`
- * and `sender` are a content producer and its consumer. `sender` fails while a
- * `fail` file exists in this home.
+ * A home with five plugins. `mailer` takes a session approval. `chatty` floods
+ * stdout, which the runtime redirects to stderr while a handler runs. `ticker`
+ * floods the same way, then keeps printing to stderr after its handler has
+ * returned. `builder` and `sender` are a content producer and its consumer.
+ * `sender` fails while a `fail` file exists in this home.
  */
 function buildHome(dir: string): string {
   mkdirSync(dir, { recursive: true })
@@ -124,6 +135,24 @@ function buildHome(dir: string): string {
     `export async function handler() {
   for (let i = 0; i < ${CHATTY_LINES}; i++) console.log('z'.repeat(499))
   return ${RESULT('chatted')}
+}\n`,
+  )
+  // `process.stderr.write`, not console.log: the redirect is off once the
+  // handler has returned, and a console.log would then go to stdout, which
+  // the run cases send to /dev/null. The cap of 150 ticks lets a drain that
+  // never settles end on node with exit 13, instead of printing forever.
+  plugin(
+    dir,
+    'ticker',
+    manifest({ name: 'ticker' }),
+    `export async function handler() {
+  for (let i = 0; i < ${CHATTY_LINES}; i++) console.log('z'.repeat(499))
+  let ticks = 0
+  const timer = setInterval(() => {
+    process.stderr.write('tick\\n')
+    if (++ticks >= 150) clearInterval(timer)
+  }, 20)
+  return ${RESULT('ticked')}
 }\n`,
   )
   plugin(
@@ -183,12 +212,13 @@ function childEnv(home: string): NodeJS.ProcessEnv {
   return env
 }
 
-type Mode = 'control' | 'closed'
+type Mode = 'control' | 'closed' | 'closed-stderr'
 
 /**
  * One launch of the bin under `sh -c`. `control` sends stdout to a file.
- * `closed` pipes it into `(exit 0)`. Scratch files sit beside the home, under
- * the test's temp root.
+ * `closed` pipes it into `(exit 0)`. `closed-stderr` pipes stderr into
+ * `(exit 0)` and sends stdout to the file. Scratch files sit beside the home,
+ * under the test's temp root.
  */
 function launch(runtime: string, home: string, argv: string[], mode: Mode): { code: number; out: string; err: string } {
   const io = `${home}.io`
@@ -199,11 +229,13 @@ function launch(runtime: string, home: string, argv: string[], mode: Mode): { co
   const script =
     mode === 'control'
       ? `${command} > ${q(out)} 2> ${q(err)}; echo $? > ${q(rc)}`
-      : `{ ${command} 2> ${q(err)}; echo $? > ${q(rc)}; } | (exit 0)`
+      : mode === 'closed'
+        ? `{ ${command} 2> ${q(err)}; echo $? > ${q(rc)}; } | (exit 0)`
+        : `{ ${command} 2>&1 > ${q(out)}; echo $? > ${q(rc)}; } | (exit 0)`
   spawnSync('sh', ['-c', script], { env: childEnv(home), stdio: 'ignore', timeout: 60_000 })
   const read = (f: string): string => (existsSync(f) ? readFileSync(f, 'utf8') : '')
   const code = Number.parseInt(read(rc).trim(), 10)
-  return { code: Number.isNaN(code) ? -1 : code, out: mode === 'control' ? read(out) : '', err: read(err) }
+  return { code: Number.isNaN(code) ? -1 : code, out: mode === 'closed' ? '' : read(out), err: read(err) }
 }
 
 type Row = {
@@ -259,7 +291,7 @@ for (const [name, runtime] of RUNTIMES) {
     const root = mkdtempSync(join(tmpdir(), `warpline-closed-reader-${name}-`))
     const problems: string[] = []
     try {
-      const homes: Record<Mode, string> = {
+      const homes: Record<'control' | 'closed', string> = {
         control: buildHome(join(root, 'control')),
         closed: buildHome(join(root, 'closed')),
       }
@@ -299,28 +331,85 @@ test('every dispatched command has a row', () => {
   expect(labels.filter(l => !firstWords.has(l))).toEqual([])
 })
 
-for (const [name, runtime] of RUNTIMES) {
-  test(`run drains plugin output still queued on stderr before it exits (${name})`, () => {
-    // The fixture must stay larger than a pipe buffer, or this passes with no drain at all.
-    expect(CHATTY_LINES * 500).toBeGreaterThan(65_536)
+/**
+ * Runs `script` under `sh` in its own process group and collects its stdout.
+ * After `ms` it kills the whole group. spawnSync's timeout signals only `sh`,
+ * which would leave a bin that never exits running behind the test, still
+ * printing. The group kill ends the bin and the reader with it.
+ */
+function pipeline(script: string, env: NodeJS.ProcessEnv, ms: number): Promise<{ out: string; timedOut: boolean }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('sh', ['-c', script], { env, detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
+    let out = ''
+    let timedOut = false
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      out += chunk
+    })
+    const timer = setTimeout(() => {
+      timedOut = true
+      try {
+        process.kill(-(child.pid as number), 'SIGKILL')
+      } catch {
+        // The group has already gone.
+      }
+    }, ms)
+    child.on('error', reject)
+    child.on('close', () => {
+      clearTimeout(timer)
+      resolve({ out, timedOut })
+    })
+  })
+}
 
-    const root = mkdtempSync(join(tmpdir(), `warpline-run-drain-${name}-`))
+for (const [name, runtime] of RUNTIMES) {
+  for (const [pluginName, title] of [
+    ['chatty', 'run drains plugin output still queued on stderr before it exits'],
+    ['ticker', 'run keeps the queued plugin output whole while the plugin is still printing'],
+  ] as const) {
+    test(`${title} (${name})`, async () => {
+      // The fixture must stay larger than a pipe buffer, or this passes with no drain at all.
+      expect(CHATTY_LINES * 500).toBeGreaterThan(65_536)
+
+      const root = mkdtempSync(join(tmpdir(), `warpline-run-drain-${name}-`))
+      try {
+        const home = buildHome(join(root, 'home'))
+        const rc = join(root, 'rc')
+        const command = [runtime, BIN, 'run', pluginName, 'go', '--json'].map(q).join(' ')
+        // The reader sleeps before it reads, so the pipe fills and the rest of
+        // the plugin's output is still queued in the process when run finishes.
+        const { out, timedOut } = await pipeline(
+          `{ ${command} 2>&1 >/dev/null; echo $? > ${q(rc)}; } | (sleep 1; cat)`,
+          childEnv(home),
+          20_000,
+        )
+        expect(timedOut).toBe(false)
+        expect(readFileSync(rc, 'utf8').trim()).toBe('0')
+        expect(out.split('\n').filter(line => line === 'z'.repeat(499))).toHaveLength(CHATTY_LINES)
+      } finally {
+        rmSync(root, { recursive: true, force: true })
+      }
+    }, 30_000)
+  }
+}
+
+for (const [name, runtime] of RUNTIMES) {
+  test(`run ends quietly with its own exit code when the stderr reader has gone away (${name})`, () => {
+    const root = mkdtempSync(join(tmpdir(), `warpline-closed-stderr-${name}-`))
     try {
       const home = buildHome(join(root, 'home'))
-      const rc = join(root, 'rc')
-      const command = [runtime, BIN, 'run', 'chatty', 'go', '--json'].map(q).join(' ')
-      // The reader sleeps before it reads, so the pipe fills and the rest of
-      // the plugin's output is still queued in the process when run finishes.
-      const result = spawnSync('sh', ['-c', `{ ${command} 2>&1 >/dev/null; echo $? > ${q(rc)}; } | (sleep 1; cat)`], {
-        env: childEnv(home),
-        encoding: 'utf8',
-        maxBuffer: 16 * 1024 * 1024,
-        timeout: 25_000,
-      })
-      expect(readFileSync(rc, 'utf8').trim()).toBe('0')
-      expect(result.stdout.split('\n').filter(line => line === 'z'.repeat(499))).toHaveLength(CHATTY_LINES)
+      const argv = ['run', 'chatty', 'go', '--json']
+      const control = launch(runtime, home, argv, 'control')
+      const closed = launch(runtime, home, argv, 'closed-stderr')
+
+      expect(control.code).toBe(0)
+      // The control really meets the stderr reader, or the closed run proves nothing.
+      expect(control.err.length).toBeGreaterThanOrEqual(CHATTY_LINES * 500)
+      expect(() => JSON.parse(control.out)).not.toThrow()
+      expect(closed.code).toBe(control.code)
+      expect(() => JSON.parse(closed.out)).not.toThrow()
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, 60_000)
 }

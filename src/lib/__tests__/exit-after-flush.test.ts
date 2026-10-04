@@ -8,6 +8,10 @@
  * their callback, so a drain of the real stream from inside the suite would
  * either wait forever or silence every file after this one.
  *
+ * The drain drops a write that arrives after it began, so the queue flushes in
+ * full, and a late write that reaches the stream anyway still settles it
+ * quietly rather than hanging or crashing.
+ *
  * This file pins the drain's error policy in-process. Where the guard is
  * placed on the real streams, which only node can see, is pinned by
  * src/cli/__tests__/closed-reader.test.ts.
@@ -42,14 +46,41 @@ describe('drained', () => {
     await expect(drained(w)).rejects.toMatchObject({ code: 'EIO' })
   })
 
-  it('settles quietly when a write arrives after the end', async () => {
+  it('a write after the drain began is dropped, and what was queued before it still flushes', async () => {
+    const written: string[] = []
+    // Each chunk lands 5 ms after it is handed over, so `b` and `c` are still
+    // buffered when the late write arrives.
+    const w = new Writable({
+      write(chunk, _enc, cb) {
+        setTimeout(() => {
+          written.push(String(chunk))
+          cb()
+        }, 5)
+      },
+    })
+    w.write('a')
+    w.write('b')
+    w.write('c')
+    const p = drained(w)
+    let lateDone = false
+    w.write('late', () => {
+      lateDone = true
+    })
+    await p
+    expect(written).toEqual(['a', 'b', 'c'])
+    await tick()
+    expect(lateDone).toBe(true)
+  })
+
+  it('a late write that reaches the stream anyway still settles quietly', async () => {
     const w = new Writable({
       write(_chunk, _enc, cb) {
         cb()
       },
     })
     const p = drained(w)
-    w.write('late')
+    // Around anything the drain put on the instance, straight to the stream.
+    Writable.prototype.write.call(w, 'late', 'utf8')
     await p
   })
 
