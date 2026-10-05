@@ -41,7 +41,7 @@
  */
 import { test, expect } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
@@ -285,6 +285,38 @@ const ROWS: Row[] = [
   { argv: ['audit', 'head'], code: 0 },
   { argv: ['prefs', 'set', 'max_sends_per_day', '20'], code: 0 },
   { argv: ['principal', 'add', 'ops', '--type', 'human'], code: 0 },
+  {
+    argv: ['audit', 'export', '--after', '0'],
+    code: 0,
+    // A store over 64 KiB, so the export fills the pipe and has to wait on a
+    // reader that has gone away. A small one never waits, and passes with no
+    // wait handling at all.
+    before: (_runtime, home) => {
+      const io = `${home}.io`
+      mkdirSync(io, { recursive: true })
+      const script = join(io, 'grow.ts')
+      writeFileSync(
+        script,
+        [
+          `import { appendAudit } from ${JSON.stringify(join(ROOT, 'src/lib/audit-log.ts'))}`,
+          `const statePath = ${JSON.stringify(join(home, 'state', 'engine-state.json'))}`,
+          `for (let i = 0; i < 300; i++) await appendAudit(statePath, 'denial.lifted', { plugin: 'grow-' + i, fingerprint: null })`,
+          '',
+        ].join('\n'),
+      )
+      const { status } = spawnSync(process.execPath, [script], { env: childEnv(home), stdio: 'ignore', timeout: 60_000 })
+      const audit = join(home, 'audit')
+      const bytes = existsSync(audit)
+        ? readdirSync(audit)
+            .filter(n => /^\d{16}\.jsonl$/.test(n))
+            .reduce((sum, n) => sum + statSync(join(audit, n)).size, 0)
+        : 0
+      const problems: string[] = []
+      if (status !== 0) problems.push(`setup grow: status ${status}, expected 0`)
+      if (bytes < 65_536) problems.push(`setup grow: store is ${bytes} bytes, under 65536`)
+      return problems
+    },
+  },
   // Last, so no later advance loads the scaffolded plugin.
   { argv: ['scaffold', 'newbie'], code: 0 },
 ]

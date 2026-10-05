@@ -7,8 +7,15 @@
  * `warplineprev` across segment files, each segment's name, and each torn
  * fragment a later segment acknowledges. Its independence is asserted on its
  * own source by the test that uses it, so an import added here turns red.
+ *
+ * `forge` lives here for the same reason. It keeps a forgery self-consistent
+ * on purpose: after an edit, a swap or an insert it renumbers every seq and
+ * re-links every `warplineprev`, so a link-only walker accepts the result and
+ * only an anchor kept off the box can catch it. It covers one segment, because
+ * links across a file boundary are already held by the walker's agreement test
+ * and by the two-segment verify cases.
  */
-import { readdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 
@@ -78,4 +85,57 @@ export function walkChain(dir: string): ChainWalk {
     }
   }
   return { ok: true, head: { seq, hex: prev }, lines, torn }
+}
+
+/** Lines are 1-based seqs. `tear` appends its text with no newline. */
+export type ForgeOp = { edit: number } | { swap: number } | { insert: number } | { truncate: number } | { tear: string }
+
+const FIRST = '0000000000000001.jsonl'
+
+/**
+ * Rewrite the one segment in `dir` in place under its unchanged name. Throws
+ * on any other store, so it is never handed a store whose re-linking it does
+ * not cover. `truncate` and `tear` leave the remaining links as they are.
+ */
+export function forge(dir: string, op: ForgeOp): void {
+  const names = readdirSync(dir).filter((n) => NAME.test(n))
+  if (names.length !== 1 || names[0] !== FIRST) {
+    throw new Error(`forge: a single-segment store only, holding ${FIRST}; found ${names.length} segment files`)
+  }
+  const path = join(dir, FIRST)
+  if ('tear' in op) {
+    appendFileSync(path, op.tear)
+    return
+  }
+  const text = readFileSync(path, 'utf8')
+  const lines = text.slice(0, text.lastIndexOf('\n') + 1).split('\n').slice(0, -1)
+  const k = Object.values(op)[0] as number
+  if (!Number.isInteger(k) || k < 1 || k > lines.length) throw new Error(`forge: line ${k} is not in the segment`)
+
+  if ('truncate' in op) {
+    writeFileSync(path, lines.slice(0, lines.length - k).map((l) => `${l}\n`).join(''))
+    return
+  }
+  const recs = lines.map((l) => JSON.parse(l) as Record<string, unknown> & { data: Record<string, unknown> })
+  if ('edit' in op) {
+    const data = recs[k - 1]!.data
+    const key = Object.keys(data).find((name) => typeof data[name] === 'string')
+    if (key === undefined) throw new Error(`forge: line ${k} has no string value in its data to edit`)
+    data[key] = `${data[key] as string}x`
+  } else if ('swap' in op) {
+    if (k === lines.length) throw new Error(`forge: line ${k} has no line after it to swap with`)
+    ;[recs[k - 1], recs[k]] = [recs[k]!, recs[k - 1]!]
+  } else {
+    recs.splice(k, 0, structuredClone(recs[k - 1]!))
+  }
+  let prev = ZEROS
+  const out = recs.map((rec, i) => {
+    rec.id = String(i + 1)
+    rec.warplineseq = i + 1
+    rec.warplineprev = prev
+    const line = JSON.stringify(rec)
+    prev = sha256(Buffer.from(line))
+    return `${line}\n`
+  })
+  writeFileSync(path, out.join(''))
 }
