@@ -50,6 +50,7 @@ Commands:
   deny       Record a no, so the next engine tick stops asking
   resolve    Answer a content fire that was marked and never confirmed: it did not ship
   revoke     Clear the current session approval
+  audit      Print the record's head (seq and hash) to anchor off this box
 
   --help     Show this message
 `
@@ -126,6 +127,11 @@ export async function main(argv: string[]): Promise<number> {
 
       case 'revoke': {
         const { run } = await import('./revoke.js')
+        return await run(rest)
+      }
+
+      case 'audit': {
+        const { run } = await import('./audit.js')
         return await run(rest)
       }
 

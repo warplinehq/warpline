@@ -132,7 +132,7 @@ describe('CLI surface', () => {
    * A hand-counted total is the same defect one step further out, so the count
    * is derived here too rather than trusted.
    */
-  const WORD_FOR = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'] as const
+  const WORD_FOR = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen'] as const
 
   test('the README shows every command the dispatcher routes', () => {
     const readme = read('README.md')
