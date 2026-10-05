@@ -17,11 +17,13 @@
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
 import * as store from '../../runtime/engine-state-store.js'
+import * as gate from '../../runtime/approval-gate.js'
 import { _setHome } from '../../lib/paths.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
@@ -223,4 +225,320 @@ describe('deny', () => {
       }
     },
   )
+})
+
+// -- Grant, revoke, content approval and denial lift (25-04) -----------------
+
+/** Write one plugin into the home, the fixture manifest with `overrides` on top. */
+function addPlugin(name: string, overrides: Record<string, unknown> = {}): void {
+  mkdirSync(join(home, 'plugins', name), { recursive: true })
+  writeFileSync(
+    join(home, 'plugins', name, 'manifest.ts'),
+    `export const manifest = ${JSON.stringify({ ...manifest(name), ...overrides })}`,
+  )
+}
+
+/** No file under the home holds the spy's sentinel. */
+function expectNoSentinel(): void {
+  for (const [path, text] of Object.entries(filesUnder(home))) {
+    expect(`${path}: ${text.includes(SENTINEL)}`).toBe(`${path}: false`)
+  }
+}
+
+/** The data of every stored record of `kind`, in seq order. */
+function recordsOf(kind: string): Record<string, unknown>[] {
+  return auditLines(home)
+    .filter((l) => l.type === `warpline.audit.${kind}`)
+    .map((l) => l.data)
+}
+
+/**
+ * A pass-through spy on `fn` of `mod` that notes, at its first call, whether a
+ * record of `kind` is already on disk.
+ */
+function recordedBefore(mod: Record<string, unknown>, fn: string, kind: string): () => boolean | undefined {
+  const real = mod[fn] as (...args: unknown[]) => unknown
+  let seen: boolean | undefined
+  installed.push(
+    spyOn(mod as Record<string, (...args: unknown[]) => unknown>, fn).mockImplementation((...args: unknown[]) => {
+      seen ??= recordsOf(kind).length > 0
+      return real(...args)
+    }),
+  )
+  return () => seen
+}
+
+const grantPath = (): string => join(home, '.session-approval')
+const statePathOf = (): string => join(home, 'state', 'engine-state.json')
+
+describe('grant issue and revoke', () => {
+  beforeEach(() => {
+    addPlugin('mailer')
+  })
+
+  test('approve mailer writes grant.issued before mergeGrant runs', async () => {
+    const seen = recordedBefore(gate, 'mergeGrant', 'grant.issued')
+
+    const { code } = await capture(['approve', 'mailer'])
+
+    expect(code).toBe(0)
+    expect(seen()).toBe(true)
+    expect(recordsOf('grant.issued')).toEqual([{ scopes: ['mailer'], ttl_ms: null, replace: false, long: false }])
+  })
+
+  test('approve mailer --ttl 30m --replace records the requested ttl and the replace flag', async () => {
+    const { code } = await capture(['approve', 'mailer', '--ttl', '30m', '--replace'])
+
+    expect(code).toBe(0)
+    expect(recordsOf('grant.issued')).toEqual([{ scopes: ['mailer'], ttl_ms: 1_800_000, replace: true, long: false }])
+  })
+
+  test('approve --all records the wildcard grant', async () => {
+    const { code } = await capture(['approve', '--all'])
+
+    expect(code).toBe(0)
+    expect(recordsOf('grant.issued')).toEqual([{ scopes: ['*'], ttl_ms: null, replace: false, long: false }])
+  })
+
+  test('a grant whose record cannot be written grants nothing', async () => {
+    const spy = failAppend('grant.issued')
+
+    const { code, stderr } = await capture(['approve', 'mailer'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('nothing was granted')
+    expect(spy.trips()).toBe(1)
+    expect(existsSync(grantPath())).toBe(false)
+    expectNoSentinel()
+  })
+
+  test('a grant whose record cannot be written leaves an existing grant file byte-identical, mtime included', async () => {
+    await gate.mergeGrant('p', {}, grantPath())
+    const before = await snapshotHome(home)
+    expect(before.some((l) => l.startsWith('.session-approval|'))).toBe(true)
+    const spy = failAppend('grant.issued')
+
+    const { code, stderr } = await capture(['approve', 'mailer', '--replace'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('nothing was granted')
+    expect(spy.trips()).toBe(1)
+    expect(await snapshotHome(home)).toEqual(before)
+    expectNoSentinel()
+  })
+
+  test('revoke writes grant.revoked naming the live scopes before revokeApproval runs', async () => {
+    expect((await capture(['approve', 'mailer'])).code).toBe(0)
+    const seen = recordedBefore(gate, 'revokeApproval', 'grant.revoked')
+
+    const { code } = await capture(['revoke'])
+
+    expect(code).toBe(0)
+    expect(seen()).toBe(true)
+    expect(recordsOf('grant.revoked')).toEqual([{ scopes: ['mailer'] }])
+    expect(existsSync(grantPath())).toBe(false)
+  })
+
+  test('a revoke whose record cannot be written still revokes, and exits 70', async () => {
+    expect((await capture(['approve', 'mailer'])).code).toBe(0)
+    const spy = failAppend('grant.revoked')
+
+    const { code, stderr } = await capture(['revoke'])
+
+    expect(code).toBe(70)
+    expect(stderr).toContain('no audit record')
+    expect(spy.trips()).toBe(1)
+    expect(existsSync(grantPath())).toBe(false)
+    expect(recordsOf('grant.revoked')).toEqual([])
+    expectNoSentinel()
+  })
+
+  test('a revoke with no grant file writes no record and exits 0', async () => {
+    const { code } = await capture(['revoke'])
+
+    expect(code).toBe(0)
+    expect(existsSync(join(home, 'audit'))).toBe(false)
+  })
+})
+
+/** A 64-hex digest of `s`, for seeded fingerprints. */
+const hex = (s: string): string => createHash('sha256').update(s).digest('hex')
+
+/**
+ * `builder` produced one inline Output in run `run-b1`; `sender` is a
+ * content-class consumer of it. `approvals` seeds the state's approvals table.
+ */
+function seedContentHome(approvals: Record<string, unknown> = {}): void {
+  addPlugin('builder', { side_effects: [], outputs: { brief: { type: 'text' } } })
+  addPlugin('sender', {
+    approval_class: 'content',
+    autonomy_level: 'autonomous',
+    dependencies: ['builder'],
+    side_effects: ['sends_email'],
+  })
+  writeFileSync(
+    statePathOf(),
+    JSON.stringify({
+      plugin_runs: {
+        builder: {
+          last_run_at: '2026-10-01T00:00:00.000Z',
+          status: 'success',
+          run_id: 'run-b1',
+          last_output: { type: 'brief', format: 'text', run_id: 'run-b1', body: 'four invoices' },
+        },
+      },
+      approvals,
+    }),
+  )
+}
+
+/** An open, unmarked content approval of `sender`, bound to `producer`. */
+function sealedApproval(producer: string, fingerprint: string): Record<string, unknown> {
+  return {
+    plugin: 'sender',
+    producer,
+    fingerprint,
+    run_id: 'run-old',
+    approved_at: '2026-10-01T00:00:00.000Z',
+    not_before: null,
+    not_after: '2099-01-01T00:00',
+    zone: 'UTC',
+    effect_id: null,
+    marked_at: null,
+    confirmed_at: null,
+  }
+}
+
+describe('content approval issue and withdrawal', () => {
+  test('approve sender --content writes content_approval.issued before the state write', async () => {
+    seedContentHome()
+    const seen = recordedBefore(store, 'writeEngineState', 'content_approval.issued')
+
+    const { code, stdout } = await capture(['approve', 'sender', '--content', '--not-after', '2099-01-01T00:00'])
+
+    expect(code).toBe(0)
+    expect(seen()).toBe(true)
+    const state = JSON.parse(readFileSync(statePathOf(), 'utf-8')) as {
+      approvals: Record<string, { fingerprint: string }>
+    }
+    const window = /^ {2}(\S+) to (\S+)$/m.exec(stdout)
+    expect(window).not.toBeNull()
+    const records = recordsOf('content_approval.issued')
+    expect(records).toEqual([
+      {
+        plugin: 'sender',
+        producer: 'builder',
+        fingerprint: state.approvals.sender!.fingerprint,
+        run_id: 'run-b1',
+        opens_at: window![1]!,
+        closes_at: window![2]!,
+        replaced_fingerprint: null,
+      },
+    ])
+    expect(records[0]!.fingerprint).toMatch(/^[0-9a-f]{64}$/)
+    expect(records[0]!.closes_at).toBe('2099-01-01T00:00:00.000Z')
+  })
+
+  test('a content re-approve onto another producer carries the replaced fingerprint and writes no withdrawal', async () => {
+    const earlier = hex('the courier bytes')
+    seedContentHome({ sender: sealedApproval('courier', earlier) })
+
+    const { code, stdout } = await capture(['approve', 'sender', '--content', '--not-after', '2099-01-01T00:00'])
+
+    expect(code).toBe(0)
+    expect(stdout).toContain('Withdrew the earlier content approval for sender')
+    const records = recordsOf('content_approval.issued')
+    expect(records).toHaveLength(1)
+    expect(records[0]!.replaced_fingerprint).toBe(earlier)
+    expect(recordsOf('content_approval.withdrawn')).toEqual([])
+  })
+
+  test('a content approval whose record cannot be written writes nothing', async () => {
+    seedContentHome()
+    const before = await snapshotHome(home)
+    const stateBefore = readFileSync(statePathOf())
+    const spy = failAppend('content_approval.issued')
+
+    const { code } = await capture(['approve', 'sender', '--content', '--not-after', '2099-01-01T00:00'])
+
+    expect(code).toBe(1)
+    expect(spy.trips()).toBe(1)
+    expect(readFileSync(statePathOf())).toEqual(stateBefore)
+    expect(await snapshotHome(home)).toEqual(before)
+    expectNoSentinel()
+  })
+
+  test('approve sender --content --remove writes content_approval.withdrawn before the state write', async () => {
+    const fingerprint = hex('the builder bytes')
+    seedContentHome({ sender: sealedApproval('builder', fingerprint) })
+    const seen = recordedBefore(store, 'writeEngineState', 'content_approval.withdrawn')
+
+    const { code } = await capture(['approve', 'sender', '--content', '--remove'])
+
+    expect(code).toBe(0)
+    expect(seen()).toBe(true)
+    expect(recordsOf('content_approval.withdrawn')).toEqual([{ plugin: 'sender', fingerprint }])
+  })
+
+  test('a content withdrawal whose record cannot be written removes nothing', async () => {
+    seedContentHome({ sender: sealedApproval('builder', hex('the builder bytes')) })
+    const stateBefore = readFileSync(statePathOf())
+    const spy = failAppend('content_approval.withdrawn')
+
+    const { code, stderr } = await capture(['approve', 'sender', '--content', '--remove'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('Nothing was removed.')
+    expect(spy.trips()).toBe(1)
+    expect(readFileSync(statePathOf())).toEqual(stateBefore)
+    const state = JSON.parse(stateBefore.toString('utf-8')) as { approvals: Record<string, unknown> }
+    expect(Object.keys(state.approvals)).toEqual(['sender'])
+    expectNoSentinel()
+  })
+})
+
+describe('denial lift', () => {
+  beforeEach(async () => {
+    addPlugin('a')
+    addPlugin('b')
+    expect((await capture(['deny', 'a', 'b'])).code).toBe(0)
+  })
+
+  test('deny --remove a b writes one denial.lifted per plugin, in order, before the state write', async () => {
+    const stored = JSON.parse(readFileSync(statePathOf(), 'utf-8')) as {
+      denials: Record<string, { fingerprint: string }>
+    }
+    const realWrite = store.writeEngineState
+    let liftedAtWrite: number | undefined
+    installed.push(
+      spyOn(store, 'writeEngineState').mockImplementation(async (payload, path) => {
+        liftedAtWrite ??= recordsOf('denial.lifted').length
+        return realWrite(payload, path)
+      }),
+    )
+
+    const { code } = await capture(['deny', '--remove', 'a', 'b'])
+
+    expect(code).toBe(0)
+    expect(liftedAtWrite).toBe(2)
+    expect(recordsOf('denial.lifted')).toEqual([
+      { plugin: 'a', fingerprint: stored.denials.a!.fingerprint },
+      { plugin: 'b', fingerprint: stored.denials.b!.fingerprint },
+    ])
+  })
+
+  test('a denial lift whose record cannot be written removes nothing', async () => {
+    const stateBefore = readFileSync(statePathOf())
+    const spy = failAppend('denial.lifted')
+
+    const { code, stderr } = await capture(['deny', '--remove', 'a', 'b'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('Nothing was removed.')
+    expect(spy.trips()).toBe(1)
+    expect(readFileSync(statePathOf())).toEqual(stateBefore)
+    const state = JSON.parse(stateBefore.toString('utf-8')) as { denials: Record<string, unknown> }
+    expect(Object.keys(state.denials).sort()).toEqual(['a', 'b'])
+    expectNoSentinel()
+  })
 })
