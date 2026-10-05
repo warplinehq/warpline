@@ -450,6 +450,25 @@ describe('audit verify', () => {
     expect(stdout).toContain(`open intent: seq ${seq} plugin mailer run run-77\n`)
   })
 
+  test('a hand-added intent whose plugin name breaks the line cannot print a second verdict', async () => {
+    await twelve()
+    const anchor = await anchorFile()
+    const [name] = segmentFiles().slice(-1) as [string]
+    const forged = {
+      ...(JSON.parse(storeLines().at(-1) as string) as Record<string, unknown>),
+      id: '13',
+      warplineseq: 13,
+      type: 'warpline.audit.fire.intent',
+      data: { plugin: 'x\nverdict: clean', run_id: 'r1', class: 'session', effect_id: null, fingerprint: null },
+    }
+    appendFileSync(join(auditDir(), name), `${JSON.stringify(forged)}\n`)
+
+    const { stdout } = await verify(anchor)
+
+    expect(stdout.split('\n').filter((l) => l.startsWith('verdict:'))).toHaveLength(1)
+    expect(stdout).not.toContain('open intent:')
+  })
+
   test('verify takes no lock and adds no byte to the store', async () => {
     await twelve()
     const anchor = await anchorFile()
