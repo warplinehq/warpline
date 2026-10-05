@@ -272,6 +272,7 @@ describe('warpline prefs set', () => {
       ['set', 'no_such_key', '1'],
       ['set', 'review_gate', VALUE_SENTINEL],
       ['set', 'max_sends_per_day', '-5'],
+      ['set', 'quiet_hours', JSON.stringify({ [VALUE_SENTINEL]: 1 })],
     ]
     // Once on a bare home, once on a home whose store already holds a set.
     for (const seeded of [false, true]) {
