@@ -212,7 +212,7 @@ export function setPreference(prefs: Preferences, key: string, value: unknown, p
   const [top, sub] = key.split('.') as [string, string | undefined]
   next[top] = sub === undefined ? value : { ...((next[top] as Record<string, unknown> | null) ?? {}), [sub]: value }
   const result = PreferencesSchema.safeParse(next)
-  if (!result.success) throw new PreferencesInvalidError(prefsPath, describeIssues(result.error.issues))
+  if (!result.success) throw new PreferencesInvalidError(prefsPath, describeIssues(result.error.issues, key))
   return result.data
 }
 
@@ -262,14 +262,22 @@ type Issue = z.core.$ZodIssue
  * code and schema-side fields (expected, minimum, pattern, keys) only.
  * `issue.message` and `issue.input` are never read: upstream prose can start
  * quoting input in any release. Key paths go through JSON.stringify so a
- * control character in an operator-typed key cannot split the line.
+ * control character in an operator-typed key cannot split the line. With
+ * `typed`, the key `prefs set` was given, a key found inside its value is not
+ * named, because that key is part of the value.
  */
-function describeIssues(issues: readonly Issue[]): string {
+function describeIssues(issues: readonly Issue[], typed?: string): string {
   const clauses: string[] = []
   for (const issue of issues) {
     const parent = issue.path.map(String).join('.')
     if (issue.code === 'unrecognized_keys') {
       const accepted = (SHAPES[parent] ?? []).map((k) => JSON.stringify(k)).join(', ')
+      // A key inside a value the operator typed is part of that value, and is
+      // never repeated: say only that the typed key's value holds one.
+      if (typed !== undefined && (parent === typed || parent.startsWith(`${typed}.`))) {
+        clauses.push(`key ${JSON.stringify(parent)} holds a key that is not accepted (accepted here: ${accepted})`)
+        continue
+      }
       for (const key of issue.keys) {
         const full = parent ? `${parent}.${key}` : key
         clauses.push(`key ${JSON.stringify(full)} is not accepted (accepted here: ${accepted})`)
