@@ -16,7 +16,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach, afterAll, spyOn } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
 import * as fsAtomic from '../../lib/fs-atomic.js'
@@ -48,6 +48,7 @@ beforeEach(async () => {
   _setPaths(
     pathsForStateFile(join(home.stateDir, 'engine-state.json'), { eventsPath: join(home.runsDir, 'events.jsonl') }),
   )
+  writeNoop()
 })
 
 afterEach(async () => {
@@ -60,6 +61,49 @@ afterEach(async () => {
 afterAll(() => {
   _setPaths(REAL_PATHS)
 })
+
+/** One plugin with no side effects, so an advance has something to run and exits 0. */
+function writeNoop(): void {
+  const dir = join(home.pluginsDir, 'noop')
+  mkdirSync(dir, { recursive: true })
+  const manifest = {
+    name: 'noop',
+    version: '1.0.0',
+    description: 'prefs fixture plugin',
+    inputs: {},
+    outputs: {},
+    capabilities: [],
+    secrets: [],
+    schedule: 'on_run',
+    autonomy_level: 'autonomous',
+    approval_class: 'session',
+    side_effects: [],
+    ttl_hours: 24,
+    dependencies: [],
+    timeout_ms: 5000,
+    max_parallelism: 1,
+    min_tier: 'normal',
+    max_retries: 0,
+    retry_delay_ms: 10,
+  }
+  writeFileSync(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+  writeFileSync(
+    join(dir, 'handler.ts'),
+    `export async function handler() {
+  return {
+    status: 'success',
+    phases_completed: ['noop'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'noop completed',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`,
+  )
+}
 
 /** Run `call` with stdout/stderr captured, always restoring the originals. */
 async function capture(call: () => Promise<number>): Promise<{ code: number; stdout: string; stderr: string }> {
