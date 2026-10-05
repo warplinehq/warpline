@@ -16,6 +16,7 @@ import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test'
 import { createHash } from 'node:crypto'
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -23,6 +24,8 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { open } from 'node:fs/promises'
@@ -213,6 +216,138 @@ describe('audit store: the lock', () => {
     expect(lines.map((l) => (JSON.parse(l) as { warplineseq: number }).warplineseq)).toEqual(
       Array.from({ length: 21 }, (_, i) => i + 1),
     )
+  })
+})
+
+describe('the lock when its file is odd', () => {
+  const lockPath = () => join(auditDir, '.lock')
+  const breakPath = () => join(auditDir, '.lock.break')
+  const segmentPath = () => join(auditDir, '0000000000000001.jsonl')
+  const sixtySecondsAgo = () => new Date(Date.now() - 60_000)
+  const root = process.getuid?.() === 0
+
+  type Settled = { settled: 'resolved'; value: { seq: number } } | { settled: 'rejected'; error: unknown } | { settled: 'pending' }
+
+  /** The append with a 300 ms lock timeout, raced against 3000 ms, so a spin fails the case instead of hanging the suite. */
+  function oddAppend(): { append: Promise<{ seq: number }>; settled: Promise<Settled> } {
+    const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 300 })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const settled = Promise.race<Settled>([
+      append.then(
+        (value) => ({ settled: 'resolved' as const, value }),
+        (error: unknown) => ({ settled: 'rejected' as const, error }),
+      ),
+      new Promise<Settled>((r) => (timer = setTimeout(() => r({ settled: 'pending' }), 3000))),
+    ]).finally(() => clearTimeout(timer))
+    return { append, settled }
+  }
+
+  /** Remove the odd lock and any break file, then let the append settle, so the in-process queue is clear for the next case. */
+  async function clear(append: Promise<unknown>): Promise<void> {
+    rmSync(lockPath(), { recursive: true, force: true })
+    rmSync(breakPath(), { force: true })
+    await append.catch(() => {})
+  }
+
+  const rejected = (out: Settled): unknown => {
+    expect(out.settled).toBe('rejected')
+    return out.settled === 'rejected' ? out.error : undefined
+  }
+
+  test('a lock that is a directory makes the append fail in time and writes nothing', async () => {
+    await lift()
+    mkdirSync(lockPath())
+    const segment = readFileSync(segmentPath())
+    const { append, settled } = oddAppend()
+    try {
+      expect((rejected(await settled) as Error | undefined)?.name).toBe('AuditAppendError')
+      expect(readFileSync(segmentPath())).toEqual(segment)
+    } finally {
+      await clear(append)
+    }
+  })
+
+  test('a lock that is a directory older than 30 s cannot be broken, and the append fails in time', async () => {
+    await lift()
+    mkdirSync(lockPath())
+    utimesSync(lockPath(), sixtySecondsAgo(), sixtySecondsAgo())
+    const segment = readFileSync(segmentPath())
+    const { append, settled } = oddAppend()
+    try {
+      expect((rejected(await settled) as Error | undefined)?.name).toBe('AuditAppendError')
+      expect(statSync(lockPath()).isDirectory()).toBe(true)
+      expect(existsSync(breakPath())).toBe(false)
+      expect(readFileSync(segmentPath())).toEqual(segment)
+    } finally {
+      await clear(append)
+    }
+  })
+
+  test('a lock that is a dangling symlink makes the append fail in time', async () => {
+    await lift()
+    symlinkSync(join(tmp, 'nothing-here'), lockPath())
+    const segment = readFileSync(segmentPath())
+    const { append, settled } = oddAppend()
+    try {
+      expect((rejected(await settled) as Error | undefined)?.name).toBe('AuditAppendError')
+      expect(existsSync(breakPath())).toBe(false)
+      expect(readFileSync(segmentPath())).toEqual(segment)
+    } finally {
+      await clear(append)
+    }
+  })
+
+  test.skipIf(root)(
+    'a lock file the writer cannot read, older than 30 s, is broken by its file time and the append proceeds',
+    async () => {
+      await lift()
+      writeFileSync(lockPath(), JSON.stringify({ token: 'crashed', at: Date.now() - 60_000 }))
+      chmodSync(lockPath(), 0o000)
+      utimesSync(lockPath(), sixtySecondsAgo(), sixtySecondsAgo())
+      const { append, settled } = oddAppend()
+      try {
+        const out = await settled
+        expect(out.settled).toBe('resolved')
+        expect(out.settled === 'resolved' ? out.value.seq : undefined).toBe(3)
+        expect(existsSync(lockPath())).toBe(false)
+        expect(existsSync(breakPath())).toBe(false)
+      } finally {
+        await clear(append)
+      }
+    },
+  )
+
+  test.skipIf(root)('a lock file the writer cannot read, and fresh, makes the append fail in time and stays', async () => {
+    await lift()
+    writeFileSync(lockPath(), JSON.stringify({ token: 'held-by-other', at: Date.now() }))
+    chmodSync(lockPath(), 0o000)
+    const segment = readFileSync(segmentPath())
+    const { append, settled } = oddAppend()
+    try {
+      expect((rejected(await settled) as Error | undefined)?.name).toBe('AuditAppendError')
+      expect(existsSync(lockPath())).toBe(true)
+      expect(readFileSync(segmentPath())).toEqual(segment)
+    } finally {
+      await clear(append)
+    }
+  })
+
+  test('a stale lock with a break file beside it fails in time naming the break file', async () => {
+    await lift()
+    writeFileSync(lockPath(), JSON.stringify({ token: 'crashed', at: Date.now() - 31_000 }))
+    writeFileSync(breakPath(), '')
+    const segment = readFileSync(segmentPath())
+    const { append, settled } = oddAppend()
+    try {
+      const err = rejected(await settled) as Error | undefined
+      expect(err?.name).toBe('AuditAppendError')
+      expect(err?.message).toContain('.lock.break')
+      expect(readFileSync(lockPath(), 'utf-8')).toContain('crashed')
+      expect(existsSync(breakPath())).toBe(true)
+      expect(readFileSync(segmentPath())).toEqual(segment)
+    } finally {
+      await clear(append)
+    }
   })
 })
 
