@@ -197,7 +197,7 @@ export type AuditData<K extends AuditKind> = z.infer<(typeof DATA)[K]>
 
 type Reason =
   | `segment ${string} holds only a partial line`
-  | 'the active segment holds a line that is not a record'
+  | WalkRefusal
   | 'unknown kind'
   | 'internal kind'
   | 'data rejected by its schema'
@@ -214,9 +214,13 @@ type Reason =
  * something names a segment file, whose name is only digits.
  */
 export class AuditAppendError extends Error {
+  /** The fixed phrase the message ends in, for a caller that names it. */
+  readonly reason: Reason
+
   constructor(kind: string, reason: Reason, cause?: unknown) {
     super(`audit store: could not append ${kind}: ${reason}`, cause === undefined ? undefined : { cause })
     this.name = 'AuditAppendError'
+    this.reason = reason
   }
 }
 
@@ -228,6 +232,8 @@ function auditDirFor(statePath: string): string {
 }
 
 const segmentName = (firstSeq: number): string => `${String(firstSeq).padStart(16, '0')}.jsonl`
+
+const firstSeqOf = (name: string): number => Number(name.slice(0, 16))
 
 const sha256 = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
 
@@ -302,13 +308,56 @@ type Carried = Pick<AuditData<'segment.opened'>, 'authority' | 'open_intents'>
 const EMPTY_STATE: Carried = { authority: { preferences: null, principals: null }, open_intents: [] }
 
 /**
- * What the next `segment.opened` carries: the state the active segment opened
- * with, walked forward over its records, so no reader has to cross a file.
+ * The fields the walk carries into output, per stored type, each under the
+ * writer's own field rule. Non-strict, so a key no rule names is stripped and
+ * never reaches the walk. A type not listed here is passed over unread.
  */
-function segmentState(lines: StoredRecord[], carried: Carried): Carried {
+const CARRIED = {
+  'warpline.audit.fire.intent': z.object({ plugin: PluginName, run_id: RunId, effect_id: Hex.nullable() }),
+  'warpline.audit.fire.outcome': z.object({ intent_seq: Seq.nullable() }),
+  'warpline.audit.fire.refused': z.object({ intent_seq: Seq.nullable() }),
+  'warpline.audit.fire.resolved': z.object({ intent_seq: Seq.nullable() }),
+  'warpline.audit.preference.set': z.object({ new: Hex.nullable() }),
+  'warpline.audit.preferences.observed': z.object({ new: Hex.nullable() }),
+  'warpline.audit.principal.added': z.object({ sha256: Hex, entries: Entries }),
+  'warpline.audit.principal.disabled': z.object({ sha256: Hex, entries: Entries }),
+  'warpline.audit.principal_registry.observed': z.object({ new: Hex.nullable(), entries: Entries }),
+} as const
+
+/**
+ * What the opening `segment.opened` carries, under the same field rules its
+ * writer schema uses. Every value here reaches output, so no rule is looser.
+ */
+const OPENED_CARRIES = z.object({
+  authority: z.object({
+    preferences: Hex.nullable(),
+    principals: z.object({ sha256: Hex, entries: Entries }).nullable(),
+  }),
+  open_intents: z.array(z.object({ seq: Seq, plugin: PluginName, run_id: RunId, effect_id: Hex.nullable() })),
+})
+
+type CarriedType = keyof typeof CARRIED
+type ShortKind<T> = T extends `warpline.audit.${infer K}` ? K : never
+
+/** Why a walk stopped: a seq, a kind the walk carries and fixed words, never a line's data. */
+type WalkRefusal =
+  | `seq ${number} is not a record`
+  | `seq ${number} opens the active segment and is not a segment.opened the walk can carry`
+  | `seq ${number} holds ${ShortKind<CarriedType>} data the walk cannot carry`
+
+type Walked = { state: Carried } | { refused: WalkRefusal }
+
+/** A carried line: its type, its seq, and only the fields its rule names. */
+type CarriedLine = { type: CarriedType; seq: number; data: any }
+
+/**
+ * What the next `segment.opened` carries: the state the active segment opened
+ * with, walked forward over its carried lines, so no reader has to cross a file.
+ */
+function segmentState(lines: CarriedLine[], carried: Carried): Carried {
   let { preferences, principals } = carried.authority
   const open = new Map(carried.open_intents.map((i) => [i.seq, i]))
-  for (const { type, warplineseq: seq, data } of lines) {
+  for (const { type, seq, data } of lines) {
     switch (type) {
       case 'warpline.audit.fire.intent':
         open.set(seq, { seq, plugin: data.plugin, run_id: data.run_id, effect_id: data.effect_id })
@@ -335,26 +384,44 @@ function segmentState(lines: StoredRecord[], carried: Carried): Carried {
   return { authority: { preferences, principals }, open_intents: [...open.values()] }
 }
 
-/** True when a record's data is what the writer would have accepted for its kind. */
-function writerShaped(r: StoredRecord): boolean {
-  const kind = r.type.slice('warpline.audit.'.length)
-  return r.type.startsWith('warpline.audit.') && Object.hasOwn(DATA, kind) && DATA[kind as keyof typeof DATA].safeParse(r.data).success
-}
-
 /**
- * The state a segment's complete lines walk to, or undefined when one of them
- * is not a record the writer could have written, or the first is not its
- * `segment.opened`. Every field the walk carries is checked, so a hand-added
- * line cannot carry a value no writer would (a plugin name that breaks a line,
- * say) into a reader's output. `text` ends at a newline, or is empty.
+ * The state a segment's complete lines walk to. The walk reads only what it
+ * carries: each line's type, the opening line's carried fields, and for a type
+ * in `CARRIED` the fields its rule names. Every other type and every other key
+ * is passed over, so a record a later build writes does not stop it. It stops
+ * at a line that is not a record, a first line that is not a `segment.opened`
+ * it can carry, or a carried field no writer would write, so no such value
+ * reaches a reader's output. `text` ends at a newline, or is empty, and its
+ * first line is seq `firstSeq`.
  */
-function stateOf(text: string): Carried | undefined {
-  const records = text.split('\n').slice(0, -1).map(parseRecord)
-  const carried = DATA['segment.opened'].safeParse(records[0]?.data)
-  if (records.some((r) => r === undefined || !writerShaped(r)) || records[0]?.type !== 'warpline.audit.segment.opened' || !carried.success) {
-    return undefined
+function stateOf(text: string, firstSeq: number): Walked {
+  const lines = text.split('\n').slice(0, -1)
+  let opened: Carried | undefined
+  const carried: CarriedLine[] = []
+  for (const [i, line] of lines.entries()) {
+    const seq = firstSeq + i
+    const r = parseRecord(line)
+    if (r === undefined) return { refused: `seq ${seq} is not a record` }
+    if (i === 0) {
+      const data = r.type === 'warpline.audit.segment.opened' ? OPENED_CARRIES.safeParse(r.data) : undefined
+      if (data === undefined || !data.success) {
+        return { refused: `seq ${seq} opens the active segment and is not a segment.opened the walk can carry` }
+      }
+      opened = data.data
+      continue
+    }
+    if (!Object.hasOwn(CARRIED, r.type)) continue
+    const type = r.type as CarriedType
+    const data = CARRIED[type].safeParse(r.data)
+    if (!data.success) {
+      return { refused: `seq ${seq} holds ${type.slice('warpline.audit.'.length) as ShortKind<CarriedType>} data the walk cannot carry` }
+    }
+    carried.push({ type, seq: r.warplineseq, data: data.data })
   }
-  return segmentState(records as StoredRecord[], carried.data)
+  if (opened === undefined) {
+    return { refused: `seq ${firstSeq} opens the active segment and is not a segment.opened the walk can carry` }
+  }
+  return { state: segmentState(carried, opened) }
 }
 
 // -- The writer --------------------------------------------------------------
@@ -535,9 +602,9 @@ async function appendLocked(
 
     if (opens) {
       whole ??= await readFile(activePath)
-      const walked = stateOf(whole.toString('utf-8'))
-      if (walked === undefined) throw new AuditAppendError(kind, 'the active segment holds a line that is not a record')
-      state = walked
+      const walked = stateOf(whole.toString('utf-8'), firstSeqOf(active))
+      if ('refused' in walked) throw new AuditAppendError(kind, walked.refused)
+      state = walked.state
     }
   }
 
@@ -739,8 +806,8 @@ export async function observeAuthorityFile(
   if (bytes === null && (await segmentsIn(auditDirFor(statePath))).length === 0) return null
   return underLock(statePath, kind, opts, async (dir, time, limits) => {
     const walked = await activeState(dir)
-    if (walked === undefined) throw new AuditAppendError(kind, 'the active segment holds a line that is not a record')
-    const { preferences, principals } = walked.authority
+    if ('refused' in walked) throw new AuditAppendError(kind, walked.refused)
+    const { preferences, principals } = walked.state.authority
     const now = bytes === null ? null : sha256(bytes)
     let data: unknown
     if (kind === 'preferences.observed') {
@@ -773,15 +840,17 @@ async function segmentsIn(dir: string): Promise<string[]> {
 }
 
 /**
- * The state the active segment's complete lines walk to: the empty state with
- * no store, undefined when one of its lines is not a record.
+ * The state the active segment's complete lines walk to, the empty state with
+ * no store, or the walk's refusal.
  */
-async function activeState(dir: string): Promise<Carried | undefined> {
+async function activeState(dir: string): Promise<Walked> {
   const active = (await segmentsIn(dir)).at(-1)
-  if (active === undefined) return EMPTY_STATE
+  if (active === undefined) return { state: EMPTY_STATE }
   const text = await readFile(join(dir, active), 'utf-8')
-  return stateOf(text.slice(0, text.lastIndexOf('\n') + 1))
+  return stateOf(text.slice(0, text.lastIndexOf('\n') + 1), firstSeqOf(active))
 }
+
+const bySeq = (intents: OpenIntent[]): OpenIntent[] => [...intents].sort((a, b) => a.seq - b.seq)
 
 /**
  * The fire intents nothing has closed: those the active segment opened with
@@ -798,8 +867,8 @@ export function openIntents(statePath: string): Promise<OpenIntent[]> {
 
 async function openIntentsIn(dir: string): Promise<OpenIntent[]> {
   const walked = await activeState(dir)
-  if (walked === undefined) throw new Error('audit store: the active segment holds a line that is not a record')
-  return [...walked.open_intents].sort((a, b) => a.seq - b.seq)
+  if ('refused' in walked) throw new Error(`audit store: the open intents could not be read: ${walked.refused}`)
+  return bySeq(walked.state.open_intents)
 }
 
 // -- Readers: export and verify ----------------------------------------------
@@ -821,8 +890,6 @@ async function* scan(path: string): AsyncGenerator<Buffer, Buffer> {
   }
   return rest
 }
-
-const firstSeqOf = (name: string): number => Number(name.slice(0, 16))
 
 /**
  * Every complete line after `afterSeq`, newline included, in seq order across
@@ -908,7 +975,7 @@ export async function c2spNote(statePath: string): Promise<string> {
   return `${source}\n${seq}\n${Buffer.from(head, 'hex').toString('base64')}\n`
 }
 
-export type Verdict = 'clean' | 'torn' | 'tampered' | 'wrong_log'
+export type Verdict = 'clean' | 'torn' | 'tampered' | 'unreadable' | 'wrong_log'
 
 export interface Verification {
   verdict: Verdict
@@ -918,7 +985,10 @@ export interface Verification {
   reason: string | null
   /** Records since the anchor; seconds and its time only once its line's hash matched. */
   stale: { records: number; seconds: number | null; anchored_at: string | null } | null
-  open_intents: OpenIntent[]
+  /** The open fire intents, or null when the walk could not read them. Never an empty list for that. */
+  open_intents: OpenIntent[] | null
+  /** Why the open intents could not be read: a seq, a kind and a rule, never data. */
+  intents_unreadable: string | null
 }
 
 /**
@@ -929,9 +999,11 @@ export interface Verification {
  * the very end that no later `segment.opened` acknowledges, an anchor beyond
  * the head, or an anchored line whose hash is not the anchor's. Torn is a
  * partial line at the very end, an acknowledged fragment, or a last segment
- * whose last line is `segment.sealed`. A re-linked rewrite passes every link,
- * so the anchor is what catches it. Wrong log outranks tampered, which
- * outranks torn.
+ * whose last line is `segment.sealed`. Unreadable is a chain that checks clean
+ * or torn whose active segment holds a line the walk cannot carry, so the open
+ * intents cannot be listed. A re-linked rewrite passes every link, so the
+ * anchor is what catches it. Wrong log, then tampered, then unreadable, then
+ * torn.
  */
 export async function verifyStore(statePath: string, anchor: Anchor, now: number): Promise<Verification> {
   const dir = auditDirFor(statePath)
@@ -941,16 +1013,17 @@ export async function verifyStore(statePath: string, anchor: Anchor, now: number
     const h = await readHead(statePath)
     head = { seq: h.seq, hex: h.head }
   } catch {}
-  let open_intents: OpenIntent[] = []
-  try {
-    open_intents = await openIntentsIn(dir)
-  } catch {}
+  // Never swallowed: a walk that stopped is reported, and never read as none open.
+  const walked = await activeState(dir)
+  const open_intents = 'refused' in walked ? null : bySeq(walked.state.open_intents)
+  const intents_unreadable = 'refused' in walked ? walked.refused : null
   const result = (verdict: Verdict, reason: string | null, stale: Verification['stale'] = null): Verification => ({
     verdict,
     head,
     reason,
     stale,
     open_intents,
+    intents_unreadable,
   })
 
   const source = await genesisSource(dir)
@@ -1032,5 +1105,6 @@ export async function verifyStore(statePath: string, anchor: Anchor, now: number
     seconds: Number.isNaN(at) ? null : Math.max(0, Math.floor((now - at) / 1000)),
     anchored_at: Number.isNaN(at) ? null : anchoredAt,
   }
+  if (intents_unreadable !== null) return result('unreadable', intents_unreadable, stale)
   return result(torn === null ? 'clean' : 'torn', torn, stale)
 }

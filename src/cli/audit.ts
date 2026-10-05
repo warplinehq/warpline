@@ -33,13 +33,15 @@ head      Prints the head of the audit record as "<seq> <hash>" on one line: the
 export    Prints every complete record after <seq> as CloudEvents JSON, one per
           line. <seq> is 0 or a positive integer, at most the head.
 verify    Checks the record against a head kept off this box, read from <file>
-          or from stdin with -. Exits 0 clean, 3 torn, 4 tampered, 5 wrong log.
+          or from stdin with -. Exits 0 clean, 3 torn, 4 tampered, 5 wrong log,
+          6 when the open intents cannot be read.
 `
 
 export const VERIFY_CLEAN = 0
 export const VERIFY_TORN = 3
 export const VERIFY_TAMPERED = 4
 export const VERIFY_WRONG_LOG = 5
+export const VERIFY_UNREADABLE = 6
 
 /** The longest anchor read, from a file or stdin. */
 const ANCHOR_MAX_BYTES = 65_536
@@ -168,7 +170,13 @@ async function readAnchor(from: string): Promise<string> {
   return Buffer.concat(chunks).toString('utf-8')
 }
 
-const CODES = { clean: VERIFY_CLEAN, torn: VERIFY_TORN, tampered: VERIFY_TAMPERED, wrong_log: VERIFY_WRONG_LOG }
+const CODES = {
+  clean: VERIFY_CLEAN,
+  torn: VERIFY_TORN,
+  tampered: VERIFY_TAMPERED,
+  unreadable: VERIFY_UNREADABLE,
+  wrong_log: VERIFY_WRONG_LOG,
+}
 
 async function verify(args: string[]): Promise<number> {
   let anchor: Anchor
@@ -196,7 +204,9 @@ async function verify(args: string[]): Promise<number> {
     )
   }
   if (v.reason !== null) lines.push(`reason: ${v.reason}`)
-  for (const i of v.open_intents) lines.push(`open intent: seq ${i.seq} plugin ${i.plugin} run ${i.run_id}`)
+  // Under any verdict. A walk that stopped is never printed as no open intents.
+  if (v.open_intents === null) lines.push(`open intents unreadable: ${v.intents_unreadable}`)
+  else for (const i of v.open_intents) lines.push(`open intent: seq ${i.seq} plugin ${i.plugin} run ${i.run_id}`)
   process.stdout.write(`${lines.join('\n')}\n`)
   return CODES[v.verdict]
 }

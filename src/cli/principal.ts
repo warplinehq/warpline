@@ -29,7 +29,7 @@ import { dirname } from 'node:path'
 import { parseArgs } from 'node:util'
 import { z } from 'zod'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
-import { appendAudit, observeAuthorityFile } from '../lib/audit-log.js'
+import { appendAudit, AuditAppendError, observeAuthorityFile } from '../lib/audit-log.js'
 import { atomicWriteJson } from '../lib/fs-atomic.js'
 import { engineStatePath, principalsPath } from '../lib/paths.js'
 
@@ -44,6 +44,13 @@ recorded on the audit store before the file is written.
 `
 
 const AUDIT_FAILED = 'The audit store could not record this change. Nothing was written.\n'
+
+/** The refusal for an append that did not happen, naming the store's reason when it gave one. */
+function auditFailed(err: unknown): string {
+  return err instanceof AuditAppendError
+    ? `The audit store could not record this change: ${err.reason}. Nothing was written.\n`
+    : AUDIT_FAILED
+}
 
 const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
 
@@ -124,8 +131,8 @@ async function load(): Promise<{ bytes: Buffer | null; registry: Registry } | st
 
   try {
     await observeAuthorityFile(engineStatePath(), 'principal_registry.observed', bytes, entries(registry))
-  } catch {
-    return AUDIT_FAILED
+  } catch (err) {
+    return auditFailed(err)
   }
   return { bytes, registry }
 }
@@ -193,8 +200,8 @@ async function add(rest: string[]): Promise<number> {
       sha256: sha256(bytes),
       entries: entries(next),
     })
-  } catch {
-    process.stderr.write(AUDIT_FAILED)
+  } catch (err) {
+    process.stderr.write(auditFailed(err))
     return 1
   }
   return write(next, `Added ${id} (${entry.type}). The change is on the audit record.\n`)
@@ -229,8 +236,8 @@ async function disable(rest: string[]): Promise<number> {
   const bytes = JSON.stringify(next, null, 2)
   try {
     await appendAudit(engineStatePath(), 'principal.disabled', { id, sha256: sha256(bytes), entries: entries(next) })
-  } catch {
-    process.stderr.write(AUDIT_FAILED)
+  } catch (err) {
+    process.stderr.write(auditFailed(err))
     return 1
   }
   return write(next, `Disabled ${id}. The change is on the audit record.\n`)

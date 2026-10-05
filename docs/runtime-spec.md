@@ -3657,10 +3657,30 @@ otherwise have to look for in an earlier file:
   intent stays open across as many segments as it takes to close it.
 
 So a reader that needs the current authority digests or the open intents reads
-the active segment and nothing else. Every line it walks must hold data the
-writer would accept for its kind. A line that doesn't, such as one added by
-hand, makes the segment unreadable for that walk, so no value the writer would
-refuse reaches a reader's output.
+the active segment and nothing else, and it walks only what it carries. That is
+each line's type, and for `fire.intent`, `fire.outcome`, `fire.refused`,
+`fire.resolved`, `preference.set`, `preferences.observed`, `principal.added`,
+`principal.disabled` and `principal_registry.observed` the fields it carries:
+the plugin, run id and effect id of an intent, the intent seq a closing record
+names, the authority digests and the principal entries. Each is checked by its
+own field rule, the one the writer uses. The `segment.opened` that opens the
+active segment is held to the same rules for the authority and open intents it
+carries. Every other kind, and any key a field rule does not name, is passed
+over, so a record a later build writes, or a field it adds, does not stop an
+older reader. A line that is not a record, a first line that is not a
+`segment.opened` it can carry, or a carried field no writer would write stops
+the walk, so no such value reaches a reader's output.
+
+**A walk that stops.** `audit verify` reports `unreadable` and names the seq,
+and every command that needs the walk refuses: an `advance`, `prefs set`,
+`principal`, `resolve`, and any append that rotates. `advance`, `prefs set` and
+`principal` print the same reason, which names the seq and the kind and nothing
+from the line. No warpline build writes such a line. Keep an export of the
+store, which is the account of what was there, then
+remove that one line from the active segment by hand.
+If records follow it, the next one no longer links, and verify reports
+`tampered` there against any anchor that covers it, which is the true account
+of what happened.
 
 **A torn tail.** A write that stops part way leaves a partial last line. The
 writer never writes past it and never removes it. The next append seals
@@ -3811,9 +3831,10 @@ compare against would read as fine when it could not look.
 | `torn` | `3` | As clean, except the store ends in a partial line, keeps a partial line that a later `segment.opened` acknowledges, or its last segment ends in `segment.sealed` with no successor. A crash leaves these. |
 | `tampered` | `4` | A line does not parse, its seq is not the next one, its `warplineprev` is not the previous line's hash, a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, the anchored seq is beyond the head, or the line at the anchored seq does not hash to the anchor. |
 | `wrong log` | `5` | The anchor's origin is another home's id. |
+| `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), so the open intents cannot be listed. The reason names its seq. |
 
-When more than one applies, wrong log wins, then tampered, then torn. None of
-the codes is `70`, `75` or `130`.
+When more than one applies, wrong log wins, then tampered, then unreadable,
+then torn. None of the codes is `70`, `75` or `130`.
 
 A writer that can write the home can edit, reorder, insert or drop lines and
 re-link every `warplineprev` behind them, and every link then checks. Only the
@@ -3823,7 +3844,9 @@ gone.
 Verify prints `verdict`, the anchor, the head, how stale the anchor is, a
 `reason` naming a seq or a file and the rule it broke when the verdict is not
 clean, and one `open intent` line per fire intent nothing has closed, each with
-its seq, plugin and run id. Staleness is the head seq minus the anchored seq in
+its seq, plugin and run id. When the open intents cannot be read, it prints one
+`open intents unreadable` line naming why in their place, under any verdict,
+and never an empty list. Staleness is the head seq minus the anchored seq in
 records, and the time since the anchored record's `time` in seconds, the second
 only once that record's hash has matched. An anchor at the head is `0 records`
 stale. Verify never prints a record's data or the anchor file's text.

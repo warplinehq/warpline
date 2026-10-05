@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
-import { appendAudit, observeAuthorityFile } from '../lib/audit-log.js'
+import { appendAudit, AuditAppendError, observeAuthorityFile } from '../lib/audit-log.js'
 import { engineStatePath, preferencesPath } from '../lib/paths.js'
 import { PreferencesInvalidError, readPreferencesFile, setPreference, writePreferences } from '../lib/preferences.js'
 
@@ -33,6 +33,13 @@ is written.
 `
 
 const AUDIT_FAILED = 'The audit store could not record this change. Nothing was written.\n'
+
+/** The refusal for an append that did not happen, naming the store's reason when it gave one. */
+function auditFailed(err: unknown): string {
+  return err instanceof AuditAppendError
+    ? `The audit store could not record this change: ${err.reason}. Nothing was written.\n`
+    : AUDIT_FAILED
+}
 
 const sha256 = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
 
@@ -73,8 +80,8 @@ async function setLocked(key: string, value: unknown): Promise<number> {
 
   try {
     await observeAuthorityFile(engineStatePath(), 'preferences.observed', current.bytes)
-  } catch {
-    process.stderr.write(AUDIT_FAILED)
+  } catch (err) {
+    process.stderr.write(auditFailed(err))
     return 1
   }
 
@@ -100,8 +107,8 @@ async function setLocked(key: string, value: unknown): Promise<number> {
       old: current.bytes === null ? null : sha256(current.bytes),
       new: sha256(bytes),
     })
-  } catch {
-    process.stderr.write(AUDIT_FAILED)
+  } catch (err) {
+    process.stderr.write(auditFailed(err))
     return 1
   }
 
