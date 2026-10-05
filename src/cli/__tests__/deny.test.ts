@@ -477,14 +477,16 @@ describe('warpline deny', () => {
 
     expect(existsSync(sessionApprovalPath())).toBe(false)
     const after = await snapshot(root)
-    const added = Object.keys(after)
-      .filter((f) => !(f in before))
-      .map((f) => f.split('/').at(-1))
-      .sort()
-    // The state document and the denial notice, and nothing else. Listing what
-    // IS allowed rather than asserting the grant file is absent: a new write
-    // the operator did not ask for fails this, whatever it is called.
-    expect(added).toEqual(['engine-state.json', 'events.jsonl'])
+    const addedPaths = Object.keys(after).filter((f) => !(f in before))
+    const added = addedPaths.map((f) => f.split('/').at(-1)).sort()
+    // The audit record, the state document and the denial notice, and nothing
+    // else. Listing what IS allowed rather than asserting the grant file is
+    // absent: a new write the operator did not ask for fails this, whatever it
+    // is called.
+    expect(added).toEqual(['0000000000000001.jsonl', 'engine-state.json', 'events.jsonl'])
+    // The record's segment by its path, not just its name: a file of that name
+    // anywhere else is a write nobody asked for.
+    expect(addedPaths).toContain(join('audit', '0000000000000001.jsonl'))
   })
 
   test('13: denying leaves an existing session approval file untouched', async () => {

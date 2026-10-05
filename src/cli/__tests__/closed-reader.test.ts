@@ -282,6 +282,7 @@ const ROWS: Row[] = [
     },
   },
   { argv: ['approve', 'sender', '--content', '--remove'], code: 0 },
+  { argv: ['audit', 'head'], code: 0 },
   // Last, so no later advance loads the scaffolded plugin.
   { argv: ['scaffold', 'newbie'], code: 0 },
 ]
