@@ -49,7 +49,6 @@ const EXPECTED: Record<string, number> = {
   'src/lib/audit-log.ts': 2,
   'src/lib/fs-atomic.ts': 3,
   'src/lib/jsonl-logger.ts': 1,
-  'src/lib/preferences.ts': 1,
   'src/runtime/approval-gate.ts': 1,
   'src/runtime/lock.ts': 1,
   'src/runtime/run-artifacts.ts': 2,
