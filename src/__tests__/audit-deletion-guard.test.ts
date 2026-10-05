@@ -20,6 +20,10 @@
  * not counted. Lines whose text starts with `*` or `//` are dropped first, so
  * a comment that names a delete is not one.
  *
+ * **What this cannot see.** A delete imported under another name
+ * (`unlink as u`), reached through a computed property (`fs['unlink']`), or
+ * written with a space before its paren. None appears here today.
+ *
  * `/usr/bin/find` picks the files and `/usr/bin/grep` picks the lines, both
  * by absolute path. The bare names resolve to a tool here that honours ignore
  * files, and it has returned a false zero over this repository before.

@@ -8,7 +8,7 @@
  * a second writer in the making, and this reddens on it.
  *
  * **What a path to the store looks like.** A `join(` or `resolve(` call with a
- * quoted `audit` among its arguments, or a quoted path that runs through
+ * quoted `audit` anywhere after it on the line, or a quoted path that runs through
  * `/audit/` or ends in `/audit`. The dispatcher's `case 'audit':` and its
  * `import('./audit.js')` name the verb, not the directory, and stay green.
  * Lines whose text starts with `*` or `//` are dropped first.
@@ -31,7 +31,9 @@ const FIND = '/usr/bin/find'
 const STORE = 'src/lib/audit-log.ts'
 
 const COMMENT = /^\s*(\*|\/\/)/
-const JOINS_AUDIT = /\b(join|resolve)\([^)]*['"`]audit['"`]/
+// The rest of the line, not `[^)]*`: an argument that is itself a call, like
+// `warplineHome()` or `dirname(dirname(p))`, closes a paren before `'audit'`.
+const JOINS_AUDIT = /\b(join|resolve)\(.*['"`]audit['"`]/
 const AUDIT_PATH = /['"`][^'"`]*\/audit(\/[^'"`]*)?['"`]/
 const SPECIFIER =
   /(?<![.\w])(?:(?:from|import)\s*["']|(?:import|require)\s*\(\s*["'`])([^"'`\n]+)["'`]/g
@@ -116,11 +118,14 @@ describe('only the store writes the store', () => {
   test('a join to the directory and a quoted path through it are each reported', () => {
     const { dir, paths } = fixture({
       'joins.ts': "const d = join(home, 'audit')\n",
+      'nested.ts': "const a = join(warplineHome(), 'audit')\nconst b = resolve(dirname(dirname(p)), 'audit')\n",
       'quoted.ts': 'await writeFile(`${home}/audit/x`, \'\')\n',
     })
     try {
       expect(writerOffenders(paths, dir)).toEqual([
         "joins.ts:1: const d = join(home, 'audit')",
+        "nested.ts:1: const a = join(warplineHome(), 'audit')",
+        "nested.ts:2: const b = resolve(dirname(dirname(p)), 'audit')",
         "quoted.ts:1: await writeFile(`${home}/audit/x`, '')",
       ])
     } finally {
