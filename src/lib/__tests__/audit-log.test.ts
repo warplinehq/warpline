@@ -506,3 +506,71 @@ describe('segments', () => {
     expect(lastOpened().data.authority).toEqual({ preferences: null, principals: null })
   })
 })
+
+describe('authority files', () => {
+  const REGISTRY = 'warpline.audit.principal_registry.observed'
+  const bytesA = Buffer.from('{"principals":[{"id":"ops"}]}')
+  const bytesB = Buffer.from('{"principals":[{"id":"ops"},{"id":"ci"}]}')
+  const digestA = createHash('sha256').update(bytesA).digest('hex')
+  const digestB = createHash('sha256').update(bytesB).digest('hex')
+  const observedLines = () =>
+    readdirSync(auditDir)
+      .filter((n) => /^\d{16}\.jsonl$/.test(n))
+      .sort()
+      .flatMap((n) => readFileSync(join(auditDir, n), 'utf-8').split('\n').filter((l) => l !== ''))
+      .map((l) => JSON.parse(l) as { type: string; warplineseq: number; data: Record<string, unknown> })
+      .filter((r) => r.type === REGISTRY)
+
+  test('the registry is recorded by entry: ids added or changed are named, and a repeat of the same bytes records nothing, across a rotation too', async () => {
+    expect(typeof audit.observeAuthorityFile).toBe('function')
+    const first = await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesA, { ops: 'a'.repeat(64) })
+
+    expect(first).not.toBeNull()
+    expect(observedLines()).toHaveLength(1)
+    expect(observedLines()[0]!.warplineseq).toBe(first!.seq)
+    expect(observedLines()[0]!.data).toEqual({
+      old: null,
+      new: digestA,
+      changed_ids: ['ops'],
+      editor: 'unknown',
+      entries: { ops: 'a'.repeat(64) },
+    })
+
+    const second = await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesB, {
+      ops: 'b'.repeat(64),
+      ci: 'c'.repeat(64),
+    })
+
+    expect(second).not.toBeNull()
+    expect(observedLines()).toHaveLength(2)
+    expect(observedLines()[1]!.data).toEqual({
+      old: digestA,
+      new: digestB,
+      changed_ids: ['ci', 'ops'],
+      editor: 'unknown',
+      entries: { ops: 'b'.repeat(64), ci: 'c'.repeat(64) },
+    })
+
+    const entriesB = { ops: 'b'.repeat(64), ci: 'c'.repeat(64) }
+    expect(await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesB, entriesB)).toBeNull()
+    expect(observedLines()).toHaveLength(2)
+
+    await audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A }, { maxSegmentBytes: 1 })
+    expect(readdirSync(auditDir).filter((n) => /^\d{16}\.jsonl$/.test(n))).toHaveLength(2)
+
+    expect(await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesB, entriesB)).toBeNull()
+    expect(observedLines()).toHaveLength(2)
+  })
+
+  test('an id that leaves the registry is named as changed', async () => {
+    expect(typeof audit.observeAuthorityFile).toBe('function')
+    await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesB, {
+      ops: 'b'.repeat(64),
+      ci: 'c'.repeat(64),
+    })
+
+    await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesA, { ci: 'c'.repeat(64) })
+
+    expect(observedLines()[1]!.data.changed_ids).toEqual(['ops'])
+  })
+})
