@@ -173,6 +173,16 @@ function rawLines(): Raw[] {
 
 const observed = (lines: Raw[] = rawLines()): Raw[] => lines.filter((l) => l.record.type === OBSERVED)
 
+/** A quiet-hours window holding right now, read off the local clock as `isQuietHours` does. */
+function windowAroundNow(): { start: string; end: string } {
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const at = (offsetMs: number): string => {
+    const d = new Date(Date.now() + offsetMs)
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+  return { start: at(-60 * 60 * 1000), end: at(60 * 60 * 1000) }
+}
+
 /** Every file under `dir`, recursively. */
 function filesUnder(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
@@ -235,6 +245,26 @@ describe('preferences.json is on the record before the advance uses it', () => {
     expect(intent).toBeDefined()
     expect(checkpoint).toBeDefined()
     expect(obs[0]!.record.warplineseq).toBeLessThan(intent!.record.warplineseq)
+    expect(obs[0]!.record.warplineseq).toBeLessThan(checkpoint!.record.warplineseq)
+  })
+
+  test('hand edit: turning quiet hours on is recorded by the advance it silences, ahead of its Checkpoint', async () => {
+    const baseline = writePrefsText('{"review_gate":false}')
+    expect((await advance()).code).toBe(0)
+    const before = rawLines().length
+    const ranBefore = invocations()
+
+    const edited = writePrefsText(JSON.stringify({ review_gate: false, quiet_hours: windowAroundNow() }))
+    const { code } = await advance()
+
+    expect(code).toBe(0)
+    expect(invocations()).toBe(ranBefore)
+    const fresh = rawLines().slice(before)
+    const obs = observed(fresh)
+    expect(obs).toHaveLength(1)
+    expect(obs[0]!.record.data).toEqual({ old: sha(baseline), new: sha(edited), changed: 'unknown', editor: 'unknown' })
+    const checkpoint = fresh.find((l) => l.record.type === 'warpline.audit.checkpoint.recorded')
+    expect(checkpoint).toBeDefined()
     expect(obs[0]!.record.warplineseq).toBeLessThan(checkpoint!.record.warplineseq)
   })
 
