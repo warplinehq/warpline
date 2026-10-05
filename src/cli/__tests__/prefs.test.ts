@@ -303,3 +303,17 @@ describe('warpline prefs set', () => {
     }
   })
 })
+
+describe('concurrent prefs set', () => {
+  test('two sets of different keys at once keep both values, and each lands one record', async () => {
+    const { code } = await capture(async () => {
+      const codes = await Promise.all([run(['set', 'review_gate', 'false']), run(['set', 'retention.days', '7'])])
+      return codes.every((c) => c === 0) ? 0 : 1
+    })
+
+    expect(code).toBe(0)
+    const file = JSON.parse(readFileSync(prefsFile(), 'utf-8')) as { review_gate?: unknown; retention?: { days?: unknown } }
+    expect({ review_gate: file.review_gate, days: file.retention?.days }).toEqual({ review_gate: false, days: 7 })
+    expect(ofType(SET).map((l) => l.data.key).sort()).toEqual(['retention.days', 'review_gate'])
+  })
+})

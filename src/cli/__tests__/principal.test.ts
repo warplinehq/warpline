@@ -445,3 +445,35 @@ describe('warpline principal', () => {
     ])
   })
 })
+
+describe('concurrent principal add', () => {
+  /** Both calls run under one capture, so neither restores the other's stream. */
+  async function both(a: string[], b: string[]): Promise<number[]> {
+    const realOut = process.stdout.write
+    const realErr = process.stderr.write
+    process.stdout.write = (() => true) as typeof process.stdout.write
+    process.stderr.write = (() => true) as typeof process.stderr.write
+    try {
+      return await Promise.all([run(a), run(b)])
+    } finally {
+      process.stdout.write = realOut
+      process.stderr.write = realErr
+    }
+  }
+
+  test('one id added twice at once: one succeeds, one is refused, one record', async () => {
+    const codes = await both(['add', 'alice', '--type', 'human'], ['add', 'alice', '--type', 'human'])
+
+    expect(codes.sort()).toEqual([0, 1])
+    expect(ofType(ADDED).map((l) => l.data.id)).toEqual(['alice'])
+    expect(registry().principals.map((p) => p.id)).toEqual(['alice'])
+  })
+
+  test('two ids added at once: both entries kept, two records', async () => {
+    const codes = await both(['add', 'alice', '--type', 'human'], ['add', 'bob', '--type', 'machine'])
+
+    expect(codes).toEqual([0, 0])
+    expect(registry().principals.map((p) => p.id).sort()).toEqual(['alice', 'bob'])
+    expect(ofType(ADDED).map((l) => l.data.id).sort()).toEqual(['alice', 'bob'])
+  })
+})
