@@ -470,21 +470,30 @@ describe('a store that cannot take a fire record', () => {
     expect(code).toBe(70)
   })
 
+  // The segment file is made read-only, not the directory. A read-only
+  // directory refuses the audit lock, and the advance's preferences check takes
+  // that lock before any fire, so it would refuse with 75 there (pinned in
+  // audit-preferences.test.ts) and never reach the intent. With no
+  // preferences.json and none on the record there is nothing to append, so the
+  // first append this advance tries is the intent.
   test.skipIf(process.getuid?.() === 0)(
-    'a read-only store stops the intent through the real bin: the handler never runs and the advance exits 70 (skipped as root: chmod cannot deny root)',
+    'a read-only segment stops the intent through the real bin: the handler never runs and the advance exits 70 (skipped as root: chmod cannot deny root)',
     () => {
       writePlugin('mailer')
+      rmSync(join(home.root, 'preferences.json'))
       const approved = bin(['approve', 'mailer'])
       expect(approved.status).toBe(0)
-      expect(existsSync(storeDir())).toBe(true)
-      chmodSync(storeDir(), 0o500)
+      const segments = readdirSync(storeDir()).filter((f) => f.endsWith('.jsonl'))
+      expect(segments).toHaveLength(1)
+      const segment = join(storeDir(), segments[0]!)
+      chmodSync(segment, 0o400)
       try {
         const r = bin(['advance'])
 
         expect(r.status).toBe(70)
         expect(mark('mailer', 'invoked')).toBeNull()
       } finally {
-        chmodSync(storeDir(), 0o700)
+        chmodSync(segment, 0o600)
       }
     },
   )
