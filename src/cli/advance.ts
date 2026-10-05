@@ -92,9 +92,10 @@
  * `plan`, `approve`, `deny` and `revoke` report.
  *
  * `70` is computed here, outside `advanceExitCode`, the way `75` and `130` are
- * produced outside it: it comes from the result's audit failures and a null
- * `audit` (a Checkpoint that could not be written), fields that function does
- * not read. It outranks `1` and `--strict`. A document is still
+ * produced outside it: it comes from the result's audit failures, a null
+ * `audit` (a Checkpoint that could not be written) and a null
+ * `audit.indeterminate` (a Checkpoint written, but a store not read back after
+ * it), fields that function does not read. It outranks `1` and `--strict`. A document is still
  * written to stdout, because the run completed; stderr says which plugin's
  * record is missing and, for an outcome, which intent stays open.
  *
@@ -221,8 +222,11 @@ export interface AdvancePayload {
    * name, a run id and a hex effect id or null. Integers and identifiers only.
    *
    * Present on every advance that returns. Null only when its Checkpoint could
-   * not be written, which exits `70`. Threaded from the Checkpoint append's own
-   * return value by way of the advance result, never recounted here.
+   * not be written, which exits `70`. Its `bytes`, `segments` and
+   * `indeterminate` are null when the Checkpoint was written but the store
+   * could not be read back after it, which exits `70` too. Threaded from the
+   * Checkpoint append's own return value by way of the advance result, never
+   * recounted here.
    */
   audit: AuditSummary | null
   /**
@@ -254,6 +258,9 @@ function renderHuman(payload: AdvancePayload): string {
   )
   // Indeterminate fires are listed by `--json` and `audit verify`, not here.
   if (payload.audit === null) lines.push('  Audit: Checkpoint not recorded')
+  else if (payload.audit.indeterminate === null) {
+    lines.push('  Audit: Checkpoint recorded, but the store could not be read back after it')
+  }
   return `${lines.join('\n')}\n`
 }
 
@@ -457,9 +464,12 @@ export async function run(
     }
 
     // `70` first: a fire, refusal or Checkpoint with no record outranks every
-    // code the mapper returns, `--strict` included.
+    // code the mapper returns, `--strict` included. So does a store not read
+    // back after its Checkpoint: an open-intent list nobody read is not none.
     const exit_code =
-      result.audit_failures.length > 0 || result.audit === null ? EXIT_AUDIT_FAILED : advanceExitCode(result, { strict })
+      result.audit_failures.length > 0 || result.audit === null || result.audit.indeterminate === null
+        ? EXIT_AUDIT_FAILED
+        : advanceExitCode(result, { strict })
     const { gated, pending_gates, failed, refused } = advanceCounts(result)
 
     // One line per missing record, then the code's line, all before the
@@ -478,6 +488,12 @@ export async function run(
     }
     if (result.audit === null) {
       process.stderr.write("warpline advance: the audit store could not record this advance's Checkpoint.\n")
+    } else if (result.audit.indeterminate === null) {
+      process.stderr.write(
+        `warpline advance: the audit store recorded this advance's Checkpoint (seq ${result.audit.seq}), ` +
+          'but could not be read back after it, so its open fire intents are not listed. ' +
+          'warpline audit verify names the reason.\n',
+      )
     }
     if (exit_code === EXIT_AUDIT_FAILED) {
       process.stderr.write('Exit 70: the audit store failed during this run; see docs/runtime-spec.md § 11.\n')

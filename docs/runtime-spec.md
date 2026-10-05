@@ -2766,7 +2766,7 @@ them.
 |------|---------|
 | `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, a plugin is holding at an approval gate, or a content approval declined to authorise a fire. |
 | `1` | At least one plugin failed, the plugin root loaded no manifests at all, or the command line was not valid. Or, under `--strict`, an approval gate is still waiting or a content approval refused a fire. Or a write to stdout or stderr failed for a reason other than a reader that has gone away. Output a plugin prints after the drain has begun is dropped, and does not count as a failed write. |
-| `70` | The audit store failed during this run: a fire intent, a fire outcome, a fire refusal or the advance's Checkpoint could not be recorded (§ 14). |
+| `70` | The audit store failed during this run: a fire intent, a fire outcome, a fire refusal or the advance's Checkpoint could not be recorded, or the advance's Checkpoint was written but the store could not be read back after it (§ 14). |
 | `75` | Could not finish. Often nothing ran and nothing was written, but not always — see below before treating it as a free retry. |
 | `130` | Interrupted by a SIGINT or SIGTERM that warpline caught. The process stopped; the work may not have. |
 
@@ -2795,8 +2795,12 @@ retries an append. The run finishes and writes its document to stdout with
 plugin failure or a held gate still reports `70`. An advance whose Checkpoint
 could not be written exits `70` as well: its document carries `audit: null`,
 stderr says the Checkpoint was not recorded, and the dead-man file is still
-written, because the advance itself finished. `warpline revoke` exits `70`
-too, when the grant was removed but its record could not be written (§ 9).
+written, because the advance itself finished. An advance whose Checkpoint was
+written but whose store could not be read back after it exits `70` too: its
+document carries the Checkpoint's seq with `indeterminate: null`, never an empty
+list, and stderr points at `warpline audit verify` for the reason.
+`warpline revoke` exits `70` too, when the grant was removed but its record
+could not be written (§ 9).
 
 `130` is the conventional code for a process ended by SIGINT, and this command
 reports it deliberately rather than by default: it installs a handler for the
@@ -3772,10 +3776,10 @@ and passed through unchanged:
 | Field | Meaning |
 |-------|---------|
 | `seq` | The head seq, which is the Checkpoint's own seq. |
-| `bytes` | The summed size of every segment file, in bytes. |
-| `segments` | How many segment files the store holds. |
+| `bytes` | The summed size of every segment file, in bytes. Null when the Checkpoint landed but the store could not be read back after it. |
+| `segments` | How many segment files the store holds. Null when the Checkpoint landed but the store could not be read back after it. |
 | `checkpoint_seq` | The Checkpoint's seq. |
-| `indeterminate` | Every `fire.intent` no `fire.outcome`, `fire.refused` or `fire.resolved` has closed, in seq order, each `{ seq, plugin, run_id, effect_id }`. `effect_id` is null for a session-class fire. |
+| `indeterminate` | Every `fire.intent` no `fire.outcome`, `fire.refused` or `fire.resolved` has closed, in seq order, each `{ seq, plugin, run_id, effect_id }`. `effect_id` is null for a session-class fire. Null, never `[]`, when the Checkpoint landed but the store could not be read back after it. |
 
 An intent is indeterminate when the process died between it and its outcome,
 or when its outcome could not be written (§ 11). The fire may or may not have
@@ -3783,8 +3787,11 @@ happened, and the store cannot say which. It is surfaced and never held: the
 plugin fires again when it is next due, and the advance's exit code does not
 change on its account. `warpline resolve` answers one (§ 10), which closes it.
 
-`audit` is `null` only when the Checkpoint could not be written. The advance
-then exits `70` (§ 11). The object holds integers and identifiers only. The
+`audit` is `null` only when the Checkpoint could not be written. Its three
+read-back fields, `bytes`, `segments` and `indeterminate`, are `null` when the
+Checkpoint was written but the store could not be read back after it, and `seq`
+and `checkpoint_seq` still name the Checkpoint. Either way the advance exits
+`70` (§ 11). The object holds integers and identifiers only. The
 dead-man file does not carry it.
 
 ### Export

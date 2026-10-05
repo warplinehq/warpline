@@ -712,14 +712,24 @@ function underLock<T>(
 export interface AuditSummary {
   /** The Checkpoint's seq, which is the head when it was taken. */
   seq: number
-  /** Summed size of every segment file. */
-  bytes: number
-  /** How many segment files there are. */
-  segments: number
+  /**
+   * Summed size of every segment file. Null when the Checkpoint landed but the
+   * store could not be read back after it.
+   */
+  bytes: number | null
+  /**
+   * How many segment files there are. Null when the Checkpoint landed but the
+   * store could not be read back after it.
+   */
+  segments: number | null
   /** The Checkpoint's seq. Equal to `seq` here, and named so a reader of the store finds it. */
   checkpoint_seq: number
-  /** Every fire intent no outcome, refusal or resolution has closed. Surfaced, never held. */
-  indeterminate: OpenIntent[]
+  /**
+   * Every fire intent no outcome, refusal or resolution has closed. Surfaced,
+   * never held. Null, never an empty list, when the Checkpoint landed but the
+   * store could not be read back after it: could not look is not found none.
+   */
+  indeterminate: OpenIntent[] | null
 }
 
 /**
@@ -727,7 +737,9 @@ export interface AuditSummary {
  * the home id, the seq of the line before it and that line's hash. Called by an
  * advance that returns, once, before its dead-man file. Goes through the same
  * queue, lock and rotation check as `appendAudit`, so a rotation due now writes
- * its own Checkpoint first. Rejects with `AuditAppendError`.
+ * its own Checkpoint first. Rejects with `AuditAppendError` only when the
+ * Checkpoint was not appended. Once it is on disk the seq is reported whatever
+ * the read-back does, and a read-back that fails leaves the other three null.
  */
 export function recordCheckpoint(statePath: string, opts: AppendOpts = {}): Promise<AuditSummary> {
   return underLock(statePath, 'checkpoint.recorded', opts, async (dir, time, limits) => {
@@ -738,10 +750,16 @@ export function recordCheckpoint(statePath: string, opts: AppendOpts = {}): Prom
       time,
       limits,
     )
-    const segments = await listSegments(dir)
-    let bytes = 0
-    for (const name of segments) bytes += (await stat(join(dir, name))).size
-    return { seq, bytes, segments: segments.length, checkpoint_seq: seq, indeterminate: await openIntentsIn(dir) }
+    try {
+      const segments = await listSegments(dir)
+      let bytes = 0
+      for (const name of segments) bytes += (await stat(join(dir, name))).size
+      return { seq, bytes, segments: segments.length, checkpoint_seq: seq, indeterminate: await openIntentsIn(dir) }
+    } catch {
+      // The line is on disk. `warpline audit verify` names why the store
+      // cannot be read back, and the caller exits 70 on the null.
+      return { seq, bytes: null, segments: null, checkpoint_seq: seq, indeterminate: null }
+    }
   })
 }
 
