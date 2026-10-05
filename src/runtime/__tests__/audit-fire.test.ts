@@ -658,6 +658,44 @@ describe('content', () => {
     expectNoSentinel()
   })
 
+  test('a failed mark whose refusal cannot be recorded leaves its intent open, and the next advance lists it as indeterminate', async () => {
+    await seedContentApproval()
+    const realWrite = store.writeEngineState
+    let trips = 0
+    installed.push(
+      spyOn(store, 'writeEngineState').mockImplementation(async (payload, path) => {
+        if (trips === 0 && isMarkWrite(payload) !== undefined) {
+          trips += 1
+          throw new Error(SENTINEL)
+        }
+        return realWrite(payload, path)
+      }),
+    )
+    const refusal = failAppend('fire.refused')
+
+    const first = await capture(['advance'])
+
+    expect(trips).toBe(1)
+    expect(refusal.trips()).toBe(1)
+    expect(first.code).toBe(70)
+    expect(mark('sender', 'invoked')).toBeNull()
+    expect(linesOf('fire.refused')).toEqual([])
+    const intents = linesOf('fire.intent').filter((l) => l.data.plugin === 'sender')
+    expect(intents).toHaveLength(1)
+    const seq = intents[0]!.warplineseq
+
+    for (const spy of installed) spy.mockRestore()
+    installed = []
+    const second = await capture(['advance', '--json'])
+
+    const docs = second.stdout.split('\n').filter((l) => l.length > 0)
+    expect(docs).toHaveLength(1)
+    const doc = JSON.parse(docs[0]!) as { audit: { indeterminate: { seq: number; plugin: string }[] } | null }
+    expect(doc.audit).not.toBeNull()
+    expect(doc.audit!.indeterminate.filter((i) => i.plugin === 'sender').map((i) => i.seq)).toEqual([seq])
+    expectNoSentinel()
+  })
+
   test('openIntents lists the intents no outcome, refusal or resolution closed, across a rotation too', async () => {
     expect(typeof audit.openIntents).toBe('function')
     expect(await audit.openIntents(join(home.root, 'none', 'state', 'engine-state.json'))).toEqual([])
