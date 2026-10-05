@@ -2621,8 +2621,9 @@ id and found that nothing shipped. It is its own verb and not a mode of
   a machine that cannot identify itself, for the two-hour window. `resolve`
   never writes, heals or removes the lock.
 - Before it writes, it appends `fire.resolved` (§ 14): the plugin, the effect
-  id, and the seq of the `fire.intent` with that plugin and effect id when one
-  is still open, else null. That record closes the intent. The lookup only
+  id, the seq of the `fire.intent` with that plugin and effect id when one
+  is still open, else null, and `answer: not_shipped`. That record closes the
+  intent. The lookup only
   names the seq and never changes what `resolve` accepts. A store that cannot
   take the record refuses the answer with exit `1`, and nothing is written.
 - It writes `not_shipped_at`, the instant of the answer, and keeps `marked_at`
@@ -2659,6 +2660,31 @@ turns out wrong has cost a retry the operator chose, never a fire the runtime
 chose for them. It erases no content. An answered record binds its producer's
 content by fingerprint until its window closes, as a confirmed one does, and
 the release rule (§ "Expiry and deletion") lets it go then.
+
+**Answering any open fire intent (`warpline resolve --intent`).**
+`warpline resolve --intent <seq> --shipped` or `--not-shipped` answers any
+`fire.intent` the audit store lists as open (§ 14), session-class or
+content-class, after the operator checked whether its effect happened. An
+intent is left open by a process that died between it and its outcome, or by
+an outcome that could not be written, and this is how it is closed.
+
+- It refuses while an advance is running, for the reason above and by the same
+  check, made first inside the state lock.
+- It refuses a seq that is not an open intent, and a malformed form: a plugin
+  name, both answers or neither, more than one seq, or a seq that is not a
+  positive decimal integer. No refusal repeats the typed seq.
+- It reads the audit store, because the open intent is what it answers. It
+  authorises no fire and never writes the state document.
+- A content fire still marked and unconfirmed under the intent's effect id is
+  answered not shipped only by the form above, which writes the state document
+  too and closes the same intent. So `--not-shipped` by seq is refused for it,
+  and the refusal names that command. `--shipped` closes such an intent on the
+  record, and its approval keeps reading `indeterminate`, because only an
+  advance confirms a mark. Telling this case apart is the one read of the state
+  document the form makes, and a document that cannot be read refuses.
+- It appends `fire.resolved` with the intent's plugin and effect id (null for a
+  session-class fire), its seq and `answer`, and writes nothing else. A store
+  that cannot take the record refuses with exit `1`, and nothing is written.
 
 ### `last_output`
 
@@ -3327,8 +3353,9 @@ The `deny` verb and the board write the engine state document, under the state
 lock. So does `approve --content`, which records the approval, and `approve
 --content --remove`, which withdraws it — both under the same lock.
 So does `approve <plugin>` when it answers a parked gate, applying it or
-discarding it, under the same lock. So does `warpline resolve`, which answers
-an indeterminate fire, under the same lock. So does the advance itself, twice, under
+discarding it, under the same lock. So does `warpline resolve <plugin>
+--not-shipped`, which answers an indeterminate fire, under the same lock. Its
+`--intent` form takes the same lock and writes no state document. So does the advance itself, twice, under
 the same lock: its spend mark and its end-of-run write. `approve`'s Grant path
 writes the session-approval file instead, `.session-approval` at the root of the
 home, and writes no state document at all. The state lock serialises all of
@@ -3544,7 +3571,7 @@ The set is closed. A kind outside it cannot be written.
 | `fire.intent` | A plugin holding side-effect authority is about to be invoked. |
 | `fire.outcome` | The invocation that intent announced returned or threw. |
 | `fire.refused` | A plugin holding a content approval was not fired, and why (§ 5). |
-| `fire.resolved` | `warpline resolve` recorded that a marked fire did not ship. |
+| `fire.resolved` | `warpline resolve` recorded the operator's answer to an open fire intent: `shipped` or `not_shipped`. |
 | `principal.added` | A principal is about to be added to the registry. |
 | `principal.disabled` | A principal is about to be disabled. |
 | `principal_registry.observed` | The principal registry changed without a warpline command. |
@@ -3576,7 +3603,9 @@ authority it carried forward (§ 14 Segments).
 
 Three kinds close a `fire.intent`: a `fire.outcome`, a `fire.refused` or a
 `fire.resolved` whose `intent_seq` is that intent's seq. One whose `intent_seq`
-is null closes nothing. An intent none of them has closed is open.
+is null closes nothing. An intent none of them has closed is open. A
+`fire.resolved` carries the operator's `answer`, `shipped` or `not_shipped`,
+and its `effect_id` is null for a session-class fire.
 
 ### Genesis and the head
 
@@ -3677,8 +3706,8 @@ the walk, so no such value reaches a reader's output.
 
 **A walk that stops.** `audit verify` reports `unreadable` and names the seq,
 and every command that needs the walk refuses: an `advance`, `prefs set`,
-`principal`, `resolve`, and any append that rotates. `advance`, `prefs set` and
-`principal` print the same reason, which names the seq and the kind and nothing
+`principal`, `resolve`, and any append that rotates. `advance`, `prefs set`,
+`principal` and `resolve` print the same reason, which names the seq and the kind and nothing
 from the line. No warpline build writes such a line. Keep an export of the
 store, which is the account of what was there, then
 remove that one line from the active segment by hand.
@@ -3740,7 +3769,8 @@ after the re-check and before the mark (§ 10), and its outcome closes it the
 same way. A refused fire gets `fire.refused` with its closed-set reason and no
 intent, because nothing fired, except when the spend mark's write failed after
 its intent landed: that refusal carries the intent's seq and closes it.
-`warpline resolve` appends `fire.resolved` before it writes its answer (§ 10). A plugin with no declared side effects gets no record, and
+`warpline resolve` appends `fire.resolved` before it writes anything, and its
+`--intent` form writes nothing else (§ 10). A plugin with no declared side effects gets no record, and
 neither does `warpline run`. An outcome or refusal that cannot be written does
 not undo what already happened; the advance exits `70` (§ 11).
 
@@ -3785,7 +3815,11 @@ An intent is indeterminate when the process died between it and its outcome,
 or when its outcome could not be written (§ 11). The fire may or may not have
 happened, and the store cannot say which. It is surfaced and never held: the
 plugin fires again when it is next due, and the advance's exit code does not
-change on its account. `warpline resolve` answers one (§ 10), which closes it.
+change on its account. Once you have checked whether the effect happened,
+answer it with `warpline resolve --intent <seq> --shipped` or `--not-shipped`,
+which closes it, and the next advance no longer lists it. A content fire still
+marked and unconfirmed that did not ship is answered with `warpline resolve
+<plugin> --not-shipped <effect-id>`, which closes its intent too (§ 10).
 
 `audit` is `null` only when the Checkpoint could not be written. Its three
 read-back fields, `bytes`, `segments` and `indeterminate`, are `null` when the

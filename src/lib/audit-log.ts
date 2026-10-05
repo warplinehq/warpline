@@ -161,7 +161,12 @@ const DATA = {
     reason: RefusalReasonSchema,
     intent_seq: Seq.nullable(),
   }),
-  'fire.resolved': z.strictObject({ plugin: PluginName, effect_id: Hex, intent_seq: Seq.nullable() }),
+  'fire.resolved': z.strictObject({
+    plugin: PluginName,
+    effect_id: Hex.nullable(),
+    intent_seq: Seq.nullable(),
+    answer: z.enum(['shipped', 'not_shipped']),
+  }),
   'principal.added': z.strictObject({
     id: PrincipalId,
     type: z.enum(['human', 'machine']),

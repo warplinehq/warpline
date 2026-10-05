@@ -416,7 +416,9 @@ reads `skipped`, `status` reads `complete` and `gated` reads `0`, because
 § 14). `audit.indeterminate` is the field to watch for fires with no outcome:
 each entry is a side-effecting fire whose process died, or whose outcome could
 not be recorded, after its intent was written. Warpline does not hold the
-plugin on its account. Whether the effect happened is for you to check.
+plugin on its account. Whether the effect happened is for you to check. Once
+you know, answer it with `warpline resolve --intent <seq> --shipped` or
+`--not-shipped`, and the next tick no longer lists it.
 `audit.indeterminate` is `null`, not `[]`, when the Checkpoint was written but
 the store could not be read back after it, and the advance then exits `70`.
 A check written as `jq '.audit.indeterminate | length'` reads `null` as `0`, so

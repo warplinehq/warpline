@@ -48,7 +48,7 @@ Commands:
   run        Invoke a single plugin handler directly
   approve    Grant a side-effect approval for this session
   deny       Record a no, so the next engine tick stops asking
-  resolve    Answer a content fire that was marked and never confirmed: it did not ship
+  resolve    Answer a fire nothing confirmed: a marked content fire, or any open intent by its seq
   revoke     Clear the current session approval
   audit      Print the record's head, export it after a seq, or check it against a Checkpoint
   prefs      Set one guardrail in preferences.json, on the record

@@ -63,10 +63,25 @@
  * The manifests are loaded only because `approvalStanding` takes them, and it
  * decides a marked record before it consults them.
  *
- * **The answer is on the audit record first**, as `fire.resolved`, and it
- * closes the fire intent it answers. The open intent is looked up only to name
- * its seq in that record, and never changes what this verb accepts. A store
- * that cannot take the record refuses the answer, with nothing written.
+ * **The answer is on the audit record first**, as `fire.resolved` with
+ * `answer: not_shipped`, and it closes the fire intent it answers. The open
+ * intent is looked up only to name its seq in that record, and never changes
+ * what this form accepts. A store that cannot take the record refuses the
+ * answer, with nothing written.
+ *
+ * **Any open fire intent is answered by its seq**, with `--intent <seq>` and
+ * `--shipped` or `--not-shipped`. That covers what the form above cannot: a
+ * session fire, and a content fire whose outcome was lost after its mark was
+ * confirmed. This form reads the audit store, because the open intent is the
+ * thing it answers, and a seq that is not open is refused. It authorises no
+ * fire, never writes the state document, and appends one `fire.resolved`
+ * carrying the intent's plugin, effect id and seq and the operator's answer,
+ * and nothing else. One case it hands back: a content fire still marked and
+ * unconfirmed under the same effect id, answered not shipped, belongs to the
+ * form above, the one writer of `not_shipped_at`, which closes the same
+ * intent. Answered shipped, the intent closes and the approval keeps reading
+ * `indeterminate`, because only an advance confirms a mark. Both forms check
+ * the run lock first, by the same function, for the same reason.
  *
  * No content is erased here. An answered record binds its producer's content
  * by fingerprint until its window closes, as a confirmed one does, and the
@@ -86,17 +101,95 @@ import {
 import type { EngineState } from '../schemas/engine-state.js'
 import { deriveHost, isLockStale, isProcessAlive, readLock } from '../runtime/lock.js'
 import { engineStatePath, lockPath as runLockPath, pluginsDir } from '../lib/paths.js'
-import { appendAudit, openIntents } from '../lib/audit-log.js'
+import { AuditAppendError, appendAudit, openIntents, type OpenIntent } from '../lib/audit-log.js'
 
 const USAGE = `Usage: warpline resolve <plugin> --not-shipped <effect-id>
+       warpline resolve --intent <seq> --shipped|--not-shipped
 
-Answers a content fire that was marked and never confirmed, after you checked
-the sink with its effect id and found that nothing shipped. The approval then
-reads spent and fires nothing. To ship those bytes after all, approve them
+The first answers a content fire that was marked and never confirmed, after you
+checked the sink with its effect id and found that nothing shipped. The approval
+then reads spent and fires nothing. To ship those bytes after all, approve them
 again: warpline approve <plugin> --content --not-after <when>.
+
+The second answers any fire intent the audit record still lists as open, after
+you checked whether its effect happened. It records your answer and nothing else.
 `
 
+/**
+ * The run-lock refusal both forms make first, inside the state lock. Prints
+ * the reason and returns true when it refused.
+ */
+async function refusedByRunLock(): Promise<boolean> {
+  // The run lock first, before the clock or the document. An advance marks a
+  // fire only while it holds the run lock, and only under the state lock the
+  // caller holds, so a live lock seen here is the one window in which a
+  // marked fire may still be in flight, and none can open before the write.
+  // Only `acquired_at` is printed: a runtime-written instant, never a path.
+  const held = await readLock(runLockPath())
+  // `isLockStale` is the heal predicate: it answers on age before it reads
+  // the pid. A live holder on this machine can go silent past the window,
+  // suspended or blocked in a handler, with its fire still able to land, so
+  // here a pid this machine can see alive outranks the age.
+  const aliveHere =
+    held !== null &&
+    held.pid !== null &&
+    held.host != null &&
+    held.host === deriveHost() &&
+    isProcessAlive(held.pid)
+  if (held !== null && (aliveHere || !isLockStale(held))) {
+    process.stderr.write(
+      `An advance is running (it took the run lock at ${held.acquired_at}), so a fire it marked ` +
+        `may still be in flight and the sink cannot answer for it yet. Resolve it after the ` +
+        `advance ends. Nothing was written.\n`,
+    )
+    return true
+  }
+  // `readLock` says null for an absent file and for one that is not a lock.
+  // Only the first is known to be no advance.
+  if (held === null && existsSync(runLockPath())) {
+    process.stderr.write(
+      `The run lock could not be read back as a lock, so whether an advance is still firing ` +
+        `cannot be told. Nothing was written.\n`,
+    )
+    return true
+  }
+  return false
+}
+
+/** The open intents, or null once the refusal is printed. */
+async function openIntentsOrRefuse(statePath: string): Promise<OpenIntent[] | null> {
+  try {
+    return await openIntents(statePath)
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err)
+    process.stderr.write(`The audit store's open intents could not be read (${why}). Nothing was written.\n`)
+    return null
+  }
+}
+
+/** The refusal for a `fire.resolved` the store did not take. */
+function refuseAppend(err: unknown): number {
+  process.stderr.write(
+    err instanceof AuditAppendError
+      ? `The audit store could not record this answer: ${err.reason}. Nothing was written.\n`
+      : 'The audit store could not record this answer. Nothing was written.\n',
+  )
+  return 1
+}
+
+/** The state document, or null once the refusal is printed. */
+async function stateOrRefuse(statePath: string): Promise<EngineState | null> {
+  try {
+    return await readEngineState(statePath)
+  } catch (err) {
+    if (!(err instanceof EngineStateInvalidError)) throw err
+    process.stderr.write(`Cannot read engine state: ${err.reason}\nNothing was written.\n`)
+    return null
+  }
+}
+
 export async function run(argv: string[]): Promise<number> {
+  if (argv.some((a) => a === '--intent' || a.startsWith('--intent='))) return runBySeq(argv)
   let values: { 'not-shipped'?: string }
   let positionals: string[]
   try {
@@ -135,51 +228,13 @@ export async function run(argv: string[]): Promise<number> {
   const lockPath = pathsForStateFile(statePath).lockPath
 
   return await withStateLockAt(lockPath, async () => {
-    // The run lock first, before the clock or the document. An advance marks a
-    // fire only while it holds the run lock, and only under the state lock this
-    // callback holds, so a live lock seen here is the one window in which a
-    // marked fire may still be in flight, and none can open before the write.
-    // Only `acquired_at` is printed: a runtime-written instant, never a path.
-    const held = await readLock(runLockPath())
-    // `isLockStale` is the heal predicate: it answers on age before it reads
-    // the pid. A live holder on this machine can go silent past the window,
-    // suspended or blocked in a handler, with its fire still able to land, so
-    // here a pid this machine can see alive outranks the age.
-    const aliveHere =
-      held !== null &&
-      held.pid !== null &&
-      held.host != null &&
-      held.host === deriveHost() &&
-      isProcessAlive(held.pid)
-    if (held !== null && (aliveHere || !isLockStale(held))) {
-      process.stderr.write(
-        `An advance is running (it took the run lock at ${held.acquired_at}), so a fire it marked ` +
-          `may still be in flight and the sink cannot answer for it yet. Resolve it after the ` +
-          `advance ends. Nothing was written.\n`,
-      )
-      return 1
-    }
-    // `readLock` says null for an absent file and for one that is not a lock.
-    // Only the first is known to be no advance.
-    if (held === null && existsSync(runLockPath())) {
-      process.stderr.write(
-        `The run lock could not be read back as a lock, so whether an advance is still firing ` +
-          `cannot be told. Nothing was written.\n`,
-      )
-      return 1
-    }
+    if (await refusedByRunLock()) return 1
 
     // Read once the lock is held: the standing and the answer instant are
     // about the document this write replaces.
     const now = Date.now()
-    let state: EngineState
-    try {
-      state = await readEngineState(statePath)
-    } catch (err) {
-      if (!(err instanceof EngineStateInvalidError)) throw err
-      process.stderr.write(`Cannot read engine state: ${err.reason}\nNothing was written.\n`)
-      return 1
-    }
+    const state = await stateOrRefuse(statePath)
+    if (state === null) return 1
 
     // Own-property, never a bare index: `resolve toString` must read as absent.
     // The typed name is not repeated: it is operator text, and nothing was
@@ -221,18 +276,18 @@ export async function run(argv: string[]): Promise<number> {
 
     // Bookkeeping, never a decision input: every check above has already
     // accepted the answer, and the lookup only names the intent it closes.
+    const open = await openIntentsOrRefuse(statePath)
+    if (open === null) return 1
+    const answered = open.find((i) => i.plugin === plugin && i.effect_id === record.effect_id)
     try {
-      const answered = (await openIntents(statePath)).find(
-        (i) => i.plugin === plugin && i.effect_id === record.effect_id,
-      )
       await appendAudit(statePath, 'fire.resolved', {
         plugin,
         effect_id: record.effect_id,
         intent_seq: answered?.seq ?? null,
+        answer: 'not_shipped',
       })
-    } catch {
-      process.stderr.write('The audit store could not record this answer. Nothing was written.\n')
-      return 1
+    } catch (err) {
+      return refuseAppend(err)
     }
 
     state.approvals[plugin] = { ...record, not_shipped_at: new Date(now).toISOString() }
@@ -242,6 +297,113 @@ export async function run(argv: string[]): Promise<number> {
         `as not shipped, on your word that nothing reached the sink. The approval now reads spent ` +
         `and fires nothing. To ship those bytes, approve them again: ` +
         `warpline approve ${plugin} --content --not-after <when>.\n`,
+    )
+    return 0
+  })
+}
+
+/** A malformed by-seq form: one line of reason, then the usage. */
+function bySeqUsage(reason: string): number {
+  process.stderr.write(`${reason}\n\n${USAGE}`)
+  return 1
+}
+
+/**
+ * `resolve --intent <seq> --shipped|--not-shipped`: close one open fire intent
+ * on the record, with the operator's answer. Every check runs before the one
+ * append, and the state document is never written.
+ */
+async function runBySeq(argv: string[]): Promise<number> {
+  let values: { intent?: string; shipped?: boolean; 'not-shipped'?: boolean }
+  let positionals: string[]
+  try {
+    const parsed = parseArgs({
+      args: argv,
+      options: { intent: { type: 'string' }, shipped: { type: 'boolean' }, 'not-shipped': { type: 'boolean' } },
+      allowPositionals: true,
+      strict: true,
+    })
+    values = parsed.values
+    positionals = parsed.positionals
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`)
+    return 1
+  }
+
+  // No refusal below repeats the typed seq: it is operator text.
+  if (positionals.length > 0) {
+    return bySeqUsage('resolve --intent names an intent by its seq alone, so it takes no plugin name.')
+  }
+  if (argv.filter((a) => a === '--intent' || a.startsWith('--intent=')).length !== 1) {
+    return bySeqUsage('resolve --intent answers one intent, so it takes one seq.')
+  }
+  if ((values.shipped === true) === (values['not-shipped'] === true)) {
+    return bySeqUsage('resolve --intent takes exactly one answer: --shipped or --not-shipped.')
+  }
+  const typed = values.intent ?? ''
+  const seq = Number(typed)
+  if (!/^[1-9][0-9]*$/.test(typed) || !Number.isSafeInteger(seq)) {
+    return bySeqUsage('The seq after --intent is a positive whole number, as audit verify prints it.')
+  }
+  const shipped = values.shipped === true
+
+  const statePath = engineStatePath()
+  const lockPath = pathsForStateFile(statePath).lockPath
+
+  return await withStateLockAt(lockPath, async () => {
+    if (await refusedByRunLock()) return 1
+
+    const open = await openIntentsOrRefuse(statePath)
+    if (open === null) return 1
+    const intent = open.find((i) => i.seq === seq)
+    if (intent === undefined) {
+      process.stderr.write(
+        'No open fire intent has that seq, so there is nothing to answer. ' +
+          'warpline audit verify lists the open ones. Nothing was written.\n',
+      )
+      return 1
+    }
+
+    // A content intent whose approval still reads indeterminate under the same
+    // effect id is the content form's to answer not shipped: it is the one
+    // writer of `not_shipped_at`. The plugin and effect id printed come from
+    // the record, which the walk checked.
+    let stillMarked = false
+    if (intent.effect_id !== null) {
+      const state = await stateOrRefuse(statePath)
+      if (state === null) return 1
+      if (Object.hasOwn(state.approvals, intent.plugin)) {
+        const { manifests } = await loadPluginManifests(pluginsDir())
+        const standing = approvalStanding(state, intent.plugin, manifests, Date.now())
+        stillMarked = standing.standing === 'indeterminate' && standing.approval.effect_id === intent.effect_id
+      }
+      if (stillMarked && !shipped) {
+        process.stderr.write(
+          `That intent is a content fire for ${intent.plugin} still marked and unconfirmed. Answer it ` +
+            `with warpline resolve ${intent.plugin} --not-shipped ${intent.effect_id}, which records the ` +
+            `answer in the state document too and closes this intent. Nothing was written.\n`,
+        )
+        return 1
+      }
+    }
+
+    try {
+      await appendAudit(statePath, 'fire.resolved', {
+        plugin: intent.plugin,
+        effect_id: intent.effect_id,
+        intent_seq: intent.seq,
+        answer: shipped ? 'shipped' : 'not_shipped',
+      })
+    } catch (err) {
+      return refuseAppend(err)
+    }
+
+    process.stdout.write(
+      `Closed fire intent ${intent.seq} for ${intent.plugin} (run ${intent.run_id}) as ` +
+        `${shipped ? 'shipped' : 'not shipped'}, on your word. The audit record keeps the intent and this answer.\n` +
+        (stillMarked
+          ? `The content approval for ${intent.plugin} still reads indeterminate: only an advance confirms a mark.\n`
+          : ''),
     )
     return 0
   })
