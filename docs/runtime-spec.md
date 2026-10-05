@@ -3586,6 +3586,13 @@ record it prints `0` and 64 `0`s, exits `0`, and creates nothing. It takes no
 lock and writes nothing, so it can be run at any time. Keeping its output off
 the box is what makes a later check of the store mean something.
 
+`warpline audit head --c2sp` prints the same head as an unsigned note body
+shaped like a C2SP checkpoint, three lines: the home id as the origin, the head
+seq as the size, and the standard base64 of the 32-byte head hash as the root.
+It is not a valid C2SP checkpoint. It carries no signature line, and the root
+is the head of a hash chain, not a Merkle root. On an empty store it refuses
+with exit `1` and prints nothing, because there is no home id yet to name.
+
 ### Writing
 
 One writer appends at a time. Within a process, appends queue behind each
@@ -3754,6 +3761,70 @@ change on its account. `warpline resolve` answers one (§ 10), which closes it.
 `audit` is `null` only when the Checkpoint could not be written. The advance
 then exits `70` (§ 11). The object holds integers and identifiers only. The
 dead-man file does not carry it.
+
+### Export
+
+`warpline audit export --after <seq>` prints every complete record after that
+seq, in seq order across segments, one CloudEvents structured-mode object per
+line, with its bytes unchanged. One object per line is warpline's own
+convention (§ Record format). Checkpoints are records, so they travel with the
+stream. `--after` takes `0` or a positive integer, nothing else: `-1`, `01`,
+`1e3` and a missing `--after` are usage errors with exit `1`. `--after 0`
+prints the whole store, and on a store with no partial line its output equals
+the segment files concatenated in name order, byte for byte. At the head it
+prints nothing and exits `0`. Past the head it prints nothing, names the head
+on stderr as `beyond head`, and exits `1`.
+
+A partial line is never exported. The `segment.opened` that follows it already
+records its length and digest (§ Segments), and stands in for it.
+
+Export reads only. It takes no lock, writes no Checkpoint and adds no byte to
+the store. It reads each segment a chunk at a time and waits for the reader
+before it writes more, so a 64 MiB segment is never held in memory. A reader
+that goes away (`| head`) ends it quietly with exit `0`. The store is archived
+this way, by export, and never moved.
+
+### Verify
+
+`warpline audit verify --checkpoint <file|->` checks the store against a head
+you kept off the box.
+The store is tamper-evident relative to the last exported Checkpoint, and this
+is the check that makes it so. The anchor is read from the file, or from stdin
+with `-`, up to 64 KiB, in either form:
+
+- `<seq> <hex>` on one line, as `audit head` prints it.
+- The note body `audit head --c2sp` prints: origin, size and base64 root, read
+  up to the first empty line.
+
+There is no unanchored check. Without `--checkpoint`, or with an anchor that is
+neither form, verify is a usage error with exit `1`. A check with nothing to
+compare against would read as fine when it could not look.
+
+| Verdict | Exit | Meaning |
+|---------|------|---------|
+| `clean` | `0` | Every line links, and the line at the anchored seq hashes to the anchor. |
+| `torn` | `3` | As clean, except the store ends in a partial line, keeps a partial line that a later `segment.opened` acknowledges, or its last segment ends in `segment.sealed` with no successor. A crash leaves these. |
+| `tampered` | `4` | A line does not parse, its seq is not the next one, its `warplineprev` is not the previous line's hash, a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, the anchored seq is beyond the head, or the line at the anchored seq does not hash to the anchor. |
+| `wrong log` | `5` | The anchor's origin is another home's id. |
+
+When more than one applies, wrong log wins, then tampered, then torn. None of
+the codes is `70`, `75` or `130`.
+
+A writer that can write the home can edit, reorder, insert or drop lines and
+re-link every `warplineprev` behind them, and every link then checks. Only the
+anchor catches that: the line at its seq no longer hashes to it, or the seq is
+gone.
+
+Verify prints `verdict`, the anchor, the head, how stale the anchor is, a
+`reason` naming a seq or a file and the rule it broke when the verdict is not
+clean, and one `open intent` line per fire intent nothing has closed, each with
+its seq, plugin and run id. Staleness is the head seq minus the anchored seq in
+records, and the time since the anchored record's `time` in seconds, the second
+only once that record's hash has matched. An anchor at the head is `0 records`
+stale. Verify never prints a record's data or the anchor file's text.
+
+Verify reads only. It takes no lock, writes no Checkpoint and adds no byte to
+the store.
 
 ## 15. The principal registry
 

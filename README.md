@@ -253,6 +253,12 @@ npx warpline prefs set review_gate true
 # Print the head of the audit record, its seq and hash, to keep off this box
 npx warpline audit head
 
+# Pull every record after a seq as CloudEvents JSON lines, for your shipper or an archive
+npx warpline audit export --after 0
+
+# Check the record against a head you kept off this box: tamper-evident relative to the last exported Checkpoint
+npx warpline audit verify --checkpoint anchor.txt
+
 # Clear the session approval
 npx warpline revoke
 ```

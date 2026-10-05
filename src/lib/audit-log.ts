@@ -32,7 +32,7 @@
  * naming them, so a kind passed any other way is invisible to it.
  */
 import { mkdir, open, readdir, readFile, stat, unlink } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { createReadStream, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
@@ -792,4 +792,237 @@ async function openIntentsIn(dir: string): Promise<OpenIntent[]> {
   const walked = await activeState(dir)
   if (walked === undefined) throw new Error('audit store: the active segment holds a line that is not a record')
   return [...walked.open_intents].sort((a, b) => a.seq - b.seq)
+}
+
+// -- Readers: export and verify ----------------------------------------------
+
+/**
+ * Each complete line of a segment, newline included, read in chunks. Returns
+ * what follows the last newline: a partial line, or nothing.
+ */
+async function* scan(path: string): AsyncGenerator<Buffer, Buffer> {
+  let rest: Buffer = Buffer.alloc(0)
+  for await (const chunk of createReadStream(path)) {
+    const buf = rest.length === 0 ? (chunk as Buffer) : Buffer.concat([rest, chunk as Buffer])
+    let start = 0
+    for (let nl = buf.indexOf(0x0a); nl !== -1; nl = buf.indexOf(0x0a, start)) {
+      yield buf.subarray(start, nl + 1)
+      start = nl + 1
+    }
+    rest = buf.subarray(start)
+  }
+  return rest
+}
+
+const firstSeqOf = (name: string): number => Number(name.slice(0, 16))
+
+/**
+ * Every complete line after `afterSeq`, newline included, in seq order across
+ * segments, a chunk at a time. A pure reader: no lock, no mkdir. A partial
+ * line is never yielded; the next segment's `segment.opened` acknowledges it.
+ * No store yields nothing.
+ */
+export async function* readCompleteLines(statePath: string, afterSeq: number): AsyncGenerator<Buffer> {
+  const dir = auditDirFor(statePath)
+  const names = await segmentsIn(dir)
+  // The last file that starts at or before the first line wanted.
+  let from = 0
+  for (const [i, name] of names.entries()) if (firstSeqOf(name) <= afterSeq + 1) from = i
+  for (const name of names.slice(from)) {
+    let seq = firstSeqOf(name) - 1
+    for await (const line of scan(join(dir, name))) {
+      seq += 1
+      if (seq > afterSeq) yield line
+    }
+  }
+}
+
+/** A head kept off the box: a seq, its line's hash, and the home it names when it says. */
+export interface Anchor {
+  seq: number
+  hex: string
+  origin?: string
+}
+
+const DECIMAL = /^(0|[1-9][0-9]*)$/
+
+/**
+ * `<seq> <hex>` on one line, or a C2SP-shaped note body: an origin, a size and
+ * the standard base64 of the 32-byte root. Read up to the first empty line, so
+ * a signed note's signature lines are ignored. Throws on anything else, with a
+ * message that quotes nothing from the text.
+ */
+export function parseAnchor(text: string): Anchor {
+  const lines = text.split('\n')
+  const end = lines.indexOf('')
+  const body = end === -1 ? lines : lines.slice(0, end)
+  const refuse = (): never => {
+    throw new Error('the anchor is neither "<seq> <hex>" nor an origin, a size and a base64 root on three lines')
+  }
+  if (body.length === 1) {
+    const m = /^(0|[1-9][0-9]*) ([0-9a-f]{64})$/.exec(body[0] as string)
+    if (m === null || !Number.isSafeInteger(Number(m[1]))) return refuse()
+    return { seq: Number(m[1]), hex: m[2] as string }
+  }
+  if (body.length !== 3) return refuse()
+  const [origin, size, root] = body as [string, string, string]
+  const bytes = Buffer.byteLength(origin)
+  if (bytes < 1 || bytes > 255 || /\s/.test(origin)) return refuse()
+  if (!DECIMAL.test(size) || !Number.isSafeInteger(Number(size))) return refuse()
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(root)) return refuse()
+  return { seq: Number(size), hex: Buffer.from(root, 'base64').toString('hex'), origin }
+}
+
+/** The home id: the `source` of the store's first line, or undefined with no store. */
+async function genesisSource(dir: string): Promise<string | undefined> {
+  const first = (await segmentsIn(dir))[0]
+  if (first === undefined) return undefined
+  const lines = scan(join(dir, first))
+  try {
+    const { value, done } = await lines.next()
+    return done ? undefined : parseRecord(value.toString('utf-8'))?.source
+  } finally {
+    // Closes the file when the generator stopped at its first line.
+    await lines.return(Buffer.alloc(0))
+  }
+}
+
+/**
+ * The head as an unsigned C2SP-shaped note body: the home id, the head seq and
+ * the standard base64 of the head hash, one per line. Not a valid C2SP
+ * checkpoint: there is no signature line, and the root is a chain head, not a
+ * Merkle root. Throws on an empty store, which has no home id to name.
+ */
+export async function c2spNote(statePath: string): Promise<string> {
+  const { seq, head } = await readHead(statePath)
+  const source = seq === 0 ? undefined : await genesisSource(auditDirFor(statePath))
+  if (source === undefined) throw new Error('the store has no records yet, so there is no origin to name.')
+  return `${source}\n${seq}\n${Buffer.from(head, 'hex').toString('base64')}\n`
+}
+
+export type Verdict = 'clean' | 'torn' | 'tampered' | 'wrong_log'
+
+export interface Verification {
+  verdict: Verdict
+  /** The store's head, or null when no complete line can be read as one. */
+  head: { seq: number; hex: string } | null
+  /** Why the verdict is not clean: a seq or a file and a rule, never data. */
+  reason: string | null
+  /** Records since the anchor; seconds and its time only once its line's hash matched. */
+  stale: { records: number; seconds: number | null; anchored_at: string | null } | null
+  open_intents: OpenIntent[]
+}
+
+/**
+ * Check every segment against itself and the store against an anchor kept off
+ * the box. A pure reader: no lock, no mkdir, nothing written.
+ *
+ * Tampered is any broken link, seq or file name, a partial line anywhere but
+ * the very end that no later `segment.opened` acknowledges, an anchor beyond
+ * the head, or an anchored line whose hash is not the anchor's. Torn is a
+ * partial line at the very end, an acknowledged fragment, or a last segment
+ * whose last line is `segment.sealed`. A re-linked rewrite passes every link,
+ * so the anchor is what catches it. Wrong log outranks tampered, which
+ * outranks torn.
+ */
+export async function verifyStore(statePath: string, anchor: Anchor, now: number): Promise<Verification> {
+  const dir = auditDirFor(statePath)
+  const names = await segmentsIn(dir)
+  let head: Verification['head'] = null
+  try {
+    const h = await readHead(statePath)
+    head = { seq: h.seq, hex: h.head }
+  } catch {}
+  let open_intents: OpenIntent[] = []
+  try {
+    open_intents = await openIntentsIn(dir)
+  } catch {}
+  const result = (verdict: Verdict, reason: string | null, stale: Verification['stale'] = null): Verification => ({
+    verdict,
+    head,
+    reason,
+    stale,
+    open_intents,
+  })
+
+  const source = await genesisSource(dir)
+  if (anchor.origin !== undefined && source !== undefined && anchor.origin !== source) {
+    return result('wrong_log', 'the anchor names another home')
+  }
+
+  let seq = 0
+  let prev = ZERO_HASH
+  let pending: { bytes: number; sha256: string } | null = null
+  let lastType: string | undefined
+  let torn: string | null = null
+  let matched = false
+  let anchoredAt: string | null = null
+  const tampered = (reason: string): Verification => {
+    const records = head !== null && anchor.seq <= head.seq ? head.seq - anchor.seq : null
+    return result('tampered', reason, records === null ? null : { records, seconds: null, anchored_at: null })
+  }
+
+  for (const [i, name] of names.entries()) {
+    if (name !== segmentName(seq + 1)) return tampered(`segment ${name} is not named by its first seq ${seq + 1}`)
+    const lines = scan(join(dir, name))
+    let n = 0
+    let step = await lines.next()
+    // An early return leaves the generator at a yield; this closes its file.
+    try {
+      for (; !step.done; step = await lines.next()) {
+        const body = step.value.subarray(0, step.value.length - 1)
+        const rec = parseRecord(body.toString('utf-8')) as (StoredRecord & { warplineprev?: unknown }) | undefined
+        if (rec === undefined) return tampered(`seq ${seq + 1} is not a record`)
+        if (rec.warplineseq !== seq + 1) return tampered(`seq ${seq + 1} is numbered ${rec.warplineseq}`)
+        if (rec.warplineprev !== prev) return tampered(`seq ${seq + 1} does not link to the line before it`)
+        if (n === 0) {
+          const fragment = (rec.data?.fragment ?? null) as { bytes?: unknown; sha256?: unknown } | null
+          const acknowledges =
+            pending === null
+              ? fragment === null
+              : rec.type === 'warpline.audit.segment.opened' &&
+                fragment?.bytes === pending.bytes &&
+                fragment.sha256 === pending.sha256
+          if (!acknowledges) return tampered(`seq ${seq + 1} does not acknowledge the partial line before it`)
+          if (pending !== null) torn = `seq ${seq + 1} acknowledges a partial line the store kept`
+          pending = null
+        }
+        n += 1
+        seq += 1
+        prev = sha256(body)
+        lastType = rec.type
+        if (seq === anchor.seq) {
+          matched = prev === anchor.hex
+          anchoredAt = typeof rec.time === 'string' ? rec.time : null
+        }
+      }
+    } finally {
+      await lines.return(Buffer.alloc(0))
+    }
+    const rest = step.value
+    const last = i === names.length - 1
+    if (n === 0 && !last) return tampered(`segment ${name} holds no complete line`)
+    if (rest.length > 0) {
+      if (last) torn = `the store ends in a partial line after seq ${seq}`
+      else pending = { bytes: rest.length, sha256: sha256(rest) }
+    } else if (n === 0) {
+      torn = `segment ${name} is empty`
+    }
+  }
+  if (lastType === 'warpline.audit.segment.sealed') torn = `seq ${seq} seals the last segment, and nothing follows it`
+
+  if (anchor.seq === 0) {
+    if (anchor.hex !== ZERO_HASH) return tampered('an anchor at seq 0 must carry the zero hash')
+  } else if (anchor.seq > seq) {
+    return tampered(`the anchored seq ${anchor.seq} is beyond the head ${seq}`)
+  } else if (!matched) {
+    return tampered(`seq ${anchor.seq} does not hash to the anchor`)
+  }
+  const at = anchoredAt === null ? NaN : Date.parse(anchoredAt)
+  const stale = {
+    records: seq - anchor.seq,
+    seconds: Number.isNaN(at) ? null : Math.max(0, Math.floor((now - at) / 1000)),
+    anchored_at: Number.isNaN(at) ? null : anchoredAt,
+  }
+  return result(torn === null ? 'clean' : 'torn', torn, stale)
 }
