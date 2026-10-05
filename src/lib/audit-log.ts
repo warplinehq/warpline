@@ -471,8 +471,10 @@ type Limits = { maxSegmentBytes: number; maxSegmentAgeMs: number }
  */
 async function appendLocked(
   dir: string,
-  kind: EmitKind,
-  data: unknown,
+  kind: EmitKind | 'checkpoint.recorded',
+  // From the head the record goes after: its seq, its hash and the home id.
+  // Only a Checkpoint's data depends on them.
+  dataAfter: (seq: number, head: string, source: string) => unknown,
   time: number,
   limits: Limits,
 ): Promise<{ seq: number; head: string }> {
@@ -557,7 +559,8 @@ async function appendLocked(
       fresh.push(checkpoint)
     }
   }
-  const record = encode(++seq, source, prev, kind, data, time)
+  const record = encode(seq + 1, source, prev, kind, dataAfter(seq, prev, source), time)
+  seq += 1
   if (record.length > MAX_LINE_BYTES) throw new AuditAppendError(kind, 'line over 16384 bytes')
 
   if (sealed !== null) await writeLine(activePath, sealed)
@@ -578,7 +581,7 @@ export function appendAudit<K extends EmitKind>(
   statePath: string,
   kind: K,
   data: AuditData<K>,
-  opts: { lockTimeoutMs?: number; now?: () => number; maxSegmentBytes?: number; maxSegmentAgeMs?: number } = {},
+  opts: AppendOpts = {},
 ): Promise<{ seq: number; head: string }> {
   if (!(AUDIT_KINDS as readonly string[]).includes(kind)) {
     return Promise.reject(new AuditAppendError('(unlisted)', 'unknown kind'))
@@ -589,6 +592,18 @@ export function appendAudit<K extends EmitKind>(
   const parsed = DATA[kind].safeParse(data)
   if (!parsed.success) return Promise.reject(new AuditAppendError(kind, 'data rejected by its schema'))
 
+  return underLock(statePath, kind, opts, (dir, time, limits) => appendLocked(dir, kind, () => parsed.data, time, limits))
+}
+
+type AppendOpts = { lockTimeoutMs?: number; now?: () => number; maxSegmentBytes?: number; maxSegmentAgeMs?: number }
+
+/** `fn` in the in-process queue, holding the audit lock. Any throw is an AuditAppendError. */
+function underLock<T>(
+  statePath: string,
+  kind: string,
+  opts: AppendOpts,
+  fn: (dir: string, time: number, limits: Limits) => Promise<T>,
+): Promise<T> {
   const dir = auditDirFor(statePath)
   const lockPath = join(dir, '.lock')
   const run = queue.then(async () => {
@@ -599,7 +614,7 @@ export function appendAudit<K extends EmitKind>(
     }
     const token = await acquire(lockPath, kind, opts.lockTimeoutMs ?? LOCK_TIMEOUT_MS)
     try {
-      return await appendLocked(dir, kind, parsed.data, (opts.now ?? Date.now)(), {
+      return await fn(dir, (opts.now ?? Date.now)(), {
         maxSegmentBytes: opts.maxSegmentBytes ?? SEGMENT_MAX_BYTES,
         maxSegmentAgeMs: opts.maxSegmentAgeMs ?? SEGMENT_MAX_AGE_MS,
       })
@@ -613,6 +628,46 @@ export function appendAudit<K extends EmitKind>(
   // One failed append must not poison the ones queued behind it.
   queue = run.catch(() => {})
   return run
+}
+
+/**
+ * The store as one Checkpoint left it, for `advance --json`. Every number is
+ * the writer's own, taken in the lock hold that wrote the Checkpoint.
+ */
+export interface AuditSummary {
+  /** The Checkpoint's seq, which is the head when it was taken. */
+  seq: number
+  /** Summed size of every segment file. */
+  bytes: number
+  /** How many segment files there are. */
+  segments: number
+  /** The Checkpoint's seq. Equal to `seq` here, and named so a reader of the store finds it. */
+  checkpoint_seq: number
+  /** Every fire intent no outcome, refusal or resolution has closed. Surfaced, never held. */
+  indeterminate: OpenIntent[]
+}
+
+/**
+ * Append a Checkpoint covering everything before it, `{ origin, size, root }`:
+ * the home id, the seq of the line before it and that line's hash. Called by an
+ * advance that returns, once, before its dead-man file. Goes through the same
+ * queue, lock and rotation check as `appendAudit`, so a rotation due now writes
+ * its own Checkpoint first. Rejects with `AuditAppendError`.
+ */
+export function recordCheckpoint(statePath: string, opts: AppendOpts = {}): Promise<AuditSummary> {
+  return underLock(statePath, 'checkpoint.recorded', opts, async (dir, time, limits) => {
+    const { seq } = await appendLocked(
+      dir,
+      'checkpoint.recorded',
+      (size, root, origin) => DATA['checkpoint.recorded'].parse({ origin, size, root }),
+      time,
+      limits,
+    )
+    const segments = await listSegments(dir)
+    let bytes = 0
+    for (const name of segments) bytes += (await stat(join(dir, name))).size
+    return { seq, bytes, segments: segments.length, checkpoint_seq: seq, indeterminate: await openIntentsIn(dir) }
+  })
 }
 
 /**
@@ -654,8 +709,11 @@ export interface OpenIntent {
  * Bookkeeping only. It names the seq a closing record carries, and the
  * indeterminate list. Nothing decides whether a fire proceeds on it.
  */
-export async function openIntents(statePath: string): Promise<OpenIntent[]> {
-  const dir = auditDirFor(statePath)
+export function openIntents(statePath: string): Promise<OpenIntent[]> {
+  return openIntentsIn(auditDirFor(statePath))
+}
+
+async function openIntentsIn(dir: string): Promise<OpenIntent[]> {
   let segments: string[]
   try {
     segments = await listSegments(dir)

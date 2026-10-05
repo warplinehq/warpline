@@ -92,8 +92,9 @@
  * `plan`, `approve`, `deny` and `revoke` report.
  *
  * `70` is computed here, outside `advanceExitCode`, the way `75` and `130` are
- * produced outside it: it comes from the result's audit failures, a field that
- * function does not read. It outranks `1` and `--strict`. A document is still
+ * produced outside it: it comes from the result's audit failures and a null
+ * `audit` (a Checkpoint that could not be written), fields that function does
+ * not read. It outranks `1` and `--strict`. A document is still
  * written to stdout, because the run completed; stderr says which plugin's
  * record is missing and, for an outcome, which intent stays open.
  *
@@ -130,6 +131,7 @@ import { existsSync } from 'node:fs'
 import { warplineHome } from '../lib/paths.js'
 import { runAdvance } from '../runtime/engine.js'
 import type { AdvanceResult, PluginFsmState } from '../runtime/engine.js'
+import type { AuditSummary } from '../lib/audit-log.js'
 import { advanceCounts, advanceExitCode, EXIT_AUDIT_FAILED } from '../runtime/exit-codes.js'
 import { isInteractive } from './prompt.js'
 import { exitAfterFlush } from '../lib/exit-after-flush.js'
@@ -157,9 +159,10 @@ read. The codes are published in docs/runtime-spec.md § 11.
  * this repository and every field is one somebody's detector can start reading.
  * A run id, a status, five integers, a code, the plugin list the human
  * rendering is built from — a name and a state token each — and one refusal
- * list of a plugin name and a closed-enum reason. No plugin summary, no plugin
- * output, no path, no operator configuration value. Same constraint as the
- * dead-man file, for the same reason.
+ * list of a plugin name and a closed-enum reason, and the `audit` object of
+ * integers and identifiers. No plugin summary, no plugin output, no path, no
+ * operator configuration value. Same constraint as the dead-man file, for the
+ * same reason. The dead-man file carries neither the refusal list nor `audit`.
  *
  * `refused_plugins` is the one field here the dead-man file deliberately does
  * NOT carry. It is bounded by construction — a declared plugin name and one of
@@ -212,6 +215,17 @@ export interface AdvancePayload {
   refused_plugins: AdvanceResult['refused_plugins']
   exit_code: 0 | 1 | 70
   /**
+   * The audit store as this advance's Checkpoint left it: the head seq, the
+   * summed bytes and count of its segments, the Checkpoint's seq, and every
+   * fire intent nothing has closed (`indeterminate`), each a seq, a plugin
+   * name, a run id and a hex effect id or null. Integers and identifiers only.
+   *
+   * Present on every advance that returns. Null only when its Checkpoint could
+   * not be written, which exits `70`. Threaded from the Checkpoint append's own
+   * return value by way of the advance result, never recounted here.
+   */
+  audit: AuditSummary | null
+  /**
    * Every plugin the run loaded, in the engine's own order.
    *
    * Not re-sorted here. `plugin_states` is populated in topological order and
@@ -238,6 +252,8 @@ function renderHuman(payload: AdvancePayload): string {
     `Gated: ${payload.gated}  Pending gates: ${payload.pending_gates}  ` +
       `Refused: ${payload.refused}  Failed: ${payload.failed}  Exit: ${payload.exit_code}`,
   )
+  // Indeterminate fires are listed by `--json` and `audit verify`, not here.
+  if (payload.audit === null) lines.push('  Audit: Checkpoint not recorded')
   return `${lines.join('\n')}\n`
 }
 
@@ -440,9 +456,10 @@ export async function run(
       return 75
     }
 
-    // `70` first: a fire or refusal with no record outranks every code the
-    // mapper returns, `--strict` included.
-    const exit_code = result.audit_failures.length > 0 ? EXIT_AUDIT_FAILED : advanceExitCode(result, { strict })
+    // `70` first: a fire, refusal or Checkpoint with no record outranks every
+    // code the mapper returns, `--strict` included.
+    const exit_code =
+      result.audit_failures.length > 0 || result.audit === null ? EXIT_AUDIT_FAILED : advanceExitCode(result, { strict })
     const { gated, pending_gates, failed, refused } = advanceCounts(result)
 
     // One line per missing record, then the code's line, all before the
@@ -458,6 +475,9 @@ export async function run(
       } else {
         process.stderr.write(`warpline advance: ${f.plugin} was refused, and the audit store could not record the refusal.\n`)
       }
+    }
+    if (result.audit === null) {
+      process.stderr.write("warpline advance: the audit store could not record this advance's Checkpoint.\n")
     }
     if (exit_code === EXIT_AUDIT_FAILED) {
       process.stderr.write('Exit 70: the audit store failed during this run; see docs/runtime-spec.md § 11.\n')
@@ -483,6 +503,7 @@ export async function run(
           // to. Counting removals a second time here would be a second answer.
           pruned: result.pruned,
           exit_code,
+          audit: result.audit,
           plugins: [...result.plugin_states].map(([name, state]) => ({ name, state })),
         },
         json,

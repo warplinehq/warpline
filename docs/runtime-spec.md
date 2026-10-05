@@ -2728,7 +2728,9 @@ alerting hook. Two things carry detail a code has no room for, and neither
 replaces it — `warpline advance --json` writes one JSON document to stdout
 describing the advance that just ran, and the dead-man file (§ 13) records the
 last one that returned. Both have to be parsed before they can say whether
-anything ran; the code says it without being read. The codes below are contract
+anything ran; the code says it without being read. The document also carries
+`audit`, the audit store as this advance's Checkpoint left it, with every fire
+whose outcome never arrived (§ 14). The codes below are contract
 surface. A scheduler unit, a monitoring check or a wrapper script may key on
 them.
 
@@ -2736,7 +2738,7 @@ them.
 |------|---------|
 | `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, a plugin is holding at an approval gate, or a content approval declined to authorise a fire. |
 | `1` | At least one plugin failed, the plugin root loaded no manifests at all, or the command line was not valid. Or, under `--strict`, an approval gate is still waiting or a content approval refused a fire. Or a write to stdout or stderr failed for a reason other than a reader that has gone away. Output a plugin prints after the drain has begun is dropped, and does not count as a failed write. |
-| `70` | The audit store failed during this run: a fire intent, a fire outcome or a fire refusal could not be recorded (§ 14). |
+| `70` | The audit store failed during this run: a fire intent, a fire outcome, a fire refusal or the advance's Checkpoint could not be recorded (§ 14). |
 | `75` | Could not finish. Often nothing ran and nothing was written, but not always — see below before treating it as a free retry. |
 | `130` | Interrupted by a SIGINT or SIGTERM that warpline caught. The process stopped; the work may not have. |
 
@@ -2762,7 +2764,10 @@ record could not be written still stands: the plugin did not fire. stderr names
 each plugin, and for an outcome the seq of the intent left open. Nothing
 retries an append. The run finishes and writes its document to stdout with
 `exit_code: 70`. `70` outranks `1` and `--strict`, so a run that also had a
-plugin failure or a held gate still reports `70`. `warpline revoke` exits `70`
+plugin failure or a held gate still reports `70`. An advance whose Checkpoint
+could not be written exits `70` as well: its document carries `audit: null`,
+stderr says the Checkpoint was not recorded, and the dead-man file is still
+written, because the advance itself finished. `warpline revoke` exits `70`
 too, when the grant was removed but its record could not be written (§ 9).
 
 `130` is the conventional code for a process ended by SIGINT, and this command
@@ -3664,3 +3669,50 @@ its intent landed: that refusal carries the intent's seq and closes it.
 `warpline resolve` appends `fire.resolved` before it writes its answer (§ 10). A plugin with no declared side effects gets no record, and
 neither does `warpline run`. An outcome or refusal that cannot be written does
 not undo what already happened; the advance exits `70` (§ 11).
+
+### Checkpoints
+
+A `checkpoint.recorded` record anchors the chain. Its data is
+`{ origin, size, root }`: `origin` is the home id, `size` the seq of the line
+before it, and `root` that line's hash under the byte rule, in lowercase hex.
+It covers every line up to and including that one, and nothing after.
+
+Every `warpline advance` that returns writes exactly one, quiet hours included,
+immediately before the dead-man file (§ 13). Three advances add three. A
+rotation writes one after the new segment's `segment.opened` (§ Segments), so
+an advance that rotates the store writes two. An advance refused before the run
+lock, by an invalid `preferences.json` or an unreadable plugin root, writes
+none and adds no byte to the store. Neither does an advance that throws after
+the lock. `warpline audit export`, `audit head` and every other reader write
+none.
+
+It is shaped like a C2SP tlog checkpoint and is not one. There is
+no Merkle tree, so `size` counts lines in a linear chain and `root` is the hash
+of the last one, not a tree root. There is no signature either. A witness tool or a
+C2SP verifier cannot check it. What it gives you is a head to export and keep
+off the box, inside the record itself, at the cadence of your scheduler.
+
+### The audit object in `advance --json`
+
+`warpline advance --json` carries `audit` on every advance that returns, gated,
+failing and quiet-hours ones included. It is the Checkpoint append's own return
+value, computed in the same hold of the audit lock that wrote the Checkpoint,
+and passed through unchanged:
+
+| Field | Meaning |
+|-------|---------|
+| `seq` | The head seq, which is the Checkpoint's own seq. |
+| `bytes` | The summed size of every segment file, in bytes. |
+| `segments` | How many segment files the store holds. |
+| `checkpoint_seq` | The Checkpoint's seq. |
+| `indeterminate` | Every `fire.intent` no `fire.outcome`, `fire.refused` or `fire.resolved` has closed, in seq order, each `{ seq, plugin, run_id, effect_id }`. `effect_id` is null for a session-class fire. |
+
+An intent is indeterminate when the process died between it and its outcome,
+or when its outcome could not be written (§ 11). The fire may or may not have
+happened, and the store cannot say which. It is surfaced and never held: the
+plugin fires again when it is next due, and the advance's exit code does not
+change on its account. `warpline resolve` answers one (§ 10), which closes it.
+
+`audit` is `null` only when the Checkpoint could not be written. The advance
+then exits `70` (§ 11). The object holds integers and identifiers only. The
+dead-man file does not carry it.

@@ -33,7 +33,8 @@ import {
 } from '../lib/paths.js'
 import { atomicWriteText } from '../lib/fs-atomic.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
-import { appendAudit } from '../lib/audit-log.js'
+import { appendAudit, recordCheckpoint } from '../lib/audit-log.js'
+import type { AuditSummary } from '../lib/audit-log.js'
 import { advanceCounts } from './exit-codes.js'
 // The account's own type, imported rather than re-spelled as a `Pick` here: a
 // second spelling is a second answer about which fields of an advance the
@@ -386,6 +387,16 @@ export interface AdvanceResult {
    * Additive, on the argument `pruned` already makes above.
    */
   audit_failures: AuditFailure[]
+  /**
+   * The audit store as this advance's Checkpoint left it: the Checkpoint
+   * append's own return value, threaded here the way the prune's count is and
+   * never recounted. Written on both arms that return, quiet hours included,
+   * immediately before the dead-man file. Null only when that append failed,
+   * which `warpline advance` reports as `70`.
+   *
+   * Additive, on the argument `pruned` already makes above.
+   */
+  audit: AuditSummary | null
 }
 
 // -----------------------------------------------------------------------
@@ -2788,6 +2799,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       const quietPendingGates = standingGateCount(state.pending_gates, Date.now(), plugins)
       // `pruned: 0` and it is honest: the prune runs below this guard, so a
       // skipped advance reclaims nothing. Nothing looked, so nothing went.
+      //
+      // The Checkpoint goes first, anchoring everything before it. A failure
+      // leaves `audit` null and changes nothing else on this arm.
+      let audit: AuditSummary | null = null
+      try {
+        audit = await recordCheckpoint(stateDir)
+      } catch {}
       await writeDeadMan(
         // Nothing was evaluated, so nothing was refused — the same honesty
         // `pruned: 0` makes below, and the same empty array this arm returns.
@@ -2812,6 +2830,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         pruned: 0,
         pending_gates: quietPendingGates,
         audit_failures: [],
+        audit,
       }
     }
 
@@ -4037,6 +4056,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // this file certain the log it names already exists. Before the release
     // below, so two advances cannot interleave writes to it. Not in the release
     // block: a throw must leave the previous file standing.
+    //
+    // The Checkpoint goes first, so the dead-man file is never newer than the
+    // last anchor. A failure leaves `audit` null and changes nothing else.
+    let audit: AuditSummary | null = null
+    try {
+      audit = await recordCheckpoint(stateDir)
+    } catch {}
     await writeDeadMan(
       { plugin_states, gated_plugins, refused_plugins, pending_gates: standingGates },
       { run_id, status: engineStatus, skipped_reason: null, pruned: prunedRunLogs },
@@ -4052,6 +4078,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       pruned: prunedRunLogs,
       pending_gates: standingGates,
       audit_failures,
+      audit,
     }
   } finally {
     // The heartbeat first, and awaited: a refresh still in flight when the

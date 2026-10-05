@@ -402,6 +402,7 @@ everything on its first tick:
 ```
 {"run_id":"...","status":"partial","gated":1,"pending_gates":1,
  "failed":0,"refused":0,"pruned":0,"exit_code":0,"refused_plugins":[],
+ "audit":{"seq":2,"bytes":913,"segments":1,"checkpoint_seq":2,"indeterminate":[]},
  "plugins":[{"name":"metrics-rollup","state":"gated"}]}
 rc=0
 ```
@@ -410,6 +411,12 @@ Every later tick waits on the same gates. The plugin is not due again yet, so it
 reads `skipped`, `status` reads `complete` and `gated` reads `0`, because
 `gated` counts what this tick parked. The dead-man file's `pending_gates` stays
 `1` until somebody answers, and it is the field to watch.
+
+`audit` is the audit store as this tick's Checkpoint left it (`runtime-spec.md`
+§ 14). `audit.indeterminate` is the field to watch for fires with no outcome:
+each entry is a side-effecting fire whose process died, or whose outcome could
+not be recorded, after its intent was written. Warpline does not hold the
+plugin on its account. Whether the effect happened is for you to check.
 
 That is a correct unattended install that completes nothing until somebody
 approves. It is the right default for a fleet with a human near it, and the
@@ -422,7 +429,7 @@ before you do — it is the section describing what the gate is holding back.
 The table is in `runtime-spec.md` § 11 and is not restated here. Five codes:
 `0` ran and nothing failed, `1` something failed, no manifests loaded or the
 command line was not valid, `70` the audit store failed during the run (some
-fire or refusal has no record; read stderr), `75` could not finish, `130`
+fire, refusal or the Checkpoint has no record; read stderr), `75` could not finish, `130`
 interrupted. Treat any
 unknown non-zero code as failure; § 11 says why that matters.
 
