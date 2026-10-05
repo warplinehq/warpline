@@ -24,9 +24,11 @@
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
 import { parseArgs } from 'node:util'
 import { z } from 'zod'
+import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { appendAudit, observeAuthorityFile } from '../lib/audit-log.js'
 import { atomicWriteJson } from '../lib/fs-atomic.js'
 import { engineStatePath, principalsPath } from '../lib/paths.js'
@@ -249,11 +251,22 @@ async function list(rest: string[]): Promise<number> {
   return 0
 }
 
+/**
+ * Run a change under the state lock. The duplicate check, the record and the
+ * write are one step, so two adds of one id cannot both pass the check, and
+ * two adds of different ids cannot each write a registry missing the other.
+ */
+async function locked(fn: () => Promise<number>): Promise<number> {
+  const { lockPath } = pathsForStateFile(engineStatePath())
+  await mkdir(dirname(lockPath), { recursive: true })
+  return await withStateLockAt(lockPath, fn)
+}
+
 export async function run(argv: string[]): Promise<number> {
   const [sub, ...rest] = argv
   try {
-    if (sub === 'add') return await add(rest)
-    if (sub === 'disable') return await disable(rest)
+    if (sub === 'add') return await locked(() => add(rest))
+    if (sub === 'disable') return await locked(() => disable(rest))
     if (sub === 'list') return await list(rest)
   } catch (err) {
     // parseArgs refuses an unknown flag or a misplaced value.

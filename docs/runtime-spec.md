@@ -1006,7 +1006,9 @@ and records nothing. A value already in effect writes nothing and records
 nothing. An unknown key, a value that is not JSON or a value the schema refuses
 exits `1` with nothing written and nothing recorded, and so does a failed
 append. No message repeats the typed value. A hand edit is still allowed, and is
-still recorded on the next read.
+still recorded on the next read. The read, the record and the write happen under
+the state lock (§ 10), so two sets at once never read the same file and lose
+one of their writes.
 
 One policy object, read by every path that deletes. Three record formats pruned
 on three literals would be three retention rules that agree until somebody tunes
@@ -3867,7 +3869,10 @@ sha256 of the exact bytes about to be written, and `entries`, each id mapped to
 the sha256 of its entry (`id`, `type`, `status`, then `key` when set, as JSON
 in that order). `principal.added` also carries the type and `key_sha256`, the
 key's sha256 or null. The key itself is never on the record. When the append
-fails, nothing is written and the verb exits `1`.
+fails, nothing is written and the verb exits `1`. An add or a disable reads the
+file, checks it, records the change and writes it under the state lock (§ 10),
+so two adds of one id at once register it once, and two adds of different ids
+keep both.
 
 Ids are never deleted or reused. Disable is the only way out of the registry.
 Adding an id that is already in the file, active or disabled, is refused with

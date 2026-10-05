@@ -18,6 +18,9 @@
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { createHash } from 'node:crypto'
+import { mkdir } from 'node:fs/promises'
+import { dirname } from 'node:path'
+import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { appendAudit, observeAuthorityFile } from '../lib/audit-log.js'
 import { engineStatePath, preferencesPath } from '../lib/paths.js'
 import { PreferencesInvalidError, readPreferencesFile, setPreference, writePreferences } from '../lib/preferences.js'
@@ -50,6 +53,14 @@ export async function run(argv: string[]): Promise<number> {
     return 1
   }
 
+  // The read, the record and the write are one step under the state lock, so
+  // two sets at once cannot both read the same file and lose one write.
+  const { lockPath } = pathsForStateFile(engineStatePath())
+  await mkdir(dirname(lockPath), { recursive: true })
+  return await withStateLockAt(lockPath, () => setLocked(key, value))
+}
+
+async function setLocked(key: string, value: unknown): Promise<number> {
   const prefsPath = preferencesPath()
   let current: Awaited<ReturnType<typeof readPreferencesFile>>
   try {
