@@ -40,9 +40,12 @@
  * leave the operator believing they had silenced three plugins when they had
  * silenced one.
  *
+ * Every denial is on the audit record before the state document changes.
+ *
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { parseArgs } from 'node:util'
+import { appendAudit } from '../lib/audit-log.js'
 import { findPendingGate, loadPluginManifests, proposalFingerprint } from '../runtime/engine.js'
 import { emitDenialRecorded, emitGateInvalidated } from '../board/engine-events.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
@@ -319,6 +322,26 @@ const denied_at = new Date().toISOString()
     }
 
 if (recorded.length === 0) return 0
+
+    // Each denial is on the audit record before the state document changes,
+    // one record per plugin, in order. The note is operator free text and
+    // never enters a record. A record that cannot be written stops the command
+    // here, before the write, so nothing is denied.
+    for (const denial of recorded) {
+      const gone = discarded.find((d) => d.plugin === denial.plugin)
+      try {
+        await appendAudit(statePath, 'denial.recorded', {
+          plugin: denial.plugin,
+          fingerprint: denial.fingerprint,
+          discarded_gate_run_id: gone?.runId ?? null,
+        })
+      } catch {
+        process.stderr.write(
+          `The audit store could not record the denial of ${denial.plugin}. Nothing was denied.\n`,
+        )
+        return 1
+      }
+    }
 
 await writeEngineState(state, statePath)
     return null

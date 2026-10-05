@@ -3381,3 +3381,143 @@ Two operator notes. Set your staleness threshold from your own timer interval,
 not from a number in this document — the runtime does not know how often you run
 it. And do not write to this file yourself: nothing here reads it back, so a file
 you author misleads only your own detector, but it will do that silently.
+
+## 14. The audit store
+
+Every change to who may act, and every side effect that fires, is appended to
+an audit record under `<home>/audit/` before it takes effect. The store is
+append-only and has one writer, the runtime's audit module. Nothing in this
+runtime prunes it, rotates it away or rewrites a line in it. Retention (§ 6) never
+reaches it. The operator archives it by export.
+
+The record is tamper-evident relative to the last head you exported and kept off
+the box. A local writer that can write the home can still edit, insert, reorder
+or truncate lines and re-link the chain behind them. What it cannot do is make
+the result agree with a head it never saw. Nothing stronger than that is
+claimed.
+
+### Record format
+
+Each line is one CloudEvents 1.0 structured-mode JSON object followed by a
+newline. CloudEvents defines a single object and a JSON array batch but no
+line-delimited format, so one object per line is warpline's own convention.
+Every line is called an audit record.
+
+The keys are written in this order, and a reader may rely on it:
+
+| Key | Value |
+|-----|-------|
+| `specversion` | `"1.0"` |
+| `id` | The record's `warplineseq`, as a decimal string. |
+| `source` | The home id: a `urn:uuid:` minted when the store's first line is written. Never the home path, which carries the operator's username. |
+| `type` | `warpline.audit.<kind>`, one of the kinds below. |
+| `time` | RFC 3339 UTC, when the record was appended. |
+| `datacontenttype` | `"application/json"` |
+| `warplineseq` | An integer, `1` for the first line, and the previous line's plus one after that. Contiguous across the whole store. |
+| `warplineprev` | The lowercase hex sha256 of the previous line, or 64 `0`s on the first line. |
+| `data` | The kind's own fields. See below. |
+
+**The byte rule.** The hash input is the exact bytes of a line as stored, with
+its trailing newline excluded. `warplineprev` is the hash of the previous line
+under that rule. Nothing is re-serialized to compute or check it, so a verifier
+needs no canonical JSON form and compares bytes. A line's own hash, the head
+hash when it is the last line, is never stored in that line. It is stored in
+the next line's `warplineprev`, or nowhere if there is none.
+
+`warplineseq` is a CloudEvents Integer, so it is valid up to 2,147,483,647
+records. `source` plus `id` is unique per record, as CloudEvents requires,
+because the seq is contiguous within one home.
+
+`data` holds identifiers, closed enums, lowercase hex sha256 digests and ISO
+times. It never holds approved content, a secret value or a configuration
+value. Each kind's fields are a strict schema: an unknown key, a malformed
+digest or a line longer than 16384 bytes is refused, nothing is written, and the
+refusal's message names the kind and a fixed reason, never a value from the
+data.
+
+### Record kinds
+
+The set is closed. A kind outside it cannot be written.
+
+| Kind | What it records |
+|------|-----------------|
+| `grant.issued` | `warpline approve` is about to write a session grant: the scopes, duration and flags asked for. |
+| `grant.renewed` | A session grant renewed. |
+| `grant.revoked` | `warpline revoke` is about to clear the session grant. |
+| `content_approval.issued` | A content approval is about to be bound to an Output's fingerprint. |
+| `content_approval.withdrawn` | A content approval is about to be removed. |
+| `denial.recorded` | `warpline deny` is about to record a denial: the plugin, the proposal's fingerprint, and the run id of any parked gate it discards. |
+| `denial.lifted` | `warpline deny --remove` is about to take a denial back. |
+| `fire.intent` | A plugin holding side-effect authority is about to be invoked. |
+| `fire.outcome` | The invocation that intent announced returned or threw. |
+| `fire.refused` | A plugin holding a content approval was not fired, and why (§ 5). |
+| `fire.resolved` | `warpline resolve` recorded that a marked fire did not ship. |
+| `principal.added` | A principal is about to be added to the registry. |
+| `principal.disabled` | A principal is about to be disabled. |
+| `principal_registry.observed` | The principal registry changed without a warpline command. |
+| `preference.set` | A preference key is about to be set by a warpline command. |
+| `preferences.observed` | The preferences file changed without a warpline command. |
+| `ask.raised` | An Ask raised. |
+| `ask.answered` | An Ask answered. |
+| `handoff.tried` | A handoff tried. |
+| `segment.opened` | The first line of a segment file. |
+| `segment.sealed` | The last line of a segment file that is full or old. |
+| `checkpoint.recorded` | The head as it stood, so it can be exported and checked later. |
+
+Nothing writes `grant.renewed`, `ask.raised`, `ask.answered` or `handoff.tried`
+yet. Their schema admits nothing, so an append under any of them is refused
+until the work that writes them lands and defines their fields. The last three
+kinds in the table are written by the store itself, never by a caller.
+
+### Genesis and the head
+
+The store's first line is a `segment.opened` record at seq `1` with 64 `0`s in
+`warplineprev`. Its data names the home id, which is also every record's
+`source`, and the warpline version that wrote it. There is no separate genesis
+kind. Segment files are named by the seq of their first line, zero-padded to 16
+digits, so the first is `0000000000000001.jsonl` and name order is seq order.
+
+`warpline audit head` prints the head as `<seq> <hex>` on one line: the last
+record's seq and the sha256 of its bytes under the byte rule. Before the first
+record it prints `0` and 64 `0`s, exits `0`, and creates nothing. It takes no
+lock and writes nothing, so it can be run at any time. Keeping its output off
+the box is what makes a later check of the store mean something.
+
+### Writing
+
+One writer appends at a time. Within a process, appends queue behind each
+other. Across processes they take the audit lock, `audit/.lock`, created
+exclusively and holding a random token and the time it was taken. A writer
+waits for it, polling every 50 ms, for up to 10 seconds. A lock older than 30
+seconds is taken to be abandoned and is broken. A writer removes the lock only
+while it still holds that writer's token. A lock that cannot be taken in time
+is an append failure.
+
+The state lock (§ 12) is always taken first. A command that holds the state
+lock may append, and the store never takes the state lock, so the two are
+never taken in the other order.
+
+Each record is one write of the whole line on a file opened for append,
+checked for length, followed by `datasync`. Creating a segment file also syncs
+the directory. The append resolves only after both.
+
+**A limit on macOS under Bun.** Bun's `datasync` on macOS does not issue
+`F_FULLFSYNC`. A record written there survives a process or OS crash, but not
+a power loss while the drive's write cache still holds it. Under Node, and on
+Linux under either runtime, the call flushes. The upgrade path is
+`fcntl(F_FULLFSYNC)` through `bun:ffi`. Until then this is a stated limit, not
+a guarantee.
+
+### Before the effect
+
+A record is written before its effect, and an effect whose record cannot be
+written does not happen. The record says what was about to happen, not what
+did.
+
+`warpline deny` appends one `denial.recorded` per plugin, in the order named,
+inside the state lock and before it writes the state document. The `--note`
+text is the operator's own words and never enters a record. If any append
+fails, `deny` writes nothing, says on stderr that nothing was denied, and exits
+`1`. A record already appended for an earlier plugin in the same command stands
+when a later one cannot be written: it records what was about to happen, and
+the store never takes a line back.
