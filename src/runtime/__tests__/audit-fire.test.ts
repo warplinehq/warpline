@@ -19,9 +19,11 @@
  */
 import { describe, test, expect, beforeEach, afterEach, afterAll, spyOn } from 'bun:test'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
+import * as store from '../engine-state-store.js'
 import { mergeGrant } from '../approval-gate.js'
 import { runAdvance } from '../engine.js'
 import { _setHome } from '../../lib/paths.js'
@@ -486,4 +488,206 @@ describe('a store that cannot take a fire record', () => {
       }
     },
   )
+})
+
+// -- Content-class fires (25-06) ---------------------------------------------
+
+/** A 64-hex digest of `s`, for seeded effect ids and fingerprints. */
+const hex = (s: string): string => createHash('sha256').update(s).digest('hex')
+
+/**
+ * `builder` produces one json Output and declares no side effect, so it runs
+ * ungranted. `sender` is a content-class consumer of it, with the marker
+ * handler, so "not invoked" is observed rather than assumed.
+ */
+function writeContentPair(): void {
+  const dir = join(home.pluginsDir, 'builder')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(
+    join(dir, 'manifest.ts'),
+    `export const manifest = ${JSON.stringify({
+      ...manifest('builder'),
+      side_effects: [],
+      outputs: { brief: { type: 'json' } },
+      ttl_hours: 24,
+    })}`,
+  )
+  writeFileSync(
+    join(dir, 'handler.ts'),
+    `export async function handler() {
+  return {
+    status: 'success',
+    phases_completed: ['build'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'built',
+    artifacts_produced: [{ type: 'brief', format: 'json', body: ${JSON.stringify('{"batch":"four invoices"}')} }],
+    schema_version: 1,
+  }
+}
+`,
+  )
+  writePlugin('sender', { approval_class: 'content', dependencies: ['builder'] })
+}
+
+/** One advance produces builder's Output, and the operator approves those bytes for sender. */
+async function seedContentApproval(): Promise<void> {
+  writeContentPair()
+  await advance()
+  const approved = await capture(['approve', 'sender', '--content', '--not-after', '2099-01-01T00:00'])
+  expect(approved.code).toBe(0)
+  expect(mark('sender', 'invoked')).toBeNull()
+}
+
+type ApprovalRecord = {
+  fingerprint: string
+  effect_id: string | null
+  marked_at: string | null
+  confirmed_at: string | null
+}
+
+/** sender's approval as the state document holds it. */
+function senderApproval(): ApprovalRecord {
+  return (JSON.parse(readFileSync(statePath(), 'utf-8')) as { approvals: Record<string, ApprovalRecord> }).approvals
+    .sender!
+}
+
+/** A write whose payload carries sender's mark and no confirmation: the spend mark's own write. */
+const isMarkWrite = (payload: { approvals: Record<string, unknown> }): ApprovalRecord | undefined => {
+  const record = Object.hasOwn(payload.approvals, 'sender') ? (payload.approvals.sender as ApprovalRecord) : undefined
+  return record !== undefined && record.marked_at !== null && record.confirmed_at === null ? record : undefined
+}
+
+describe('content', () => {
+  test("the intent is on disk when the mark's write is called, and the outcome closes it", async () => {
+    await seedContentApproval()
+    const realWrite = store.writeEngineState
+    let intentAtMark: boolean | undefined
+    installed.push(
+      spyOn(store, 'writeEngineState').mockImplementation(async (payload, path) => {
+        const record = isMarkWrite(payload)
+        if (intentAtMark === undefined && record !== undefined) {
+          intentAtMark = linesOf('fire.intent').some(
+            (l) =>
+              l.data.plugin === 'sender' &&
+              l.data.class === 'content' &&
+              l.data.effect_id === record.effect_id &&
+              l.data.fingerprint === record.fingerprint,
+          )
+        }
+        return realWrite(payload, path)
+      }),
+    )
+
+    const r = await advance()
+
+    expect(intentAtMark).toBe(true)
+    expect(r.refused_plugins).toEqual([])
+    expect(mark('sender', 'invoked')).toBe('yes')
+    const approval = senderApproval()
+    const intents = linesOf('fire.intent').filter((l) => l.data.plugin === 'sender')
+    expect(intents.map((l) => l.data)).toEqual([
+      {
+        plugin: 'sender',
+        run_id: r.run_id,
+        class: 'content',
+        effect_id: approval.effect_id,
+        fingerprint: approval.fingerprint,
+      },
+    ])
+    expect(linesOf('fire.outcome').map((l) => l.data)).toEqual([
+      { plugin: 'sender', run_id: r.run_id, intent_seq: intents[0]!.warplineseq, status: 'success' },
+    ])
+    expect(r.audit_failures).toEqual([])
+  })
+
+  test('an intent that cannot be recorded refuses mark_unavailable: nothing marked, nothing invoked, no seq', async () => {
+    await seedContentApproval()
+    const spy = failAppend('fire.intent')
+
+    const r = await advance()
+
+    expect(spy.trips()).toBe(1)
+    expect(r.refused_plugins).toEqual([{ plugin: 'sender', reason: 'mark_unavailable' }])
+    expect(senderApproval().marked_at).toBeNull()
+    expect(mark('sender', 'invoked')).toBeNull()
+    expect(linesOf('fire.refused').map((l) => l.data)).toEqual([
+      { plugin: 'sender', run_id: r.run_id, reason: 'mark_unavailable', intent_seq: null },
+    ])
+    expect(linesOf('fire.intent')).toEqual([])
+    expectNoSentinel()
+  })
+
+  test('a mark that fails after its intent landed refuses mark_uncertain with that seq, which closes it', async () => {
+    await seedContentApproval()
+    // The failTheMarkWrite(false) shape from content-spend-mark: the mark's own
+    // write throws before the real write runs, every other write calls through.
+    const realWrite = store.writeEngineState
+    let trips = 0
+    installed.push(
+      spyOn(store, 'writeEngineState').mockImplementation(async (payload, path) => {
+        if (trips === 0 && isMarkWrite(payload) !== undefined) {
+          trips += 1
+          throw new Error(SENTINEL)
+        }
+        return realWrite(payload, path)
+      }),
+    )
+
+    const r = await advance()
+
+    expect(trips).toBe(1)
+    expect(r.refused_plugins).toEqual([{ plugin: 'sender', reason: 'mark_uncertain' }])
+    expect(mark('sender', 'invoked')).toBeNull()
+    const intents = linesOf('fire.intent').filter((l) => l.data.plugin === 'sender')
+    expect(intents).toHaveLength(1)
+    expect(linesOf('fire.refused').map((l) => l.data)).toEqual([
+      { plugin: 'sender', run_id: r.run_id, reason: 'mark_uncertain', intent_seq: intents[0]!.warplineseq },
+    ])
+    expect((await audit.openIntents(statePath())).filter((i) => i.plugin === 'sender')).toEqual([])
+    expectNoSentinel()
+  })
+
+  test('openIntents lists the intents no outcome, refusal or resolution closed, across a rotation too', async () => {
+    expect(typeof audit.openIntents).toBe('function')
+    expect(await audit.openIntents(join(home.root, 'none', 'state', 'engine-state.json'))).toEqual([])
+
+    for (const [sub, opts] of [
+      ['flat', {}],
+      ['rotated', { maxSegmentBytes: 1 }],
+    ] as const) {
+      const path = join(home.root, sub, 'state', 'engine-state.json')
+      const intent = (plugin: string, run_id: string) =>
+        audit.appendAudit(
+          path,
+          'fire.intent',
+          { plugin, run_id, class: 'content', effect_id: hex(`${plugin} effect`), fingerprint: hex(`${plugin} bytes`) },
+          opts,
+        )
+      const done = await intent('done', 'run-1')
+      const refused = await intent('refused', 'run-1')
+      const answered = await intent('answered', 'run-1')
+      const open = await intent('open', 'run-2')
+      await audit.appendAudit(path, 'fire.outcome', { plugin: 'done', run_id: 'run-1', intent_seq: done.seq, status: 'success' }, opts)
+      await audit.appendAudit(
+        path,
+        'fire.refused',
+        { plugin: 'refused', run_id: 'run-1', reason: 'mark_uncertain', intent_seq: refused.seq },
+        opts,
+      )
+      await audit.appendAudit(
+        path,
+        'fire.resolved',
+        { plugin: 'answered', effect_id: hex('answered effect'), intent_seq: answered.seq },
+        opts,
+      )
+
+      expect(await audit.openIntents(path)).toEqual([
+        { seq: open.seq, plugin: 'open', run_id: 'run-2', effect_id: hex('open effect') },
+      ])
+    }
+    // The rotated store really did rotate, so the answer crossed a segment.
+    expect(readdirSync(join(home.root, 'rotated', 'audit')).filter((f) => f.endsWith('.jsonl')).length).toBeGreaterThan(1)
+  })
 })

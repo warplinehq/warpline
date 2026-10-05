@@ -24,6 +24,7 @@ import { join, relative } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
 import * as store from '../../runtime/engine-state-store.js'
 import * as gate from '../../runtime/approval-gate.js'
+import { approvalStanding, loadPluginManifests } from '../../runtime/engine.js'
 import { _setHome } from '../../lib/paths.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
@@ -539,6 +540,149 @@ describe('denial lift', () => {
     expect(readFileSync(statePathOf())).toEqual(stateBefore)
     const state = JSON.parse(stateBefore.toString('utf-8')) as { denials: Record<string, unknown> }
     expect(Object.keys(state.denials).sort()).toEqual(['a', 'b'])
+    expectNoSentinel()
+  })
+})
+
+// -- Resolve closes the intent it answers (25-06) ----------------------------
+
+/**
+ * A home where `builder` emits one json Output and `sender`, a content-class
+ * consumer of it, reports `failed` while `<home>/fail` exists. A failed send
+ * leaves the mark unconfirmed, so the approval reads indeterminate.
+ */
+function seedFiringHome(): void {
+  // `main(['advance'])` reads the home default, and the shipped `review_gate:
+  // true` is not what these cases are about.
+  writeFileSync(join(home, 'preferences.json'), JSON.stringify({ review_gate: false }))
+  addPlugin('builder', { side_effects: [], autonomy_level: 'autonomous', outputs: { brief: { type: 'json' } } })
+  writeFileSync(
+    join(home, 'plugins', 'builder', 'handler.ts'),
+    `export async function handler() {
+  return {
+    status: 'success',
+    phases_completed: ['build'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'built',
+    artifacts_produced: [{ type: 'brief', format: 'json', body: ${JSON.stringify('{"batch":"four invoices"}')} }],
+    schema_version: 1,
+  }
+}
+`,
+  )
+  addPlugin('sender', {
+    approval_class: 'content',
+    autonomy_level: 'autonomous',
+    dependencies: ['builder'],
+    side_effects: ['sends_email'],
+    // Near zero, so sender is stale on every advance and reaches the content gate.
+    ttl_hours: 0.001,
+  })
+  writeFileSync(
+    join(home, 'plugins', 'sender', 'handler.ts'),
+    `import { existsSync } from 'node:fs'
+export async function handler() {
+  const failed = existsSync(${JSON.stringify(join(home, 'fail'))})
+  return {
+    status: failed ? 'failed' : 'success',
+    phases_completed: failed ? [] : ['send'],
+    phases_failed: failed ? ['send'] : [],
+    errors: failed ? [{ phase: 'send', message: 'the sink answered 500', recoverable: false }] : [],
+    data_freshness: {},
+    summary: failed ? 'the send reported a failure' : 'sent',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`,
+  )
+  writeFileSync(join(home, 'fail'), '')
+}
+
+/**
+ * builder's Output, sender approved over it, then a fire whose handler reports
+ * failed. With `dropOutcome` the outcome append trips, so the intent stays open.
+ */
+async function fireAndFail(dropOutcome: boolean): Promise<void> {
+  seedFiringHome()
+  await capture(['advance'])
+  expect((await capture(['approve', 'sender', '--content', '--not-after', '2099-01-01T00:00'])).code).toBe(0)
+  const spy = dropOutcome ? failAppend('fire.outcome') : undefined
+  await capture(['advance'])
+  if (spy !== undefined) expect(spy.trips()).toBe(1)
+  expect(await senderStanding()).toBe('indeterminate')
+}
+
+async function senderStanding(): Promise<string> {
+  const state = await store.readEngineState(statePathOf())
+  const { manifests } = await loadPluginManifests(join(home, 'plugins'))
+  return approvalStanding(state, 'sender', manifests, Date.now()).standing
+}
+
+/** The effect id the mark recorded for sender. */
+function senderEffectId(): string {
+  const state = JSON.parse(readFileSync(statePathOf(), 'utf-8')) as {
+    approvals: Record<string, { effect_id: string | null }>
+  }
+  const id = state.approvals.sender!.effect_id
+  expect(id).toMatch(/^[0-9a-f]{64}$/)
+  return id!
+}
+
+/** sender's content fire intent, which must exist. */
+function senderIntent(): Line {
+  const intents = auditLines(home).filter(
+    (l) => l.type === 'warpline.audit.fire.intent' && l.data.plugin === 'sender',
+  )
+  expect(intents).toHaveLength(1)
+  return intents[0]!
+}
+
+describe('resolve', () => {
+  test('resolve --not-shipped closes the open intent it answers, on the record before the state write', async () => {
+    await fireAndFail(true)
+    const effectId = senderEffectId()
+    const intent = senderIntent()
+    expect(intent.data.effect_id).toBe(effectId)
+    expect((await audit.openIntents(statePathOf())).map((i) => i.seq)).toContain(intent.warplineseq)
+    const seen = recordedBefore(store, 'writeEngineState', 'fire.resolved')
+
+    const { code } = await capture(['resolve', 'sender', '--not-shipped', effectId])
+
+    expect(code).toBe(0)
+    expect(seen()).toBe(true)
+    expect(recordsOf('fire.resolved')).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq }])
+    expect((await audit.openIntents(statePathOf())).filter((i) => i.plugin === 'sender')).toEqual([])
+  })
+
+  test('resolve --not-shipped over an intent its outcome already closed records no seq', async () => {
+    await fireAndFail(false)
+    const effectId = senderEffectId()
+    const intent = senderIntent()
+    expect(recordsOf('fire.outcome').map((d) => d.intent_seq)).toContain(intent.warplineseq)
+
+    const { code } = await capture(['resolve', 'sender', '--not-shipped', effectId])
+
+    expect(code).toBe(0)
+    expect(recordsOf('fire.resolved')).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: null }])
+  })
+
+  test('a resolve whose record cannot be written answers nothing', async () => {
+    await fireAndFail(false)
+    const effectId = senderEffectId()
+    const stateBefore = readFileSync(statePathOf())
+    const spy = failAppend('fire.resolved')
+
+    const { code, stderr } = await capture(['resolve', 'sender', '--not-shipped', effectId])
+
+    expect(spy.trips()).toBe(1)
+    expect(code).toBe(1)
+    expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+    expect(readFileSync(statePathOf())).toEqual(stateBefore)
+    expect(await senderStanding()).toBe('indeterminate')
+    expect(recordsOf('fire.resolved')).toEqual([])
     expectNoSentinel()
   })
 })
