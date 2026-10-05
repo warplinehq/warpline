@@ -99,6 +99,8 @@ const Seq = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const SemVer = z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/)
 const Scope = z.union([z.literal('*'), PluginName])
 const Entries = z.record(PrincipalId, Hex)
+/** Each changed id to its new entry digest, or null when it left the registry. */
+const ChangedEntries = z.record(PrincipalId, Hex.nullable())
 
 const DATA = {
   'segment.opened': z.strictObject({
@@ -172,15 +174,15 @@ const DATA = {
     type: z.enum(['human', 'machine']),
     key_sha256: Hex.nullable(),
     sha256: Hex,
-    entries: Entries,
+    entry_sha256: Hex,
   }),
-  'principal.disabled': z.strictObject({ id: PrincipalId, sha256: Hex, entries: Entries }),
+  'principal.disabled': z.strictObject({ id: PrincipalId, sha256: Hex, entry_sha256: Hex }),
   'principal_registry.observed': z.strictObject({
     old: Hex.nullable(),
     new: Hex.nullable(),
     changed_ids: z.array(PrincipalId),
     editor: z.literal('unknown'),
-    entries: Entries,
+    changed_entries: ChangedEntries,
   }),
   'preference.set': z.strictObject({ key: PrefKey, old: Hex.nullable(), new: Hex }),
   'preferences.observed': z.strictObject({
@@ -281,20 +283,26 @@ async function readAt(path: string, start: number, length: number): Promise<Buff
 }
 
 /**
- * The last complete line of a segment, read from its last `TAIL_BYTES`,
- * whether the segment ends in a partial line, and its size. `line` is null
- * when the window holds no complete line.
+ * The last complete line of a segment, whether the segment ends in a partial
+ * line, and its size. Read from the last `TAIL_BYTES`, and from twice as far
+ * back each time that window holds no whole line, so an internal line of any
+ * length is found. `line` is null when the segment holds no complete line.
  */
 async function lastLine(path: string): Promise<{ line: Buffer | null; torn: boolean; size: number }> {
   const { size } = await stat(path)
-  const start = Math.max(0, size - TAIL_BYTES)
-  const buf = await readAt(path, start, size - start)
-  const torn = buf.length > 0 && buf[buf.length - 1] !== 0x0a
-  const end = buf.lastIndexOf(0x0a)
-  if (end === -1) return { line: null, torn, size }
-  const from = buf.lastIndexOf(0x0a, end - 1) + 1
-  if (from === 0 && start > 0) return { line: null, torn, size }
-  return { line: buf.subarray(from, end), torn, size }
+  for (let window = TAIL_BYTES; ; window *= 2) {
+    const start = Math.max(0, size - window)
+    const buf = await readAt(path, start, size - start)
+    const torn = buf.length > 0 && buf[buf.length - 1] !== 0x0a
+    const end = buf.lastIndexOf(0x0a)
+    const from = end === -1 ? -1 : buf.lastIndexOf(0x0a, end - 1) + 1
+    // No newline, or the line's start lies before the window: read further back.
+    if (end === -1 || (from === 0 && start > 0)) {
+      if (start === 0) return { line: null, torn, size }
+      continue
+    }
+    return { line: buf.subarray(from, end), torn, size }
+  }
 }
 
 type StoredRecord = { warplineseq: number; source: string; type: string; time?: unknown; data?: any }
@@ -316,6 +324,12 @@ const EMPTY_STATE: Carried = { authority: { preferences: null, principals: null 
  * The fields the walk carries into output, per stored type, each under the
  * writer's own field rule. Non-strict, so a key no rule names is stripped and
  * never reaches the walk. A type not listed here is passed over unread.
+ *
+ * A principal record is read in either shape a writer has written: the whole
+ * id-to-digest map in `entries`, or the one entry that changed. `z.xor` takes a
+ * line that matches exactly one shape. A line holding both matches both, and no
+ * writer writes one, so it fails here and the walk stops at it rather than
+ * folding whichever shape is listed first.
  */
 const CARRIED = {
   'warpline.audit.fire.intent': z.object({ plugin: PluginName, run_id: RunId, effect_id: Hex.nullable() }),
@@ -324,9 +338,18 @@ const CARRIED = {
   'warpline.audit.fire.resolved': z.object({ intent_seq: Seq.nullable() }),
   'warpline.audit.preference.set': z.object({ new: Hex.nullable() }),
   'warpline.audit.preferences.observed': z.object({ new: Hex.nullable() }),
-  'warpline.audit.principal.added': z.object({ sha256: Hex, entries: Entries }),
-  'warpline.audit.principal.disabled': z.object({ sha256: Hex, entries: Entries }),
-  'warpline.audit.principal_registry.observed': z.object({ new: Hex.nullable(), entries: Entries }),
+  'warpline.audit.principal.added': z.xor([
+    z.object({ sha256: Hex, entries: Entries }),
+    z.object({ id: PrincipalId, sha256: Hex, entry_sha256: Hex }),
+  ]),
+  'warpline.audit.principal.disabled': z.xor([
+    z.object({ sha256: Hex, entries: Entries }),
+    z.object({ id: PrincipalId, sha256: Hex, entry_sha256: Hex }),
+  ]),
+  'warpline.audit.principal_registry.observed': z.xor([
+    z.object({ new: Hex.nullable(), entries: Entries }),
+    z.object({ new: Hex.nullable(), changed_entries: ChangedEntries }),
+  ]),
 } as const
 
 /**
@@ -377,13 +400,31 @@ function segmentState(lines: CarriedLine[], carried: Carried): Carried {
       case 'warpline.audit.preferences.observed':
         preferences = data.new
         break
+      // A line with the whole map replaces it. A line naming one change sets
+      // that change over the map carried so far, in a new object.
       case 'warpline.audit.principal.added':
       case 'warpline.audit.principal.disabled':
-        principals = { sha256: data.sha256, entries: data.entries }
+        principals = {
+          sha256: data.sha256,
+          entries: 'entries' in data ? data.entries : { ...principals?.entries, [data.id]: data.entry_sha256 },
+        }
         break
-      case 'warpline.audit.principal_registry.observed':
-        principals = data.new === null ? null : { sha256: data.new, entries: data.entries }
+      case 'warpline.audit.principal_registry.observed': {
+        if (data.new === null) {
+          principals = null
+          break
+        }
+        let entries: Record<string, string> = data.entries
+        if (!('entries' in data)) {
+          entries = { ...principals?.entries }
+          for (const [id, digest] of Object.entries(data.changed_entries as Record<string, string | null>)) {
+            if (digest === null) delete entries[id]
+            else entries[id] = digest
+          }
+        }
+        principals = { sha256: data.new, entries }
         break
+      }
     }
   }
   return { authority: { preferences, principals }, open_intents: [...open.values()] }
@@ -598,8 +639,8 @@ async function appendLocked(
     if (!tail.torn && lastRecord.type !== 'warpline.audit.segment.sealed') {
       if (tail.size >= limits.maxSegmentBytes) reason = 'size'
       else {
-        const head = (await readAt(activePath, 0, Math.min(tail.size, TAIL_BYTES))).toString('utf-8')
-        const openedAt = Date.parse(String(parseRecord(head.slice(0, head.indexOf('\n')))?.time))
+        const first = await firstLine(activePath)
+        const openedAt = Date.parse(String(first === undefined ? undefined : parseRecord(first.toString('utf-8'))?.time))
         if (time - openedAt >= limits.maxSegmentAgeMs) reason = 'age'
       }
     }
@@ -617,10 +658,8 @@ async function appendLocked(
   if (sealed !== null) prev = headOf(sealed)
   const fresh: Buffer[] = []
   if (opens) {
-    // ponytail: internal lines are not held to MAX_LINE_BYTES. An opened line
-    // carrying hundreds of open intents could outgrow the 64 KiB tail read, and
-    // a crash right after it would leave a last line the tail read cannot find.
-    // Reading further back when the window holds no line is the upgrade path.
+    // Internal lines are not held to MAX_LINE_BYTES. The tail read and the
+    // first-line read both follow a line of any length.
     const opened = encode(
       ++seq,
       source,
@@ -803,8 +842,9 @@ export interface OpenIntent {
  * just parsed. Equal resolves null. Different appends one observed record and
  * resolves its seq: `preferences.observed` names the two whole-file digests and
  * nothing else, and `principal_registry.observed` adds every id whose entry
- * digest was added, removed or changed, and the new id-to-digest map. Neither
- * names an editor, which nothing here can know.
+ * digest was added, removed or changed, and each such id's new entry digest,
+ * null for one that left the file. Neither names an editor, which nothing here
+ * can know.
  *
  * `bytes` is exactly what was parsed, or null for a missing file. A whitespace
  * edit that parses to the same values is still a change, because the digest is
@@ -843,7 +883,10 @@ export async function observeAuthorityFile(
       const changed_ids = [...new Set([...Object.keys(before), ...Object.keys(after)])]
         .filter((id) => before[id] !== after[id])
         .sort()
-      data = { old: principals?.sha256 ?? null, new: now, changed_ids, editor: 'unknown', entries: after }
+      const changed_entries = Object.fromEntries(
+        changed_ids.map((id) => [id, Object.hasOwn(after, id) ? after[id] : null]),
+      )
+      data = { old: principals?.sha256 ?? null, new: now, changed_ids, editor: 'unknown', changed_entries }
     }
     const parsed = DATA[kind].safeParse(data)
     if (!parsed.success) throw new AuditAppendError(kind, 'data rejected by its schema')
@@ -971,18 +1014,24 @@ export function parseAnchor(text: string): Anchor {
   return { seq: Number(size), hex: Buffer.from(root, 'base64').toString('hex'), origin }
 }
 
-/** The home id: the `source` of the store's first line, or undefined with no store. */
-async function genesisSource(dir: string): Promise<string | undefined> {
-  const first = (await segmentsIn(dir))[0]
-  if (first === undefined) return undefined
-  const lines = scan(join(dir, first))
+/** A segment's first complete line, newline excluded, whatever its length, or undefined when it holds none. */
+async function firstLine(path: string): Promise<Buffer | undefined> {
+  const lines = scan(path)
   try {
     const { value, done } = await lines.next()
-    return done ? undefined : parseRecord(value.toString('utf-8'))?.source
+    return done ? undefined : value.subarray(0, value.length - 1)
   } finally {
     // Closes the file when the generator stopped at its first line.
     await lines.return(Buffer.alloc(0))
   }
+}
+
+/** The home id: the `source` of the store's first line, or undefined with no store. */
+async function genesisSource(dir: string): Promise<string | undefined> {
+  const first = (await segmentsIn(dir))[0]
+  if (first === undefined) return undefined
+  const line = await firstLine(join(dir, first))
+  return line === undefined ? undefined : parseRecord(line.toString('utf-8'))?.source
 }
 
 /**

@@ -6,7 +6,7 @@
  *
  *   1. Every change is on the record first. `principal.added` or
  *      `principal.disabled` is appended with the sha256 of the exact bytes
- *      about to be written and each id's entry digest, then the file is written
+ *      about to be written and the changed entry's digest, then the file is written
  *      through fs-atomic at 0600. A failed append writes nothing. A key is
  *      recorded as its digest only.
  *   2. Ids are never deleted or reused. Disable is the only way out of the
@@ -44,6 +44,15 @@ recorded on the audit store before the file is written.
 `
 
 const AUDIT_FAILED = 'The audit store could not record this change. Nothing was written.\n'
+
+/**
+ * A hand edit is recorded as one `principal_registry.observed`, which names
+ * every changed id, so an edit changing too many at once cannot fit one record.
+ */
+const EDIT_TOO_LARGE =
+  'principals.json changed in more entries since the store last saw it than one audit record can name. ' +
+  'Record it in parts: put part of the change back, run warpline principal list, then make the rest. ' +
+  'Nothing was written.\n'
 
 /** The refusal for an append that did not happen, naming the store's reason when it gave one. */
 function auditFailed(err: unknown): string {
@@ -132,6 +141,8 @@ async function load(): Promise<{ bytes: Buffer | null; registry: Registry } | st
   try {
     await observeAuthorityFile(engineStatePath(), 'principal_registry.observed', bytes, entries(registry))
   } catch (err) {
+    // The typed reason, so a reworded one fails typecheck here.
+    if (err instanceof AuditAppendError && err.reason === 'line over 16384 bytes') return EDIT_TOO_LARGE
     return auditFailed(err)
   }
   return { bytes, registry }
@@ -198,7 +209,7 @@ async function add(rest: string[]): Promise<number> {
       type: entry.type,
       key_sha256: entry.key === undefined ? null : sha256(entry.key),
       sha256: sha256(bytes),
-      entries: entries(next),
+      entry_sha256: entryDigest(entry),
     })
   } catch (err) {
     process.stderr.write(auditFailed(err))
@@ -230,12 +241,11 @@ async function disable(rest: string[]): Promise<number> {
     return 1
   }
 
-  const next: Registry = {
-    principals: loaded.registry.principals.map((p) => (p.id === id ? { ...p, status: 'disabled' as const } : p)),
-  }
+  const disabled: Entry = { ...current, status: 'disabled' }
+  const next: Registry = { principals: loaded.registry.principals.map((p) => (p.id === id ? disabled : p)) }
   const bytes = JSON.stringify(next, null, 2)
   try {
-    await appendAudit(engineStatePath(), 'principal.disabled', { id, sha256: sha256(bytes), entries: entries(next) })
+    await appendAudit(engineStatePath(), 'principal.disabled', { id, sha256: sha256(bytes), entry_sha256: entryDigest(disabled) })
   } catch (err) {
     process.stderr.write(auditFailed(err))
     return 1

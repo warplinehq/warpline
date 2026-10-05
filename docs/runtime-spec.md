@@ -3595,11 +3595,15 @@ last digest the store holds for it, never from a warpline command.
 and after (null for a file the store had not seen, or one now missing), and
 `changed` and `editor`, which are always `unknown`. No value, key path or
 per-key digest is recorded. `principal_registry.observed` carries `old`, `new`
-and `editor` the same way, the new `entries` map of principal id to entry
-digest, and `changed_ids`: every id added, removed or whose entry digest
-differs from the last map recorded, sorted. The comparison and the append
-happen in one hold of the audit lock, against the active segment and the
-authority it carried forward (§ 14 Segments).
+and `editor` the same way, `changed_ids`: every id added, removed or whose
+entry digest differs from the map the store carries, sorted, and
+`changed_entries`, which maps each of those ids to its new entry digest, or to
+null when the id left the file. It does not carry the whole map. Records
+written before this change carried the whole map as `entries` in place of
+`changed_entries`, and `principal.added` and `principal.disabled` did too
+(§ 15). Those are still read. The comparison and the append happen in one hold
+of the audit lock, against the active segment and the authority it carried
+forward (§ 14 Segments).
 
 Three kinds close a `fire.intent`: a `fire.outcome`, a `fire.refused` or a
 `fire.resolved` whose `intent_seq` is that intent's seq. One whose `intent_seq`
@@ -3696,7 +3700,11 @@ each line's type, and for `fire.intent`, `fire.outcome`, `fire.refused`,
 `principal.disabled` and `principal_registry.observed` the fields it carries:
 the plugin, run id and effect id of an intent, the intent seq a closing record
 names, the authority digests and the principal entries. Each is checked by its
-own field rule, the one the writer uses. The `segment.opened` that opens the
+own field rule, the one the writer uses. A principal record is folded into the
+carried map in either shape: one that carries the whole map in `entries`
+replaces it, and one that names a change sets that id's digest, or for
+`changed_entries` removes an id whose digest is null. A principal record that
+holds both shapes at once stops the walk, since no writer writes one. The `segment.opened` that opens the
 active segment is held to the same rules for the authority and open intents it
 carries. Every other kind, and any key a field rule does not name, is passed
 over, so a record a later build writes, or a field it adds, does not stop an
@@ -3929,10 +3937,13 @@ The file has one writer, `warpline principal`:
 
 Each add appends `principal.added`, and each disable `principal.disabled`, to
 the audit store (§ 14) before the file changes. The record carries the id, the
-sha256 of the exact bytes about to be written, and `entries`, each id mapped to
-the sha256 of its entry (`id`, `type`, `status`, then `key` when set, as JSON
-in that order). `principal.added` also carries the type and `key_sha256`, the
-key's sha256 or null. The key itself is never on the record. When the append
+sha256 of the exact bytes about to be written, and `entry_sha256`, the sha256
+of that one entry as it will be written (`id`, `type`, `status`, then `key`
+when set, as JSON in that order). `principal.added` also carries the type and
+`key_sha256`, the key's sha256 or null. The key itself is never on the record.
+No record names the other entries, so no record grows with the registry, and
+there is no limit on how many principals it holds. The whole map of id to
+entry digest rides each `segment.opened` instead (§ 14 Segments). When the append
 fails, nothing is written and the verb exits `1`. An add or a disable reads the
 file, checks it, records the change and writes it under the state lock (§ 10),
 so two adds of one id at once register it once, and two adds of different ids
@@ -3949,6 +3960,12 @@ The file may still be edited by hand. Every read by `warpline principal`
 compares its bytes with the last digest the store holds, before the verb acts on
 what it read, and a difference is recorded as `principal_registry.observed`
 naming the ids whose entry digests changed (§ 14). When that record cannot be
-written the verb refuses with exit `1`. A file that will not parse, or that
+written the verb refuses with exit `1`. That record must fit in one 16384-byte
+line, and it names every changed id twice, so one edit can change at most 78
+entries with 64-character ids, more with shorter ones. An edit that changes
+more at once is refused by every `warpline principal` verb with a sentence
+saying it is more than one audit record can name, and nothing is written. To
+record it, put part of the change back, run `warpline principal list`, then
+make the rest. A file that will not parse, or that
 fails the schema, is refused with a message naming key paths and schema facts,
 never a value from the file.
