@@ -109,7 +109,7 @@ function auditLines(): Line[] {
     )
 }
 
-test('R10: a fire killed between its intent and its outcome is listed indeterminate by the next advance, which fires it again and exits 0', () => {
+test('a fire killed between its intent and its outcome is listed indeterminate by the next advance, which fires it again and exits 0', () => {
   expect(bin(['approve', 'killer']).status).toBe(0)
 
   const killed = bin(['advance'])

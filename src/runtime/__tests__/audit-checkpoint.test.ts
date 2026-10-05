@@ -290,7 +290,7 @@ describe('an advance that does not return writes no Checkpoint', () => {
 })
 
 describe('a fire with no outcome is listed as indeterminate', () => {
-  test('R11: after an advance whose outcome append failed, the next advance lists that intent as indeterminate and exits 0', async () => {
+  test('after an advance whose outcome append failed, the next advance lists that intent as indeterminate and exits 0', async () => {
     writePlugin('mailer', { side_effects: ['sends_email'] })
     await mergeGrant(['mailer'], {}, join(home.root, '.session-approval'))
     const real = audit.appendAudit
@@ -322,7 +322,7 @@ describe('a fire with no outcome is listed as indeterminate', () => {
 })
 
 describe('a Checkpoint the store cannot take', () => {
-  test('D-32: the document carries audit null, the advance exits 70, stderr names the Checkpoint, and the dead-man file is written', async () => {
+  test('the document carries audit null, the advance exits 70, stderr names the Checkpoint, and the dead-man file is written', async () => {
     expect(typeof audit.recordCheckpoint).toBe('function')
     writePlugin('alpha')
     let trips = 0
