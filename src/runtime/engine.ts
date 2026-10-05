@@ -33,6 +33,7 @@ import {
 } from '../lib/paths.js'
 import { atomicWriteText } from '../lib/fs-atomic.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
+import { appendAudit } from '../lib/audit-log.js'
 import { advanceCounts } from './exit-codes.js'
 // The account's own type, imported rather than re-spelled as a `Pick` here: a
 // second spelling is a second answer about which fields of an advance the
@@ -311,6 +312,19 @@ export interface AdvanceOptions {
   onRunFailure?: (reason: string) => void
 }
 
+/**
+ * One fire record the audit store could not take during an advance.
+ *
+ * `fire.intent`: the plugin did not fire. `fire.outcome`: it fired, and the
+ * intent at `intent_seq` stays open. `fire.refused`: the refusal stands and the
+ * store holds no line saying so.
+ */
+export interface AuditFailure {
+  plugin: string
+  kind: 'fire.intent' | 'fire.outcome' | 'fire.refused'
+  intent_seq?: number
+}
+
 export interface AdvanceResult {
   run_id: string
   /**
@@ -363,6 +377,15 @@ export interface AdvanceResult {
    * Additive, on the argument `pruned` already makes above.
    */
   pending_gates: number
+  /**
+   * The fire records this advance could not append, collected per plugin as
+   * each append fails and never retried. Read by `warpline advance`, which
+   * reports `70` when it is non-empty. Empty on the quiet-hours arm, which
+   * fires nothing.
+   *
+   * Additive, on the argument `pruned` already makes above.
+   */
+  audit_failures: AuditFailure[]
 }
 
 // -----------------------------------------------------------------------
@@ -2768,6 +2791,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         run_log_path: '',
         pruned: 0,
         pending_gates: quietPendingGates,
+        audit_failures: [],
       }
     }
 
@@ -2877,6 +2901,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
      * carried out. Nothing here re-reads the approvals record to build it.
      */
     const refused_plugins: AdvanceResult['refused_plugins'] = []
+    /**
+     * The fire records the store could not take, one per failed append. The
+     * advance carries on and does its end-of-run write, so a sibling that
+     * already fired keeps its run record and does not fire again.
+     */
+    const audit_failures: AuditFailure[] = []
     /**
      * The content-authorised fires this advance MARKED and whose handler then
      * returned without failing. Read once, at the end-of-run assembly, which is
@@ -3180,6 +3210,19 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 if (ev.refusal === undefined) {
                   await emitPluginSkipped(pluginName, ev.detail, run_id, eventsPath)
                 } else {
+                  // On the audit record first, with no intent, because nothing
+                  // fired. A store that cannot take it changes nothing about
+                  // the refusal: it is collected, and the command exits 70.
+                  try {
+                    await appendAudit(stateDir, 'fire.refused', {
+                      plugin: pluginName,
+                      run_id,
+                      reason: ev.refusal,
+                      intent_seq: null,
+                    })
+                  } catch {
+                    audit_failures.push({ plugin: pluginName, kind: 'fire.refused' })
+                  }
                   await emitPluginRefused(pluginName, ev.refusal, run_id, eventsPath).catch(() => {})
                 }
                 // The FSM state, per this hook's contract — and a refusal
@@ -3258,6 +3301,19 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               // also what would fail this append. An event log that cannot be
               // written must not cost the run log, which is the artifact the
               // refusal exists to produce.
+              //
+              // The audit record goes first and is collected on failure, as on
+              // the gate's refusal arm above.
+              try {
+                await appendAudit(stateDir, 'fire.refused', {
+                  plugin: pluginName,
+                  run_id,
+                  reason: markRefusal,
+                  intent_seq: null,
+                })
+              } catch {
+                audit_failures.push({ plugin: pluginName, kind: 'fire.refused' })
+              }
               await emitPluginRefused(pluginName, markRefusal, run_id, eventsPath).catch(() => {})
               onPluginEnd?.(pluginName, 'skipped', markElapsed, markDetail)
               return
@@ -3272,6 +3328,11 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
           // -- Invoke plugin --
           let invocationResult: Awaited<ReturnType<typeof invokePlugin>>
+          // The session-class fire intent's seq once it is on the record, and
+          // whether its append failed. Held out here so the catch below can
+          // tell a fire that never started from an invocation that threw.
+          let intentSeq: number | undefined
+          let intentUnrecorded = false
           try {
             // `runId` is threaded so the Outputs this handler returns are stamped
             // with the advance that produced them, not with a per-invocation id
@@ -3338,6 +3399,27 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               }),
             )
 
+            // Write-ahead: the intent is on the record before the handler can
+            // act, so a handler that fires its effect and then dies still left
+            // a line saying it was about to. Session class only: a content
+            // fire's intent belongs to its spend mark. A plugin with no
+            // declared side effects is not a fire and gets no record.
+            if (witness.granted && !('via' in witness)) {
+              try {
+                const intent = await appendAudit(stateDir, 'fire.intent', {
+                  plugin: pluginName,
+                  run_id,
+                  class: 'session',
+                  effect_id: null,
+                  fingerprint: null,
+                })
+                intentSeq = intent.seq
+              } catch (err) {
+                intentUnrecorded = true
+                throw err
+              }
+            }
+
             invocationResult = await invokePlugin(
               pluginName,
               {},
@@ -3345,6 +3427,42 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               witness,
             )
           } catch (err) {
+            // The intent could not be recorded, so the plugin did not fire.
+            // It is `failed` in this advance's account and nowhere else: no
+            // run record, because no run happened, and writing one would
+            // re-arm its freshness on a fire that never left. The fixed
+            // summary, never the error, which stays off every artifact.
+            if (intentUnrecorded) {
+              plugin_states.set(pluginName, 'failed')
+              const unrecordedElapsed = Date.now() - entryStart
+              const unrecorded = 'not fired: its fire intent could not be recorded in the audit store'
+              plugin_entries.push({
+                plugin: pluginName,
+                status: 'failed',
+                started_at: entryStartedAt,
+                elapsed_ms: unrecordedElapsed,
+                result_summary: unrecorded,
+                retried: false,
+              })
+              audit_failures.push({ plugin: pluginName, kind: 'fire.intent' })
+              await emitPluginFailed(pluginName, unrecorded, run_id, eventsPath).catch(() => {})
+              onPluginEnd?.(pluginName, 'failed', unrecordedElapsed, unrecorded)
+              return
+            }
+            // The intent is on the record and the invocation threw, so the
+            // outcome closes it as `threw`. One attempt; a failure is collected.
+            if (intentSeq !== undefined) {
+              try {
+                await appendAudit(stateDir, 'fire.outcome', {
+                  plugin: pluginName,
+                  run_id,
+                  intent_seq: intentSeq,
+                  status: 'threw',
+                })
+              } catch {
+                audit_failures.push({ plugin: pluginName, kind: 'fire.outcome', intent_seq: intentSeq })
+              }
+            }
             plugin_states.set(pluginName, 'failed')
             const errMsg = err instanceof Error ? err.message : String(err)
             const failedElapsed = Date.now() - entryStart
@@ -3385,6 +3503,22 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           }
 
           const { result, retried } = invocationResult
+
+          // The outcome closes the intent, one attempt and no retry. A store
+          // that cannot take it leaves the intent open for the next advance to
+          // list; the run itself is recorded below like any other.
+          if (intentSeq !== undefined) {
+            try {
+              await appendAudit(stateDir, 'fire.outcome', {
+                plugin: pluginName,
+                run_id,
+                intent_seq: intentSeq,
+                status: result.status,
+              })
+            } catch {
+              audit_failures.push({ plugin: pluginName, kind: 'fire.outcome', intent_seq: intentSeq })
+            }
+          }
 
           // -- Supervised: gate (unless dry-run, or the result failed) --
           // review_gate forces autonomous plugins to be treated as supervised
@@ -3887,6 +4021,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       run_log_path,
       pruned: prunedRunLogs,
       pending_gates: standingGates,
+      audit_failures,
     }
   } finally {
     // The heartbeat first, and awaited: a refresh still in flight when the

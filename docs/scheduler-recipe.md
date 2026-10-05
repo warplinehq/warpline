@@ -419,9 +419,11 @@ before you do — it is the section describing what the gate is holding back.
 
 ## Exit codes
 
-The table is in `runtime-spec.md` § 11 and is not restated here. Four codes:
+The table is in `runtime-spec.md` § 11 and is not restated here. Five codes:
 `0` ran and nothing failed, `1` something failed, no manifests loaded or the
-command line was not valid, `75` could not finish, `130` interrupted. Treat any
+command line was not valid, `70` the audit store failed during the run (some
+fire or refusal has no record; read stderr), `75` could not finish, `130`
+interrupted. Treat any
 unknown non-zero code as failure; § 11 says why that matters.
 
 Five things a scheduler operator should read there rather than infer:

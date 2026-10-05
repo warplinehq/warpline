@@ -25,6 +25,10 @@
  * `75` and `130` are produced outside this function. A pure function over an
  * advance result cannot know that a lock was held or that a signal arrived,
  * because in those cases there is no result to hand it.
+ *
+ * `70` is produced outside it too, in `warpline advance`, from the result's
+ * audit failures. The four fields this function reads do not carry them, and
+ * `70` outranks every code this function returns.
  */
 import type { AdvanceResult } from './engine.js'
 

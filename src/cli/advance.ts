@@ -91,6 +91,12 @@
  * is — catching it here means this command reports `75` without changing what
  * `plan`, `approve`, `deny` and `revoke` report.
  *
+ * `70` is computed here, outside `advanceExitCode`, the way `75` and `130` are
+ * produced outside it: it comes from the result's audit failures, a field that
+ * function does not read. It outranks `1` and `--strict`. A document is still
+ * written to stdout, because the run completed; stderr says which plugin's
+ * record is missing and, for an outcome, which intent stays open.
+ *
  * Three more that arrived with the refusals:
  *
  *   5. The home check refuses to CREATE a home, NEVER to RUN unattended, and
@@ -124,7 +130,7 @@ import { existsSync } from 'node:fs'
 import { warplineHome } from '../lib/paths.js'
 import { runAdvance } from '../runtime/engine.js'
 import type { AdvanceResult, PluginFsmState } from '../runtime/engine.js'
-import { advanceCounts, advanceExitCode } from '../runtime/exit-codes.js'
+import { advanceCounts, advanceExitCode, EXIT_AUDIT_FAILED } from '../runtime/exit-codes.js'
 import { isInteractive } from './prompt.js'
 import { exitAfterFlush } from '../lib/exit-after-flush.js'
 import { RunTriggerSchema, type RunTrigger } from '../schemas/run-log.js'
@@ -204,7 +210,7 @@ export interface AdvancePayload {
    * present, empty, and wrong on exactly the advances it exists for.
    */
   refused_plugins: AdvanceResult['refused_plugins']
-  exit_code: 0 | 1
+  exit_code: 0 | 1 | 70
   /**
    * Every plugin the run loaded, in the engine's own order.
    *
@@ -434,8 +440,28 @@ export async function run(
       return 75
     }
 
-    const exit_code = advanceExitCode(result, { strict })
+    // `70` first: a fire or refusal with no record outranks every code the
+    // mapper returns, `--strict` included.
+    const exit_code = result.audit_failures.length > 0 ? EXIT_AUDIT_FAILED : advanceExitCode(result, { strict })
     const { gated, pending_gates, failed, refused } = advanceCounts(result)
+
+    // One line per missing record, then the code's line, all before the
+    // document. Built from the plugin name, a fixed phrase and a seq only.
+    for (const f of result.audit_failures) {
+      if (f.kind === 'fire.intent') {
+        process.stderr.write(`warpline advance: ${f.plugin} did not fire: the audit store could not record its intent.\n`)
+      } else if (f.kind === 'fire.outcome') {
+        process.stderr.write(
+          `warpline advance: ${f.plugin} fired, but the audit store could not record its outcome ` +
+            `(intent seq ${f.intent_seq}). The intent stays open and the next advance lists it.\n`,
+        )
+      } else {
+        process.stderr.write(`warpline advance: ${f.plugin} was refused, and the audit store could not record the refusal.\n`)
+      }
+    }
+    if (exit_code === EXIT_AUDIT_FAILED) {
+      process.stderr.write('Exit 70: the audit store failed during this run; see docs/runtime-spec.md § 11.\n')
+    }
 
     // The one site anything reaches stdout from, past every refusal above it.
     process.stdout.write(

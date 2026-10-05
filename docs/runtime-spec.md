@@ -2719,6 +2719,7 @@ them.
 |------|---------|
 | `0` | The advance ran and nothing failed. Every plugin completed, nothing was due, a plugin is holding at an approval gate, or a content approval declined to authorise a fire. |
 | `1` | At least one plugin failed, the plugin root loaded no manifests at all, or the command line was not valid. Or, under `--strict`, an approval gate is still waiting or a content approval refused a fire. Or a write to stdout or stderr failed for a reason other than a reader that has gone away. Output a plugin prints after the drain has begun is dropped, and does not count as a failed write. |
+| `70` | The audit store failed during this run: a fire intent, a fire outcome or a fire refusal could not be recorded (§ 14). |
 | `75` | Could not finish. Often nothing ran and nothing was written, but not always — see below before treating it as a free retry. |
 | `130` | Interrupted by a SIGINT or SIGTERM that warpline caught. The process stopped; the work may not have. |
 
@@ -2734,6 +2735,18 @@ named here rather than left for a monitor to discover as "a plugin failed". What
 tells them apart from outside: under `--json` a plugin failure, an empty plugin
 root and a `--strict` promotion each write a document to stdout, the last with
 `pending_gates` or `refused` above zero, and a usage error writes none.
+
+**`70` means a fire or a refusal has no audit record.** A plugin whose fire
+intent could not be recorded did not fire. It is recorded `failed` in the run
+log, and it gets no run record, because no run happened. A plugin whose outcome
+could not be recorded did fire. It keeps its run record like any other, and its
+intent stays open in the store for the next advance to list. A refusal whose
+record could not be written still stands: the plugin did not fire. stderr names
+each plugin, and for an outcome the seq of the intent left open. Nothing
+retries an append. The run finishes and writes its document to stdout with
+`exit_code: 70`. `70` outranks `1` and `--strict`, so a run that also had a
+plugin failure or a held gate still reports `70`. `warpline revoke` exits `70`
+too, when the grant was removed but its record could not be written (§ 9).
 
 `130` is the conventional code for a process ended by SIGINT, and this command
 reports it deliberately rather than by default: it installs a handler for the
@@ -3616,3 +3629,13 @@ removes the grant file, but a revoke only narrows authority, and a failing
 store must never leave authority wider than the operator chose. So when that
 append fails the file is removed anyway, and the command exits `70` with a
 stderr line saying no audit record of the revoke was written.
+
+A fire is written ahead the same way. When `warpline advance` fires a
+session-class plugin that declares side effects, it appends `fire.intent`
+immediately before the handler runs, and `fire.outcome` naming that intent's
+seq once the handler returns, with the result's status, or `threw` when the
+invocation threw. An intent that cannot be written stops the fire. A refused
+fire gets `fire.refused` with its closed-set reason and no intent, because
+nothing fired. A plugin with no declared side effects gets no record, and
+neither does `warpline run`. An outcome or refusal that cannot be written does
+not undo what already happened; the advance exits `70` (§ 11).
