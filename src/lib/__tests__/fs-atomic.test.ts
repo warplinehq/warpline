@@ -5,7 +5,7 @@
  * no `mock.module` (CONTRIBUTING.md § Testing rules).
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, rm, readFile, readdir, access } from 'node:fs/promises'
+import { mkdir, rm, readFile, readdir, access, writeFile, chmod, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -64,6 +64,33 @@ describe('atomicWriteJson', () => {
     // per write is a consumer-visible defect.
     const entries = await readdir(tmpDir)
     expect(entries.filter((e) => e.startsWith('overwrite.json'))).toEqual(['overwrite.json'])
+  })
+})
+
+describe('atomicWriteJson with a mode', () => {
+  test('a mode is on the installed file, over an existing file that was 0o644', async () => {
+    const path = join(tmpDir, 'private.json')
+    await writeFile(path, '{}')
+    await chmod(path, 0o644)
+
+    await atomicWriteJson(path, { v: 1 }, { mode: 0o600 })
+
+    expect((await stat(path)).mode & 0o777).toBe(0o600)
+    expect(JSON.parse(await readFile(path, 'utf-8'))).toEqual({ v: 1 })
+    const entries = await readdir(tmpDir)
+    expect(entries).toEqual(['private.json'])
+  })
+
+  test('without a mode the written file has the mode a plain write gives it', async () => {
+    const reference = join(tmpDir, 'reference.json')
+    await writeFile(reference, '{}')
+    const path = join(tmpDir, 'plain.json')
+    await writeFile(path, '{}')
+    await chmod(path, 0o600)
+
+    await atomicWriteJson(path, { v: 1 })
+
+    expect((await stat(path)).mode & 0o777).toBe((await stat(reference)).mode & 0o777)
   })
 })
 

@@ -1,0 +1,447 @@
+/**
+ * `warpline principal` — the registry of who may act, and its only writer.
+ *
+ * `<home>/principals.json` holds one entry per principal: an id the operator
+ * chose, a type, a status and an optional key. Every add and disable is on the
+ * audit store before the file changes, the file is owner-only after every
+ * write, and no entry ever leaves it: disable is the only way out, and an id
+ * once used is never used again. Later records name principals by id, so an id
+ * that could be deleted or reused would make those records name someone else.
+ *
+ * No principal is ever taken from the account running the command. Two static
+ * checks read principal.ts for a removal and for the OS user, and each is shown
+ * red on a planted fixture in the same test, so a check that can't fail can't
+ * pass here.
+ *
+ * Digests are computed here with `node:crypto` over bytes read back from disk,
+ * never with a helper from the code under test, so the check cannot agree with
+ * the writer by construction.
+ *
+ * Every case gets its own home through `_setHome`, and everything this file
+ * writes goes under temp dirs (AGENTS.md Rule 2).
+ */
+import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test'
+import { createHash } from 'node:crypto'
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import * as audit from '../../lib/audit-log.js'
+import * as fsAtomic from '../../lib/fs-atomic.js'
+import { _setHome } from '../../lib/paths.js'
+import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
+import { run } from '../principal.js'
+
+const SOURCE = join(import.meta.dir, '..', 'principal.ts')
+const ADDED = 'warpline.audit.principal.added'
+const DISABLED = 'warpline.audit.principal.disabled'
+const OBSERVED = 'warpline.audit.principal_registry.observed'
+/** A key value. It may sit in principals.json and nowhere under `audit/`. */
+const KEY = 'PRINCIPAL-KEY-SENTINEL ssh-ed25519 AAAA'
+/** The spy's error message. It must never reach the operator. */
+const APPEND_SENTINEL = 'WARPLINE_AUDIT_APPEND_SPY_SENTINEL'
+
+let home: string
+let installed: ReturnType<typeof spyOn>[] = []
+
+const file = (): string => join(home, 'principals.json')
+const storeDir = (): string => join(home, 'audit')
+const mode = (): number => statSync(file()).mode & 0o777
+const sha = (data: Buffer | string): string => createHash('sha256').update(data).digest('hex')
+
+/** An entry's digest: `{ id, type, status }` plus `key` when set, in that order. */
+function entryDigest(e: { id: string; type: string; status: string; key?: string }): string {
+  const shape: Record<string, string> = { id: e.id, type: e.type, status: e.status }
+  if (e.key !== undefined) shape.key = e.key
+  return sha(JSON.stringify(shape))
+}
+
+type Entry = { id: string; type: string; status: string; key?: string }
+const registry = (): { principals: Entry[] } => JSON.parse(readFileSync(file(), 'utf-8')) as { principals: Entry[] }
+
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), 'warpline-principal-'))
+  _setHome(home)
+})
+
+afterEach(() => {
+  for (const spy of installed) spy.mockRestore()
+  installed = []
+  _setHome(null)
+  rmSync(home, { recursive: true, force: true })
+})
+
+/**
+ * Run the verb with stdout/stderr captured, always restoring the originals.
+ * `onFirstStdout` runs once, at the first stdout write, before it is kept.
+ */
+async function principal(
+  argv: string[],
+  onFirstStdout?: () => void,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const realOut = process.stdout.write
+  const realErr = process.stderr.write
+  let stdout = ''
+  let stderr = ''
+  process.stdout.write = ((chunk: string) => {
+    if (stdout === '' && onFirstStdout) onFirstStdout()
+    stdout += chunk
+    return true
+  }) as typeof process.stdout.write
+  process.stderr.write = ((chunk: string) => {
+    stderr += chunk
+    return true
+  }) as typeof process.stderr.write
+  try {
+    return { code: await run(argv), stdout, stderr }
+  } finally {
+    process.stdout.write = realOut
+    process.stderr.write = realErr
+  }
+}
+
+type Line = { type: string; warplineseq: number; data: Record<string, unknown> }
+
+/** Every stored line under `<home>/audit/`, segments in name order. */
+function lines(): Line[] {
+  if (!existsSync(storeDir())) return []
+  return readdirSync(storeDir())
+    .filter((f) => f.endsWith('.jsonl'))
+    .sort()
+    .flatMap((f) =>
+      readFileSync(join(storeDir(), f), 'utf-8')
+        .split('\n')
+        .filter((l) => l.length > 0)
+        .map((l) => JSON.parse(l) as Line),
+    )
+}
+
+const ofType = (type: string): Line[] => lines().filter((l) => l.type === type)
+
+/** Every byte under `<home>/audit/`, as one string. */
+function storeText(): string {
+  if (!existsSync(storeDir())) return ''
+  return readdirSync(storeDir())
+    .map((f) => readFileSync(join(storeDir(), f), 'utf-8'))
+    .join('\n')
+}
+
+/**
+ * Make the append of `kind` throw once, before anything is written. Every
+ * other call goes to the real append.
+ */
+function failAppend(kind: string): () => number {
+  // Read BEFORE `spyOn`: afterwards the namespace property is the mock.
+  const real = audit.appendAudit
+  let trips = 0
+  installed.push(
+    spyOn(audit, 'appendAudit').mockImplementation((async (statePath: string, k: string, data: unknown, opts?: unknown) => {
+      if (k === kind && trips === 0) {
+        trips += 1
+        throw new Error(APPEND_SENTINEL)
+      }
+      return (real as (...args: unknown[]) => Promise<unknown>)(statePath, k, data, opts)
+    }) as typeof audit.appendAudit),
+  )
+  return () => trips
+}
+
+/** The code lines of a source file, comment lines dropped, that match `re`. */
+function offending(path: string, re: RegExp): string[] {
+  return readFileSync(path, 'utf-8')
+    .split('\n')
+    .filter((text) => !/^\s*(\*|\/\/|\/\*)/.test(text))
+    .filter((text) => re.test(text))
+}
+
+/** A temp source file holding `body`, for showing a static check red. */
+function fixture(body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'warpline-principal-fixture-'))
+  const path = join(dir, 'principal.ts')
+  writeFileSync(path, `/**\n * A planted offender.\n */\nexport function f(next: { principals: { id: string }[] }, id: string) {\n${body}\n}\n`)
+  return path
+}
+
+const REMOVAL = /\.(splice|pop|shift|filter)\(|\bdelete\s/
+const OS_USER = /process\.env\.(USER|LOGNAME|USERNAME)|userInfo\(|os\.userInfo/
+
+describe('warpline principal', () => {
+  test('add, disable and list work end to end, each change on the record before the file, the file at 0600 every time', async () => {
+    const realWrite = fsAtomic.atomicWriteJson
+    const addedAtWrite: number[] = []
+    installed.push(
+      spyOn(fsAtomic, 'atomicWriteJson').mockImplementation(async (path, value, opts) => {
+        addedAtWrite.push(ofType(ADDED).length + ofType(DISABLED).length)
+        return realWrite(path, value, opts)
+      }),
+    )
+
+    const human = await principal(['add', 'ops', '--type', 'human'])
+    expect(human.code).toBe(0)
+    expect(human.stderr).toBe('')
+    expect(human.stdout.split('\n').filter(Boolean)).toHaveLength(1)
+    expect(registry()).toEqual({ principals: [{ id: 'ops', type: 'human', status: 'active' }] })
+    expect(mode()).toBe(0o600)
+    const opsActive = entryDigest({ id: 'ops', type: 'human', status: 'active' })
+    expect(ofType(ADDED).map((l) => l.data)).toEqual([
+      { id: 'ops', type: 'human', key_sha256: null, sha256: sha(readFileSync(file())), entries: { ops: opsActive } },
+    ])
+
+    const machine = await principal(['add', 'ci-bot', '--type', 'machine', '--key', KEY])
+    expect(machine.code).toBe(0)
+    expect(registry().principals[1]).toEqual({ id: 'ci-bot', type: 'machine', status: 'active', key: KEY })
+    expect(mode()).toBe(0o600)
+    const bot = entryDigest({ id: 'ci-bot', type: 'machine', status: 'active', key: KEY })
+    expect(ofType(ADDED)[1]!.data).toEqual({
+      id: 'ci-bot',
+      type: 'machine',
+      key_sha256: sha(KEY),
+      sha256: sha(readFileSync(file())),
+      entries: { ops: opsActive, 'ci-bot': bot },
+    })
+    expect(storeText()).not.toContain('PRINCIPAL-KEY-SENTINEL')
+
+    const disabled = await principal(['disable', 'ops'])
+    expect(disabled.code).toBe(0)
+    expect(disabled.stdout.split('\n').filter(Boolean)).toHaveLength(1)
+    expect(registry().principals[0]!.status).toBe('disabled')
+    expect(mode()).toBe(0o600)
+    expect(ofType(DISABLED).map((l) => l.data)).toEqual([
+      {
+        id: 'ops',
+        sha256: sha(readFileSync(file())),
+        entries: { ops: entryDigest({ id: 'ops', type: 'human', status: 'disabled' }), 'ci-bot': bot },
+      },
+    ])
+
+    // Each write found its own record already on the store.
+    expect(addedAtWrite).toEqual([1, 2, 3])
+
+    const listed = await principal(['list'])
+    expect(listed.code).toBe(0)
+    expect(listed.stderr).toBe('')
+    expect(listed.stdout.split('\n').filter(Boolean)).toEqual(['ops\thuman\tdisabled\tno key', 'ci-bot\tmachine\tactive\tkey'])
+    expect(listed.stdout).not.toContain('PRINCIPAL-KEY-SENTINEL')
+    expect(storeText()).not.toContain('PRINCIPAL-KEY-SENTINEL')
+  })
+
+  test('a registry file that was 0o644 is 0o600 after the next write', async () => {
+    writeFileSync(file(), '{ "principals": [] }')
+    chmodSync(file(), 0o644)
+    expect(mode()).toBe(0o644)
+
+    expect((await principal(['add', 'ops', '--type', 'human'])).code).toBe(0)
+
+    expect(mode()).toBe(0o600)
+  })
+
+  test('an id already used, active or disabled, is refused, and so is disabling one twice or one that was never added', async () => {
+    expect((await principal(['add', 'ops', '--type', 'human'])).code).toBe(0)
+    expect((await principal(['add', 'ci-bot', '--type', 'machine'])).code).toBe(0)
+    expect((await principal(['disable', 'ops'])).code).toBe(0)
+
+    for (const argv of [
+      ['add', 'ops', '--type', 'human'],
+      ['add', 'ops', '--type', 'machine'],
+      ['add', 'ci-bot', '--type', 'machine'],
+      ['disable', 'ops'],
+      ['disable', 'ghost'],
+    ]) {
+      const bytes = readFileSync(file())
+      const count = lines().length
+
+      const { code, stdout, stderr } = await principal(argv)
+
+      expect(code).toBe(1)
+      expect(stdout).toBe('')
+      expect(stderr).not.toBe('')
+      expect(lines()).toHaveLength(count)
+      expect(readFileSync(file()).equals(bytes)).toBe(true)
+    }
+  })
+
+  test('with no registry file, list prints nothing, exits 0 and creates nothing', async () => {
+    const before = await snapshotHome(home)
+
+    const { code, stdout, stderr } = await principal(['list'])
+
+    expect(code).toBe(0)
+    expect(stdout).toBe('')
+    expect(stderr).toBe('')
+    expect(existsSync(file())).toBe(false)
+    expect(existsSync(storeDir())).toBe(false)
+    expect(await snapshotHome(home)).toEqual(before)
+  })
+
+  test('no entry ever leaves the registry: a disabled principal stays where it was', async () => {
+    expect((await principal(['add', 'a', '--type', 'human'])).code).toBe(0)
+    expect((await principal(['add', 'b', '--type', 'machine'])).code).toBe(0)
+    expect((await principal(['disable', 'a'])).code).toBe(0)
+
+    expect(registry().principals.map((p) => p.id)).toEqual(['a', 'b'])
+  })
+
+  test('principal.ts has no code line that removes an entry, and the check finds one in a planted fixture', () => {
+    expect(readFileSync(SOURCE, 'utf-8').split('\n').length).toBeGreaterThan(20)
+    expect(offending(SOURCE, REMOVAL)).toEqual([])
+
+    const planted = fixture('  next.principals = next.principals.filter((p) => p.id !== id)')
+    try {
+      expect(offending(planted, REMOVAL)).not.toEqual([])
+    } finally {
+      rmSync(join(planted, '..'), { recursive: true, force: true })
+    }
+  })
+
+  test('principal.ts never reads the OS user, the check finds it in a planted fixture, and add with no id is a usage error', async () => {
+    expect(readFileSync(SOURCE, 'utf-8').split('\n').length).toBeGreaterThan(20)
+    expect(offending(SOURCE, OS_USER)).toEqual([])
+
+    const planted = fixture("  const id = process.env.USER ?? 'me'")
+    try {
+      expect(offending(planted, OS_USER)).not.toEqual([])
+    } finally {
+      rmSync(join(planted, '..'), { recursive: true, force: true })
+    }
+
+    const before = await snapshotHome(home)
+    const { code, stdout, stderr } = await principal(['add', '--type', 'human'])
+
+    expect(code).toBe(1)
+    expect(stdout).toBe('')
+    expect(stderr).toContain('warpline principal add <id>')
+    expect(await snapshotHome(home)).toEqual(before)
+  })
+
+  test('an id outside the charset and a type outside human and machine are refused and write nothing', async () => {
+    for (const argv of [
+      ['add', 'Bad Id', '--type', 'human'],
+      ['add', '../x', '--type', 'human'],
+      ['add', 'ops', '--type', 'robot'],
+      ['add', 'ops'],
+    ]) {
+      const before = await snapshotHome(home)
+
+      const { code, stdout, stderr } = await principal(argv)
+
+      expect(code).toBe(1)
+      expect(stdout).toBe('')
+      expect(stderr).not.toBe('')
+      expect(await snapshotHome(home)).toEqual(before)
+    }
+  })
+
+  test('a hand edit of the registry is recorded with the changed ids before the verb acts', async () => {
+    expect((await principal(['add', 'ops', '--type', 'human'])).code).toBe(0)
+    expect((await principal(['add', 'ci-bot', '--type', 'machine'])).code).toBe(0)
+    const oldBytes = readFileSync(file())
+    const edited = registry()
+    edited.principals[0]!.type = 'machine'
+    writeFileSync(file(), JSON.stringify(edited))
+    const newBytes = readFileSync(file())
+    let observedAtPrint: number | undefined
+
+    const { code, stdout } = await principal(['list'], () => {
+      observedAtPrint = ofType(OBSERVED).length
+    })
+
+    expect(code).toBe(0)
+    expect(stdout.split('\n').filter(Boolean)).toHaveLength(2)
+    expect(observedAtPrint).toBe(1)
+    const observed = ofType(OBSERVED)
+    expect(observed).toHaveLength(1)
+    expect(observed[0]!.data).toEqual({
+      old: sha(oldBytes),
+      new: sha(newBytes),
+      changed_ids: ['ops'],
+      editor: 'unknown',
+      entries: {
+        ops: entryDigest({ id: 'ops', type: 'machine', status: 'active' }),
+        'ci-bot': entryDigest({ id: 'ci-bot', type: 'machine', status: 'active' }),
+      },
+    })
+  })
+
+  describe('when the hand-edit check cannot be recorded', () => {
+    test('list refuses with exit 1 and prints nothing', async () => {
+      expect((await principal(['add', 'ops', '--type', 'human'])).code).toBe(0)
+      let trips = 0
+      installed.push(
+        spyOn(audit, 'observeAuthorityFile').mockImplementation(async () => {
+          trips += 1
+          throw new Error(APPEND_SENTINEL)
+        }),
+      )
+
+      const { code, stdout, stderr } = await principal(['list'])
+
+      expect(trips).toBe(1)
+      expect(code).toBe(1)
+      expect(stdout).toBe('')
+      expect(stderr).not.toContain(APPEND_SENTINEL)
+    })
+  })
+
+  test('an add followed by a list records no hand edit', async () => {
+    expect((await principal(['add', 'ops', '--type', 'human', '--key', KEY])).code).toBe(0)
+
+    expect((await principal(['list'])).code).toBe(0)
+
+    expect(ofType(OBSERVED)).toHaveLength(0)
+  })
+
+  test('an add whose record cannot be written exits 1 and leaves no file where there was none', async () => {
+    const trips = failAppend('principal.added')
+
+    const { code, stdout, stderr } = await principal(['add', 'ops', '--type', 'human'])
+
+    expect(trips()).toBe(1)
+    expect(code).toBe(1)
+    expect(existsSync(file())).toBe(false)
+    expect(ofType(ADDED)).toHaveLength(0)
+    expect(stderr).toContain('The audit store could not record this change. Nothing was written.')
+    expect(stdout + stderr).not.toContain(APPEND_SENTINEL)
+  })
+
+  test('an add or a disable whose record cannot be written exits 1 and leaves the file byte-identical', async () => {
+    expect((await principal(['add', 'ops', '--type', 'human'])).code).toBe(0)
+    const bytes = readFileSync(file())
+
+    const addTrips = failAppend('principal.added')
+    const added = await principal(['add', 'ci-bot', '--type', 'machine'])
+    expect(addTrips()).toBe(1)
+    expect(added.code).toBe(1)
+    expect(readFileSync(file()).equals(bytes)).toBe(true)
+    expect(ofType(ADDED)).toHaveLength(1)
+
+    const disableTrips = failAppend('principal.disabled')
+    const disabled = await principal(['disable', 'ops'])
+    expect(disableTrips()).toBe(1)
+    expect(disabled.code).toBe(1)
+    expect(readFileSync(file()).equals(bytes)).toBe(true)
+    expect(ofType(DISABLED)).toHaveLength(0)
+    expect(added.stdout + added.stderr + disabled.stdout + disabled.stderr).not.toContain(APPEND_SENTINEL)
+  })
+
+  test('a principal with a key and one without go through the same add, list and disable, and their records differ only in their own fields', async () => {
+    expect((await principal(['add', 'alpha', '--type', 'machine', '--key', KEY])).code).toBe(0)
+    expect((await principal(['add', 'beta', '--type', 'machine'])).code).toBe(0)
+
+    const listed = await principal(['list'])
+    expect(listed.code).toBe(0)
+    expect(listed.stdout.split('\n').filter(Boolean)).toEqual(['alpha\tmachine\tactive\tkey', 'beta\tmachine\tactive\tno key'])
+
+    expect((await principal(['disable', 'alpha'])).code).toBe(0)
+    expect((await principal(['disable', 'beta'])).code).toBe(0)
+    expect(registry().principals.map((p) => p.status)).toEqual(['disabled', 'disabled'])
+
+    const [withKey, without] = ofType(ADDED).map((l) => l.data)
+    expect(Object.keys(withKey!)).toEqual(Object.keys(without!))
+    expect(Object.keys(withKey!)).toEqual(['id', 'type', 'key_sha256', 'sha256', 'entries'])
+    expect(withKey!.key_sha256).toBe(sha(KEY))
+    expect(without!.key_sha256).toBeNull()
+    expect(ofType(DISABLED).map((l) => Object.keys(l.data))).toEqual([
+      ['id', 'sha256', 'entries'],
+      ['id', 'sha256', 'entries'],
+    ])
+  })
+})
