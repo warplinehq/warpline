@@ -3754,3 +3754,58 @@ change on its account. `warpline resolve` answers one (§ 10), which closes it.
 `audit` is `null` only when the Checkpoint could not be written. The advance
 then exits `70` (§ 11). The object holds integers and identifiers only. The
 dead-man file does not carry it.
+
+## 15. The principal registry
+
+`<home>/principals.json` names who may act. It is owner-only: mode `0600`
+after every write, a file that was looser beforehand included. A missing file
+is an empty registry.
+
+```json
+{
+  "principals": [
+    { "id": "ops", "type": "human", "status": "active" },
+    { "id": "ci-bot", "type": "machine", "status": "disabled", "key": "ssh-ed25519 AAAA..." }
+  ]
+}
+```
+
+| Field | Value |
+|-------|-------|
+| `id` | 1 to 64 characters of `a-z`, `0-9`, `.`, `_` and `-`, starting with a letter or digit. Unique in the file. |
+| `type` | `human` or `machine`. |
+| `status` | `active` or `disabled`. |
+| `key` | Optional. One key, 1 to 8192 characters with no control character. Stored here and nowhere else. |
+
+The file has one writer, `warpline principal`:
+
+- `warpline principal add <id> --type human|machine [--key <key>]` adds an
+  active entry at the end of the file.
+- `warpline principal disable <id>` sets an active entry's status to
+  `disabled`.
+- `warpline principal list` prints one tab-separated line per entry, in file
+  order: the id, the type, the status, and `key` or `no key`. It never prints
+  the key. With no file it prints nothing and exits `0`.
+
+Each add appends `principal.added`, and each disable `principal.disabled`, to
+the audit store (§ 14) before the file changes. The record carries the id, the
+sha256 of the exact bytes about to be written, and `entries`, each id mapped to
+the sha256 of its entry (`id`, `type`, `status`, then `key` when set, as JSON
+in that order). `principal.added` also carries the type and `key_sha256`, the
+key's sha256 or null. The key itself is never on the record. When the append
+fails, nothing is written and the verb exits `1`.
+
+Ids are never deleted or reused. Disable is the only way out of the registry.
+Adding an id that is already in the file, active or disabled, is refused with
+exit `1` and no record, and so is disabling an entry that is already disabled or
+an id that is not there. No principal is ever inferred from the account running
+the command. An id comes from the operator's argument and from nowhere else, and
+`add` with no id is a usage error.
+
+The file may still be edited by hand. Every read by `warpline principal`
+compares its bytes with the last digest the store holds, before the verb acts on
+what it read, and a difference is recorded as `principal_registry.observed`
+naming the ids whose entry digests changed (§ 14). When that record cannot be
+written the verb refuses with exit `1`. A file that will not parse, or that
+fails the schema, is refused with a message naming key paths and schema facts,
+never a value from the file.

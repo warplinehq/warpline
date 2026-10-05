@@ -52,6 +52,7 @@ Commands:
   revoke     Clear the current session approval
   audit      Print the record's head (seq and hash) to anchor off this box
   prefs      Set one guardrail in preferences.json, on the record
+  principal  Add, disable or list the people and machines who may act
 
   --help     Show this message
 `
@@ -138,6 +139,11 @@ export async function main(argv: string[]): Promise<number> {
 
       case 'prefs': {
         const { run } = await import('./prefs.js')
+        return await run(rest)
+      }
+
+      case 'principal': {
+        const { run } = await import('./principal.js')
         return await run(rest)
       }
 

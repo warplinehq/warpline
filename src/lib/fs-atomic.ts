@@ -11,8 +11,13 @@
  *   3. `rename(tmp, path)` — POSIX-atomic on the same filesystem.
  *   4. On failure (serialise / write / rename), best-effort unlink the temp file
  *      so we never leak half-written artefacts alongside the target.
+ *
+ * `atomicWriteJson`'s optional `mode` is set on the temp file by the write and
+ * again by `chmod` before the rename: the write's mode is masked by the umask,
+ * and the rename installs the temp inode, so the target ends up with exactly
+ * that mode whatever the old file had.
  */
-import { writeFile, rename, mkdir, readFile, unlink } from 'node:fs/promises'
+import { writeFile, rename, mkdir, readFile, unlink, chmod } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 function tmpSuffix(): string {
@@ -30,9 +35,9 @@ async function bestEffortUnlink(path: string): Promise<void> {
 /**
  * Atomically write `value` as pretty-printed JSON to `path`. Parent directories
  * are created if missing. On serialise / write / rename failure the target is
- * left untouched.
+ * left untouched. With `opts.mode`, the written file has exactly that mode.
  */
-export async function atomicWriteJson<T>(path: string, value: T): Promise<void> {
+export async function atomicWriteJson<T>(path: string, value: T, opts: { mode?: number } = {}): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
   const tmp = `${path}${tmpSuffix()}`
   let serialised: string
@@ -43,7 +48,12 @@ export async function atomicWriteJson<T>(path: string, value: T): Promise<void> 
     throw err
   }
   try {
-    await writeFile(tmp, serialised, 'utf-8')
+    if (opts.mode === undefined) {
+      await writeFile(tmp, serialised, 'utf-8')
+    } else {
+      await writeFile(tmp, serialised, { encoding: 'utf-8', mode: opts.mode })
+      await chmod(tmp, opts.mode)
+    }
     await rename(tmp, path)
   } catch (err) {
     await bestEffortUnlink(tmp)

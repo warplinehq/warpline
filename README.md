@@ -244,6 +244,9 @@ npx warpline deny my-plugin
 # did not ship. Takes the effect id the refusal printed; then approve again.
 npx warpline resolve my-plugin --not-shipped <effect-id>
 
+# Register who may act, by id; disable is the only way out, and every change is on the audit record
+npx warpline principal add ops --type human
+
 # Change one guardrail; the change is on the audit record before it is written
 npx warpline prefs set review_gate true
 
@@ -254,7 +257,7 @@ npx warpline audit head
 npx warpline revoke
 ```
 
-Those twelve subcommands are the whole CLI surface. `advance` is the one a
+Those thirteen subcommands are the whole CLI surface. `advance` is the one a
 scheduler calls, and its exit codes are contract surface —
 [the exit code table](docs/runtime-spec.md#11-exit-codes) is what a monitor
 keys on. The same work is also a library call, `runAdvance()` from the package

@@ -97,6 +97,16 @@ export function preferencesPath(): string {
 }
 
 /**
+ * The principal registry: who may act, by id. Owner-only, written by
+ * `warpline principal` alone.
+ *
+ * Internal. This is NOT re-exported from `paths-public.ts`.
+ */
+export function principalsPath(): string {
+  return path.join(warplineHome(), 'principals.json')
+}
+
+/**
  * Operator-authored configuration for one plugin.
  *
  * Home-level rather than inside the plugin directory: a plugin directory is
