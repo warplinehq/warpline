@@ -140,3 +140,27 @@ test('a fire killed between its intent and its outcome is listed indeterminate b
   expect(existsSync(join(home, 'invoked'))).toBe(true)
   expect(doc.plugins).toEqual([{ name: 'killer', state: 'completed' }])
 })
+
+test('a fire killed between its intent and its outcome is answered by seq, and the next advance lists nothing indeterminate', () => {
+  expect(bin(['approve', 'killer']).status).toBe(0)
+  expect(bin(['advance']).signal).toBe('SIGKILL')
+  const intents = auditLines().filter((l) => l.type === 'warpline.audit.fire.intent' && l.data.plugin === 'killer')
+  expect(intents).toHaveLength(1)
+  // The kill left the run lock behind. This is the test's own temp home.
+  rmSync(join(home, 'state', '.lock'), { force: true })
+
+  const answered = bin(['resolve', '--intent', String(intents[0]!.warplineseq), '--not-shipped'])
+
+  expect(answered.status).toBe(0)
+  const next = bin(['advance', '--json'])
+  expect(next.status).toBe(0)
+  const doc = JSON.parse(String(next.stdout)) as { audit?: { indeterminate: unknown[] } }
+  expect(doc.audit?.indeterminate).toEqual([])
+  const head = bin(['audit', 'head'])
+  expect(head.status).toBe(0)
+  const anchor = join(home, 'anchor')
+  writeFileSync(anchor, String(head.stdout))
+  const verified = bin(['audit', 'verify', '--checkpoint', anchor])
+  expect(String(verified.stdout)).toContain('verdict: clean')
+  expect(String(verified.stdout)).not.toContain('open intent:')
+})

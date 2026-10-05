@@ -726,7 +726,7 @@ describe('content', () => {
       await audit.appendAudit(
         path,
         'fire.resolved',
-        { plugin: 'answered', effect_id: hex('answered effect'), intent_seq: answered.seq },
+        { plugin: 'answered', effect_id: hex('answered effect'), intent_seq: answered.seq, answer: 'not_shipped' },
         opts,
       )
 

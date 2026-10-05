@@ -498,7 +498,7 @@ describe('segments', () => {
   test('carry: fire.resolved closes its intent, and a fire.refused with no intent_seq closes nothing', async () => {
     const a = await kept('fire.intent', { plugin: 'a', run_id: 'r1', class: 'session', effect_id: null, fingerprint: null })
     const b = await kept('fire.intent', { plugin: 'b', run_id: 'r2', class: 'session', effect_id: null, fingerprint: null })
-    await kept('fire.resolved', { plugin: 'a', effect_id: 'f'.repeat(64), intent_seq: a.seq })
+    await kept('fire.resolved', { plugin: 'a', effect_id: 'f'.repeat(64), intent_seq: a.seq, answer: 'not_shipped' })
     await kept('fire.refused', { plugin: 'b', run_id: 'r2', reason: 'outside_window', intent_seq: null })
 
     await rotate()

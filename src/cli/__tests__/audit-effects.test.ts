@@ -25,7 +25,8 @@ import * as audit from '../../lib/audit-log.js'
 import * as store from '../../runtime/engine-state-store.js'
 import * as gate from '../../runtime/approval-gate.js'
 import { approvalStanding, loadPluginManifests } from '../../runtime/engine.js'
-import { _setHome } from '../../lib/paths.js'
+import { _setHome, lockPath as runLockPath } from '../../lib/paths.js'
+import { acquireLock, releaseLock } from '../../runtime/lock.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
 import { main } from '../warpline.js'
@@ -653,7 +654,9 @@ describe('resolve', () => {
 
     expect(code).toBe(0)
     expect(seen()).toBe(true)
-    expect(recordsOf('fire.resolved')).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq }])
+    expect(recordsOf('fire.resolved')).toEqual([
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'not_shipped' },
+    ])
     expect((await audit.openIntents(statePathOf())).filter((i) => i.plugin === 'sender')).toEqual([])
   })
 
@@ -666,7 +669,7 @@ describe('resolve', () => {
     const { code } = await capture(['resolve', 'sender', '--not-shipped', effectId])
 
     expect(code).toBe(0)
-    expect(recordsOf('fire.resolved')).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: null }])
+    expect(recordsOf('fire.resolved')).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: null, answer: 'not_shipped' }])
   })
 
   test('a resolve whose record cannot be written answers nothing', async () => {
@@ -683,6 +686,199 @@ describe('resolve', () => {
     expect(readFileSync(statePathOf())).toEqual(stateBefore)
     expect(await senderStanding()).toBe('indeterminate')
     expect(recordsOf('fire.resolved')).toEqual([])
+    expectNoSentinel()
+  })
+})
+
+// -- Resolve by seq: any open intent ------------------------------------------
+
+/**
+ * `mailer`, a session plugin, granted and fired, with its `fire.outcome`
+ * append failed once so its intent stays open. The spy is removed before this
+ * returns, so a case can install its own. Returns the open intent.
+ */
+async function sessionIntentLeftOpen(): Promise<Line> {
+  writeFileSync(join(home, 'preferences.json'), JSON.stringify({ review_gate: false }))
+  addPlugin('mailer', { autonomy_level: 'autonomous', ttl_hours: 0.001 })
+  writeFileSync(
+    join(home, 'plugins', 'mailer', 'handler.ts'),
+    `export async function handler() {
+  return {
+    status: 'success',
+    phases_completed: ['send'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'sent',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`,
+  )
+  expect((await capture(['approve', 'mailer'])).code).toBe(0)
+  const spy = failAppend('fire.outcome')
+  const { code } = await capture(['advance'])
+  expect(spy.trips()).toBe(1)
+  installed.pop()!.mockRestore()
+  expect(code).toBe(70)
+  const intents = auditLines(home).filter((l) => l.type === 'warpline.audit.fire.intent' && l.data.plugin === 'mailer')
+  expect(intents).toHaveLength(1)
+  expect((await audit.openIntents(statePathOf())).map((i) => i.seq)).toEqual([intents[0]!.warplineseq])
+  return intents[0]!
+}
+
+/** The by-seq form's usage line, which every malformed form prints. */
+const BY_SEQ_USAGE = 'warpline resolve --intent <seq> --shipped|--not-shipped'
+
+/** The whole-home snapshot without the audit store, for a case that appends one record. */
+async function snapshotOutsideStore(): Promise<string[]> {
+  return (await snapshotHome(home)).filter((l) => !l.startsWith('audit/'))
+}
+
+describe('resolve --intent', () => {
+  test('a session intent whose outcome could not be written is closed as shipped, by seq, with nothing else written', async () => {
+    const intent = await sessionIntentLeftOpen()
+    const seq = intent.warplineseq
+    const outside = await snapshotOutsideStore()
+    const linesBefore = auditLines(home).length
+
+    const { code, stdout, stderr } = await capture(['resolve', '--intent', String(seq), '--shipped'])
+
+    expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
+    expect(stdout).toContain(`fire intent ${seq} for mailer (run ${intent.data.run_id as string})`)
+    const added = auditLines(home).slice(linesBefore)
+    expect(added.map((l) => l.type)).toEqual(['warpline.audit.fire.resolved'])
+    expect(added[0]!.data).toEqual({ plugin: 'mailer', effect_id: null, intent_seq: seq, answer: 'shipped' })
+    expect((await audit.openIntents(statePathOf())).map((i) => i.seq)).not.toContain(seq)
+    expect(await snapshotOutsideStore()).toEqual(outside)
+  })
+
+  test('a content fire whose handler succeeded but whose outcome could not be written is closed by seq with its effect id', async () => {
+    seedFiringHome()
+    rmSync(join(home, 'fail'))
+    await capture(['advance'])
+    expect((await capture(['approve', 'sender', '--content', '--not-after', '2099-01-01T00:00'])).code).toBe(0)
+    const spy = failAppend('fire.outcome')
+    await capture(['advance'])
+    expect(spy.trips()).toBe(1)
+    expect(await senderStanding()).not.toBe('indeterminate')
+    const effectId = senderEffectId()
+    const intent = senderIntent()
+    expect((await audit.openIntents(statePathOf())).map((i) => i.seq)).toContain(intent.warplineseq)
+    const stateBefore = readFileSync(statePathOf())
+
+    const { code } = await capture(['resolve', '--intent', String(intent.warplineseq), '--shipped'])
+
+    expect(code).toBe(0)
+    expect(recordsOf('fire.resolved')).toEqual([
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+    ])
+    expect((await audit.openIntents(statePathOf())).filter((i) => i.plugin === 'sender')).toEqual([])
+    expect(readFileSync(statePathOf())).toEqual(stateBefore)
+  })
+
+  test('a content fire still marked and unconfirmed refuses --not-shipped by seq and points at the content form', async () => {
+    await fireAndFail(true)
+    const intent = senderIntent()
+    const before = await snapshotHome(home)
+
+    const { code, stderr } = await capture(['resolve', '--intent', String(intent.warplineseq), '--not-shipped'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('warpline resolve sender --not-shipped')
+    expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+    expect(await snapshotHome(home)).toEqual(before)
+  })
+
+  test('a content fire still marked and unconfirmed takes --shipped by seq, and its approval still reads indeterminate', async () => {
+    await fireAndFail(true)
+    const intent = senderIntent()
+    const effectId = senderEffectId()
+    const stateBefore = readFileSync(statePathOf())
+
+    const { code, stdout } = await capture(['resolve', '--intent', String(intent.warplineseq), '--shipped'])
+
+    expect(code).toBe(0)
+    expect(stdout).toContain('The content approval for sender still reads indeterminate')
+    expect(recordsOf('fire.resolved')).toEqual([
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+    ])
+    expect((await audit.openIntents(statePathOf())).filter((i) => i.plugin === 'sender')).toEqual([])
+    expect(await senderStanding()).toBe('indeterminate')
+    expect(readFileSync(statePathOf())).toEqual(stateBefore)
+  })
+
+  test('a seq that is not an open intent is refused, names nothing typed, and writes nothing', async () => {
+    await fireAndFail(false)
+    const closed = senderIntent().warplineseq
+    expect(recordsOf('fire.outcome').map((d) => d.intent_seq)).toContain(closed)
+    expect((await capture(['deny', 'p'])).code).toBe(0)
+    const denial = auditLines(home).find((l) => l.type === 'warpline.audit.denial.recorded')!.warplineseq
+    const pastHead = (await audit.readHead(statePathOf())).seq + 1
+    const before = await snapshotHome(home)
+
+    for (const seq of [closed, denial, pastHead]) {
+      const { code, stderr } = await capture(['resolve', '--intent', String(seq), '--shipped'])
+
+      expect(`${seq}: ${code}`).toBe(`${seq}: 1`)
+      expect(stderr).toContain('No open fire intent has that seq')
+      expect(stderr).not.toContain(String(seq))
+      expect(await snapshotHome(home)).toEqual(before)
+    }
+  })
+
+  test('a malformed by-seq answer is a usage error that writes nothing', async () => {
+    const before = await snapshotHome(home)
+
+    for (const argv of [
+      ['--intent', '5', 'sender', '--shipped'],
+      ['--intent', '5', '--shipped', '--not-shipped'],
+      ['--intent', '5'],
+      ['--intent', '0', '--shipped'],
+      ['--intent', '01', '--shipped'],
+      ['--intent', '1e3', '--shipped'],
+      ['--intent', 'abc', '--shipped'],
+      ['--intent=-1', '--shipped'],
+    ]) {
+      const { code, stderr } = await capture(['resolve', ...argv])
+
+      expect(`${argv.join(' ')}: ${code}`).toBe(`${argv.join(' ')}: 1`)
+      expect(stderr).toContain(BY_SEQ_USAGE)
+      expect(await snapshotHome(home)).toEqual(before)
+    }
+  })
+
+  test('a live advance refuses the by-seq answer as it refuses the content form', async () => {
+    const intent = await sessionIntentLeftOpen()
+    const held = await acquireLock(runLockPath())
+    try {
+      const before = await snapshotHome(home)
+
+      const { code, stderr } = await capture(['resolve', '--intent', String(intent.warplineseq), '--not-shipped'])
+
+      expect(code).toBe(1)
+      expect(stderr).toContain('An advance is running')
+      expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+      expect(await snapshotHome(home)).toEqual(before)
+    } finally {
+      await releaseLock(runLockPath(), held.run_id)
+    }
+  })
+
+  test('a by-seq answer whose record cannot be written answers nothing', async () => {
+    const intent = await sessionIntentLeftOpen()
+    const stateBefore = readFileSync(statePathOf())
+    const spy = failAppend('fire.resolved')
+
+    const { code, stderr } = await capture(['resolve', '--intent', String(intent.warplineseq), '--shipped'])
+
+    expect(code).toBe(1)
+    expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+    expect(spy.trips()).toBe(1)
+    expect((await audit.openIntents(statePathOf())).map((i) => i.seq)).toContain(intent.warplineseq)
+    expect(recordsOf('fire.resolved')).toEqual([])
+    expect(readFileSync(statePathOf())).toEqual(stateBefore)
     expectNoSentinel()
   })
 })
