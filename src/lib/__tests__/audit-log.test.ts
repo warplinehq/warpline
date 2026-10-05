@@ -14,7 +14,17 @@
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -230,5 +240,269 @@ describe('audit store: every append is synced before it resolves', () => {
 
     await lift()
     expect(spy!.mock.calls.length).toBeGreaterThanOrEqual(afterFirst + 1)
+  })
+})
+
+describe('segments', () => {
+  type Line = { raw: string; obj: Record<string, any> }
+  type Opts = { now?: () => number; maxSegmentBytes?: number; maxSegmentAgeMs?: number }
+  const append = audit.appendAudit as unknown as (
+    s: string,
+    k: string,
+    d: unknown,
+    o?: Opts,
+  ) => Promise<{ seq: number; head: string }>
+
+  const T = Date.parse('2026-01-01T00:00:00.000Z')
+  const OPENED = 'warpline.audit.segment.opened'
+  const SEALED = 'warpline.audit.segment.sealed'
+  const CHECKPOINT = 'warpline.audit.checkpoint.recorded'
+  const LIFTED = 'warpline.audit.denial.lifted'
+  const name = (seq: number) => `${String(seq).padStart(16, '0')}.jsonl`
+
+  /** The segment files, in name order. */
+  const segments = (): string[] => readdirSync(auditDir).filter((n) => /^\d{16}\.jsonl$/.test(n)).sort()
+
+  /** A segment's complete lines, raw and parsed. A partial last line is left out. */
+  function lines(file: string): Line[] {
+    const raw = readFileSync(join(auditDir, file), 'utf-8').split('\n').slice(0, -1)
+    return raw.map((r) => ({ raw: r, obj: JSON.parse(r) }))
+  }
+
+  /** Every segment file's bytes, so a later check can hold each as a prefix. */
+  function snap(): Map<string, Buffer> {
+    return new Map(segments().map((n) => [n, readFileSync(join(auditDir, n))]))
+  }
+
+  /** Each file that existed before still starts with its old bytes. */
+  function expectPrefix(before: Map<string, Buffer>): void {
+    for (const [n, old] of before) {
+      expect(readFileSync(join(auditDir, n)).subarray(0, old.length).equals(old)).toBe(true)
+    }
+  }
+
+  /** An append that also proves no existing byte moved. */
+  async function kept(kind: string, data: unknown, opts?: Opts) {
+    const before = existsSync(auditDir) ? snap() : new Map<string, Buffer>()
+    const result = await append(statePath, kind, data, opts)
+    expectPrefix(before)
+    return result
+  }
+
+  const liftKept = (opts?: Opts) => kept('denial.lifted', { plugin: 'p', fingerprint: HEX_A }, opts)
+
+  /** Whole store: no partial line, contiguous seq, unbroken chain, name order is seq order. */
+  function expectWholeChain(): Line[] {
+    const names = segments()
+    const all: Line[] = []
+    for (const n of names) {
+      expect(readFileSync(join(auditDir, n), 'utf-8').endsWith('\n')).toBe(true)
+      const ls = lines(n)
+      expect(n).toBe(name(ls[0]!.obj.warplineseq))
+      all.push(...ls)
+    }
+    expect(all.map((l) => l.obj.warplineseq)).toEqual(all.map((_, i) => i + 1))
+    for (let i = 1; i < all.length; i++) expect(all[i]!.obj.warplineprev).toBe(sha256(all[i - 1]!.raw))
+    return all
+  }
+
+  test('size: a segment at the threshold is sealed, and the record lands after opened and a checkpoint', async () => {
+    await liftKept()
+    await liftKept()
+    const n = statSync(join(auditDir, name(1))).size
+
+    const result = await liftKept({ maxSegmentBytes: n })
+
+    const names = segments()
+    expect(names).toHaveLength(2)
+    const a = lines(names[0]!)
+    const b = lines(names[1]!)
+    const sealed = a[a.length - 1]!
+    expect(sealed.obj.type).toBe(SEALED)
+    expect(sealed.obj.data).toEqual({ reason: 'size', bytes: n })
+    expect(names[1]).toBe(name(sealed.obj.warplineseq + 1))
+    expect(b.map((l) => l.obj.type)).toEqual([OPENED, CHECKPOINT, LIFTED])
+
+    const opened = b[0]!
+    expect(opened.obj.warplineprev).toBe(sha256(sealed.raw))
+    expect(opened.obj.data).toEqual({
+      home: a[0]!.obj.source,
+      version: PACKAGE_VERSION,
+      fragment: null,
+      authority: { preferences: null, principals: null },
+      open_intents: [],
+    })
+    expect(b[1]!.obj.data).toEqual({ origin: a[0]!.obj.source, size: opened.obj.warplineseq, root: sha256(opened.raw) })
+    expect([...names].sort()).toEqual(names)
+
+    const all = expectWholeChain()
+    expect(result).toEqual({ seq: all.length, head: sha256(all[all.length - 1]!.raw) })
+    expect(await audit.readHead(statePath)).toEqual(result)
+  })
+
+  test('size: a segment one byte under the threshold takes the append', async () => {
+    await liftKept()
+    await liftKept()
+    const n = statSync(join(auditDir, name(1))).size
+
+    await liftKept({ maxSegmentBytes: n + 1 })
+
+    expect(segments()).toEqual([name(1)])
+    expect(lines(name(1)).map((l) => l.obj.type)).toEqual([OPENED, LIFTED, LIFTED, LIFTED])
+  })
+
+  test('age: a segment as old as the threshold from its opened time is sealed', async () => {
+    await liftKept({ now: () => T })
+
+    await liftKept({ now: () => T + 1000, maxSegmentAgeMs: 1000 })
+
+    const names = segments()
+    expect(names).toHaveLength(2)
+    const a = lines(names[0]!)
+    expect(a[a.length - 1]!.obj.type).toBe(SEALED)
+    expect(a[a.length - 1]!.obj.data.reason).toBe('age')
+    expect(lines(names[1]!).map((l) => l.obj.type)).toEqual([OPENED, CHECKPOINT, LIFTED])
+    expectWholeChain()
+  })
+
+  test('age: a segment one ms younger than the threshold takes the append', async () => {
+    await liftKept({ now: () => T })
+
+    await liftKept({ now: () => T + 999, maxSegmentAgeMs: 1000 })
+
+    expect(segments()).toEqual([name(1)])
+  })
+
+  test('torn: a partial last line is acknowledged in a new segment, and every old byte stays', async () => {
+    await liftKept()
+    await liftKept()
+    const first = join(auditDir, name(1))
+    const fragment = '{"specversion":"1.0","id":"9'
+    appendFileSync(first, fragment)
+    const old = readFileSync(first)
+    const lastComplete = lines(name(1)).at(-1)!
+
+    const result = await liftKept()
+
+    expect(readFileSync(first).equals(old)).toBe(true)
+    expect(readFileSync(first, 'utf-8').endsWith(fragment)).toBe(true)
+    expect(lines(name(1)).map((l) => l.obj.type)).not.toContain(SEALED)
+
+    const names = segments()
+    expect(names).toEqual([name(1), name(lastComplete.obj.warplineseq + 1)])
+    const b = lines(names[1]!)
+    expect(b.map((l) => l.obj.type)).toEqual([OPENED, LIFTED])
+    expect(b[0]!.obj.warplineprev).toBe(sha256(lastComplete.raw))
+    expect(b[0]!.obj.data.fragment).toEqual({ bytes: Buffer.byteLength(fragment), sha256: sha256(fragment) })
+    expect(b[1]!.obj.warplineprev).toBe(sha256(b[0]!.raw))
+    expect(result).toEqual({ seq: b[1]!.obj.warplineseq, head: sha256(b[1]!.raw) })
+  })
+
+  test('a segment holding only a partial line refuses the append, names the file, and writes nothing', async () => {
+    await liftKept()
+    const orphan = name(3)
+    writeFileSync(join(auditDir, orphan), '{"specversion":"1.0"')
+    const before = await snapshotHome(tmp)
+
+    let caught: unknown
+    try {
+      await append(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A })
+    } catch (err) {
+      caught = err
+    }
+
+    expect((caught as Error | undefined)?.name).toBe('AuditAppendError')
+    expect((caught as Error).message).toContain(orphan)
+    expect(await snapshotHome(tmp)).toEqual(before)
+  })
+
+  test('heal: a sealed segment with no successor gets opened and the record, and no checkpoint', async () => {
+    await liftKept()
+    await liftKept()
+    await liftKept()
+    const first = join(auditDir, name(1))
+    const prior = lines(name(1))
+    const last = prior.at(-1)!
+    const sealedRaw = JSON.stringify({
+      specversion: '1.0',
+      id: String(last.obj.warplineseq + 1),
+      source: last.obj.source,
+      type: SEALED,
+      time: new Date().toISOString(),
+      datacontenttype: 'application/json',
+      warplineseq: last.obj.warplineseq + 1,
+      warplineprev: sha256(last.raw),
+      data: { reason: 'size', bytes: statSync(first).size },
+    })
+    appendFileSync(first, `${sealedRaw}\n`)
+
+    await liftKept()
+
+    const names = segments()
+    expect(names).toEqual([name(1), name(last.obj.warplineseq + 2)])
+    const b = lines(names[1]!)
+    expect(b.map((l) => l.obj.type)).toEqual([OPENED, LIFTED])
+    expect(b[0]!.obj.warplineprev).toBe(sha256(sealedRaw))
+    expect(b[0]!.obj.data.fragment).toBeNull()
+    expectWholeChain()
+  })
+
+  /** The open_intents of the newest segment.opened. */
+  const lastOpened = () => lines(segments().at(-1)!)[0]!.obj
+  const rotate = () => liftKept({ maxSegmentBytes: 1 })
+
+  test('carry: authority and open intents ride every segment.opened, and a closed intent drops out', async () => {
+    await kept('preference.set', { key: 'review_gate', old: null, new: 'b'.repeat(64) })
+    await kept('principal.added', {
+      id: 'ops',
+      type: 'human',
+      key_sha256: null,
+      sha256: 'c'.repeat(64),
+      entries: { ops: 'd'.repeat(64) },
+    })
+    const a = await kept('fire.intent', { plugin: 'a', run_id: 'r1', class: 'session', effect_id: null, fingerprint: null })
+    const b = await kept('fire.intent', {
+      plugin: 'b',
+      run_id: 'r1',
+      class: 'content',
+      effect_id: 'e'.repeat(64),
+      fingerprint: HEX_A,
+    })
+    const authority = {
+      preferences: 'b'.repeat(64),
+      principals: { sha256: 'c'.repeat(64), entries: { ops: 'd'.repeat(64) } },
+    }
+    const A = { seq: a.seq, plugin: 'a', run_id: 'r1', effect_id: null }
+    const B = { seq: b.seq, plugin: 'b', run_id: 'r1', effect_id: 'e'.repeat(64) }
+
+    await rotate()
+    expect(segments()).toHaveLength(2)
+    expect(lastOpened().data.authority).toEqual(authority)
+    expect(lastOpened().data.open_intents).toEqual([A, B])
+
+    await kept('fire.outcome', { plugin: 'a', run_id: 'r1', intent_seq: a.seq, status: 'success' })
+    await rotate()
+    expect(segments()).toHaveLength(3)
+    expect(lastOpened().data.authority).toEqual(authority)
+    expect(lastOpened().data.open_intents).toEqual([B])
+
+    await kept('fire.refused', { plugin: 'b', run_id: 'r1', reason: 'mark_uncertain', intent_seq: b.seq })
+    await rotate()
+    expect(segments()).toHaveLength(4)
+    expect(lastOpened().data.authority).toEqual(authority)
+    expect(lastOpened().data.open_intents).toEqual([])
+    expectWholeChain()
+  })
+
+  test('carry: fire.resolved closes its intent, and a fire.refused with no intent_seq closes nothing', async () => {
+    const a = await kept('fire.intent', { plugin: 'a', run_id: 'r1', class: 'session', effect_id: null, fingerprint: null })
+    const b = await kept('fire.intent', { plugin: 'b', run_id: 'r2', class: 'session', effect_id: null, fingerprint: null })
+    await kept('fire.resolved', { plugin: 'a', effect_id: 'f'.repeat(64), intent_seq: a.seq })
+    await kept('fire.refused', { plugin: 'b', run_id: 'r2', reason: 'outside_window', intent_seq: null })
+
+    await rotate()
+
+    expect(lastOpened().data.open_intents).toEqual([{ seq: b.seq, plugin: 'b', run_id: 'r2', effect_id: null }])
+    expect(lastOpened().data.authority).toEqual({ preferences: null, principals: null })
   })
 })
