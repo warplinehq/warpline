@@ -3655,7 +3655,10 @@ otherwise have to look for in an earlier file:
   intent stays open across as many segments as it takes to close it.
 
 So a reader that needs the current authority digests or the open intents reads
-the active segment and nothing else.
+the active segment and nothing else. Every line it walks must hold data the
+writer would accept for its kind. A line that doesn't, such as one added by
+hand, makes the segment unreadable for that walk, so no value the writer would
+refuse reaches a reader's output.
 
 **A torn tail.** A write that stops part way leaves a partial last line. The
 writer never writes past it and never removes it. The next append seals

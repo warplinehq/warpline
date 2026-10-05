@@ -335,15 +335,23 @@ function segmentState(lines: StoredRecord[], carried: Carried): Carried {
   return { authority: { preferences, principals }, open_intents: [...open.values()] }
 }
 
+/** True when a record's data is what the writer would have accepted for its kind. */
+function writerShaped(r: StoredRecord): boolean {
+  const kind = r.type.slice('warpline.audit.'.length)
+  return r.type.startsWith('warpline.audit.') && Object.hasOwn(DATA, kind) && DATA[kind as keyof typeof DATA].safeParse(r.data).success
+}
+
 /**
  * The state a segment's complete lines walk to, or undefined when one of them
- * is not a record or the first is not its `segment.opened`. `text` ends at a
- * newline, or is empty.
+ * is not a record the writer could have written, or the first is not its
+ * `segment.opened`. Every field the walk carries is checked, so a hand-added
+ * line cannot carry a value no writer would (a plugin name that breaks a line,
+ * say) into a reader's output. `text` ends at a newline, or is empty.
  */
 function stateOf(text: string): Carried | undefined {
   const records = text.split('\n').slice(0, -1).map(parseRecord)
   const carried = DATA['segment.opened'].safeParse(records[0]?.data)
-  if (records.some((r) => r === undefined) || records[0]?.type !== 'warpline.audit.segment.opened' || !carried.success) {
+  if (records.some((r) => r === undefined || !writerShaped(r)) || records[0]?.type !== 'warpline.audit.segment.opened' || !carried.success) {
     return undefined
   }
   return segmentState(records as StoredRecord[], carried.data)
