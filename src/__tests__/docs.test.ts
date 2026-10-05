@@ -2413,3 +2413,35 @@ describe('the runtime dependency tree stays at one package', () => {
     expect(Object.keys(pkg.dependencies).sort()).toEqual(['zod'])
   })
 })
+
+// ── The audit store is tamper-evident, never tamper-proof ─────────────────
+//
+// The store detects tampering relative to the last Checkpoint an operator
+// exported. Anyone holding the box can rewrite every byte of it, so a doc that
+// calls it tamper-proof promises what the design cannot keep.
+
+/** The files whose text calls something tamper-proof, in any spelling. */
+function tamperProofOffenders(texts: Record<string, string>): string[] {
+  return Object.entries(texts)
+    .filter(([, text]) => /tamper[- ]?proof/i.test(text))
+    .map(([file]) => file)
+}
+
+describe("the audit store's docs", () => {
+  test('no doc and not the README calls anything tamper-proof', () => {
+    const files = markdownFiles().filter((f) => f.startsWith('docs/') || f === 'README.md')
+    expect(files).toContain('docs/runtime-spec.md')
+    expect(files).toContain('README.md')
+    expect(tamperProofOffenders(Object.fromEntries(files.map((f) => [f, read(f)])))).toEqual([])
+  })
+
+  test('the check names a file that says it', () => {
+    expect(
+      tamperProofOffenders({
+        'a.md': 'this store is tamper-proof',
+        'b.md': 'Tamperproof, they said',
+        'c.md': 'tamper-evident relative to the last exported Checkpoint',
+      }),
+    ).toEqual(['a.md', 'b.md'])
+  })
+})
