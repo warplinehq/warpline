@@ -41,8 +41,9 @@
  */
 import * as util from 'node:util'
 import { invokePlugin } from '../runtime/invoke-plugin.js'
-import { readPreferences } from '../lib/preferences.js'
-import { preferencesPath } from '../lib/paths.js'
+import { readPreferencesFile } from '../lib/preferences.js'
+import { engineStatePath, preferencesPath } from '../lib/paths.js'
+import { observeAuthorityFile } from '../lib/audit-log.js'
 import { exitAfterFlush } from '../lib/exit-after-flush.js'
 
 const USAGE =
@@ -203,7 +204,13 @@ export async function runPlugin(
     // artifact is written. That is a new failure mode for a manual run, and a
     // deliberate one: a trim on a cap nobody chose deletes what the operator
     // meant to keep.
-    const prefs = await readPreferences(preferencesPath())
+    //
+    // The bytes parsed are then compared with the audit store's record of the
+    // file, and a hand edit is recorded before the plugin runs. A failed append
+    // lands in the same catch: `ok: false`, exit 1, nothing invoked, and the
+    // error is the store's fixed sentence, which carries no value.
+    const { prefs, bytes } = await readPreferencesFile(preferencesPath())
+    await observeAuthorityFile(engineStatePath(), 'preferences.observed', bytes)
 
     // This verb reads no Grant, anywhere in this file, and it did not before
     // this argument existed either. What changes is that the absence is now a

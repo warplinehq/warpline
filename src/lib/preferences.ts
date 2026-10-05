@@ -5,8 +5,10 @@
  *   PreferencesSchema — Zod schema with all defaults
  *   DEFAULT_PREFERENCES — parsed defaults object
  *   PreferencesInvalidError — the file exists and cannot be used
- *   readPreferences()  — reads from disk; defaults on a missing file only,
+ *   readPreferencesFile() — reads from disk and returns the bytes it parsed;
+ *                        defaults and null bytes on a missing file only,
  *                        refuses an invalid one
+ *   readPreferences()  — the same, the preferences only
  *   writePreferences() — atomic write (tmp + rename), refuses what read refuses
  *   isQuietHours()     — check if current time is within quiet hours window
  *
@@ -124,17 +126,28 @@ export class PreferencesInvalidError extends Error {
  * build, so a downgrade needs that key removed from the file first.
  */
 export async function readPreferences(prefsPath: string): Promise<Preferences> {
-  let content: string
+  return (await readPreferencesFile(prefsPath)).prefs
+}
+
+/**
+ * `readPreferences`, also returning the exact bytes it parsed, or null for a
+ * missing file. A production read hands the bytes to the audit store, which
+ * compares their digest with the last one it recorded for this file.
+ */
+export async function readPreferencesFile(
+  prefsPath: string,
+): Promise<{ prefs: Preferences; bytes: Buffer | null }> {
+  let bytes: Buffer
   try {
-    content = await readFile(prefsPath, 'utf-8')
+    bytes = await readFile(prefsPath)
   } catch (err: unknown) {
-    if (isEnoent(err)) return DEFAULT_PREFERENCES
+    if (isEnoent(err)) return { prefs: DEFAULT_PREFERENCES, bytes: null }
     throw err
   }
 
   let parsed: unknown
   try {
-    parsed = JSON.parse(content)
+    parsed = JSON.parse(bytes.toString('utf-8'))
   } catch {
     // The parser's own message is not forwarded: Bun quotes the offending
     // token in it, which would put file content into this error.
@@ -145,7 +158,7 @@ export async function readPreferences(prefsPath: string): Promise<Preferences> {
   if (!result.success) {
     throw new PreferencesInvalidError(prefsPath, describeIssues(result.error.issues))
   }
-  return result.data
+  return { prefs: result.data, bytes }
 }
 
 /**

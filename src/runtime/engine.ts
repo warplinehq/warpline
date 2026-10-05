@@ -33,7 +33,7 @@ import {
 } from '../lib/paths.js'
 import { atomicWriteText } from '../lib/fs-atomic.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
-import { appendAudit, recordCheckpoint } from '../lib/audit-log.js'
+import { appendAudit, observeAuthorityFile, recordCheckpoint } from '../lib/audit-log.js'
 import type { AuditSummary } from '../lib/audit-log.js'
 import { advanceCounts } from './exit-codes.js'
 // The account's own type, imported rather than re-spelled as a `Pick` here: a
@@ -122,7 +122,7 @@ import {
   emitGateInvalidated,
   emitPluginDenied,
 } from '../board/engine-events.js'
-import { readPreferences, isQuietHours } from '../lib/preferences.js'
+import { readPreferencesFile, isQuietHours } from '../lib/preferences.js'
 import {
   checkTaskLock as smCheckTaskLock,
   pathsForStateFile,
@@ -2543,10 +2543,14 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // (test isolation / relocated homes), else the warpline home default. The
   // source system's comment promised this derivation but never implemented
   // it, so its engine tests silently read the LIVE preferences file.
+  //
+  // The bytes it parsed are compared with the audit store's record of the file
+  // once the run lock is held, before any value from it is used (the first
+  // statement inside the `try` below). Only a file that parsed gets that far.
   const resolvedPrefsPath =
     preferencesPath ??
     (options.stateDir ? join(dirname(options.stateDir), 'preferences.json') : defaultPreferencesPath())
-  const prefs = await readPreferences(resolvedPrefsPath)
+  const { prefs, bytes: prefsBytes } = await readPreferencesFile(resolvedPrefsPath)
 
   // The run lock. Acquired HERE — below the plugin-root and preferences
   // refusals above, above the state read below — so either refusal still
@@ -2584,6 +2588,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   const stopHeartbeat = startHeartbeat(resolvedLockPath, heldLock.run_id)
 
   try {
+    // A hand edit of preferences.json is on the record before anything below
+    // uses a value from it. A failed append throws out through the `finally`,
+    // which releases the lock, and `warpline advance` reports 75: nothing fired.
+    await observeAuthorityFile(stateDir, 'preferences.observed', prefsBytes)
 
     // A readable root that produced no manifests is its own outcome, not a
     // clean run over nothing. Computed once, here, above the quiet-hours guard

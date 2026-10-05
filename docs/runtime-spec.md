@@ -982,6 +982,19 @@ the file. A missing file is the built-in defaults. The strictness has one
 accepted cost: a key added by a later release is refused by an earlier one, so
 remove it before downgrading.
 
+Every production read of `preferences.json` is checked against the audit store
+(§ 14): an advance, once it holds the run lock and before it uses any value, and
+`warpline run`, before the plugin runs. Only a file that parsed is checked. The
+sha256 of the exact bytes parsed is compared with the last digest the store
+holds for the file. A difference appends `preferences.observed` naming the two
+digests, and neither what changed nor who changed it. A hand edit is a
+difference, so is a file the store has not seen and a file that was deleted.
+Bytes are compared, not values, so re-spacing the file is recorded too. A
+failed append refuses the read: `advance` exits `75` with nothing fired, and
+`run` exits `1` with `ok: false` and the plugin not run. An invalid file is
+refused before the comparison, as above, and is never digested. A missing file
+the store has never seen records nothing.
+
 One policy object, read by every path that deletes. Three record formats pruned
 on three literals would be three retention rules that agree until somebody tunes
 one.
@@ -3529,6 +3542,18 @@ Nothing writes `grant.renewed`, `ask.raised`, `ask.answered` or `handoff.tried`
 yet. Their schema admits nothing, so an append under any of them is refused
 until the work that writes them lands and defines their fields. The last three
 kinds in the table are written by the store itself, never by a caller.
+
+The two observed kinds come from comparing an authority file's bytes with the
+last digest the store holds for it, never from a warpline command.
+`preferences.observed` carries `old` and `new`, the whole file's sha256 before
+and after (null for a file the store had not seen, or one now missing), and
+`changed` and `editor`, which are always `unknown`. No value, key path or
+per-key digest is recorded. `principal_registry.observed` carries `old`, `new`
+and `editor` the same way, the new `entries` map of principal id to entry
+digest, and `changed_ids`: every id added, removed or whose entry digest
+differs from the last map recorded, sorted. The comparison and the append
+happen in one hold of the audit lock, against the active segment and the
+authority it carried forward (§ 14 Segments).
 
 Three kinds close a `fire.intent`: a `fire.outcome`, a `fire.refused` or a
 `fire.resolved` whose `intent_seq` is that intent's seq. One whose `intent_seq`

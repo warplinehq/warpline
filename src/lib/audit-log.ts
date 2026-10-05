@@ -701,6 +701,81 @@ export interface OpenIntent {
 }
 
 /**
+ * An authority file as the store last saw it, compared with the bytes a caller
+ * just parsed. Equal resolves null. Different appends one observed record and
+ * resolves its seq: `preferences.observed` names the two whole-file digests and
+ * nothing else, and `principal_registry.observed` adds every id whose entry
+ * digest was added, removed or changed, and the new id-to-digest map. Neither
+ * names an editor, which nothing here can know.
+ *
+ * `bytes` is exactly what was parsed, or null for a missing file. A whitespace
+ * edit that parses to the same values is still a change, because the digest is
+ * over the bytes.
+ *
+ * The last digest is the active segment's carried authority walked over its
+ * own lines, read in the same lock hold as the append, so two readers cannot
+ * both see the old digest and both record the change.
+ *
+ * Absence of observation must never read as absence of change. A missing file
+ * the store has never seen is the one case that writes nothing, and it creates
+ * no store either. Rejects with `AuditAppendError`, and the caller must then not
+ * use what it read.
+ */
+export async function observeAuthorityFile(
+  statePath: string,
+  kind: 'preferences.observed' | 'principal_registry.observed',
+  bytes: Buffer | null,
+  entries?: Record<string, string>,
+  opts: AppendOpts = {},
+): Promise<{ seq: number } | null> {
+  if (bytes === null && (await segmentsIn(auditDirFor(statePath))).length === 0) return null
+  return underLock(statePath, kind, opts, async (dir, time, limits) => {
+    const walked = await activeState(dir)
+    if (walked === undefined) throw new AuditAppendError(kind, 'the active segment holds a line that is not a record')
+    const { preferences, principals } = walked.authority
+    const now = bytes === null ? null : sha256(bytes)
+    let data: unknown
+    if (kind === 'preferences.observed') {
+      if (preferences === now) return null
+      data = { old: preferences, new: now, changed: 'unknown', editor: 'unknown' }
+    } else {
+      if ((principals?.sha256 ?? null) === now) return null
+      const before = principals?.entries ?? {}
+      const after = entries ?? {}
+      const changed_ids = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+        .filter((id) => before[id] !== after[id])
+        .sort()
+      data = { old: principals?.sha256 ?? null, new: now, changed_ids, editor: 'unknown', entries: after }
+    }
+    const parsed = DATA[kind].safeParse(data)
+    if (!parsed.success) throw new AuditAppendError(kind, 'data rejected by its schema')
+    const { seq } = await appendLocked(dir, kind, () => parsed.data, time, limits)
+    return { seq }
+  })
+}
+
+/** The segment file names, or none when there is no store. */
+async function segmentsIn(dir: string): Promise<string[]> {
+  try {
+    return await listSegments(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw err
+  }
+}
+
+/**
+ * The state the active segment's complete lines walk to: the empty state with
+ * no store, undefined when one of its lines is not a record.
+ */
+async function activeState(dir: string): Promise<Carried | undefined> {
+  const active = (await segmentsIn(dir)).at(-1)
+  if (active === undefined) return EMPTY_STATE
+  const text = await readFile(join(dir, active), 'utf-8')
+  return stateOf(text.slice(0, text.lastIndexOf('\n') + 1))
+}
+
+/**
  * The fire intents nothing has closed: those the active segment opened with
  * plus its own, less every one a `fire.outcome`, a `fire.refused` or a
  * `fire.resolved` names. In seq order. A pure reader: no lock, no mkdir, and a
@@ -714,17 +789,7 @@ export function openIntents(statePath: string): Promise<OpenIntent[]> {
 }
 
 async function openIntentsIn(dir: string): Promise<OpenIntent[]> {
-  let segments: string[]
-  try {
-    segments = await listSegments(dir)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
-    throw err
-  }
-  const active = segments[segments.length - 1]
-  if (active === undefined) return []
-  const text = await readFile(join(dir, active), 'utf-8')
-  const walked = stateOf(text.slice(0, text.lastIndexOf('\n') + 1))
+  const walked = await activeState(dir)
   if (walked === undefined) throw new Error('audit store: the active segment holds a line that is not a record')
-  return walked.open_intents.sort((a, b) => a.seq - b.seq)
+  return [...walked.open_intents].sort((a, b) => a.seq - b.seq)
 }
