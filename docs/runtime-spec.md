@@ -787,7 +787,7 @@ wording changes.
 | `indeterminate` | the gate, or the spend mark | A fire was marked and never confirmed, so the runtime cannot tell whether the bytes already shipped |
 | `outside_window` | the gate | The approval window has closed, its zone no longer resolves on this host, or its approval instant cannot be parsed |
 | `content_moved` | the gate, or the spend mark | The approved bytes are no longer what would ship, or the producer's Output that held them has been erased, or the producer's latest run produced no Output (§ 10, `last_output`) |
-| `mark_unavailable` | the spend mark | The mark could not be attempted at all — the state document could not be locked or could not be read — so nothing was written and nothing was sent |
+| `mark_unavailable` | the spend mark | The mark could not be attempted at all — the state document could not be locked or could not be read, or the fire intent could not be recorded (§ 14) — so nothing was written and nothing was sent |
 | `mark_uncertain` | the spend mark | The mark's own write failed, so whether it landed is unknown; nothing was sent either way |
 
 At the gate the first three are decided in that order, and the order is not
@@ -2434,6 +2434,17 @@ in-flight `plugin_runs`, which are not durable until the run returns. If the
 record has gone, its fingerprint has moved, or it is already marked by the time
 the lock is held, the fire is refused rather than taken: no mark, no invocation.
 
+**The fire intent is recorded inside the same lock.** After that re-check and
+before the mark is written, the spend mark appends a `fire.intent` (§ 14) for
+the fire: the plugin, the run id, the class `content`, the effect id and the
+approval's fingerprint. So when the mark lands, its intent is already on disk,
+and the record and the mark share one window. An intent the audit store cannot
+take stops the mark before anything is written, and the fire is refused
+`mark_unavailable`. A mark that fails after its intent landed is refused
+`mark_uncertain`, and that refusal's `fire.refused` carries the intent's seq,
+which closes it. A fire whose mark lands is closed by its `fire.outcome` once
+the handler returns, as a session fire is.
+
 **The durability ceiling, stated rather than claimed away.** The guarantee is
 against **process crash**, not power loss: the state document is written with
 rename atomicity and no `fsync`. The outcome is also not durable until the
@@ -2450,8 +2461,9 @@ either arm there is **no invocation**: the level loop continues, and
 the advance still writes its run log, its JSONL rows and its dead-man file, with
 the refused plugin carried on all of them. The two arms are split by where the
 failure happened, not by which error class arrived. A lock that could not be
-acquired or a document that could not be read is `mark_unavailable`, because
-both sit above the write and nothing can have been written. A write that threw
+acquired, a document that could not be read, or a fire intent the audit store
+could not take is `mark_unavailable`, because all three sit above the write and
+nothing can have been written. A write that threw
 is `mark_uncertain`, because the rename may have landed.
 
 On the `mark_uncertain` arm the in-memory record is restored to the value it
@@ -2580,6 +2592,11 @@ id and found that nothing shipped. It is its own verb and not a mode of
   age. The cost is waiting for the running advance to end, and after a crash on
   a machine that cannot identify itself, for the two-hour window. `resolve`
   never writes, heals or removes the lock.
+- Before it writes, it appends `fire.resolved` (§ 14): the plugin, the effect
+  id, and the seq of the `fire.intent` with that plugin and effect id when one
+  is still open, else null. That record closes the intent. The lookup only
+  names the seq and never changes what `resolve` accepts. A store that cannot
+  take the record refuses the answer with exit `1`, and nothing is written.
 - It writes `not_shipped_at`, the instant of the answer, and keeps `marked_at`
   and `effect_id` as they were. It never writes `confirmed_at`, which stays the
   advance's account of a fire it saw finish.
@@ -2605,7 +2622,7 @@ id and found that nothing shipped. It is its own verb and not a mode of
   installed manifests, so the fire of a plugin uninstalled since is still
   answerable.
 - It writes no board event and no run-log entry. The answer lives in the
-  state document, beside the mark it answers.
+  state document, beside the mark it answers, and on the audit record.
 
 The answer is the operator's word about a sink the runtime cannot see, and the
 runtime cannot check it. That is why it is recorded as its own field rather
@@ -3508,6 +3525,10 @@ yet. Their schema admits nothing, so an append under any of them is refused
 until the work that writes them lands and defines their fields. The last three
 kinds in the table are written by the store itself, never by a caller.
 
+Three kinds close a `fire.intent`: a `fire.outcome`, a `fire.refused` or a
+`fire.resolved` whose `intent_seq` is that intent's seq. One whose `intent_seq`
+is null closes nothing. An intent none of them has closed is open.
+
 ### Genesis and the head
 
 The store's first line is a `segment.opened` record at seq `1` with 64 `0`s in
@@ -3634,8 +3655,12 @@ A fire is written ahead the same way. When `warpline advance` fires a
 session-class plugin that declares side effects, it appends `fire.intent`
 immediately before the handler runs, and `fire.outcome` naming that intent's
 seq once the handler returns, with the result's status, or `threw` when the
-invocation threw. An intent that cannot be written stops the fire. A refused
-fire gets `fire.refused` with its closed-set reason and no intent, because
-nothing fired. A plugin with no declared side effects gets no record, and
+invocation threw. An intent that cannot be written stops the fire. A
+content-class fire's intent is written by its spend mark, inside the state lock
+after the re-check and before the mark (§ 10), and its outcome closes it the
+same way. A refused fire gets `fire.refused` with its closed-set reason and no
+intent, because nothing fired, except when the spend mark's write failed after
+its intent landed: that refusal carries the intent's seq and closes it.
+`warpline resolve` appends `fire.resolved` before it writes its answer (§ 10). A plugin with no declared side effects gets no record, and
 neither does `warpline run`. An outcome or refusal that cannot be written does
 not undo what already happened; the advance exits `70` (§ 11).

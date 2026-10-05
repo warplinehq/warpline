@@ -335,6 +335,20 @@ function segmentState(lines: StoredRecord[], carried: Carried): Carried {
   return { authority: { preferences, principals }, open_intents: [...open.values()] }
 }
 
+/**
+ * The state a segment's complete lines walk to, or undefined when one of them
+ * is not a record or the first is not its `segment.opened`. `text` ends at a
+ * newline, or is empty.
+ */
+function stateOf(text: string): Carried | undefined {
+  const records = text.split('\n').slice(0, -1).map(parseRecord)
+  const carried = DATA['segment.opened'].safeParse(records[0]?.data)
+  if (records.some((r) => r === undefined) || records[0]?.type !== 'warpline.audit.segment.opened' || !carried.success) {
+    return undefined
+  }
+  return segmentState(records as StoredRecord[], carried.data)
+}
+
 // -- The writer --------------------------------------------------------------
 
 /**
@@ -511,12 +525,9 @@ async function appendLocked(
 
     if (opens) {
       whole ??= await readFile(activePath)
-      const records = whole.toString('utf-8').split('\n').slice(0, -1).map(parseRecord)
-      const carried = DATA['segment.opened'].safeParse(records[0]?.data)
-      if (records.some((r) => r === undefined) || records[0]?.type !== 'warpline.audit.segment.opened' || !carried.success) {
-        throw new AuditAppendError(kind, 'the active segment holds a line that is not a record')
-      }
-      state = segmentState(records as StoredRecord[], carried.data)
+      const walked = stateOf(whole.toString('utf-8'))
+      if (walked === undefined) throw new AuditAppendError(kind, 'the active segment holds a line that is not a record')
+      state = walked
     }
   }
 
@@ -624,4 +635,38 @@ export async function readHead(statePath: string): Promise<{ seq: number; head: 
     throw new Error('audit store: the active segment holds no readable last line')
   }
   return { seq, head: sha256(line) }
+}
+
+/** A fire intent no record has closed yet. */
+export interface OpenIntent {
+  seq: number
+  plugin: string
+  run_id: string
+  effect_id: string | null
+}
+
+/**
+ * The fire intents nothing has closed: those the active segment opened with
+ * plus its own, less every one a `fire.outcome`, a `fire.refused` or a
+ * `fire.resolved` names. In seq order. A pure reader: no lock, no mkdir, and a
+ * partial last line is not read.
+ *
+ * Bookkeeping only. It names the seq a closing record carries, and the
+ * indeterminate list. Nothing decides whether a fire proceeds on it.
+ */
+export async function openIntents(statePath: string): Promise<OpenIntent[]> {
+  const dir = auditDirFor(statePath)
+  let segments: string[]
+  try {
+    segments = await listSegments(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw err
+  }
+  const active = segments[segments.length - 1]
+  if (active === undefined) return []
+  const text = await readFile(join(dir, active), 'utf-8')
+  const walked = stateOf(text.slice(0, text.lastIndexOf('\n') + 1))
+  if (walked === undefined) throw new Error('audit store: the active segment holds a line that is not a record')
+  return walked.open_intents.sort((a, b) => a.seq - b.seq)
 }

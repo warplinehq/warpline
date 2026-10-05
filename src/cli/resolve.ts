@@ -63,6 +63,11 @@
  * The manifests are loaded only because `approvalStanding` takes them, and it
  * decides a marked record before it consults them.
  *
+ * **The answer is on the audit record first**, as `fire.resolved`, and it
+ * closes the fire intent it answers. The open intent is looked up only to name
+ * its seq in that record, and never changes what this verb accepts. A store
+ * that cannot take the record refuses the answer, with nothing written.
+ *
  * No content is erased here. An answered record binds its producer's content
  * by fingerprint until its window closes, as a confirmed one does, and the
  * advance's release rule lets it go then.
@@ -81,6 +86,7 @@ import {
 import type { EngineState } from '../schemas/engine-state.js'
 import { deriveHost, isLockStale, isProcessAlive, readLock } from '../runtime/lock.js'
 import { engineStatePath, lockPath as runLockPath, pluginsDir } from '../lib/paths.js'
+import { appendAudit, openIntents } from '../lib/audit-log.js'
 
 const USAGE = `Usage: warpline resolve <plugin> --not-shipped <effect-id>
 
@@ -210,6 +216,22 @@ export async function run(argv: string[]): Promise<number> {
           `whose effect id is ${record.effect_id}. Check the sink for that fire. ` +
           `Nothing was written.\n`,
       )
+      return 1
+    }
+
+    // Bookkeeping, never a decision input: every check above has already
+    // accepted the answer, and the lookup only names the intent it closes.
+    try {
+      const answered = (await openIntents(statePath)).find(
+        (i) => i.plugin === plugin && i.effect_id === record.effect_id,
+      )
+      await appendAudit(statePath, 'fire.resolved', {
+        plugin,
+        effect_id: record.effect_id,
+        intent_seq: answered?.seq ?? null,
+      })
+    } catch {
+      process.stderr.write('The audit store could not record this answer. Nothing was written.\n')
       return 1
     }
 

@@ -1693,6 +1693,14 @@ function eraseGateCopies(pendingGates: PendingGate[], plugin: string, bodySha256
  * the effect id is the remedy: the operator checks the sink with it and, when
  * nothing arrived, answers the fire with `warpline resolve`.
  *
+ * **The fire intent is recorded inside this lock**, after the precondition
+ * and before the write, so the record and the mark share one window: when the
+ * mark lands, its intent is already on disk. A store that cannot take the
+ * intent stops the mark before anything in memory has changed, which is the
+ * outer arm's `mark_unavailable`. The intent's seq is handed back through
+ * `intent`, so a mark that fails after it is reported with that seq, and the
+ * refusal closes the intent rather than leaving one nothing can close.
+ *
  * @returns the refusal to report, or undefined when the mark was taken.
  */
 async function markContentApprovalSpent(
@@ -1704,6 +1712,8 @@ async function markContentApprovalSpent(
   runsAtRead: ReadonlyMap<string, string | undefined>,
   erasedAtRead: ReadonlySet<string>,
   markedPlugins: ReadonlySet<string>,
+  runId: string,
+  intent: { seq?: number },
 ): Promise<MarkRefusal | undefined> {
   // The partition is by CALL SITE, never by an `instanceof` taxonomy: the
   // question is not which error class arrived, it is whether the write had been
@@ -1767,6 +1777,16 @@ async function markContentApprovalSpent(
         return 'content_moved'
       }
       if (record.marked_at !== null) return 'indeterminate'
+      // Write-ahead, inside the lock: past the precondition, before the mark.
+      // A throw reaches the outer arm with nothing written and nothing changed.
+      const intentRecord = await appendAudit(statePath, 'fire.intent', {
+        plugin,
+        run_id: runId,
+        class: 'content',
+        effect_id: authority.effect_id,
+        fingerprint: authority.fingerprint,
+      })
+      intent.seq = intentRecord.seq
 
       // `marked_at` IS the fire instant, and the identity is load-bearing: it is
       // what makes the effect id RECOMPUTABLE from the stored record, so a reader
@@ -3261,7 +3281,14 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // rationale — serialisation, the merge rule, the stale-authority
           // window and the durability ceiling — is on
           // `markContentApprovalSpent`, in one copy.
+          //
+          // The fire intent's seq once it is on the record, held above the
+          // spend mark because a content fire's intent is written by the mark.
+          // Read below by the outcome appends, and by the invocation catch to
+          // tell a fire that never started from an invocation that threw.
+          let intentSeq: number | undefined
           if (ev.content !== undefined) {
+            const contentIntent: { seq?: number } = {}
             const markRefusal = await markContentApprovalSpent(
               state,
               stateDir,
@@ -3271,6 +3298,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               runsAtRead,
               erasedAtRead,
               markedThisAdvance,
+              run_id,
+              contentIntent,
             )
             if (markRefusal !== undefined) {
               // The FSM state, not the run-log status: a refusal leaves it at
@@ -3303,13 +3332,14 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               // refusal exists to produce.
               //
               // The audit record goes first and is collected on failure, as on
-              // the gate's refusal arm above.
+              // the gate's refusal arm above. A mark that failed after its
+              // intent landed names that intent, and this record closes it.
               try {
                 await appendAudit(stateDir, 'fire.refused', {
                   plugin: pluginName,
                   run_id,
                   reason: markRefusal,
-                  intent_seq: null,
+                  intent_seq: contentIntent.seq ?? null,
                 })
               } catch {
                 audit_failures.push({ plugin: pluginName, kind: 'fire.refused' })
@@ -3319,8 +3349,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               return
             }
             // The mark landed, so this advance's copy of the record is the
-            // newest there is, and both approvals writes carry it.
+            // newest there is, and both approvals writes carry it. Its intent
+            // is closed by the outcome below, as a session fire's is.
             markedThisAdvance.add(pluginName)
+            intentSeq = contentIntent.seq
           }
 
           onPluginStart?.(pluginName)
@@ -3328,10 +3360,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
           // -- Invoke plugin --
           let invocationResult: Awaited<ReturnType<typeof invokePlugin>>
-          // The session-class fire intent's seq once it is on the record, and
-          // whether its append failed. Held out here so the catch below can
-          // tell a fire that never started from an invocation that threw.
-          let intentSeq: number | undefined
+          // Whether the session-class intent's append failed, held out here
+          // for the same reason as `intentSeq` above.
           let intentUnrecorded = false
           try {
             // `runId` is threaded so the Outputs this handler returns are stamped
