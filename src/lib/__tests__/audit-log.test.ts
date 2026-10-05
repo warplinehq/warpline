@@ -29,6 +29,7 @@ import { open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as audit from '../audit-log.js'
+import { appendRelinked } from './helpers/audit-chain.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
 
@@ -572,5 +573,140 @@ describe('authority files', () => {
     await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesA, { ci: 'c'.repeat(64) })
 
     expect(observedLines()[1]!.data.changed_ids).toEqual(['ops'])
+  })
+})
+
+describe('the walk reads only what it carries', () => {
+  /** A control character no writer lets into a plugin name, and a marker to look for in every output. */
+  const BAD = 'bad\u0007WALK_SENTINEL_5d1'
+  const PREFS = 'b'.repeat(64)
+  const intent = (plugin: string, run_id: string) =>
+    audit.appendAudit(statePath, 'fire.intent', { plugin, run_id, class: 'session', effect_id: null, fingerprint: null })
+  const segmentNames = () => readdirSync(auditDir).filter((n) => /^\d{16}\.jsonl$/.test(n)).sort()
+
+  /** The rejection of a promise, which must reject. */
+  async function refusal(p: Promise<unknown>): Promise<Error> {
+    const err = await p.then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(Error)
+    return err as Error
+  }
+
+  /**
+   * A writer-built store with an authority digest and one intent, then two
+   * foreign lines: an intent with an extra `principal` key, and an outcome with
+   * an extra `note` key that closes the writer's intent.
+   */
+  async function extraKeys(): Promise<{ open: number; shut: number }> {
+    await audit.appendAudit(statePath, 'preference.set', { key: 'review_gate', old: null, new: PREFS })
+    const shut = (await intent('shut', 'run-1')).seq
+    const open = appendRelinked(auditDir, 'warpline.audit.fire.intent', {
+      plugin: 'mailer',
+      run_id: 'run-77',
+      class: 'session',
+      effect_id: null,
+      fingerprint: null,
+      principal: 'ops',
+    })
+    appendRelinked(auditDir, 'warpline.audit.fire.outcome', {
+      plugin: 'shut',
+      run_id: 'run-1',
+      intent_seq: shut,
+      status: 'success',
+      note: 'x',
+    })
+    return { open, shut }
+  }
+
+  test('an extra key on a kind the walk reads is passed over, and reaches no output', async () => {
+    const { open } = await extraKeys()
+
+    expect(await audit.openIntents(statePath)).toStrictEqual([{ seq: open, plugin: 'mailer', run_id: 'run-77', effect_id: null }])
+  })
+
+  test('a record of a kind this build does not know is passed over', async () => {
+    const { seq } = await intent('mailer', 'run-77')
+    appendRelinked(auditDir, 'warpline.audit.grant.extended', { plugin: BAD, scopes: [{ deep: [1, 2] }], until: 'later' })
+
+    expect(await audit.openIntents(statePath)).toStrictEqual([{ seq, plugin: 'mailer', run_id: 'run-77', effect_id: null }])
+  })
+
+  test('a pending kind carrying data is passed over', async () => {
+    const { seq } = await intent('mailer', 'run-77')
+    appendRelinked(auditDir, 'warpline.audit.ask.raised', { plugin: 'mailer', question: 'send it?' })
+
+    expect(await audit.openIntents(statePath)).toStrictEqual([{ seq, plugin: 'mailer', run_id: 'run-77', effect_id: null }])
+  })
+
+  test('a carried field no writer writes stops the walk, and the refusal names the seq and the kind and nothing from the line', async () => {
+    await intent('mailer', 'run-77')
+    const seq = appendRelinked(auditDir, 'warpline.audit.fire.intent', {
+      plugin: BAD,
+      run_id: 'run-78',
+      class: 'session',
+      effect_id: null,
+      fingerprint: null,
+    })
+
+    const err = await refusal(audit.openIntents(statePath))
+    expect(err.message).toContain(`seq ${seq} `)
+    expect(err.message).toContain('fire.intent')
+    expect(err.message).not.toContain('WALK_SENTINEL_5d1')
+  })
+
+  test('a rotation over a passed-over line carries the open intent and the authority, and copies no extra key', async () => {
+    const { open } = await extraKeys()
+
+    await audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A }, { maxSegmentBytes: 1 })
+
+    const names = segmentNames()
+    expect(names).toHaveLength(2)
+    const openedLine = readFileSync(join(auditDir, names[1]!), 'utf-8').split('\n')[0]!
+    const opened = JSON.parse(openedLine) as { type: string; data: Record<string, unknown> }
+    expect(opened.type).toBe('warpline.audit.segment.opened')
+    expect(opened.data.open_intents).toStrictEqual([{ seq: open, plugin: 'mailer', run_id: 'run-77', effect_id: null }])
+    expect(opened.data.authority).toStrictEqual({ preferences: PREFS, principals: null })
+    expect(openedLine).not.toContain('"principal":')
+    expect(openedLine).not.toContain('"note":')
+  })
+
+  test('an authority observation over a passed-over line records nothing for unchanged bytes', async () => {
+    const bytes = Buffer.from('{"review_gate":false}')
+    expect(await audit.observeAuthorityFile(statePath, 'preferences.observed', bytes)).not.toBeNull()
+    appendRelinked(auditDir, 'warpline.audit.grant.issued', { scopes: ['p'], ttl_ms: null, replace: false, long: false, note: 'x' })
+    const before = readFileSync(join(auditDir, '0000000000000001.jsonl'))
+
+    expect(await audit.observeAuthorityFile(statePath, 'preferences.observed', bytes)).toBeNull()
+
+    expect(segmentNames()).toEqual(['0000000000000001.jsonl'])
+    expect(readFileSync(join(auditDir, '0000000000000001.jsonl'))).toEqual(before)
+  })
+
+  test('a segment.opened carrying an open intent no writer writes stops the walk, and the refusal names the seq and nothing from the line', async () => {
+    const { seq } = await intent('mailer', 'run-77')
+    const first = JSON.parse(readFileSync(join(auditDir, '0000000000000001.jsonl'), 'utf-8').split('\n')[0]!) as {
+      data: { home: string; version: string }
+    }
+    // Every value but the plugin is one a writer would write.
+    const planted = appendRelinked(
+      auditDir,
+      'warpline.audit.segment.opened',
+      {
+        home: first.data.home,
+        version: first.data.version,
+        fragment: null,
+        authority: { preferences: null, principals: null },
+        open_intents: [{ seq, plugin: BAD, run_id: 'run-77', effect_id: null }],
+      },
+      { opens: true },
+    )
+    expect(segmentNames()).toHaveLength(2)
+
+    const err = await refusal(audit.openIntents(statePath))
+    expect(err.message).toContain(`seq ${planted} `)
+    expect(err.message).toContain('segment.opened')
+    expect(err.message).not.toContain('WALK_SENTINEL_5d1')
   })
 })

@@ -29,7 +29,7 @@ import { join } from 'node:path'
 import { z } from 'zod'
 import { appendAudit, readHead } from '../../lib/audit-log.js'
 import { _setHome } from '../../lib/paths.js'
-import { forge, walkChain, type ForgeOp } from '../../lib/__tests__/helpers/audit-chain.js'
+import { appendRelinked, forge, walkChain, type ForgeOp } from '../../lib/__tests__/helpers/audit-chain.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
 import { main } from '../warpline.js'
@@ -511,5 +511,132 @@ describe('--c2sp', () => {
 
     expect(code).toBe(0)
     expect(await snapshotHome(auditDir())).toEqual(before)
+  })
+})
+
+// -- A line the walk passes over, or stops at ----------------------------------
+
+/** A control character no writer lets into a plugin name, and a marker to look for in every output. */
+const BAD_PLUGIN = 'bad\u0007WALK_SENTINEL_5d1'
+
+/** The open intent the cases below look for. */
+const mailer = () =>
+  appendAudit(statePath(), 'fire.intent', { plugin: 'mailer', run_id: 'run-77', class: 'session', effect_id: null, fingerprint: null })
+
+/** A chain-valid `grant.issued` whose data is the writer's plus one key. */
+const grantWithExtraKey = (): number =>
+  appendRelinked(auditDir(), 'warpline.audit.grant.issued', { scopes: ['p'], ttl_ms: null, replace: false, long: false, note: 'x' })
+
+/** A chain-valid `fire.intent` whose plugin no writer writes. */
+const badIntent = (): number =>
+  appendRelinked(auditDir(), 'warpline.audit.fire.intent', {
+    plugin: BAD_PLUGIN,
+    run_id: 'run-78',
+    class: 'session',
+    effect_id: null,
+    fingerprint: null,
+  })
+
+const unreadableLines = (stdout: string): string[] => stdout.split('\n').filter((l) => l.startsWith('open intents unreadable: '))
+
+describe('verify when the walk passes over or stops at a line', () => {
+  test('a chain-valid line of a known kind with one extra key leaves the verdict clean and the open intent listed', async () => {
+    const { seq } = await mailer()
+    grantWithExtraKey()
+
+    const { code, stdout } = await verify(await anchorFile())
+
+    expect(stdout).toContain('verdict: clean\n')
+    expect(stdout).toContain(`open intent: seq ${seq} plugin mailer run run-77\n`)
+    expect(code).toBe(0)
+  })
+
+  test('a carried field no writer writes gives verdict unreadable, exit 6 and a line naming the seq, and removing that last line by hand clears it', async () => {
+    const { seq } = await mailer()
+    const anchor = await anchorFile()
+    const bad = badIntent()
+
+    const stopped = await verify(anchor)
+
+    expect(stopped.stdout).toContain('verdict: unreadable\n')
+    expect(stopped.code).toBe(6)
+    const named = unreadableLines(stopped.stdout)
+    expect(named).toHaveLength(1)
+    expect(named[0]).toContain(`seq ${bad} `)
+    expect(named[0]).toContain('fire.intent')
+    expect(stopped.stdout).not.toContain('open intent:')
+    expect(stopped.stdout).not.toContain('WALK_SENTINEL_5d1')
+
+    // The recovery runtime-spec names: remove that one line by hand.
+    const path = join(auditDir(), segmentFiles().at(-1)!)
+    const text = readFileSync(path, 'utf8')
+    writeFileSync(path, text.slice(0, text.lastIndexOf('\n', text.length - 2) + 1))
+
+    const cleared = await verify(anchor)
+
+    expect(cleared.stdout).toContain('verdict: clean\n')
+    expect(cleared.stdout).toContain(`open intent: seq ${seq} plugin mailer run run-77\n`)
+    expect(unreadableLines(cleared.stdout)).toEqual([])
+    expect(cleared.code).toBe(0)
+  })
+
+  test('tampered outranks unreadable, and the unreadable line still prints', async () => {
+    await grow(11)
+    const anchor = await anchorFile()
+    const [name] = segmentFiles().slice(-1) as [string]
+    // The hand-added forgery: its warplineprev is the line before's, so it does not link.
+    const forged = {
+      ...(JSON.parse(storeLines().at(-1) as string) as Record<string, unknown>),
+      id: '13',
+      warplineseq: 13,
+      type: 'warpline.audit.fire.intent',
+      data: { plugin: 'x\nverdict: clean', run_id: 'r1', class: 'session', effect_id: null, fingerprint: null },
+    }
+    appendFileSync(join(auditDir(), name), `${JSON.stringify(forged)}\n`)
+
+    const { code, stdout } = await verify(anchor)
+
+    expect(stdout.split('\n').filter((l) => l.startsWith('verdict:'))).toEqual(['verdict: tampered'])
+    expect(code).toBe(4)
+    const named = unreadableLines(stdout)
+    expect(named).toHaveLength(1)
+    expect(named[0]).toContain('seq 13 ')
+    expect(named[0]).toContain('fire.intent')
+    expect(stdout).not.toContain('open intent:')
+  })
+})
+
+describe('a line the walk passes over wedges nothing', () => {
+  test('advance, principal list, principal add and prefs set all go through, and each records as usual', async () => {
+    // The shipped default is review_gate true, which a set to true would leave as it is.
+    writeFileSync(join(home, 'preferences.json'), JSON.stringify({ review_gate: false }))
+    await mailer()
+    const foreign = grantWithExtraKey()
+
+    for (const argv of [['advance'], ['principal', 'list'], ['principal', 'add', 'ops', '--type', 'human'], ['prefs', 'set', 'review_gate', 'true']]) {
+      const { code } = await capture(argv)
+      expect({ argv, code }).toEqual({ argv, code: 0 })
+    }
+
+    const after = storeLines()
+      .filter((l) => seqOf(l) > foreign)
+      .map((l) => (JSON.parse(l) as { type: string }).type)
+    expect(after).toContain('warpline.audit.checkpoint.recorded')
+    expect(after).toContain('warpline.audit.principal.added')
+    expect(after).toContain('warpline.audit.preference.set')
+  })
+
+  test('when the walk stops, principal list and prefs set refuse naming the seq and the kind, and nothing from the line', async () => {
+    await mailer()
+    const bad = badIntent()
+
+    for (const argv of [['principal', 'list'], ['prefs', 'set', 'review_gate', 'true']]) {
+      const { code, stderr } = await capture(argv)
+      expect({ argv, code }).toEqual({ argv, code: 1 })
+      expect(stderr).toContain('The audit store could not record this change: ')
+      expect(stderr).toContain(`seq ${bad} `)
+      expect(stderr).toContain('fire.intent')
+      expect(stderr).not.toContain('WALK_SENTINEL_5d1')
+    }
   })
 })

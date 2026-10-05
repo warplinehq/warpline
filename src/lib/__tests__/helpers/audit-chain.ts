@@ -14,6 +14,11 @@
  * only an anchor kept off the box can catch it. It covers one segment, because
  * links across a file boundary are already held by the walker's agreement test
  * and by the two-segment verify cases.
+ *
+ * `appendRelinked` builds a foreign line, of any type and any data, chain-valid:
+ * the next seq, the hash of the line before it, and the store's own envelope.
+ * So a check that objects to it objects for what the line holds, and never
+ * for a broken link.
  */
 import { appendFileSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -138,4 +143,34 @@ export function forge(dir: string, op: ForgeOp): void {
     return `${line}\n`
   })
   writeFileSync(path, out.join(''))
+}
+
+/**
+ * Append one chain-valid line of `type` and `data`, exactly as passed, after the
+ * last complete line of the last segment in `dir`, and return its seq. With
+ * `opens` the line is instead the only line of a new segment file named by its
+ * seq, which is how a test plants the first line of the active segment.
+ */
+export function appendRelinked(dir: string, type: string, data: unknown, opts: { opens?: boolean } = {}): number {
+  const last = readdirSync(dir).filter((n) => NAME.test(n)).sort().at(-1)
+  if (last === undefined) throw new Error('appendRelinked: no segment to link after')
+  const text = readFileSync(join(dir, last), 'utf8')
+  const before = text.slice(0, text.lastIndexOf('\n') + 1).split('\n').slice(0, -1).at(-1)
+  if (before === undefined) throw new Error(`appendRelinked: ${last} holds no complete line`)
+  const prev = JSON.parse(before) as { warplineseq: number; source: string }
+  const seq = prev.warplineseq + 1
+  const line = `${JSON.stringify({
+    specversion: '1.0',
+    id: String(seq),
+    source: prev.source,
+    type,
+    time: new Date().toISOString(),
+    datacontenttype: 'application/json',
+    warplineseq: seq,
+    warplineprev: sha256(Buffer.from(before)),
+    data,
+  })}\n`
+  if (opts.opens === true) writeFileSync(join(dir, `${String(seq).padStart(16, '0')}.jsonl`), line)
+  else appendFileSync(join(dir, last), line)
+  return seq
 }
