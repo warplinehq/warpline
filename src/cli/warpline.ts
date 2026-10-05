@@ -51,6 +51,7 @@ Commands:
   resolve    Answer a content fire that was marked and never confirmed: it did not ship
   revoke     Clear the current session approval
   audit      Print the record's head (seq and hash) to anchor off this box
+  prefs      Set one guardrail in preferences.json, on the record
 
   --help     Show this message
 `
@@ -132,6 +133,11 @@ export async function main(argv: string[]): Promise<number> {
 
       case 'audit': {
         const { run } = await import('./audit.js')
+        return await run(rest)
+      }
+
+      case 'prefs': {
+        const { run } = await import('./prefs.js')
         return await run(rest)
       }
 

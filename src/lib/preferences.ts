@@ -9,15 +9,18 @@
  *                        defaults and null bytes on a missing file only,
  *                        refuses an invalid one
  *   readPreferences()  — the same, the preferences only
- *   writePreferences() — atomic write (tmp + rename), refuses what read refuses
+ *   writePreferences() — atomic write through fs-atomic, refuses what read refuses
+ *   PREFERENCE_KEYS    — every key `warpline prefs set` accepts, dotted
+ *   setPreference()    — one key set, refused unless the result is valid
  *   isQuietHours()     — check if current time is within quiet hours window
  *
  * Written atomically and Zod-validated on write — a half-written or
  * malformed preferences file must not be loadable. Strict on read too: an
  * unknown key at any level is an error, never stripped.
  */
-import { readFile, writeFile, rename } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
+import { atomicWriteJson } from './fs-atomic.js'
 
 // -----------------------------------------------------------------------
 // Schema
@@ -78,6 +81,19 @@ export type Preferences = z.infer<typeof PreferencesSchema>
 export type RetentionPolicy = Preferences['retention']
 
 export const DEFAULT_PREFERENCES: Preferences = PreferencesSchema.parse({})
+
+/** The accepted keys at each object level, read off the schemas themselves. */
+const SHAPES: Record<string, readonly string[]> = {
+  '': Object.keys(PreferencesSchema.shape),
+  quiet_hours: Object.keys(QuietHoursSchema.shape),
+  retention: Object.keys(RetentionSchema.shape),
+}
+
+/** Every settable key, dotted: each top-level key, and each key of the objects under one. */
+export const PREFERENCE_KEYS: readonly string[] = (SHAPES[''] ?? []).flatMap((top) => [
+  top,
+  ...(Object.hasOwn(SHAPES, top) ? (SHAPES[top] ?? []).map((k) => `${top}.${k}`) : []),
+])
 
 // -----------------------------------------------------------------------
 // Errors
@@ -162,16 +178,42 @@ export async function readPreferencesFile(
 }
 
 /**
- * Write preferences atomically via tmp + rename.
- * This prevents concurrent readers from seeing a half-written file.
- * Validated through the strict schema first, so an unknown key is refused
- * rather than dropped and nothing is written.
+ * Write preferences through `atomicWriteJson`, whose temp name is unique per
+ * write, so two writers never share one. Validated through the strict schema
+ * first, so an unknown key is refused rather than dropped and nothing is
+ * written. The bytes are `JSON.stringify(validated, null, 2)`, which is what a
+ * caller digests for the audit record.
  */
 export async function writePreferences(prefsPath: string, prefs: Preferences): Promise<void> {
-  const validated = PreferencesSchema.parse(prefs)
-  const tmpPath = `${prefsPath}.tmp`
-  await writeFile(tmpPath, JSON.stringify(validated, null, 2), 'utf-8')
-  await rename(tmpPath, prefsPath)
+  await atomicWriteJson(prefsPath, PreferencesSchema.parse(prefs))
+}
+
+/**
+ * `prefs` with one dotted key set to `value`, validated. A key outside
+ * `PREFERENCE_KEYS`, or a result the schema refuses, throws
+ * `PreferencesInvalidError` naming key paths and schema facts, never the value.
+ * Setting `quiet_hours.start` or `.end` while quiet hours are off starts from an
+ * empty window, so the schema supplies the other bound's default.
+ */
+export function setPreference(prefs: Preferences, key: string, value: unknown, prefsPath: string): Preferences {
+  if (!PREFERENCE_KEYS.includes(key)) {
+    const dot = key.lastIndexOf('.')
+    const parent = dot === -1 ? '' : key.slice(0, dot)
+    const known = parent !== '' && Object.hasOwn(SHAPES, parent)
+    const issue = {
+      code: 'unrecognized_keys',
+      path: known ? [parent] : [],
+      keys: [known ? key.slice(dot + 1) : key],
+      message: '',
+    } as unknown as Issue
+    throw new PreferencesInvalidError(prefsPath, describeIssues([issue]))
+  }
+  const next: Record<string, unknown> = { ...prefs }
+  const [top, sub] = key.split('.') as [string, string | undefined]
+  next[top] = sub === undefined ? value : { ...((next[top] as Record<string, unknown> | null) ?? {}), [sub]: value }
+  const result = PreferencesSchema.safeParse(next)
+  if (!result.success) throw new PreferencesInvalidError(prefsPath, describeIssues(result.error.issues))
+  return result.data
 }
 
 // -----------------------------------------------------------------------
@@ -212,13 +254,6 @@ export function isQuietHours(prefs: Preferences, now?: Date): boolean {
 // -----------------------------------------------------------------------
 // Internal helpers
 // -----------------------------------------------------------------------
-
-/** The accepted keys at each object level, read off the schemas themselves. */
-const SHAPES: Record<string, readonly string[]> = {
-  '': Object.keys(PreferencesSchema.shape),
-  quiet_hours: Object.keys(QuietHoursSchema.shape),
-  retention: Object.keys(RetentionSchema.shape),
-}
 
 type Issue = z.core.$ZodIssue
 

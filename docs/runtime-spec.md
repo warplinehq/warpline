@@ -995,6 +995,19 @@ failed append refuses the read: `advance` exits `75` with nothing fired, and
 refused before the comparison, as above, and is never digested. A missing file
 the store has never seen records nothing.
 
+`warpline prefs set <dotted.key> <json-value>` is the audited writer of
+`preferences.json`. It reads the file as above, records a pending hand edit
+first, then appends `preference.set` naming the key path, the sha256 of the old
+file bytes (`null` when there was no file) and the sha256 of the bytes it is
+about to write, and only then writes those bytes through the same atomic write
+as every state file. The record never carries the value. Because the new digest
+is over the exact bytes written, the next read finds the file matching the store
+and records nothing. A value already in effect writes nothing and records
+nothing. An unknown key, a value that is not JSON or a value the schema refuses
+exits `1` with nothing written and nothing recorded, and so does a failed
+append. No message repeats the typed value. A hand edit is still allowed, and is
+still recorded on the next read.
+
 One policy object, read by every path that deletes. Three record formats pruned
 on three literals would be three retention rules that agree until somebody tunes
 one.
