@@ -60,6 +60,10 @@
  * widen a grant past what the operator typed. `--all` is unambiguously a Grant
  * gesture and never applies a parked result.
  *
+ * Each of the three record-writing gestures (a Grant, a content approval and its
+ * withdrawal) is on the audit record before it takes effect, and the records
+ * are written here, around the grant module's calls, never inside it.
+ *
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { parseArgs } from 'node:util'
@@ -76,6 +80,7 @@ import {
   proposalFingerprint,
 } from '../runtime/engine.js'
 import { DEFAULT_TTL_MS, liveGrantScopes, mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
+import { appendAudit } from '../lib/audit-log.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
 import {
@@ -95,6 +100,9 @@ import { suggest } from './suggest.js'
 // actually reads. Same lesson as the dispatcher's command list.
 const CEILING_H = MAX_GRANT_WINDOW_MS / (60 * 60 * 1000)
 const DEFAULT_TTL_H = DEFAULT_TTL_MS / (60 * 60 * 1000)
+
+/** A stored fingerprint goes into a record only when it is a sha256 digest. */
+const HEX64 = /^[0-9a-f]{64}$/
 
 const USAGE = `Usage: warpline approve <plugin>... [options]
        warpline approve --all [options]
@@ -453,6 +461,26 @@ async function approveContent(
 
     const fingerprint = proposalFingerprint(state, producer, producerManifest)
     const replaced = Object.hasOwn(state.approvals, consumer) ? state.approvals[consumer] : undefined
+
+    // On the audit record before anything changes, in memory or on disk. The
+    // window goes in as the instants it resolved to: the typed wall clocks and
+    // the zone stay out. A replacement is one record carrying the replaced
+    // fingerprint, never a separate withdrawal.
+    try {
+      await appendAudit(statePath, 'content_approval.issued', {
+        plugin: consumer,
+        producer,
+        fingerprint,
+        run_id: lastOutput.run_id ?? null,
+        opens_at: new Date(opensAt).toISOString(),
+        closes_at: new Date(closesAt).toISOString(),
+        replaced_fingerprint: replaced !== undefined && HEX64.test(replaced.fingerprint) ? replaced.fingerprint : null,
+      })
+    } catch {
+      process.stderr.write('The audit store could not record this content approval. Nothing was written.\n')
+      return 1
+    }
+
     state.approvals[consumer] = {
       plugin: consumer,
       producer,
@@ -569,6 +597,18 @@ async function removeContentApproval(
     // next advance it would never go: nothing would name the run any more.
     // The copy an applied gate holds of it goes in the same write.
     const withdrawn = state.approvals[consumer]!
+    try {
+      await appendAudit(statePath, 'content_approval.withdrawn', {
+        plugin: consumer,
+        fingerprint: HEX64.test(withdrawn.fingerprint) ? withdrawn.fingerprint : null,
+      })
+    } catch {
+      process.stderr.write(
+        `The audit store could not record the withdrawal of the content approval for ${consumer}. ` +
+          `Nothing was removed.\n`,
+      )
+      return 1
+    }
     delete state.approvals[consumer]
     eraseIfReleased(state.plugin_runs, state.pending_gates, withdrawn.producer, state.approvals, manifests, now, withdrawn)
     await writeEngineState(state, statePath)
@@ -1030,6 +1070,22 @@ export async function run(argv: string[]): Promise<number> {
       },
     )
     if (settled !== null) return settled
+  }
+
+  // On the audit record before the grant file changes, and after every refusal
+  // above, so a refused command records nothing and a failed record grants
+  // nothing. The narration below waits for it too: a blanket line printed
+  // ahead of a refusal would be a success the command did not achieve.
+  try {
+    await appendAudit(statePath, 'grant.issued', {
+      scopes: values.all ? ['*'] : positionals,
+      ttl_ms: ttlMs ?? null,
+      replace: values.replace === true,
+      long: values.long === true,
+    })
+  } catch {
+    process.stderr.write('The audit store could not record this grant, so nothing was granted.\n')
+    return 1
   }
 
   if (values.all) {

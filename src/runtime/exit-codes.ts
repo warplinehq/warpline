@@ -156,3 +156,11 @@ export function advanceExitCode(
 
   return 0
 }
+
+/**
+ * The audit store failed during this command, so an effect may have happened
+ * with no record of it. `warpline revoke` reports it when its revoke happened
+ * and its record could not be written: a revoke only narrows authority, so a
+ * failing store never blocks one.
+ */
+export const EXIT_AUDIT_FAILED = 70

@@ -40,7 +40,8 @@
  * leave the operator believing they had silenced three plugins when they had
  * silenced one.
  *
- * Every denial is on the audit record before the state document changes.
+ * Every denial, and every removal of one, is on the audit record before the
+ * state document changes.
  *
  * Never terminates the process — it returns a code to the dispatcher.
  */
@@ -192,6 +193,22 @@ export async function run(argv: string[]): Promise<number> {
         }
         process.stderr.write('Nothing was removed.\n')
         return 1
+      }
+
+      // Every lift is on the audit record before the state document changes.
+      for (const plugin of positionals) {
+        const stored = state.denials[plugin]!.fingerprint
+        try {
+          await appendAudit(statePath, 'denial.lifted', {
+            plugin,
+            fingerprint: /^[0-9a-f]{64}$/.test(stored) ? stored : null,
+          })
+        } catch {
+          process.stderr.write(
+            `The audit store could not record the removal of the denial of ${plugin}. Nothing was removed.\n`,
+          )
+          return 1
+        }
       }
 
       for (const name of positionals) delete state.denials[name]

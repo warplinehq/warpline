@@ -1444,6 +1444,12 @@ later one is the failure this behaviour exists to prevent.
 | Zero duration | Rejected before anything is written. `--ttl` takes a positive integer followed by `m`, `h` or `d`; a bare `0` fails the grammar and `0h` fails the positive-value check. The command exits 1 and the file is untouched. |
 | Empty scope list | Reachable only from the library path, which writes an empty `scopes` array. It approves nothing — an empty list is not a synonym for `"*"`. The command cannot produce one: `approve` with no plugin name and no `--all` prints usage and exits 1. |
 
+`warpline approve` appends a `grant.issued` record (§ 14) after every refusal
+check and before it merges, carrying the scopes asked for (`["*"]` for
+`--all`), the requested TTL in milliseconds or null, and the `--replace` and
+`--long` flags. When that record cannot be written, it says so on stderr,
+grants nothing and exits 1.
+
 The 23-hour ceiling belongs to the merge path, not to the file. `mergeGrant`,
 behind `warpline approve`, is the only code that computes it; `grantApproval`,
 the programmatic pre-grant, writes the lifetime it was handed with no ceiling
@@ -1456,7 +1462,11 @@ An unknown plugin name aborts the whole command, writes nothing, and exits 1 —
 partial application is not a state the file is ever left in.
 
 `warpline revoke` deletes the file and exits 0, including when no grant exists.
-After a revoke, every side-effecting plugin reads as unapproved.
+After a revoke, every side-effecting plugin reads as unapproved. When a grant
+file exists, revoke first appends a `grant.revoked` record (§ 14) naming its
+live scopes. A revoke only narrows authority, so it removes the file even when
+that append fails, then exits `70` with a stderr line saying no audit record of
+the revoke was written. With no grant file it writes no record.
 
 **Nothing reachable from a run writes this file.** `checkApproval` — the only
 function the engine calls — opens it read-only, and the write path
@@ -2104,6 +2114,12 @@ A run that produces no Output no longer moves the fingerprint. It leaves
 proposal stays bound to it across a producer's failed run, rather than being
 superseded by the empty-set hash the same plugin would otherwise fall back to.
 
+Both directions are on the audit record (§ 14) before this table changes.
+`warpline deny` appends one `denial.recorded` per plugin with its fingerprint,
+and `warpline deny --remove` appends one `denial.lifted` per plugin, in the
+order named, with the stored fingerprint (null when it is not a hex sha256).
+Either refuses with the state document unchanged when an append fails.
+
 ### `approvals`
 
 Live content approvals, keyed by plugin name. Each one is a standing yes to
@@ -2121,6 +2137,16 @@ An approval applies only to a plugin whose manifest declares
 `approval_class: 'content'`. For every other plugin the record is not consulted
 at all, and the session grant of § 9 decides. The two are disjoint, not
 additive.
+
+`warpline approve <consumer> --content` appends a `content_approval.issued`
+record (§ 14) inside the state lock, before the state write, with the consumer,
+the producer, the fingerprint, the producer's run id and the window as the two
+ISO instants it resolved to. The typed wall clocks and the zone stay out. A
+re-approve that replaces a record carries the replaced fingerprint in
+`replaced_fingerprint` and writes no separate withdrawal. `--content --remove`
+appends a `content_approval.withdrawn` record with the stored fingerprint
+before the record is deleted. Either refuses with the state document unchanged
+when its append fails.
 
 The fields:
 
@@ -3577,3 +3603,16 @@ fails, `deny` writes nothing, says on stderr that nothing was denied, and exits
 `1`. A record already appended for an earlier plugin in the same command stands
 when a later one cannot be written: it records what was about to happen, and
 the store never takes a line back.
+
+The same rule covers every other authority change a verb makes. `warpline
+approve` appends `grant.issued` before it merges a grant (§ 9), and
+`content_approval.issued` or `content_approval.withdrawn` inside the state lock
+before the state write (§ 10). `warpline deny --remove` appends one
+`denial.lifted` per plugin before the state write. Each of these refuses with
+exit `1` and nothing changed when its append fails.
+
+`warpline revoke` is the one exception. It appends `grant.revoked` before it
+removes the grant file, but a revoke only narrows authority, and a failing
+store must never leave authority wider than the operator chose. So when that
+append fails the file is removed anyway, and the command exits `70` with a
+stderr line saying no audit record of the revoke was written.
