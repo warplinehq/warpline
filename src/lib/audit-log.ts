@@ -49,6 +49,11 @@ const LOCK_STALE_MS = 30_000
 const TAIL_BYTES = 65_536
 const SEGMENT_NAME = /^\d{16}\.jsonl$/
 
+/** A segment at or past this size is sealed before the next append. */
+export const SEGMENT_MAX_BYTES = 64 * 1024 * 1024
+/** A segment this old, from its `segment.opened` time, is sealed before the next append. */
+export const SEGMENT_MAX_AGE_MS = 30 * 86_400_000
+
 /** The closed set. A kind not listed here cannot be written. */
 export const AUDIT_KINDS = [
   'grant.issued',
@@ -191,20 +196,22 @@ export type AuditData<K extends AuditKind> = z.infer<(typeof DATA)[K]>
 // -- Errors ------------------------------------------------------------------
 
 type Reason =
+  | `segment ${string} holds only a partial line`
+  | 'the active segment holds a line that is not a record'
   | 'unknown kind'
   | 'internal kind'
   | 'data rejected by its schema'
   | 'line over 16384 bytes'
   | 'audit lock not acquired'
   | 'audit lock not acquired in time'
-  | 'the active segment ends in a partial line'
   | 'the active segment holds no readable last line'
   | 'write failed'
 
 /**
  * An append that did not happen. The message is built from the kind and a
  * fixed phrase only, never from the data, a schema issue or a path, because it
- * reaches stderr and from there the operator's mail.
+ * reaches stderr and from there the operator's mail. The one phrase that names
+ * something names a segment file, whose name is only digits.
  */
 export class AuditAppendError extends Error {
   constructor(kind: string, reason: Reason, cause?: unknown) {
@@ -250,27 +257,82 @@ async function listSegments(dir: string): Promise<string[]> {
   return (await readdir(dir)).filter((name) => SEGMENT_NAME.test(name)).sort()
 }
 
-/**
- * The last complete line of a segment, read from its last `TAIL_BYTES`, and
- * whether the segment ends in a partial line. `line` is null when the window
- * holds no complete line.
- */
-async function lastLine(path: string): Promise<{ line: Buffer | null; torn: boolean }> {
-  const { size } = await stat(path)
-  const start = Math.max(0, size - TAIL_BYTES)
-  const buf = Buffer.alloc(size - start)
+/** Up to `length` bytes of a file from `start`. */
+async function readAt(path: string, start: number, length: number): Promise<Buffer> {
+  const buf = Buffer.alloc(length)
   const fh = await open(path, 'r')
   try {
-    await fh.read(buf, 0, buf.length, start)
+    const { bytesRead } = await fh.read(buf, 0, length, start)
+    return buf.subarray(0, bytesRead)
   } finally {
     await fh.close()
   }
+}
+
+/**
+ * The last complete line of a segment, read from its last `TAIL_BYTES`,
+ * whether the segment ends in a partial line, and its size. `line` is null
+ * when the window holds no complete line.
+ */
+async function lastLine(path: string): Promise<{ line: Buffer | null; torn: boolean; size: number }> {
+  const { size } = await stat(path)
+  const start = Math.max(0, size - TAIL_BYTES)
+  const buf = await readAt(path, start, size - start)
   const torn = buf.length > 0 && buf[buf.length - 1] !== 0x0a
   const end = buf.lastIndexOf(0x0a)
-  if (end === -1) return { line: null, torn }
+  if (end === -1) return { line: null, torn, size }
   const from = buf.lastIndexOf(0x0a, end - 1) + 1
-  if (from === 0 && start > 0) return { line: null, torn }
-  return { line: buf.subarray(from, end), torn }
+  if (from === 0 && start > 0) return { line: null, torn, size }
+  return { line: buf.subarray(from, end), torn, size }
+}
+
+type StoredRecord = { warplineseq: number; source: string; type: string; time?: unknown; data?: any }
+
+/** A stored line's envelope, or undefined when it is not one of ours. */
+function parseRecord(line: string): StoredRecord | undefined {
+  try {
+    const r = JSON.parse(line)
+    if (Seq.safeParse(r?.warplineseq).success && typeof r.source === 'string' && typeof r.type === 'string') return r
+  } catch {}
+  return undefined
+}
+
+type Carried = Pick<AuditData<'segment.opened'>, 'authority' | 'open_intents'>
+
+const EMPTY_STATE: Carried = { authority: { preferences: null, principals: null }, open_intents: [] }
+
+/**
+ * What the next `segment.opened` carries: the state the active segment opened
+ * with, walked forward over its records, so no reader has to cross a file.
+ */
+function segmentState(lines: StoredRecord[], carried: Carried): Carried {
+  let { preferences, principals } = carried.authority
+  const open = new Map(carried.open_intents.map((i) => [i.seq, i]))
+  for (const { type, warplineseq: seq, data } of lines) {
+    switch (type) {
+      case 'warpline.audit.fire.intent':
+        open.set(seq, { seq, plugin: data.plugin, run_id: data.run_id, effect_id: data.effect_id })
+        break
+      // A null intent_seq closes nothing.
+      case 'warpline.audit.fire.outcome':
+      case 'warpline.audit.fire.refused':
+      case 'warpline.audit.fire.resolved':
+        open.delete(data.intent_seq)
+        break
+      case 'warpline.audit.preference.set':
+      case 'warpline.audit.preferences.observed':
+        preferences = data.new
+        break
+      case 'warpline.audit.principal.added':
+      case 'warpline.audit.principal.disabled':
+        principals = { sha256: data.sha256, entries: data.entries }
+        break
+      case 'warpline.audit.principal_registry.observed':
+        principals = data.new === null ? null : { sha256: data.new, entries: data.entries }
+        break
+    }
+  }
+  return { authority: { preferences, principals }, open_intents: [...open.values()] }
 }
 
 // -- The writer --------------------------------------------------------------
@@ -377,59 +439,123 @@ function packageVersion(): string {
   return pkg.version
 }
 
-async function appendLocked(dir: string, kind: EmitKind, data: unknown, time: number): Promise<{ seq: number; head: string }> {
-  const segments = await listSegments(dir)
-  let path: string
-  let seq: number
-  let source: string
-  let prev: string
-  let genesis: Buffer | null = null
+type Limits = { maxSegmentBytes: number; maxSegmentAgeMs: number }
 
-  if (segments.length === 0) {
-    // Genesis: the first segment opens with seq 1 and a zero prev.
-    path = join(dir, segmentName(1))
-    source = `urn:uuid:${randomUUID()}`
-    genesis = encode(
-      1,
-      source,
-      ZERO_HASH,
-      'segment.opened',
-      DATA['segment.opened'].parse({
-        home: source,
-        version: packageVersion(),
-        fragment: null,
-        authority: { preferences: null, principals: null },
-        open_intents: [],
-      }),
-      time,
-    )
-    seq = 1
-    prev = headOf(genesis)
-  } else {
-    path = join(dir, segments[segments.length - 1] as string)
-    const { line, torn } = await lastLine(path)
-    if (torn) throw new AuditAppendError(kind, 'the active segment ends in a partial line')
-    let last: { warplineseq?: unknown; source?: unknown } | undefined
-    try {
-      last = line === null ? undefined : JSON.parse(line.toString('utf-8'))
-    } catch {}
-    if (line === null || !Seq.safeParse(last?.warplineseq).success || typeof last?.source !== 'string') {
+/**
+ * Decide, from the active segment, whether the append goes to it or to a new
+ * segment, then write. Every line is built before the first byte is written,
+ * so a refusal writes nothing. In order:
+ *
+ * 1. A partial last line is never written past or removed. A new segment
+ *    opens after the last complete line and records the fragment's length and
+ *    digest. Nothing is sealed, since the fragment cannot be sealed past.
+ * 2. A segment whose last line is `segment.sealed` lost its successor in a
+ *    crash. The successor opens, with no Checkpoint.
+ * 3. A segment at the size or age threshold is sealed, and the new segment
+ *    opens with a Checkpoint over everything before the record.
+ * 4. Otherwise the record goes to the active segment.
+ */
+async function appendLocked(
+  dir: string,
+  kind: EmitKind,
+  data: unknown,
+  time: number,
+  limits: Limits,
+): Promise<{ seq: number; head: string }> {
+  const segments = await listSegments(dir)
+  // Genesis is a segment that opens on nothing: seq 1, a zero prev, empty state.
+  let seq = 0
+  let source = `urn:uuid:${randomUUID()}`
+  let prev = ZERO_HASH
+  let state = EMPTY_STATE
+  let fragment: { bytes: number; sha256: string } | null = null
+  let reason: 'size' | 'age' | null = null
+  let opens = segments.length === 0
+  const active = segments[segments.length - 1]
+  const activePath = active === undefined ? '' : join(dir, active)
+  let activeSize = 0
+  let path = activePath
+
+  if (active !== undefined) {
+    const tail = await lastLine(activePath)
+    activeSize = tail.size
+    let whole: Buffer | null = null
+    let last = tail.line
+    if (tail.torn) {
+      const bytes = await readFile(activePath)
+      const end = bytes.lastIndexOf(0x0a)
+      // A successor would need this file's own name.
+      if (end === -1) throw new AuditAppendError(kind, `segment ${active} holds only a partial line`)
+      const tornBytes = bytes.subarray(end + 1)
+      fragment = { bytes: tornBytes.length, sha256: sha256(tornBytes) }
+      whole = bytes.subarray(0, end + 1)
+      last = whole.subarray(whole.lastIndexOf(0x0a, end - 1) + 1, end)
+    }
+    const lastRecord = last === null ? undefined : parseRecord(last.toString('utf-8'))
+    if (last === null || lastRecord === undefined) {
       throw new AuditAppendError(kind, 'the active segment holds no readable last line')
     }
-    seq = last.warplineseq as number
-    source = last.source
-    prev = sha256(line)
+    seq = lastRecord.warplineseq
+    source = lastRecord.source
+    prev = sha256(last)
+
+    if (!tail.torn && lastRecord.type !== 'warpline.audit.segment.sealed') {
+      if (tail.size >= limits.maxSegmentBytes) reason = 'size'
+      else {
+        const head = (await readAt(activePath, 0, Math.min(tail.size, TAIL_BYTES))).toString('utf-8')
+        const openedAt = Date.parse(String(parseRecord(head.slice(0, head.indexOf('\n')))?.time))
+        if (time - openedAt >= limits.maxSegmentAgeMs) reason = 'age'
+      }
+    }
+    opens = tail.torn || reason !== null || lastRecord.type === 'warpline.audit.segment.sealed'
+
+    if (opens) {
+      whole ??= await readFile(activePath)
+      const records = whole.toString('utf-8').split('\n').slice(0, -1).map(parseRecord)
+      const carried = DATA['segment.opened'].safeParse(records[0]?.data)
+      if (records.some((r) => r === undefined) || records[0]?.type !== 'warpline.audit.segment.opened' || !carried.success) {
+        throw new AuditAppendError(kind, 'the active segment holds a line that is not a record')
+      }
+      state = segmentState(records as StoredRecord[], carried.data)
+    }
   }
 
-  const record = encode(seq + 1, source, prev, kind, data, time)
+  const sealed = reason === null ? null : encode(++seq, source, prev, 'segment.sealed', { reason, bytes: activeSize }, time)
+  if (sealed !== null) prev = headOf(sealed)
+  const fresh: Buffer[] = []
+  if (opens) {
+    // ponytail: internal lines are not held to MAX_LINE_BYTES. An opened line
+    // carrying hundreds of open intents could outgrow the 64 KiB tail read, and
+    // a crash right after it would leave a last line the tail read cannot find.
+    // Reading further back when the window holds no line is the upgrade path.
+    const opened = encode(
+      ++seq,
+      source,
+      prev,
+      'segment.opened',
+      DATA['segment.opened'].parse({ home: source, version: packageVersion(), fragment, ...state }),
+      time,
+    )
+    path = join(dir, segmentName(seq))
+    prev = headOf(opened)
+    fresh.push(opened)
+    if (sealed !== null) {
+      const openedSeq = seq
+      const checkpoint = encode(++seq, source, prev, 'checkpoint.recorded', { origin: source, size: openedSeq, root: prev }, time)
+      prev = headOf(checkpoint)
+      fresh.push(checkpoint)
+    }
+  }
+  const record = encode(++seq, source, prev, kind, data, time)
   if (record.length > MAX_LINE_BYTES) throw new AuditAppendError(kind, 'line over 16384 bytes')
 
-  if (genesis !== null) {
-    await writeLine(path, genesis)
-    await syncDir(dir)
+  if (sealed !== null) await writeLine(activePath, sealed)
+  for (const [i, line] of fresh.entries()) {
+    await writeLine(path, line)
+    if (i === 0) await syncDir(dir)
   }
   await writeLine(path, record)
-  return { seq: seq + 1, head: headOf(record) }
+  return { seq, head: headOf(record) }
 }
 
 /**
@@ -441,7 +567,7 @@ export function appendAudit<K extends EmitKind>(
   statePath: string,
   kind: K,
   data: AuditData<K>,
-  opts: { lockTimeoutMs?: number; now?: () => number } = {},
+  opts: { lockTimeoutMs?: number; now?: () => number; maxSegmentBytes?: number; maxSegmentAgeMs?: number } = {},
 ): Promise<{ seq: number; head: string }> {
   if (!(AUDIT_KINDS as readonly string[]).includes(kind)) {
     return Promise.reject(new AuditAppendError('(unlisted)', 'unknown kind'))
@@ -462,7 +588,10 @@ export function appendAudit<K extends EmitKind>(
     }
     const token = await acquire(lockPath, kind, opts.lockTimeoutMs ?? LOCK_TIMEOUT_MS)
     try {
-      return await appendLocked(dir, kind, parsed.data, (opts.now ?? Date.now)())
+      return await appendLocked(dir, kind, parsed.data, (opts.now ?? Date.now)(), {
+        maxSegmentBytes: opts.maxSegmentBytes ?? SEGMENT_MAX_BYTES,
+        maxSegmentAgeMs: opts.maxSegmentAgeMs ?? SEGMENT_MAX_AGE_MS,
+      })
     } catch (err) {
       if (err instanceof AuditAppendError) throw err
       throw new AuditAppendError(kind, 'write failed', err)

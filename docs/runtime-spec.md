@@ -3508,6 +3508,62 @@ Linux under either runtime, the call flushes. The upgrade path is
 `fcntl(F_FULLFSYNC)` through `bun:ffi`. Until then this is a stated limit, not
 a guarantee.
 
+### Segments
+
+The store is a run of segment files. Each is named by the seq of its first
+line, zero-padded to 16 digits, so name order is seq order and the last name
+is the active segment. No line spans two files, and the chain runs straight
+across them.
+
+Before each append the writer checks the active segment. It rotates when the
+segment is 64 MiB or larger, or when 30 days have passed since the time on its
+`segment.opened` line. Both are constants in the code. Neither is a preference
+or an environment setting.
+
+A rotation writes, in order:
+
+1. `segment.sealed` as the old file's last line. Its data holds the reason,
+   `size` or `age`, and the file's length in bytes before the sealed line.
+2. A new file whose first line is `segment.opened`, with `warplineprev` the
+   hash of the sealed line.
+3. `checkpoint.recorded`, covering every line up to that `segment.opened`. Its
+   data holds the home id as `origin`, the opened line's seq as `size`, and the
+   opened line's hash as `root`.
+4. The record being appended.
+
+Each is its own write and `datasync`, and the directory is synced once the new
+file exists.
+
+Every `segment.opened` after the first carries forward what a reader would
+otherwise have to look for in an earlier file:
+
+- `authority`: the last audited sha256 of `preferences.json`, and of
+  `principals.json` with each principal id's digest. A file never audited is
+  `null`.
+- `open_intents`: every `fire.intent` that no `fire.outcome`, `fire.refused`
+  or `fire.resolved` has closed, by seq, plugin, run id and effect id. An
+  intent stays open across as many segments as it takes to close it.
+
+So a reader that needs the current authority digests or the open intents reads
+the active segment and nothing else.
+
+**A torn tail.** A write that stops part way leaves a partial last line. The
+writer never writes past it and never removes it. The next append seals
+nothing, because a partial line can't be sealed past. It opens a new segment
+after the last complete line, whose `segment.opened` records the fragment's
+length in bytes and its sha256 as `fragment`, and then writes the record.
+Every byte of the torn file stays as it was. A segment that holds only a
+partial line can't be followed, because its successor would need the same
+name. Appends are refused, naming that file, until it is moved aside by hand.
+
+**A lost successor.** A crash between the sealed line and the new file leaves
+an active segment that ends in `segment.sealed`. The next append heals it. It
+opens the successor with `segment.opened` and writes the record, and it writes
+no Checkpoint.
+
+Nothing in this runtime moves, prunes or deletes a segment. The store only
+grows, and the operator archives by export.
+
 ### Before the effect
 
 A record is written before its effect, and an effect whose record cannot be
