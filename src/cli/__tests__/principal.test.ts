@@ -27,7 +27,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
 import * as fsAtomic from '../../lib/fs-atomic.js'
-import { _setHome } from '../../lib/paths.js'
+import { appendRelinked } from '../../lib/__tests__/helpers/audit-chain.js'
+import { _setHome, engineStatePath } from '../../lib/paths.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { run } from '../principal.js'
 
@@ -183,7 +184,7 @@ describe('warpline principal', () => {
     expect(mode()).toBe(0o600)
     const opsActive = entryDigest({ id: 'ops', type: 'human', status: 'active' })
     expect(ofType(ADDED).map((l) => l.data)).toEqual([
-      { id: 'ops', type: 'human', key_sha256: null, sha256: sha(readFileSync(file())), entries: { ops: opsActive } },
+      { id: 'ops', type: 'human', key_sha256: null, sha256: sha(readFileSync(file())), entry_sha256: opsActive },
     ])
 
     const machine = await principal(['add', 'ci-bot', '--type', 'machine', '--key', KEY])
@@ -196,7 +197,7 @@ describe('warpline principal', () => {
       type: 'machine',
       key_sha256: sha(KEY),
       sha256: sha(readFileSync(file())),
-      entries: { ops: opsActive, 'ci-bot': bot },
+      entry_sha256: bot,
     })
     expect(storeText()).not.toContain('PRINCIPAL-KEY-SENTINEL')
 
@@ -209,7 +210,7 @@ describe('warpline principal', () => {
       {
         id: 'ops',
         sha256: sha(readFileSync(file())),
-        entries: { ops: entryDigest({ id: 'ops', type: 'human', status: 'disabled' }), 'ci-bot': bot },
+        entry_sha256: entryDigest({ id: 'ops', type: 'human', status: 'disabled' }),
       },
     ])
 
@@ -354,10 +355,7 @@ describe('warpline principal', () => {
       new: sha(newBytes),
       changed_ids: ['ops'],
       editor: 'unknown',
-      entries: {
-        ops: entryDigest({ id: 'ops', type: 'machine', status: 'active' }),
-        'ci-bot': entryDigest({ id: 'ci-bot', type: 'machine', status: 'active' }),
-      },
+      changed_entries: { ops: entryDigest({ id: 'ops', type: 'machine', status: 'active' }) },
     })
   })
 
@@ -436,13 +434,132 @@ describe('warpline principal', () => {
 
     const [withKey, without] = ofType(ADDED).map((l) => l.data)
     expect(Object.keys(withKey!)).toEqual(Object.keys(without!))
-    expect(Object.keys(withKey!)).toEqual(['id', 'type', 'key_sha256', 'sha256', 'entries'])
+    expect(Object.keys(withKey!)).toEqual(['id', 'type', 'key_sha256', 'sha256', 'entry_sha256'])
     expect(withKey!.key_sha256).toBe(sha(KEY))
     expect(without!.key_sha256).toBeNull()
     expect(ofType(DISABLED).map((l) => Object.keys(l.data))).toEqual([
-      ['id', 'sha256', 'entries'],
-      ['id', 'sha256', 'entries'],
+      ['id', 'sha256', 'entry_sha256'],
+      ['id', 'sha256', 'entry_sha256'],
     ])
+  })
+})
+
+describe('a registry past the size one record could carry', () => {
+  /** A 64-character id, the longest allowed, unique by its first three characters. */
+  const long = (i: number): string => `${String(i).padStart(3, '0')}${'x'.repeat(61)}`
+  const active = (id: string, type = 'machine'): Entry => ({ id, type, status: 'active' })
+
+  /** The raw stored lines of one type, as they sit on disk. */
+  function raw(type: string): string[] {
+    return readdirSync(storeDir())
+      .filter((f) => f.endsWith('.jsonl'))
+      .sort()
+      .flatMap((f) => readFileSync(join(storeDir(), f), 'utf-8').split('\n'))
+      .filter((l) => l.length > 0 && (JSON.parse(l) as Line).type === type)
+  }
+
+  /** principals.json written by hand, as atomicWriteJson would format it. Returns its bytes. */
+  function handWrite(principals: Entry[]): Buffer {
+    writeFileSync(file(), JSON.stringify({ principals }, null, 2))
+    return readFileSync(file())
+  }
+
+  /** A store with one record in it, so a test can plant a line after it. */
+  async function seededStore(): Promise<void> {
+    await audit.appendAudit(engineStatePath(), 'denial.lifted', { plugin: 'p', fingerprint: 'a'.repeat(64) })
+  }
+
+  test('160 principals with 64-character ids are each added on the record, and no record grows with the registry', async () => {
+    const codes: number[] = []
+    for (let i = 0; i < 160; i++) codes.push((await principal(['add', long(i), '--type', 'machine'])).code)
+
+    // The index of the first add refused, if any: add number index + 1.
+    expect(codes.findIndex((c) => c !== 0)).toBe(-1)
+    const listed = await principal(['list'])
+    expect(listed.code).toBe(0)
+    expect(listed.stdout.split('\n').filter(Boolean)).toHaveLength(160)
+    expect(ofType(OBSERVED)).toHaveLength(0)
+    const added = raw(ADDED)
+    expect(added).toHaveLength(160)
+    expect(Math.max(...added.map((l) => Buffer.byteLength(l)))).toBeLessThanOrEqual(1024)
+  }, 60_000)
+
+  test('a hand edit that changes more entries than one record can name is refused with that reason, and a smaller one is recorded', async () => {
+    expect((await principal(['add', 'ops', '--type', 'human'])).code).toBe(0)
+    const ops = active('ops', 'human')
+
+    const big = handWrite([ops, ...Array.from({ length: 120 }, (_, i) => active(long(i)))])
+    const storeBefore = storeText()
+    const refused = await principal(['list'])
+    expect(refused.code).toBe(1)
+    expect(refused.stdout).toBe('')
+    expect(refused.stderr).toContain('than one audit record can name')
+    expect(refused.stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+    expect(storeText()).toBe(storeBefore)
+    expect(readFileSync(file()).equals(big)).toBe(true)
+
+    const forty = Array.from({ length: 40 }, (_, i) => active(long(i)))
+    handWrite([ops, ...forty])
+    const recorded = await principal(['list'])
+    expect(recorded.code).toBe(0)
+    const observed = ofType(OBSERVED)
+    expect(observed).toHaveLength(1)
+    expect(observed[0]!.data.changed_ids).toEqual(forty.map((e) => e.id))
+    expect(observed[0]!.data.changed_entries).toEqual(Object.fromEntries(forty.map((e) => [e.id, entryDigest(e)])))
+  })
+
+  test('a record written with the whole map and one written with one entry fold into the same carried registry', async () => {
+    await seededStore()
+    const ops = active('ops', 'human')
+    const bytes = handWrite([ops])
+    appendRelinked(storeDir(), ADDED, {
+      id: 'ops',
+      type: 'human',
+      key_sha256: null,
+      sha256: sha(bytes),
+      entries: { ops: entryDigest(ops) },
+    })
+
+    expect((await principal(['add', 'ci', '--type', 'machine'])).code).toBe(0)
+    const last = ofType(ADDED).at(-1)!.data
+    expect(last.entry_sha256).toBe(entryDigest(active('ci')))
+    expect(Object.hasOwn(last, 'entries')).toBe(false)
+
+    expect((await principal(['list'])).code).toBe(0)
+    expect(ofType(OBSERVED)).toHaveLength(0)
+
+    await audit.appendAudit(engineStatePath(), 'denial.lifted', { plugin: 'p', fingerprint: 'a'.repeat(64) }, { maxSegmentBytes: 1 })
+    const opened = ofType('warpline.audit.segment.opened').at(-1)!.data as {
+      authority: { principals: { sha256: string; entries: Record<string, string> } }
+    }
+    expect(opened.authority.principals).toEqual({
+      sha256: sha(readFileSync(file())),
+      entries: { ops: entryDigest(ops), ci: entryDigest(active('ci')) },
+    })
+  })
+
+  test('a record holding both the whole map and one entry is refused by the walk, naming its seq and kind', async () => {
+    await seededStore()
+    const ops = active('ops', 'human')
+    const bytes = handWrite([ops])
+    const seq = appendRelinked(storeDir(), ADDED, {
+      id: 'ops',
+      type: 'human',
+      key_sha256: null,
+      sha256: sha(bytes),
+      entries: { ops: entryDigest(ops) },
+      entry_sha256: entryDigest(ops),
+    })
+    const storeBefore = storeText()
+
+    const { code, stdout, stderr } = await principal(['list'])
+
+    expect(code).toBe(1)
+    expect(stdout).toBe('')
+    expect(stderr).toContain(`seq ${seq} `)
+    expect(stderr).toContain('principal.added')
+    expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+    expect(storeText()).toBe(storeBefore)
   })
 })
 

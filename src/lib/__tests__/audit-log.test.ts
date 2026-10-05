@@ -459,7 +459,7 @@ describe('segments', () => {
       type: 'human',
       key_sha256: null,
       sha256: 'c'.repeat(64),
-      entries: { ops: 'd'.repeat(64) },
+      entry_sha256: 'd'.repeat(64),
     })
     const a = await kept('fire.intent', { plugin: 'a', run_id: 'r1', class: 'session', effect_id: null, fingerprint: null })
     const b = await kept('fire.intent', {
@@ -534,7 +534,7 @@ describe('authority files', () => {
       new: digestA,
       changed_ids: ['ops'],
       editor: 'unknown',
-      entries: { ops: 'a'.repeat(64) },
+      changed_entries: { ops: 'a'.repeat(64) },
     })
 
     const second = await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesB, {
@@ -549,7 +549,7 @@ describe('authority files', () => {
       new: digestB,
       changed_ids: ['ci', 'ops'],
       editor: 'unknown',
-      entries: { ops: 'b'.repeat(64), ci: 'c'.repeat(64) },
+      changed_entries: { ci: 'c'.repeat(64), ops: 'b'.repeat(64) },
     })
 
     const entriesB = { ops: 'b'.repeat(64), ci: 'c'.repeat(64) }
@@ -573,7 +573,66 @@ describe('authority files', () => {
     await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesA, { ci: 'c'.repeat(64) })
 
     expect(observedLines()[1]!.data.changed_ids).toEqual(['ops'])
+    expect(observedLines()[1]!.data.changed_entries).toEqual({ ops: null })
   })
+})
+
+describe('a segment.opened over 64 KiB', () => {
+  const OPENED = 'warpline.audit.segment.opened'
+  const SEALED = 'warpline.audit.segment.sealed'
+  const segmentNames = () => readdirSync(auditDir).filter((n) => /^\d{16}\.jsonl$/.test(n)).sort()
+  const rawLines = (name: string) => readFileSync(join(auditDir, name), 'utf-8').split('\n').slice(0, -1)
+  const liftWith = (opts?: { now?: () => number; maxSegmentBytes?: number }) =>
+    audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A }, opts)
+
+  /**
+   * 600 open intents, each carried at about 150 bytes, then a rotation, so the
+   * active segment opens with a line well past 64 KiB. Returns that line raw.
+   */
+  async function bigOpened(): Promise<string> {
+    for (let i = 0; i < 600; i++) {
+      await audit.appendAudit(statePath, 'fire.intent', {
+        plugin: `${String(i).padStart(4, '0')}${'p'.repeat(60)}`,
+        run_id: 'r'.repeat(40),
+        class: 'session',
+        effect_id: null,
+        fingerprint: null,
+      })
+    }
+    await liftWith({ maxSegmentBytes: 1 })
+    const opened = rawLines(segmentNames().at(-1)!)[0]!
+    const rec = JSON.parse(opened) as { type: string; data: { open_intents: unknown[] } }
+    expect(rec.type).toBe(OPENED)
+    expect(rec.data.open_intents).toHaveLength(600)
+    expect(Buffer.byteLength(opened)).toBeGreaterThan(65_536)
+    return opened
+  }
+
+  test('the segment it opens still rotates by age', async () => {
+    const opened = await bigOpened()
+    const active = segmentNames().at(-1)!
+    const openedAt = Date.parse((JSON.parse(opened) as { time: string }).time)
+
+    await liftWith({ now: () => openedAt + audit.SEGMENT_MAX_AGE_MS })
+
+    const last = JSON.parse(rawLines(active).at(-1)!) as { type: string; data: { reason?: string } }
+    expect(last.type).toBe(SEALED)
+    expect(last.data.reason).toBe('age')
+    expect(segmentNames()).toHaveLength(3)
+  }, 60_000)
+
+  test('a crash right after it still leaves a last line the next append and readHead can read', async () => {
+    const opened = await bigOpened()
+    const active = segmentNames().at(-1)!
+    // The crash: the active segment ends just after its segment.opened line.
+    writeFileSync(join(auditDir, active), `${opened}\n`)
+    const seq = (JSON.parse(opened) as { warplineseq: number }).warplineseq
+
+    expect(await audit.readHead(statePath)).toEqual({ seq, head: sha256(opened) })
+    const next = await liftWith()
+    expect(next.seq).toBe(seq + 1)
+    expect(rawLines(active)).toHaveLength(2)
+  }, 60_000)
 })
 
 describe('the walk reads only what it carries', () => {
