@@ -211,6 +211,7 @@ type Reason =
   | 'line over 16384 bytes'
   | 'audit lock not acquired'
   | 'audit lock not acquired in time'
+  | 'a stale audit lock cannot be broken while .lock.break exists'
   | 'the active segment holds no readable last line'
   | 'write failed'
 
@@ -481,18 +482,17 @@ let queue: Promise<unknown> = Promise.resolve()
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** The lock's age in ms, or null when it is gone. */
+/**
+ * The lock's age in ms: by the time it holds, or by its file time when that
+ * cannot be read. Null only when the lock is gone, or cannot even be stat'ed.
+ */
 async function lockAge(lockPath: string): Promise<number | null> {
-  let text: string
   try {
-    text = await readFile(lockPath, 'utf-8')
-  } catch {
-    return null
-  }
-  try {
-    const at = (JSON.parse(text) as { at?: unknown }).at
+    const at = (JSON.parse(await readFile(lockPath, 'utf-8')) as { at?: unknown }).at
     if (typeof at === 'number') return Date.now() - at
-  } catch {}
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+  }
   try {
     return Date.now() - (await stat(lockPath)).mtimeMs
   } catch {
@@ -500,7 +500,35 @@ async function lockAge(lockPath: string): Promise<number | null> {
   }
 }
 
-async function acquire(lockPath: string, kind: string, timeoutMs: number): Promise<string> {
+/**
+ * Remove a stale lock, one writer at a time. The break file is created
+ * exclusively first, and the lock's age is read again under it, so a lock some
+ * other breaker already replaced with a fresh one is left alone.
+ */
+async function breakStale(dir: string, lockPath: string): Promise<'removed' | 'kept' | 'break file held'> {
+  const breakPath = join(dir, '.lock.break')
+  let fh: Awaited<ReturnType<typeof open>>
+  try {
+    fh = await open(breakPath, 'wx')
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EEXIST' ? 'break file held' : 'kept'
+  }
+  try {
+    await fh.close()
+    const age = await lockAge(lockPath)
+    if (age === null || age <= LOCK_STALE_MS) return 'kept'
+    await unlink(lockPath)
+    return 'removed'
+  } catch (err) {
+    // A lock already gone is as good as removed. Anything else, a directory
+    // say, cannot be broken here.
+    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'removed' : 'kept'
+  } finally {
+    await unlink(breakPath).catch(() => {})
+  }
+}
+
+async function acquire(dir: string, lockPath: string, kind: string, timeoutMs: number): Promise<string> {
   const token = randomUUID()
   const deadline = Date.now() + timeoutMs
   for (;;) {
@@ -517,17 +545,26 @@ async function acquire(lockPath: string, kind: string, timeoutMs: number): Promi
         throw new AuditAppendError(kind, 'audit lock not acquired', err)
       }
     }
+    // Only this pass's answer counts toward the reason the wait ends with.
+    let breakHeld = false
     const age = await lockAge(lockPath)
-    if (age === null) continue
-    if (age > LOCK_STALE_MS) {
-      // ponytail: a holder paused past 30 s loses its lock, and a later write
-      // of its own could interleave with the next holder's. The critical
-      // section is kept to a tail read and one write so no live holder gets
-      // near that. A fencing token checked at write time is the upgrade path.
-      await unlink(lockPath).catch(() => {})
-      continue
+    if (age !== null && age > LOCK_STALE_MS) {
+      // ponytail: a holder alive but paused past 30 s (suspended, swapped
+      // out, or slow inside a rotation's whole-segment walk and datasyncs)
+      // loses its lock, and its late write can interleave with the next
+      // holder's. A writer that dies holding `.lock.break` stops every later
+      // break until the file is removed by hand. A fencing token checked at
+      // write time is the upgrade path.
+      const broken = await breakStale(dir, lockPath)
+      if (broken === 'removed') continue
+      breakHeld = broken === 'break file held'
     }
-    if (Date.now() >= deadline) throw new AuditAppendError(kind, 'audit lock not acquired in time')
+    if (Date.now() >= deadline) {
+      throw new AuditAppendError(
+        kind,
+        breakHeld ? 'a stale audit lock cannot be broken while .lock.break exists' : 'audit lock not acquired in time',
+      )
+    }
     await sleep(LOCK_POLL_MS)
   }
 }
@@ -731,7 +768,7 @@ function underLock<T>(
     } catch (err) {
       throw new AuditAppendError(kind, 'write failed', err)
     }
-    const token = await acquire(lockPath, kind, opts.lockTimeoutMs ?? LOCK_TIMEOUT_MS)
+    const token = await acquire(dir, lockPath, kind, opts.lockTimeoutMs ?? LOCK_TIMEOUT_MS)
     try {
       return await fn(dir, (opts.now ?? Date.now)(), {
         maxSegmentBytes: opts.maxSegmentBytes ?? SEGMENT_MAX_BYTES,
