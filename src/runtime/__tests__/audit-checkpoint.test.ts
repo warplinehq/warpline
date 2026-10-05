@@ -24,8 +24,11 @@ import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manag
 import { createTestHome, type TestHome } from './helpers/create-test-home.js'
 import { snapshotHome } from './helpers/snapshot-home.js'
 import { main } from '../../cli/warpline.js'
+import { testFixturesDir } from '../../../test-utils/fixtures.js'
 
 const REAL_PATHS = _getPaths()
+/** The chain helper, by absolute path, for a plugin handler written into a temp home. */
+const AUDIT_CHAIN = testFixturesDir(import.meta.url, '../../lib/__tests__/helpers/audit-chain.ts')
 
 let home: TestHome
 let installed: ReturnType<typeof spyOn>[] = []
@@ -341,6 +344,62 @@ describe('a Checkpoint the store cannot take', () => {
     expect('audit' in doc).toBe(true)
     expect(doc.audit).toBeNull()
     expect(stderr).toContain('Checkpoint')
+    const deadMan = JSON.parse(readFileSync(join(home.stateDir, 'last-successful-advance'), 'utf-8')) as {
+      run_id: string
+    }
+    expect(deadMan.run_id).toBe(doc.run_id)
+  })
+})
+
+describe('a Checkpoint written before the store could be read back', () => {
+  test('an advance whose plugin leaves a line the walk stops at reports the recorded Checkpoint, indeterminate null, exits 70 and names audit verify', async () => {
+    // A store before the advance, so its opening observation walks a clean
+    // one and the bad line arrives only mid-run.
+    await audit.appendAudit(join(home.stateDir, 'engine-state.json'), 'denial.lifted', {
+      plugin: 'p',
+      fingerprint: 'a'.repeat(64),
+    })
+    // No side effects, so nothing else appends while the handler runs.
+    writePlugin('alpha', { autonomy_level: 'autonomous', side_effects: [] })
+    const bad = { plugin: 'bad\u0007CHECKPOINT_SENTINEL_2e4', run_id: 'run-78', class: 'session', effect_id: null, fingerprint: null }
+    writeFileSync(
+      join(home.pluginsDir, 'alpha', 'handler.ts'),
+      `import { appendRelinked } from ${JSON.stringify(AUDIT_CHAIN)}
+export async function handler() {
+  appendRelinked(${JSON.stringify(storeDir())}, 'warpline.audit.fire.intent', ${JSON.stringify(bad)})
+  return {
+    status: 'success',
+    phases_completed: ['alpha'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'alpha completed',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`,
+    )
+
+    const { code, doc, stderr } = await advanceJson()
+
+    const lines = rawLines()
+    const last = lines[lines.length - 1]!.record
+    expect(last.type).toBe('warpline.audit.checkpoint.recorded')
+    expect(lines.some((l) => l.record.type === 'warpline.audit.fire.intent')).toBe(true)
+    expect(doc.audit).toEqual({
+      seq: last.warplineseq,
+      bytes: null,
+      segments: null,
+      checkpoint_seq: last.warplineseq,
+      indeterminate: null,
+    })
+    expect(code).toBe(70)
+    expect(doc.exit_code).toBe(70)
+    expect(stderr).toContain("recorded this advance's Checkpoint")
+    expect(stderr).toContain('could not be read back')
+    expect(stderr).toContain('warpline audit verify')
+    expect(stderr).not.toContain("could not record this advance's Checkpoint")
     const deadMan = JSON.parse(readFileSync(join(home.stateDir, 'last-successful-advance'), 'utf-8')) as {
       run_id: string
     }

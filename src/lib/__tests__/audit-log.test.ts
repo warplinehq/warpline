@@ -710,3 +710,31 @@ describe('the walk reads only what it carries', () => {
     expect(err.message).not.toContain('WALK_SENTINEL_5d1')
   })
 })
+
+describe('a Checkpoint the walk cannot summarise', () => {
+  test('recordCheckpoint over a line the walk stops at resolves with the Checkpoint seq, and bytes, segments and indeterminate null', async () => {
+    await lift()
+    // Chain-valid, so the append under the Checkpoint takes it. Only the walk
+    // that reads the store back afterwards stops at it.
+    appendRelinked(auditDir, 'warpline.audit.fire.intent', {
+      plugin: 'bad\u0007CHECKPOINT_SENTINEL_2e4',
+      run_id: 'run-78',
+      class: 'session',
+      effect_id: null,
+      fingerprint: null,
+    })
+
+    const summary: unknown = await audit.recordCheckpoint(statePath)
+
+    const last = JSON.parse(segmentLines().at(-1)!) as { type: string; warplineseq: number }
+    expect(last.type).toBe('warpline.audit.checkpoint.recorded')
+    expect(summary).toStrictEqual({
+      seq: last.warplineseq,
+      bytes: null,
+      segments: null,
+      checkpoint_seq: last.warplineseq,
+      indeterminate: null,
+    })
+    expect(JSON.stringify(summary)).not.toContain('CHECKPOINT_SENTINEL_2e4')
+  })
+})
