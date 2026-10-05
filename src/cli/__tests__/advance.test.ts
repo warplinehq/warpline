@@ -848,6 +848,7 @@ describe('main([advance, --json])', () => {
     // refusal list, a plugin name and a closed-enum reason each. No summary, no
     // output, no path.
     expect(Object.keys(doc).sort()).toEqual([
+      'audit',
       'exit_code',
       'failed',
       'gated',
