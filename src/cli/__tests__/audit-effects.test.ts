@@ -849,6 +849,27 @@ describe('resolve --intent', () => {
     }
   })
 
+  test('a repeated --intent is refused and writes nothing, even when the last seq is a real open intent', async () => {
+    const intent = await sessionIntentLeftOpen()
+    const seq = String(intent.warplineseq)
+    const pastHead = String((await audit.readHead(statePathOf())).seq + 1)
+    const before = await snapshotHome(home)
+
+    for (const argv of [
+      ['--intent', pastHead, '--intent', seq, '--shipped'],
+      ['--intent', seq, '--intent', seq, '--shipped'],
+      [`--intent=${pastHead}`, '--intent', seq, '--not-shipped'],
+    ]) {
+      const { code, stderr } = await capture(['resolve', ...argv])
+
+      expect(`${argv.join(' ')}: ${code}`).toBe(`${argv.join(' ')}: 1`)
+      expect(stderr).toContain(BY_SEQ_USAGE)
+      expect(recordsOf('fire.resolved')).toEqual([])
+      expect(await snapshotHome(home)).toEqual(before)
+    }
+    expect((await audit.openIntents(statePathOf())).map((i) => i.seq)).toContain(intent.warplineseq)
+  })
+
   test('a live advance refuses the by-seq answer as it refuses the content form', async () => {
     const intent = await sessionIntentLeftOpen()
     const held = await acquireLock(runLockPath())
