@@ -56,12 +56,12 @@
  * run case in closed-reader.test.ts has no ceiling and still guards a drain
  * that never settles on that path.
  */
-import { test, expect, beforeAll, afterAll } from 'bun:test'
+import { test, expect, beforeAll, afterAll, afterEach } from 'bun:test'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
 
 /** The bin entry, not the plugin-run module: this is the path a scheduler runs. */
@@ -228,7 +228,41 @@ beforeAll(() => {
   }
 })
 
+/**
+ * The `sigtermDrain` pipelines still running. A case killed by its timeout
+ * leaves its reader polling for `signalled`, and `afterAll` then removes the
+ * home that file would go in, so nothing could ever release it. The reader
+ * would run on after the suite, holding the runner's output open.
+ */
+const drains = new Set<{ child: ChildProcess; signalled: string; pidFile: string }>()
+
+/**
+ * Releases every pipeline still in `drains`: its reader through `signalled`,
+ * while the directory is still there, then SIGKILL to the plugin's pid when
+ * one was written, and to the shell. Every error is ignored. The pipeline is
+ * not spawned detached, because a detached group no longer gets a terminal's
+ * Ctrl-C, which would strand it a new way.
+ */
+function releaseDrains(): void {
+  for (const { child, signalled, pidFile } of drains) {
+    try {
+      if (existsSync(dirname(signalled))) writeFileSync(signalled, '')
+    } catch {}
+    try {
+      const pid = Number(readFileSync(pidFile, 'utf8'))
+      if (pid > 0) process.kill(pid, 'SIGKILL')
+    } catch {}
+    try {
+      child.kill('SIGKILL')
+    } catch {}
+  }
+  drains.clear()
+}
+
+afterEach(releaseDrains)
+
 afterAll(() => {
+  releaseDrains()
   rmSync(home, { recursive: true, force: true })
   rmSync(ticking, { recursive: true, force: true })
   rmSync(fleet, { recursive: true, force: true })
@@ -244,12 +278,17 @@ afterAll(() => {
  * The env is passed explicitly. A bun child spawned with the default env sees
  * the env as it was when this process started, not as it is now.
  */
-function sh(cmd: string, home: string): Promise<{ out: string; code: number | null }> {
+function sh(
+  cmd: string,
+  home: string,
+  spawned?: (child: ChildProcess) => void,
+): Promise<{ out: string; code: number | null }> {
   return new Promise((resolve, reject) => {
     const child = spawn('sh', ['-c', cmd], {
       env: { ...process.env, WARPLINE_HOME: home },
       stdio: ['ignore', 'pipe', 'inherit'],
     })
+    spawned?.(child)
     let out = ''
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk: string) => {
@@ -372,16 +411,31 @@ async function sigtermDrain(
     rmSync(stale, { force: true })
   }
 
+  // The reader also stops once `dir` is gone. `releaseDrains` writes
+  // `signalled`, but `afterAll` removes the home a moment later, and a reader
+  // between two polls would never see the file. Measured: a case killed at
+  // 50 ms or 100 ms stranded its reader that way.
+  let drain: { child: ChildProcess; signalled: string; pidFile: string } | undefined
   const result = sh(
-    `{ "${runtime}" "${entry}" advance ${streams}; echo $? > "${rc}"; } | (while [ ! -e "${signalled}" ]; do sleep 0.05; done; sleep 0.3; cat)`,
+    `{ "${runtime}" "${entry}" advance ${streams}; echo $? > "${rc}"; } | (while [ ! -e "${signalled}" ] && [ -d "${dir}" ]; do sleep 0.05; done; sleep 0.3; cat)`,
     dir,
+    child => {
+      drain = { child, signalled, pidFile }
+      drains.add(drain)
+    },
   )
+  // Once this function has written `signalled` itself, the reader is released
+  // and the pipeline ends on its own.
+  const released = () => {
+    writeFileSync(signalled, '')
+    if (drain !== undefined) drains.delete(drain)
+  }
 
   const deadline = Date.now() + 15_000
   let pid = ''
   while ((pid = existsSync(pidFile) ? readFileSync(pidFile, 'utf8') : '') === '') {
     if (Date.now() > deadline) {
-      writeFileSync(signalled, '') // release the reader so the pipeline can end
+      released() // release the reader so the pipeline can end
       throw new Error('the slow plugin never wrote its pid')
     }
     await new Promise<void>(resolve => setTimeout(resolve, 20))
@@ -389,7 +443,7 @@ async function sigtermDrain(
 
   process.kill(Number(pid), 'SIGTERM')
   const killedAt = Date.now()
-  writeFileSync(signalled, '')
+  released()
   const { out } = await result
   return { rc: readFileSync(rc, 'utf8').trim(), out, elapsed: Date.now() - killedAt }
 }
