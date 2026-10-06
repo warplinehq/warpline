@@ -862,3 +862,182 @@ describe('audit pass-over', () => {
     expect(v.code).toBe(3)
   })
 })
+
+// -- A line that is not a record -----------------------------------------------
+
+/** The line `garble()` adds, without its newline. */
+const GARBLED = 'not a record WALK_SENTINEL_5d1'
+
+/**
+ * A complete last line that is not a record, added by hand to the active
+ * segment, as a write that went wrong leaves one. Resolves its positional seq,
+ * one past the head, and its bytes without the newline.
+ */
+async function garble(): Promise<{ seq: number; bytes: Buffer }> {
+  const { seq } = await readHead(statePath())
+  appendFileSync(join(auditDir(), segmentFiles().at(-1)!), `${GARBLED}\n`)
+  return { seq: seq + 1, bytes: Buffer.from(GARBLED, 'utf8') }
+}
+
+/** A segment's file name, from its first seq. */
+const nameOf = (seq: number): string => `${String(seq).padStart(16, '0')}.jsonl`
+
+/** Each `reason:` line verify printed. */
+const reasons = (stdout: string): string[] => stdout.split('\n').filter((l) => l.startsWith('reason: '))
+
+describe('a line that is not a record', () => {
+  test('at the end of the active segment is passed over in a new segment that opens after the last record before it, and verify reads clean against anchors taken before and after', async () => {
+    const { seq: intent } = await mailer()
+    await grow(1)
+    const h0 = await headText()
+    const before = lastLine()
+    const { seq: g, bytes } = await garble()
+    const [oldName] = segmentFiles() as [string]
+    const oldBytes = readFileSync(join(auditDir(), oldName))
+
+    const stopped = await verifyAt(h0)
+    expect(stopped.code).toBe(4)
+    expect(stopped.stdout).toContain('verdict: tampered\n')
+    expect(reasons(stopped.stdout)).toEqual([`reason: seq ${g} is not a record`])
+
+    const r = await passOver(g)
+
+    expect(r.code).toBe(0)
+    expect(r.stderr).toBe('')
+    expect(r.stdout).toContain(`opens at seq ${g}`)
+    expect(r.stdout).not.toContain('WALK_SENTINEL_5d1')
+    expect(readFileSync(join(auditDir(), oldName)).equals(oldBytes)).toBe(true)
+    expect(segmentFiles()).toEqual([oldName, nameOf(g)])
+    const newText = readFileSync(join(auditDir(), nameOf(g)), 'utf8')
+    expect(newText).not.toContain('WALK_SENTINEL_5d1')
+    const firstNew = newText.split('\n')[0]!
+    const opened = JSON.parse(firstNew) as {
+      type: string
+      warplineseq: number
+      warplineprev: string
+      data: { passed_over?: unknown; open_intents: unknown[] }
+    }
+    expect(opened.type).toBe('warpline.audit.segment.opened')
+    expect(opened.warplineseq).toBe(g)
+    expect(opened.warplineprev).toBe(sha(Buffer.from(before, 'utf8')))
+    expect(opened.data.passed_over).toEqual([{ seq: g, sha256: createHash('sha256').update(bytes).digest('hex') }])
+    expect(opened.data.open_intents).toContainEqual({ seq: intent, plugin: 'mailer', run_id: 'run-77', effect_id: null })
+
+    const clean = await verifyAt(h0)
+    expect(clean.stdout).toContain('verdict: clean\n')
+    expect(clean.stdout).toContain(`open intent: seq ${intent} plugin mailer run run-77\n`)
+    expect(unreadableLines(clean.stdout)).toEqual([])
+    expect(clean.code).toBe(0)
+
+    const h2 = await headText()
+    expect(h2).toBe(`${g} ${sha(Buffer.from(firstNew, 'utf8'))}\n`)
+    await grow(1)
+    expect((await capture(['principal', 'list'])).code).toBe(0)
+    for (const h of [h0, h2]) {
+      const v = await verifyAt(h)
+      expect(v.stdout).toContain('verdict: clean\n')
+      expect(v.code).toBe(0)
+    }
+  })
+
+  test('at the end of the active segment leaves audit head refusing without a stack and export printing every line, while appends and principal list refuse until the pass-over', async () => {
+    await mailer()
+    const { seq: g } = await garble()
+    const path = join(auditDir(), segmentFiles().at(-1)!)
+    const bytes = readFileSync(path)
+
+    for (const argv of [['audit', 'head'], ['audit', 'head', '--c2sp']]) {
+      const { code, stdout, stderr } = await capture(argv)
+      expect({ argv, code, stdout }).toEqual({ argv, code: 1, stdout: '' })
+      expect(stderr).toContain('no head to print')
+      expect(stderr).toContain('warpline audit pass-over')
+      expect(stderr).not.toContain('WALK_SENTINEL_5d1')
+    }
+
+    const exported = await capture(['audit', 'export', '--after', '0'])
+    expect(exported.code).toBe(0)
+    expect(exported.stdout).toBe(bytes.toString('utf8'))
+
+    let reason: unknown
+    try {
+      await appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null })
+    } catch (err) {
+      reason = (err as { reason?: unknown }).reason
+    }
+    expect(reason).toBe('the active segment holds no readable last line')
+
+    const listed = await capture(['principal', 'list'])
+    expect(listed.code).toBe(1)
+    expect(listed.stderr).toContain(`seq ${g} is not a record`)
+    expect(listed.stderr).not.toContain('WALK_SENTINEL_5d1')
+    expect(readFileSync(path).equals(bytes)).toBe(true)
+  })
+
+  test('with records after it in its segment is passed over and the walk goes on, and verify still reports it tampered', async () => {
+    await mailer()
+    await grow(1)
+    const h0 = await headText()
+    const path = join(auditDir(), segmentFiles().at(-1)!)
+    const text = readFileSync(path, 'utf8')
+    const lastStart = text.lastIndexOf('\n', text.length - 2) + 1
+    writeFileSync(path, `${text.slice(0, lastStart)}${GARBLED}\n${text.slice(lastStart)}`)
+    const m = text.slice(0, lastStart).split('\n').length
+
+    await grow(1)
+    const stopped = await verifyAt(h0)
+    expect(stopped.code).toBe(4)
+    expect(reasons(stopped.stdout)).toEqual([`reason: seq ${m} is not a record`])
+    expect((await capture(['principal', 'list'])).code).toBe(1)
+
+    expect((await passOver(m)).code).toBe(0)
+    expect((await capture(['principal', 'list'])).code).toBe(0)
+    const after = await verifyAt(h0)
+    expect(after.code).toBe(4)
+    expect(after.stdout).toContain('verdict: tampered\n')
+    expect(reasons(after.stdout)).toEqual([`reason: seq ${m} is not a record`])
+  })
+
+  test('passed over at the end of a segment is tampered when the next segment.opened does not name it', async () => {
+    await mailer()
+    const h0 = await headText()
+    const { seq: g } = await garble()
+    expect((await passOver(g)).code).toBe(0)
+    const path = join(auditDir(), segmentFiles().at(-1)!)
+    const original = readFileSync(path)
+    const text = original.toString('utf8')
+    expect(text.indexOf('\n')).toBe(text.length - 1)
+
+    const rec = JSON.parse(text) as { data: { passed_over?: unknown } }
+    delete rec.data.passed_over
+    writeFileSync(path, `${JSON.stringify(rec)}\n`)
+    const unnamed = await verifyAt(h0)
+    expect(unnamed.code).toBe(4)
+    expect(reasons(unnamed.stdout)).toEqual([`reason: seq ${g} is not a record`])
+
+    writeFileSync(path, original)
+    const v = await verifyAt(h0)
+    expect(v.stdout).toContain('verdict: clean\n')
+    expect(v.code).toBe(0)
+  })
+
+  test('that replaced the anchored record is passed over, and verify against that anchor is still tampered', async () => {
+    await grow(1)
+    const h1 = await headText()
+    await grow(1)
+    const hk = await headText()
+    const k = Number(hk.split(' ')[0])
+    const path = join(auditDir(), segmentFiles().at(-1)!)
+    const text = readFileSync(path, 'utf8')
+    writeFileSync(path, `${text.slice(0, text.lastIndexOf('\n', text.length - 2) + 1)}${GARBLED}\n`)
+
+    expect((await passOver(k)).code).toBe(0)
+
+    const anchored = await verifyAt(hk)
+    expect(anchored.code).toBe(4)
+    expect(anchored.stdout).toContain('verdict: tampered\n')
+    expect(reasons(anchored.stdout)).toEqual([`reason: seq ${k} does not hash to the anchor`])
+    const earlier = await verifyAt(h1)
+    expect(earlier.stdout).toContain('verdict: clean\n')
+    expect(earlier.code).toBe(0)
+  })
+})
