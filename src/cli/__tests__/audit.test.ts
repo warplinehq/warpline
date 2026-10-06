@@ -27,7 +27,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { appendAudit, readHead } from '../../lib/audit-log.js'
+import { appendAudit, passOver as passOverLib, readHead } from '../../lib/audit-log.js'
 import { _setHome } from '../../lib/paths.js'
 import { appendRelinked, forge, walkChain, type ForgeOp } from '../../lib/__tests__/helpers/audit-chain.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
@@ -764,6 +764,36 @@ describe('audit pass-over', () => {
     const v = await verifyAt(h)
     expect(v.stdout).toContain('verdict: clean\n')
     expect(v.code).toBe(0)
+  })
+
+  test('a pass-over under a due rotation seals the active segment and writes its Checkpoint; with none due it writes only segment.opened', async () => {
+    const kinds = (name: string) =>
+      readFileSync(join(auditDir(), name), 'utf8').trimEnd().split('\n').map((l) => (JSON.parse(l) as { type: string }).type)
+
+    await mailer()
+    const bad = badIntent()
+    const [first] = segmentFiles() as [string]
+    const r = await passOverLib(statePath(), [bad])
+    expect(segmentFiles()).toHaveLength(2)
+    expect(kinds(first).at(-1)).not.toBe('warpline.audit.segment.sealed')
+    expect(kinds(segmentFiles().at(-1)!)).toEqual(['warpline.audit.segment.opened'])
+    expect(r.seq).toBe(r.opened)
+
+    const bad2 = badIntent()
+    const [, second] = segmentFiles() as [string, string]
+    const due = await passOverLib(statePath(), [bad2], { maxSegmentBytes: 1 })
+    expect(segmentFiles()).toHaveLength(3)
+    expect(kinds(second).at(-1)).toBe('warpline.audit.segment.sealed')
+    const third = readFileSync(join(auditDir(), segmentFiles().at(-1)!), 'utf8').trimEnd().split('\n')
+    expect(third.map((l) => (JSON.parse(l) as { type: string }).type)).toEqual([
+      'warpline.audit.segment.opened',
+      'warpline.audit.checkpoint.recorded',
+    ])
+    const cp = JSON.parse(third[1]!) as { data: { size: number; root: string } }
+    expect(cp.data.size).toBe(due.opened)
+    expect(cp.data.root).toBe(sha(Buffer.from(third[0]!, 'utf8')))
+    expect(openedLine().data.passed_over?.map((e) => e.seq)).toEqual([bad2])
+    expect(walkChain(auditDir()).ok).toBe(true)
   })
 
   test('a malformed pass-over is a usage error, and a home with no store is refused without creating one', async () => {
