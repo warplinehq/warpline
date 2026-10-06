@@ -855,6 +855,30 @@ describe('audit pass-over', () => {
     expect(listed.stderr).not.toContain('WALK_SENTINEL_5d1')
   })
 
+  test('an active segment whose only line is an opening line that is not a record is refused by pass-over and by the walk, and neither names a pass-over', async () => {
+    await grow(1)
+    const [name] = segmentFiles() as [string]
+    const first = Number(name.slice(0, 16))
+    writeFileSync(join(auditDir(), name), `${GARBLED}\n`)
+    const before = await snapshotHome(home)
+
+    for (const seqs of [[first], [first + 1]]) {
+      const r = await passOver(...seqs)
+      expect({ seqs, code: r.code }).toEqual({ seqs, code: 1 })
+      expect(r.stderr).toContain(`seq ${first} opens the active segment`)
+      expect(r.stderr).not.toContain('warpline audit pass-over')
+      expect(r.stderr).not.toContain('WALK_SENTINEL_5d1')
+      expect(r.stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+      expect(await snapshotHome(home)).toEqual(before)
+    }
+
+    const listed = await capture(['principal', 'list'])
+    expect(listed.code).toBe(1)
+    expect(listed.stderr).toContain(`seq ${first} opens the active segment`)
+    expect(listed.stderr).not.toContain('warpline audit pass-over')
+    expect(listed.stderr).not.toContain('WALK_SENTINEL_5d1')
+  })
+
   test('a malformed pass-over is a usage error, and a home with no store is refused without creating one', async () => {
     const none = await passOver(2)
     expect(none.code).toBe(1)
