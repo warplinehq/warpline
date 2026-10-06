@@ -1040,4 +1040,23 @@ describe('a line that is not a record', () => {
     expect(earlier.stdout).toContain('verdict: clean\n')
     expect(earlier.code).toBe(0)
   })
+
+  test('at the end of the active segment is passed over with no seal or Checkpoint, even with a rotation due', async () => {
+    await mailer()
+    const h0 = await headText()
+    const { seq: g } = await garble()
+    const [oldName] = segmentFiles() as [string]
+    const oldBytes = readFileSync(join(auditDir(), oldName))
+
+    const r = await passOverLib(statePath(), [g], { maxSegmentBytes: 1 })
+
+    expect(r.opened).toBe(g)
+    expect(readFileSync(join(auditDir(), oldName)).equals(oldBytes)).toBe(true)
+    expect(segmentFiles()).toEqual([oldName, nameOf(g)])
+    const newText = readFileSync(join(auditDir(), nameOf(g)), 'utf8')
+    expect(newText.indexOf('\n')).toBe(newText.length - 1)
+    const v = await verifyAt(h0)
+    expect(v.stdout).toContain('verdict: clean\n')
+    expect(v.code).toBe(0)
+  })
 })
