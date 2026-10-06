@@ -84,12 +84,21 @@ async function head(args: string[]): Promise<number> {
   } catch (err) {
     return usage('head', err)
   }
+  let h: { seq: number; head: string }
+  try {
+    h = await readHead(engineStatePath())
+  } catch (err) {
+    if ((err as Error).name !== 'AuditHeadUnreadableError') throw err
+    process.stderr.write(
+      'audit head: the active segment holds no readable last line, so there is no head to print. warpline audit verify names the line, and warpline audit pass-over <seq> goes past a last line that is not a record.\n',
+    )
+    return 1
+  }
   if (!c2sp) {
-    const { seq, head } = await readHead(engineStatePath())
-    process.stdout.write(`${seq} ${head}\n`)
+    process.stdout.write(`${h.seq} ${h.head}\n`)
     return 0
   }
-  if ((await readHead(engineStatePath())).seq === 0) {
+  if (h.seq === 0) {
     process.stderr.write('audit head --c2sp: the store has no records yet, so there is no origin to name.\n')
     return 1
   }
@@ -109,8 +118,15 @@ async function exportAfter(args: string[]): Promise<number> {
   } catch (err) {
     return usage('export', err)
   }
-  const { seq } = await readHead(engineStatePath())
-  if (after > seq) {
+  // With no readable head there is nothing to hold --after against, and every
+  // complete line is streamed: an export must be possible to keep before a pass-over.
+  let seq: number | null = null
+  try {
+    seq = (await readHead(engineStatePath())).seq
+  } catch (err) {
+    if ((err as Error).name !== 'AuditHeadUnreadableError') throw err
+  }
+  if (seq !== null && after > seq) {
     process.stderr.write(`audit export: --after ${after} is beyond head ${seq}.\n`)
     return 1
   }

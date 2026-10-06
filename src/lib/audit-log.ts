@@ -767,7 +767,9 @@ type Limits = { maxSegmentBytes: number; maxSegmentAgeMs: number }
  * as it stands. Each named seq must be a line of the active segment, not its
  * first, that the walk stops on. The walk passes over exactly those lines, the
  * opened line names each by seq and the hash of its bytes, and no record is
- * written (`dataAfter` is null).
+ * written (`dataAfter` is null). When the active segment ends in lines that are
+ * not records, the new segment opens after the last record before them, and no
+ * seal is written. Without `passing`, such a last line refuses every append.
  */
 async function appendLocked(
   dir: string,
@@ -810,7 +812,28 @@ async function appendLocked(
       whole = bytes.subarray(0, end + 1)
       last = whole.subarray(whole.lastIndexOf(0x0a, end - 1) + 1, end)
     }
-    const lastRecord = last === null ? undefined : parseRecord(last.toString('utf-8'))
+    let lastRecord = last === null ? undefined : parseRecord(last.toString('utf-8'))
+    // The complete lines, as bytes, for a pass-over: each named one is hashed as written.
+    const lines: Buffer[] = []
+    // Whether a pass-over stepped back over trailing lines that are not records.
+    let stepped = false
+    if (passing !== undefined && last !== null) {
+      whole ??= await readFile(activePath)
+      for (let at = 0, nl = whole.indexOf(0x0a); nl !== -1; at = nl + 1, nl = whole.indexOf(0x0a, at)) {
+        lines.push(whole.subarray(at, nl))
+      }
+      // A pass-over opens after the last record before them, so each still
+      // ends its segment and the next segment.opened can name it.
+      if (lastRecord === undefined) {
+        let k = lines.length - 1
+        for (; k >= 0 && lastRecord === undefined; k -= 1) lastRecord = parseRecord((lines[k] as Buffer).toString('utf-8'))
+        if (lastRecord === undefined) {
+          throw new AuditAppendError(kind, `seq ${firstSeqOf(active)} opens the active segment and is not a segment.opened the walk can carry`)
+        }
+        last = lines[k + 1] as Buffer
+        stepped = true
+      }
+    }
     if (last === null || lastRecord === undefined) {
       throw new AuditAppendError(kind, 'the active segment holds no readable last line')
     }
@@ -818,7 +841,8 @@ async function appendLocked(
     source = lastRecord.source
     prev = sha256(last)
 
-    if (!tail.torn && lastRecord.type !== 'warpline.audit.segment.sealed') {
+    // Nothing is sealed past a line that is not a record, which would then no longer end its segment.
+    if (!tail.torn && !stepped && lastRecord.type !== 'warpline.audit.segment.sealed') {
       if (tail.size >= limits.maxSegmentBytes) reason = 'size'
       else {
         const first = await firstLine(activePath)
@@ -831,11 +855,6 @@ async function appendLocked(
     if (opens) {
       whole ??= await readFile(activePath)
       if (passing !== undefined) {
-        // The complete lines, as bytes: each named one is hashed as written.
-        const lines: Buffer[] = []
-        for (let at = 0, nl = whole.indexOf(0x0a); nl !== -1; at = nl + 1, nl = whole.indexOf(0x0a, at)) {
-          lines.push(whole.subarray(at, nl))
-        }
         passed = [...new Set(passing)].sort((a, b) => a - b).map((n) => {
           const line = lines[n - firstSeqOf(active)]
           if (n <= firstSeqOf(active) || line === undefined || !('refused' in walkLine(line.toString('utf-8'), n))) {
@@ -1046,6 +1065,8 @@ export function passOver(
 /**
  * The head: the last complete line's seq and the hash of its bytes, or seq 0
  * and the zero hash before the first record. A pure reader: no lock, no mkdir.
+ * Rejects with an Error named `AuditHeadUnreadableError` when the active
+ * segment holds no complete line, or its last one is not a record.
  */
 export async function readHead(statePath: string): Promise<{ seq: number; head: string }> {
   const dir = auditDirFor(statePath)
@@ -1058,11 +1079,13 @@ export async function readHead(statePath: string): Promise<{ seq: number; head: 
   }
   if (segments.length === 0) return { seq: 0, head: ZERO_HASH }
   const { line } = await lastLine(join(dir, segments[segments.length - 1] as string))
-  const seq = line === null ? undefined : (JSON.parse(line.toString('utf-8')) as { warplineseq?: unknown }).warplineseq
-  if (line === null || typeof seq !== 'number') {
-    throw new Error('audit store: the active segment holds no readable last line')
+  const rec = line === null ? undefined : parseRecord(line.toString('utf-8'))
+  if (line === null || rec === undefined) {
+    const err = new Error('audit store: the active segment holds no readable last line')
+    err.name = 'AuditHeadUnreadableError'
+    throw err
   }
-  return { seq, head: sha256(line) }
+  return { seq: rec.warplineseq, head: sha256(line) }
 }
 
 /** A fire intent no record has closed yet. */
@@ -1335,12 +1358,15 @@ export interface Verification {
  * Check every segment against itself and the store against an anchor kept off
  * the box. A pure reader: no lock, no mkdir, nothing written.
  *
- * Tampered is any broken link, seq or file name, a partial line anywhere but
- * the very end that no later `segment.opened` acknowledges, a `passed_over`
- * entry that does not match the segment before it, an anchor beyond the head,
- * or an anchored line whose hash is not the anchor's. Torn is a
- * partial line at the very end, an acknowledged fragment, or a last segment
- * whose last line is `segment.sealed`. Unreadable is a chain that checks clean
+ * Tampered is any broken link, seq or file name, a line that is not a record
+ * other than at the end of a segment the next `segment.opened` names in
+ * `passed_over` (such a line moves no seq or link, and is never the line an
+ * anchor is compared with), a partial line anywhere but the very end that no
+ * later `segment.opened` acknowledges, a `passed_over` entry that does not
+ * match the segment before it, an anchor beyond the head, or an anchored line
+ * whose hash is not the anchor's. Torn is a partial line at the very end, an
+ * acknowledged fragment, or a last segment whose last line is
+ * `segment.sealed`. Unreadable is a chain that checks clean
  * or torn whose active segment holds a line the walk cannot carry, so the open
  * intents cannot be listed. A re-linked rewrite passes every link, so the
  * anchor is what catches it. Wrong log, then tampered, then unreadable, then
@@ -1384,17 +1410,29 @@ export async function verifyStore(statePath: string, anchor: Anchor, now: number
     return result('tampered', reason, records === null ? null : { records, seconds: null, anchored_at: null })
   }
 
+  // Lines that are not records at the end of the segment before, by positional
+  // seq. The next segment.opened must name each in passed_over.
+  let carried: number[] = []
   for (const [i, name] of names.entries()) {
     if (name !== segmentName(seq + 1)) return tampered(`segment ${name} is not named by its first seq ${seq + 1}`)
     const lines = scan(join(dir, name))
     let n = 0
+    // Lines that are not records, held until the segment ends or a record follows.
+    const held: number[] = []
     let step = await lines.next()
     // An early return leaves the generator at a yield; this closes its file.
     try {
       for (; !step.done; step = await lines.next()) {
         const body = step.value.subarray(0, step.value.length - 1)
         const rec = parseRecord(body.toString('utf-8')) as (StoredRecord & { warplineprev?: unknown }) | undefined
-        if (rec === undefined) return tampered(`seq ${seq + 1} is not a record`)
+        // A held line moves nothing: seq, prev and the anchor match advance
+        // only on records, so a held line is never compared with the anchor.
+        if (rec === undefined) {
+          if (n === 0) return tampered(`seq ${seq + 1} is not a record`)
+          held.push(seq + 1 + held.length)
+          continue
+        }
+        if (held.length > 0) return tampered(`seq ${held[0]} is not a record`)
         if (rec.warplineseq !== seq + 1) return tampered(`seq ${seq + 1} is numbered ${rec.warplineseq}`)
         if (rec.warplineprev !== prev) return tampered(`seq ${seq + 1} does not link to the line before it`)
         if (n === 0) {
@@ -1409,14 +1447,18 @@ export async function verifyStore(statePath: string, anchor: Anchor, now: number
           if (pending !== null) torn = `seq ${seq + 1} acknowledges a partial line the store kept`
           pending = null
           const named: unknown = rec.data?.passed_over
-          const held = named === undefined ? true : await passedOverHolds(dir, names[i - 1], named)
-          if (held !== true) {
+          const holds = named === undefined ? true : await passedOverHolds(dir, names[i - 1], named)
+          if (holds !== true) {
             return tampered(
-              held.seq === null
+              holds.seq === null
                 ? `seq ${seq + 1}'s passed_over does not match the segment before it`
-                : `seq ${seq + 1}'s passed_over entry for seq ${held.seq} does not match the segment before it`,
+                : `seq ${seq + 1}'s passed_over entry for seq ${holds.seq} does not match the segment before it`,
             )
           }
+          // passedOverHolds checked each entry's hash; each carried line must be one.
+          const unnamed = carried.find((c) => !(named as { seq: number }[] | undefined)?.some((e) => e.seq === c))
+          if (unnamed !== undefined) return tampered(`seq ${unnamed} is not a record`)
+          carried = []
         }
         n += 1
         seq += 1
@@ -1432,6 +1474,10 @@ export async function verifyStore(statePath: string, anchor: Anchor, now: number
     }
     const rest = step.value
     const last = i === names.length - 1
+    if (held.length > 0) {
+      if (last) return tampered(`seq ${held[0]} is not a record`)
+      carried = held
+    }
     if (n === 0 && !last) return tampered(`segment ${name} holds no complete line`)
     if (rest.length > 0) {
       if (last) torn = `the store ends in a partial line after seq ${seq}`

@@ -3665,6 +3665,11 @@ It is not a valid C2SP checkpoint. It carries no signature line, and the root
 is the head of a hash chain, not a Merkle root. On an empty store it refuses
 with exit `1` and prints nothing, because there is no home id yet to name.
 
+When the active segment's last complete line is not a record, or the segment
+holds no complete line, there is no head to print. `audit head` exits `1`,
+prints nothing on stdout, and names `warpline audit verify` and
+`warpline audit pass-over` on stderr. `--c2sp` does the same.
+
 ### Writing
 
 One writer appends at a time. Within a process, appends queue behind each
@@ -3806,23 +3811,38 @@ stops on. If another line still stops the walk, it refuses and names that one.
 Pass-over edits no line. It opens a new segment after the active one as it
 stands. The new segment's `segment.opened` carries forward the state reached by
 a walk that skips exactly the named lines, and names each one in `passed_over`,
-by seq and the sha256 of its bytes under the byte rule. The lines stay where
-they are, and in every export. Verify checks each entry against the segment
+by seq and the sha256 of its bytes under the byte rule. Whatever a passed-over
+line said is lost to the walk. Its bytes stay where they are and in every
+export, but the new `segment.opened` keeps only its seq and sha256, so an
+intent it opened is not carried and one it closed stays open. Verify checks
+each entry against the segment
 before it (§ Verify), so every anchor taken before or after the pass-over still
 holds. A partial last line is acknowledged in `fragment` beside it, as any
 rotation does. When a size or age rotation is due, it seals first and writes
 that rotation's Checkpoint, as any append does. Otherwise it writes no seal and
-no Checkpoint. It never writes a record, as the heal of a lost successor writes
-`segment.opened` only.
+no Checkpoint. Apart from a due rotation's seal and Checkpoint, it writes
+nothing but the new `segment.opened`, as the heal of a lost successor writes
+only that.
 
 It refuses with exit `1`, and writes nothing, for the active segment's own
 `segment.opened`, a seq outside the active segment (a sealed segment's line, or
 past the head), a line the walk carries, a store where another line it was not
-given still stops the walk, and a home with no store, where it creates nothing.
-A build that predates `passed_over` still reads the segment, because the walk
-strips keys it does not carry. A line that is not a record breaks the chain
-where it sits, so verify keeps reporting it `tampered` after a pass-over, which
-is the true account. The pass-over still lets the walk go on past it.
+given still stops the walk, an active segment that holds no complete line, or
+only a partial one (§ A torn tail), and a home with no store, where it creates
+nothing. A build that predates `passed_over` still reads the segment, because
+the walk strips keys it does not carry.
+
+A line that is not a record is passed over the same way. When it ends the
+active segment, as a write that went wrong leaves it, the new segment opens
+after the last record before it: its `segment.opened` takes that record's seq
+plus one, links to that record's hash, and names the line in `passed_over` by
+its place in the segment and the sha256 of its bytes. Verify reports `tampered`
+at that line until the pass-over, and `clean` after it against anchors taken
+before and after. No size or age seal is written past such a line, as none is
+written past a partial one. One with records after it in its segment can only
+be put there by hand, and it breaks the chain where it sits, so verify keeps
+reporting it `tampered` after a pass-over, which is the true account.
+The pass-over still lets the walk go on past it.
 
 **A torn tail.** A write that stops part way leaves a partial last line. The
 writer never writes past it and never removes it. The next append seals
@@ -3952,6 +3972,11 @@ the segment files concatenated in name order, byte for byte. At the head it
 prints nothing and exits `0`. Past the head it prints nothing, names the head
 on stderr as `beyond head`, and exits `1`.
 
+When the active segment's last complete line is not a record, there is no head
+to hold `--after` against. Export prints every complete line after the seq
+given, that line included, and exits `0`,
+so an export can be kept before a pass-over.
+
 A partial line is never exported. The `segment.opened` that follows it already
 records its length and digest (§ Segments), and stands in for it.
 
@@ -3981,7 +4006,7 @@ compare against would read as fine when it could not look.
 |---------|------|---------|
 | `clean` | `0` | Every line links, and the line at the anchored seq hashes to the anchor. |
 | `torn` | `3` | As clean, except the store ends in a partial line, keeps a partial line that a later `segment.opened` acknowledges, or its last segment ends in `segment.sealed` with no successor. A crash leaves these. |
-| `tampered` | `4` | A line does not parse, its seq is not the next one, its `warplineprev` is not the previous line's hash, a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, a `segment.opened` has a `passed_over` that names a line not in the segment before it or one that does not hash as recorded, the anchored seq is beyond the head, or the line at the anchored seq does not hash to the anchor. |
+| `tampered` | `4` | A line does not parse, other than lines at the end of a segment that the next `segment.opened` names in `passed_over`, its seq is not the next one, its `warplineprev` is not the previous line's hash, a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, a `segment.opened` has a `passed_over` that names a line not in the segment before it or one that does not hash as recorded, the anchored seq is beyond the head, or the line at the anchored seq does not hash to the anchor. |
 | `wrong log` | `5` | The anchor's origin is another home's id. |
 | `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), so the open intents cannot be listed. The reason names its seq. |
 
