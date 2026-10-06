@@ -220,6 +220,7 @@ type Reason =
   | 'write failed'
   | 'the store has no segment to pass over'
   | `seq ${number} is not a line the walk stops on in the active segment`
+  | `seq ${number} opens the active segment and cannot be passed over`
 
 /**
  * An append that did not happen. The message is built from the kind and a
@@ -374,11 +375,18 @@ const OPENED_CARRIES = z.object({
 type CarriedType = keyof typeof CARRIED
 type ShortKind<T> = T extends `warpline.audit.${infer K}` ? K : never
 
-/** Why a walk stopped: a seq, a kind the walk carries and fixed words, never a line's data. */
+/** The way past a line the walk stops on, named where the walk stops. Fixed words. */
+const PASS_IT_OVER = '; pass it over with warpline audit pass-over (docs/runtime-spec.md § 14)'
+
+/**
+ * Why a walk stopped: a seq, a kind the walk carries and fixed words, never a
+ * line's data. A line pass-over can name says so. The opening line cannot be
+ * passed over, so its refusal names no pass-over.
+ */
 type WalkRefusal =
-  | `seq ${number} is not a record`
+  | `seq ${number} is not a record${typeof PASS_IT_OVER}`
   | `seq ${number} opens the active segment and is not a segment.opened the walk can carry`
-  | `seq ${number} holds ${ShortKind<CarriedType>} data the walk cannot carry`
+  | `seq ${number} holds ${ShortKind<CarriedType>} data the walk cannot carry${typeof PASS_IT_OVER}`
 
 type Walked = { state: Carried } | { refused: WalkRefusal }
 
@@ -444,12 +452,14 @@ function segmentState(lines: CarriedLine[], carried: Carried): Carried {
  */
 function walkLine(line: string, seq: number): { refused: WalkRefusal } | { carried: CarriedLine | null } {
   const r = parseRecord(line)
-  if (r === undefined) return { refused: `seq ${seq} is not a record` }
+  if (r === undefined) return { refused: `seq ${seq} is not a record${PASS_IT_OVER}` }
   if (!Object.hasOwn(CARRIED, r.type)) return { carried: null }
   const type = r.type as CarriedType
   const data = CARRIED[type].safeParse(r.data)
   if (!data.success) {
-    return { refused: `seq ${seq} holds ${type.slice('warpline.audit.'.length) as ShortKind<CarriedType>} data the walk cannot carry` }
+    return {
+      refused: `seq ${seq} holds ${type.slice('warpline.audit.'.length) as ShortKind<CarriedType>} data the walk cannot carry${PASS_IT_OVER}`,
+    }
   }
   return { carried: { type, seq: r.warplineseq, data: data.data } }
 }
@@ -471,10 +481,11 @@ function stateOf(text: string, firstSeq: number, skip: ReadonlySet<number> = new
   const carried: CarriedLine[] = []
   for (const [i, line] of lines.entries()) {
     const seq = firstSeq + i
+    // Whether or not it is a record, the opening line holds the state the
+    // walk starts from, and no pass-over can name it.
     if (i === 0) {
       const r = parseRecord(line)
-      if (r === undefined) return { refused: `seq ${seq} is not a record` }
-      const data = r.type === 'warpline.audit.segment.opened' ? OPENED_CARRIES.safeParse(r.data) : undefined
+      const data = r?.type === 'warpline.audit.segment.opened' ? OPENED_CARRIES.safeParse(r.data) : undefined
       if (data === undefined || !data.success) {
         return { refused: `seq ${seq} opens the active segment and is not a segment.opened the walk can carry` }
       }
@@ -857,7 +868,8 @@ async function appendLocked(
       if (passing !== undefined) {
         passed = [...new Set(passing)].sort((a, b) => a - b).map((n) => {
           const line = lines[n - firstSeqOf(active)]
-          if (n <= firstSeqOf(active) || line === undefined || !('refused' in walkLine(line.toString('utf-8'), n))) {
+          if (n === firstSeqOf(active)) throw new AuditAppendError(kind, `seq ${n} opens the active segment and cannot be passed over`)
+          if (n < firstSeqOf(active) || line === undefined || !('refused' in walkLine(line.toString('utf-8'), n))) {
             throw new AuditAppendError(kind, `seq ${n} is not a line the walk stops on in the active segment`)
           }
           return { seq: n, sha256: sha256(line) }

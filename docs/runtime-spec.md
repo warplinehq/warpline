@@ -3804,7 +3804,11 @@ the walk, so no such value reaches a reader's output.
 and every command that needs the walk refuses: an `advance`, `prefs set`,
 `principal`, `resolve`, and any append that rotates. `advance`, `prefs set`,
 `principal` and `resolve` print the same reason, which names the seq and the kind and nothing
-from the line. No warpline build writes such a line. Keep an export of the
+from the line, and ends by saying to pass the line over with `warpline audit pass-over`:
+`; pass it over with warpline audit pass-over (docs/runtime-spec.md § 14)`.
+Verify's `open intents unreadable` line carries the same reason. A walk that
+stops at the active segment's first line says no such thing, because that line
+cannot be passed over (below). No warpline build writes such a line. Keep an export of the
 store, then run `warpline audit pass-over <seq>...`, naming every line the walk
 stops on. If another line still stops the walk, it refuses and names that one.
 
@@ -3824,13 +3828,21 @@ no Checkpoint. Apart from a due rotation's seal and Checkpoint, it writes
 nothing but the new `segment.opened`, as the heal of a lost successor writes
 only that.
 
-It refuses with exit `1`, and writes nothing, for the active segment's own
-`segment.opened`, a seq outside the active segment (a sealed segment's line, or
-past the head), a line the walk carries, a store where another line it was not
-given still stops the walk, an active segment that holds no complete line, or
-only a partial one (§ A torn tail), and a home with no store, where it creates
-nothing. A build that predates `passed_over` still reads the segment, because
-the walk strips keys it does not carry.
+It refuses with exit `1`, and writes nothing, for a seq outside the active
+segment (a sealed segment's line, or past the head), a line the walk carries, a
+store where another line it was not given still stops the walk, an active
+segment that holds no complete line, or only a partial one (§ A torn tail), and
+a home with no store, where it creates nothing. A build that predates
+`passed_over` still reads the segment, because the walk strips keys it does not
+carry.
+
+The active segment's first line has its own refusal, `seq N opens the active segment and cannot be passed over`.
+That line holds the state the walk starts from, and a pass-over has nothing to
+carry forward without it. A walk that stops there refuses with `seq N opens the
+active segment and is not a segment.opened the walk can carry`, whether the line
+is a `segment.opened` this build cannot carry or not a record at all. The first
+case is a line only a later build writes, so run the build that wrote it, or a
+later one. A first line that is not a record has no recovery in this build.
 
 A line that is not a record is passed over the same way. When it ends the
 active segment, as a write that went wrong leaves it, the new segment opens
