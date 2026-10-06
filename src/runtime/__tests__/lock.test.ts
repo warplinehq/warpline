@@ -107,8 +107,12 @@ describe('deriveHost', () => {
   })
 
   it('never consults the machine name', async () => {
-    const src = await readFile(join(import.meta.dir, '..', 'lock.ts'), 'utf-8')
-    expect(src).not.toMatch(/hostname\s*\(|os\.hostname/)
+    // The host is derived in host-identity.ts now, so the scan has to read that
+    // file too, or it guards nothing.
+    for (const file of [join(import.meta.dir, '..', 'lock.ts'), join(import.meta.dir, '..', '..', 'lib', 'host-identity.ts')]) {
+      const src = await readFile(file, 'utf-8')
+      expect(src).not.toMatch(/hostname\s*\(|os\.hostname/)
+    }
   })
 })
 
