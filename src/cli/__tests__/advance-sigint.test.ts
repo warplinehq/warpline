@@ -11,11 +11,18 @@
  * the runner. The drain has no in-process seam either: what it guards is what
  * happens to bytes still queued when the process ends.
  *
- * So this file launches the real bin eight times. Two are the exit-code cases,
+ * So this file launches the real bin ten times. Two are the exit-code cases,
  * one per signal, because a second signal is a second disposition. Six are
- * the drain cases. Any further interrupt behaviour — the handler being removed
+ * the drain cases. Two are the audit lock case, an interrupted advance and the
+ * one after it. Any further interrupt behaviour — the handler being removed
  * again, for instance — belongs in `advance.test.ts`, which can observe it
  * without a launch.
+ *
+ * The audit lock case is about what an interrupt leaves behind. An advance
+ * signalled while it holds `audit/.lock` exits through `process.exit(130)`, so
+ * the hold's own release never runs. The store's exit hook removes the lock on
+ * the way out, and the next advance must run at once rather than fail every
+ * append until the lock is 30 seconds old.
  *
  * The normal-exit drain guard pipes a document larger than the pipe buffer
  * into a reader that waits before it reads. Against a bin that exits without
@@ -50,7 +57,8 @@
  * that never settles on that path.
  */
 import { test, expect, beforeAll, afterAll } from 'bun:test'
-import { spawn } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
+import type { ChildProcess } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -430,3 +438,83 @@ for (const [name, runtime, entry] of [
     }
   }, 30_000)
 }
+
+/**
+ * The hold is kept open by a FIFO in place of the first segment. The store
+ * reads the segment under the audit lock before it appends, and a read of a
+ * FIFO with no writer blocks, so the advance sits inside its hold until the
+ * signal lands. The audit lock existing is the readiness marker.
+ *
+ * Bun only. Measured when this case was written: under node 24 the blocked
+ * FIFO read keeps the process from exiting after the handler and the exit
+ * listener run. Under bun 1.4.2 the process exits 130.
+ */
+test('an advance interrupted while it holds the audit lock leaves no lock, and the next advance runs at once', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'warpline-advance-audit-lock-'))
+  let first: ChildProcess | undefined
+  try {
+    writeFileSync(join(dir, 'preferences.json'), JSON.stringify({ review_gate: false }))
+    const plugin = join(dir, 'plugins', 'quick')
+    mkdirSync(plugin, { recursive: true })
+    writeFileSync(join(plugin, 'manifest.ts'), `export const manifest = ${JSON.stringify({ name: 'quick', ...MANIFEST })}\n`)
+    writeFileSync(
+      join(plugin, 'handler.ts'),
+      `export async function handler() {
+  return {
+    status: 'success',
+    phases_completed: ['quick'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'quick completed',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}\n`,
+    )
+    const auditDir = join(dir, 'audit')
+    mkdirSync(auditDir)
+    const segment = join(auditDir, '0000000000000001.jsonl')
+    execFileSync('/usr/bin/mkfifo', [segment])
+    const auditLock = join(auditDir, '.lock')
+
+    const env = { ...process.env, WARPLINE_HOME: dir }
+    first = spawn(process.execPath, [ENTRY, 'advance'], { env, stdio: 'ignore' })
+    const exited = new Promise<{ code: number | null; signal: string | null }>(resolve => {
+      first?.on('exit', (code, sig) => resolve({ code, signal: sig }))
+    })
+    const deadline = Date.now() + 15_000
+    while (!existsSync(auditLock)) {
+      if (Date.now() > deadline) throw new Error('the advance never took the audit lock')
+      await new Promise<void>(resolve => setTimeout(resolve, 20))
+    }
+    first.kill('SIGTERM')
+    const firstExit = await exited
+    const lockLeft = existsSync(auditLock)
+
+    // The run lock is left too, because the run lock's own release never ran
+    // either. Healing a dead holder's run lock belongs to § 12 and is pinned in
+    // lock.test.ts. This case is about the audit lock, so it removes the run
+    // lock by hand, as `advanceKilledWith` does, with the FIFO.
+    rmSync(segment, { force: true })
+    rmSync(join(dir, 'state', '.lock'), { force: true })
+    const started = Date.now()
+    const second = spawnSync(process.execPath, [ENTRY, 'advance'], { env, encoding: 'utf8', timeout: 20_000 })
+    const elapsed = Date.now() - started
+
+    expect(firstExit).toEqual({ code: 130, signal: null })
+    expect(second.status).toBe(0)
+    expect(elapsed).toBeLessThan(8_000)
+    expect(second.stderr).not.toContain('audit lock not acquired')
+    const types = readFileSync(segment, 'utf8')
+      .split('\n')
+      .filter(line => line !== '')
+      .map(line => (JSON.parse(line) as { type: string }).type)
+    expect(types).toContain('warpline.audit.preferences.observed')
+    // Last, so a failure here shows the second advance ran all the same.
+    expect(lockLeft).toBe(false)
+  } finally {
+    if (first !== undefined && first.exitCode === null && first.signalCode === null) first.kill('SIGKILL')
+    rmSync(dir, { recursive: true, force: true })
+  }
+}, 30_000)

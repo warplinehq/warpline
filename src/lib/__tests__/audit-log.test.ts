@@ -22,6 +22,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -29,9 +30,12 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { open } from 'node:fs/promises'
+import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as audit from '../audit-log.js'
+import { deriveHost } from '../host-identity.js'
+import * as hostIdentity from '../host-identity.js'
 import { appendRelinked } from './helpers/audit-chain.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
@@ -219,40 +223,41 @@ describe('audit store: the lock', () => {
   })
 })
 
+const lockPath = () => join(auditDir, '.lock')
+const breakPath = () => join(auditDir, '.lock.break')
+const segmentPath = () => join(auditDir, '0000000000000001.jsonl')
+const sixtySecondsAgo = () => new Date(Date.now() - 60_000)
+
+type Settled = { settled: 'resolved'; value: { seq: number } } | { settled: 'rejected'; error: unknown } | { settled: 'pending' }
+
+/** The append with a 300 ms lock timeout, raced against 3000 ms, so a spin fails the case instead of hanging the suite. */
+function oddAppend(): { append: Promise<{ seq: number }>; settled: Promise<Settled> } {
+  const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 300 })
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const settled = Promise.race<Settled>([
+    append.then(
+      (value) => ({ settled: 'resolved' as const, value }),
+      (error: unknown) => ({ settled: 'rejected' as const, error }),
+    ),
+    new Promise<Settled>((r) => (timer = setTimeout(() => r({ settled: 'pending' }), 3000))),
+  ]).finally(() => clearTimeout(timer))
+  return { append, settled }
+}
+
+/** Remove the odd lock and any break file, then let the append settle, so the in-process queue is clear for the next case. */
+async function clear(append: Promise<unknown>): Promise<void> {
+  rmSync(lockPath(), { recursive: true, force: true })
+  rmSync(breakPath(), { force: true })
+  await append.catch(() => {})
+}
+
+const rejected = (out: Settled): unknown => {
+  expect(out.settled).toBe('rejected')
+  return out.settled === 'rejected' ? out.error : undefined
+}
+
 describe('the lock when its file is odd', () => {
-  const lockPath = () => join(auditDir, '.lock')
-  const breakPath = () => join(auditDir, '.lock.break')
-  const segmentPath = () => join(auditDir, '0000000000000001.jsonl')
-  const sixtySecondsAgo = () => new Date(Date.now() - 60_000)
   const root = process.getuid?.() === 0
-
-  type Settled = { settled: 'resolved'; value: { seq: number } } | { settled: 'rejected'; error: unknown } | { settled: 'pending' }
-
-  /** The append with a 300 ms lock timeout, raced against 3000 ms, so a spin fails the case instead of hanging the suite. */
-  function oddAppend(): { append: Promise<{ seq: number }>; settled: Promise<Settled> } {
-    const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 300 })
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const settled = Promise.race<Settled>([
-      append.then(
-        (value) => ({ settled: 'resolved' as const, value }),
-        (error: unknown) => ({ settled: 'rejected' as const, error }),
-      ),
-      new Promise<Settled>((r) => (timer = setTimeout(() => r({ settled: 'pending' }), 3000))),
-    ]).finally(() => clearTimeout(timer))
-    return { append, settled }
-  }
-
-  /** Remove the odd lock and any break file, then let the append settle, so the in-process queue is clear for the next case. */
-  async function clear(append: Promise<unknown>): Promise<void> {
-    rmSync(lockPath(), { recursive: true, force: true })
-    rmSync(breakPath(), { force: true })
-    await append.catch(() => {})
-  }
-
-  const rejected = (out: Settled): unknown => {
-    expect(out.settled).toBe('rejected')
-    return out.settled === 'rejected' ? out.error : undefined
-  }
 
   test('a lock that is a directory makes the append fail in time and writes nothing', async () => {
     await lift()
@@ -347,6 +352,268 @@ describe('the lock when its file is odd', () => {
       expect(readFileSync(segmentPath())).toEqual(segment)
     } finally {
       await clear(append)
+    }
+  })
+})
+
+/**
+ * This machine as the store names it in a lock: the machine identifier, and on
+ * Linux that joined to the pid namespace, or null when either is missing.
+ * Computed here from the identity module and the namespace link, not borrowed
+ * from the store.
+ */
+const HOST: string | null = (() => {
+  const base = deriveHost()
+  if (base === null || process.platform !== 'linux') return base
+  try {
+    return `${base}:${readlinkSync('/proc/self/ns/pid')}`
+  } catch {
+    return null
+  }
+})()
+
+/** The pid of a process that has already exited, checked gone before use. */
+function deadPid(): number {
+  const { pid } = spawnSync(process.execPath, ['-e', '0'])
+  try {
+    process.kill(pid, 0)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return pid
+  }
+  throw new Error(`pid ${pid} is still running`)
+}
+
+/** A process idling until killed. Kill it in `finally`. */
+const liveChild = () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+
+const writeLock = (path: string, lock: object) => writeFileSync(path, JSON.stringify(lock))
+
+/**
+ * Runs a child that imports the store by absolute path and appends once, with a
+ * `now` that acts inside the hold. `exit` exits 130 there. `replaced` puts
+ * another holder's lock in place first, then exits 130. `linux` claims the
+ * Linux platform before its first append and prints the lock's text there.
+ */
+function childAppend(mode: 'exit' | 'replaced' | 'linux'): ReturnType<typeof spawnSync> & { stdout: string } {
+  const script = join(tmp, 'child-append.ts')
+  writeFileSync(
+    script,
+    `import { readFileSync, writeFileSync } from 'node:fs'
+import { appendAudit } from ${JSON.stringify(join(import.meta.dir, '..', 'audit-log.ts'))}
+const [statePath, mode] = process.argv.slice(2)
+const lockPath = ${JSON.stringify(lockPath())}
+if (mode === 'linux') Object.defineProperty(process, 'platform', { value: 'linux' })
+await appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, {
+  now: () => {
+    if (mode === 'exit') process.exit(130)
+    if (mode === 'replaced') {
+      writeFileSync(lockPath, JSON.stringify({ token: 'next-holder', at: Date.now(), pid: 1, host: null }))
+      process.exit(130)
+    }
+    process.stdout.write(readFileSync(lockPath, 'utf-8'))
+    return Date.now()
+  },
+})
+`,
+  )
+  return spawnSync(process.execPath, [script, statePath, mode], { env: { ...process.env }, encoding: 'utf8' })
+}
+
+describe('the lock names its holder', () => {
+  test('a held lock names its token, its time, this process and this machine', async () => {
+    let seen = ''
+    await audit.appendAudit(
+      statePath,
+      'denial.lifted',
+      { plugin: 'p', fingerprint: null },
+      {
+        now: () => {
+          seen = readFileSync(lockPath(), 'utf-8')
+          return Date.now()
+        },
+      },
+    )
+    const lock = JSON.parse(seen) as Record<string, unknown>
+    expect(typeof lock.token).toBe('string')
+    expect(typeof lock.at).toBe('number')
+    expect(lock.pid).toBe(process.pid)
+    expect(lock.host).toBe(HOST)
+    expect(existsSync(lockPath())).toBe(false)
+  })
+
+  test.skipIf(HOST === null)('a lock whose holder is gone on this machine is taken at once', async () => {
+    await lift()
+    writeLock(lockPath(), { token: 'gone', at: Date.now(), pid: deadPid(), host: HOST })
+    const started = Date.now()
+    const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 2000 })
+    try {
+      const out = await append.then(
+        (value) => ({ settled: 'resolved' as const, value }),
+        (error: unknown) => ({ settled: 'rejected' as const, error }),
+      )
+      expect(out.settled).toBe('resolved')
+      expect(Date.now() - started).toBeLessThan(1000)
+      expect(segmentLines()).toHaveLength(3)
+      expect(existsSync(lockPath())).toBe(false)
+      expect(existsSync(breakPath())).toBe(false)
+    } finally {
+      await clear(append)
+    }
+  })
+
+  test('a lock whose holder is alive on this machine is not taken', async () => {
+    await lift()
+    const live = liveChild()
+    try {
+      writeLock(lockPath(), { token: 'live', at: Date.now(), pid: live.pid, host: HOST })
+      const bytes = readFileSync(lockPath())
+      const segment = readFileSync(segmentPath())
+      const { append, settled } = oddAppend()
+      try {
+        expect((rejected(await settled) as Error | undefined)?.message).toContain('audit lock not acquired in time')
+        expect(readFileSync(lockPath())).toEqual(bytes)
+        expect(readFileSync(segmentPath())).toEqual(segment)
+      } finally {
+        await clear(append)
+      }
+    } finally {
+      live.kill('SIGKILL')
+    }
+  })
+
+  test('a lock that names no machine is broken only by age', async () => {
+    await lift()
+    const dead = deadPid()
+    writeLock(lockPath(), { token: 'nameless', at: Date.now(), pid: dead, host: null })
+    const bytes = readFileSync(lockPath())
+    const fresh = oddAppend()
+    try {
+      rejected(await fresh.settled)
+      expect(readFileSync(lockPath())).toEqual(bytes)
+    } finally {
+      await fresh.append.catch(() => {})
+    }
+
+    writeLock(lockPath(), { token: 'nameless', at: Date.now() - 31_000, pid: dead, host: null })
+    const old = oddAppend()
+    try {
+      expect((await old.settled).settled).toBe('resolved')
+      expect(existsSync(lockPath())).toBe(false)
+    } finally {
+      await clear(old.append)
+    }
+  })
+
+  test('a lock from another machine or another pid namespace is broken only by age, whatever its pid', async () => {
+    await lift()
+    const dead = deadPid()
+    for (const host of ['f'.repeat(64), `${deriveHost()}:pid:[1]`]) {
+      writeLock(lockPath(), { token: 'foreign', at: Date.now(), pid: dead, host })
+      const bytes = readFileSync(lockPath())
+      const { append, settled } = oddAppend()
+      try {
+        rejected(await settled)
+        expect(readFileSync(lockPath())).toEqual(bytes)
+      } finally {
+        await clear(append)
+      }
+    }
+  })
+
+  test.skipIf(HOST === null)('a break file whose holder is gone on this machine is cleared, and the stale lock is broken', async () => {
+    await lift()
+    writeLock(lockPath(), { token: 'crashed', at: Date.now() - 31_000 })
+    writeLock(breakPath(), { token: 'breaker', at: Date.now(), pid: deadPid(), host: HOST })
+    const { append, settled } = oddAppend()
+    try {
+      expect((await settled).settled).toBe('resolved')
+      expect(existsSync(lockPath())).toBe(false)
+      expect(existsSync(breakPath())).toBe(false)
+    } finally {
+      await clear(append)
+    }
+  })
+
+  test('a break file from a machine that cannot be told is cleared at 30 s by its time, and one that names no holder is not', async () => {
+    await lift()
+    writeLock(lockPath(), { token: 'crashed', at: Date.now() - 31_000 })
+    writeLock(breakPath(), { token: 'breaker', at: Date.now() - 31_000, pid: deadPid(), host: null })
+    const first = oddAppend()
+    try {
+      expect((await first.settled).settled).toBe('resolved')
+      expect(existsSync(lockPath())).toBe(false)
+      expect(existsSync(breakPath())).toBe(false)
+    } finally {
+      await clear(first.append)
+    }
+
+    writeLock(lockPath(), { token: 'crashed', at: Date.now() - 31_000 })
+    writeFileSync(breakPath(), '')
+    utimesSync(breakPath(), sixtySecondsAgo(), sixtySecondsAgo())
+    const second = oddAppend()
+    try {
+      expect((rejected(await second.settled) as Error | undefined)?.message).toContain('.lock.break')
+      expect(existsSync(breakPath())).toBe(true)
+    } finally {
+      await clear(second.append)
+    }
+  })
+
+  test('a process that exits holding the lock removes it on the way out', async () => {
+    await lift()
+    const segment = readFileSync(segmentPath())
+    const child = childAppend('exit')
+    expect(child.status).toBe(130)
+    expect(existsSync(lockPath())).toBe(false)
+    expect(readFileSync(segmentPath())).toEqual(segment)
+  })
+
+  test('the exit hook leaves a lock that holds another token', async () => {
+    await lift()
+    try {
+      const child = childAppend('replaced')
+      expect(child.status).toBe(130)
+      expect(readFileSync(lockPath(), 'utf-8')).toContain('next-holder')
+    } finally {
+      rmSync(lockPath(), { force: true })
+    }
+  })
+
+  test('on Linux the lock names the pid namespace, and names no machine when it cannot be read', async () => {
+    await lift()
+    const child = childAppend('linux')
+    expect(child.status).toBe(0)
+    const lock = JSON.parse(child.stdout) as Record<string, unknown>
+    const link = existsSync('/proc/self/ns/pid') ? readlinkSync('/proc/self/ns/pid') : null
+    expect(lock.pid).toBe(child.pid)
+    expect(lock.host).toBe(link === null ? null : `${deriveHost()}:${link}`)
+  })
+
+  test('a lock replaced between its judgment and the break is kept', async () => {
+    await lift()
+    const live = liveChild()
+    let tripped = 0
+    const real = hostIdentity.isProcessAlive
+    const spy = spyOn(hostIdentity, 'isProcessAlive').mockImplementation((pid: number) => {
+      if (tripped > 0) return real(pid)
+      tripped++
+      writeLock(lockPath(), { token: 'next', at: Date.now(), pid: live.pid, host: HOST })
+      return false
+    })
+    try {
+      writeLock(lockPath(), { token: 'gone', at: Date.now(), pid: deadPid(), host: HOST })
+      const { append, settled } = oddAppend()
+      try {
+        expect((rejected(await settled) as Error | undefined)?.message).toContain('audit lock not acquired in time')
+        expect(readFileSync(lockPath(), 'utf-8')).toContain('"next"')
+        expect(existsSync(breakPath())).toBe(false)
+        expect(tripped).toBe(1)
+      } finally {
+        await clear(append)
+      }
+    } finally {
+      spy.mockRestore()
+      live.kill('SIGKILL')
     }
   })
 })
