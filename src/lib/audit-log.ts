@@ -1285,23 +1285,34 @@ export async function c2spNote(statePath: string): Promise<string> {
 
 /**
  * Whether a `passed_over` names, in rising seq order, only lines of the segment
- * `prevName`, each hashing as recorded under the byte rule. Reads that segment
- * only when called, so a store with no pass-over pays nothing.
+ * `prevName`, each hashing as recorded under the byte rule. Resolves `true`
+ * when every entry holds. Otherwise resolves the failing entry's seq: the
+ * first, in scan order, whose line hashes to something else, or the smallest
+ * left unmatched once the segment ends. The seq is null when the list as a
+ * whole fails: it is not a list of entries, its seqs do not rise, or there is
+ * no segment before. Reads that segment only when called, so a store with no
+ * pass-over pays nothing.
  */
-async function passedOverHolds(dir: string, prevName: string | undefined, named: unknown): Promise<boolean> {
+async function passedOverHolds(
+  dir: string,
+  prevName: string | undefined,
+  named: unknown,
+): Promise<true | { seq: number | null }> {
   const parsed = PassedOver.safeParse(named)
-  if (!parsed.success || prevName === undefined) return false
-  if (parsed.data.some((e, k) => k > 0 && e.seq <= (parsed.data[k - 1] as { seq: number }).seq)) return false
+  if (!parsed.success || prevName === undefined) return { seq: null }
+  if (parsed.data.some((e, k) => k > 0 && e.seq <= (parsed.data[k - 1] as { seq: number }).seq)) return { seq: null }
   const want = new Map(parsed.data.map((e) => [e.seq, e.sha256]))
   let seq = firstSeqOf(prevName) - 1
   for await (const line of scan(join(dir, prevName))) {
     seq += 1
     const hash = want.get(seq)
     if (hash === undefined) continue
-    if (sha256(line.subarray(0, line.length - 1)) !== hash) return false
+    if (sha256(line.subarray(0, line.length - 1)) !== hash) return { seq }
     want.delete(seq)
   }
-  return want.size === 0
+  // The entries rise, so the first left is the smallest.
+  const [left] = want.keys()
+  return left === undefined ? true : { seq: left }
 }
 
 export type Verdict = 'clean' | 'torn' | 'tampered' | 'unreadable' | 'wrong_log'
@@ -1398,8 +1409,13 @@ export async function verifyStore(statePath: string, anchor: Anchor, now: number
           if (pending !== null) torn = `seq ${seq + 1} acknowledges a partial line the store kept`
           pending = null
           const named: unknown = rec.data?.passed_over
-          if (named !== undefined && !(await passedOverHolds(dir, names[i - 1], named))) {
-            return tampered(`seq ${seq + 1}'s passed_over does not match the segment before it`)
+          const held = named === undefined ? true : await passedOverHolds(dir, names[i - 1], named)
+          if (held !== true) {
+            return tampered(
+              held.seq === null
+                ? `seq ${seq + 1}'s passed_over does not match the segment before it`
+                : `seq ${seq + 1}'s passed_over entry for seq ${held.seq} does not match the segment before it`,
+            )
           }
         }
         n += 1
