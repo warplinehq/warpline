@@ -422,7 +422,9 @@ you know, answer it with `warpline resolve --intent <seq> --shipped` or
 approval still reads indeterminate is the exception. Answer it with
 `warpline resolve <plugin> --shipped <effect-id>` or `--not-shipped
 <effect-id>`, which closes its intent too. The by-seq form refuses it and names
-that command.
+that command. If that command says your answer is on the audit record but the
+state document could not be written,
+run the same command again to finish it. The other answer is refused.
 `audit.indeterminate` is `null`, not `[]`, when the Checkpoint was written but
 the store could not be read back after it, and the advance then exits `70`.
 A check written as `jq '.audit.indeterminate | length'` reads `null` as `0`, so

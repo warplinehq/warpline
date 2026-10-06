@@ -2634,19 +2634,31 @@ own verb and not a mode of
   age. The cost is waiting for the running advance to end, and after a crash on
   a machine that cannot identify itself, for the two-hour window. `resolve`
   never writes, heals or removes the lock.
-- Before it writes, it appends `fire.resolved` (§ 14): the plugin, the effect
-  id, the seq of the `fire.intent` with that plugin and effect id when one
-  is still open, else null, and `answer: shipped` or `not_shipped`. That record
-  closes the
-  intent. The lookup only
-  names the seq and never changes what `resolve` accepts. A store that cannot
-  take the record refuses the answer with exit `1`, and nothing is written.
+- Before it writes, it reads the audit store for
+  an earlier `fire.resolved` with this plugin and effect id (the next bullets
+  say what that changes). With none there, it appends `fire.resolved` (§ 14):
+  the plugin, the effect id, the seq of the `fire.intent` with that plugin and
+  effect id when one is still open, else null, and `answer: shipped` or
+  `not_shipped`. That record closes the intent.
+  The open-intent lookup only names the seq.
+  A store that cannot take the record refuses the answer with exit `1`, and
+  nothing is written.
 - It writes `shipped_at` or `not_shipped_at`, the instant of the answer, and
   keeps `marked_at` and `effect_id` as they were. It never writes
   `confirmed_at`, which stays the advance's account of a fire it saw finish.
 - A record that already holds an answer is not `indeterminate`, so a second
-  answer is refused, either way round, and the record never holds two answers
-  for one effect id.
+  answer is refused, either way round. An answer whose state write did not land
+  is on the audit record and found there by the lookup above, while the record
+  still reads `indeterminate`. So the other answer is refused, naming the one on
+  the record, and the same answer appends nothing and writes only the state
+  document. Either way the record never holds two answers for one effect id.
+  The lookup only refuses an answer or skips a duplicate record. It never lets
+  anything fire.
+- When the state write fails after the answer is on the audit record,
+  `resolve` exits `1`, says the answer is on the audit record and the approval
+  still reads `indeterminate`, and says to
+  run the same command again to finish it, naming that command with the
+  recorded effect id. It prints nothing from the error.
 - The answered record reads `spent`: it fires nothing, it is not a refusal, and
   its not-due detail names when the fire was marked and when it was answered.
   To fire those bytes again, the operator re-approves them with
@@ -2661,8 +2673,11 @@ own verb and not a mode of
   by a build that recorded no effect id (only a hand edit of the state document
   clears such a record, and the refusal says so), an effect id that does not
   match (the
-  refusal prints the recorded id and never echoes the typed one), neither
-  answer or both, other than exactly one plugin, or any other flag.
+  refusal prints the recorded id and never echoes the typed one), an answer
+  the audit record already holds the other way for that effect id (the refusal
+  names the one on the record), an audit store that cannot be read for that
+  lookup, neither answer or both, other than exactly one plugin, or any other
+  flag.
   Every check that reads the document runs inside the state lock, before any
   mutation.
 - Like `--remove`, it is validated against the record, not against the
@@ -3828,8 +3843,9 @@ after the re-check and before the mark (§ 10), and its outcome closes it the
 same way. A refused fire gets `fire.refused` with its closed-set reason and no
 intent, because nothing fired, except when the spend mark's write failed after
 its intent landed: that refusal carries the intent's seq and closes it.
-`warpline resolve` appends `fire.resolved` before it writes anything, and its
-`--intent` form writes nothing else (§ 10). A plugin with no declared side effects gets no record, and
+`warpline resolve` has its `fire.resolved` on the record before it writes
+anything: appended then, or found there from a run whose state write did not
+land (§ 10). Its `--intent` form writes nothing else (§ 10). A plugin with no declared side effects gets no record, and
 neither does `warpline run`. An outcome or refusal that cannot be written does
 not undo what already happened; the advance exits `70` (§ 11).
 

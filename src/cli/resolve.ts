@@ -30,7 +30,9 @@
  * byte-unchanged. "Indeterminate" is never re-derived here: the verb reads
  * `approvalStanding`, the one authority read, and answers only what it calls
  * `indeterminate`, so a record that already holds an answer refuses a second
- * one, either way round. No operator-typed text is echoed, the plugin name included:
+ * one, either way round. When the state write after the answer did not land,
+ * the record still reads `indeterminate`, and the audit store lookup below
+ * refuses the other answer instead. No operator-typed text is echoed, the plugin name included:
  * the typed effect id is compared and never echoed or stored, and the refusal
  * prints the recorded id instead; the plugin is named only once a record was
  * found under it.
@@ -65,10 +67,17 @@
  * decides a marked record before it consults them.
  *
  * **The answer is on the audit record first**, as `fire.resolved` with
- * `answer: shipped` or `not_shipped`, and it closes the fire intent it answers. The open
- * intent is looked up only to name its seq in that record, and never changes
- * what this form accepts. A store that cannot take the record refuses the
- * answer, with nothing written.
+ * `answer: shipped` or `not_shipped`, and it closes the fire intent it answers.
+ * Before the append, the store is read for an earlier `fire.resolved` with this
+ * plugin and effect id. The other answer is refused. The same answer is not
+ * appended again, so running a command whose state write did not land again
+ * finishes it, with only the state document written. This lookup can only
+ * refuse an answer or skip a duplicate record, and never lets anything fire. A
+ * store that cannot be read for it refuses the answer. The open intent is
+ * looked up only to name its seq in the record. A store that cannot take the
+ * record refuses the answer, with nothing written. A state write that fails
+ * after the record landed says the answer is there and names the command that
+ * finishes it, and prints nothing from the error.
  *
  * **Any open fire intent is answered by its seq**, with `--intent <seq>` and
  * `--shipped` or `--not-shipped`. That covers what the form above cannot: a
@@ -101,7 +110,7 @@ import {
 import type { EngineState } from '../schemas/engine-state.js'
 import { deriveHost, isLockStale, isProcessAlive, readLock } from '../runtime/lock.js'
 import { engineStatePath, lockPath as runLockPath, pluginsDir } from '../lib/paths.js'
-import { AuditAppendError, appendAudit, openIntents, type OpenIntent } from '../lib/audit-log.js'
+import { AuditAppendError, appendAudit, openIntents, readCompleteLines, type OpenIntent } from '../lib/audit-log.js'
 
 const USAGE = `Usage: warpline resolve <plugin> --shipped|--not-shipped <effect-id>
        warpline resolve --intent <seq> --shipped|--not-shipped
@@ -177,6 +186,39 @@ function refuseAppend(err: unknown): number {
   )
   return 1
 }
+
+type Answer = 'shipped' | 'not_shipped'
+
+/**
+ * The answer an earlier `fire.resolved` gave this plugin's fire with this
+ * effect id, or null when the store holds none. A line that does not parse
+ * carries no answer anyone can read, and verify reports it, so it is skipped.
+ * Throws when the store cannot be read: the caller refuses on that.
+ */
+// ponytail: reads every segment once per answer, which a rare operator command
+// can afford. An answered-effect set carried in `segment.opened` is the upgrade path.
+async function answerOnRecord(statePath: string, plugin: string, effectId: string): Promise<Answer | null> {
+  for await (const line of readCompleteLines(statePath, 0)) {
+    let rec: { type?: unknown; data?: { plugin?: unknown; effect_id?: unknown; answer?: unknown } } | null
+    try {
+      rec = JSON.parse(line.toString('utf-8'))
+    } catch {
+      continue
+    }
+    if (
+      rec?.type === 'warpline.audit.fire.resolved' &&
+      rec.data?.plugin === plugin &&
+      rec.data.effect_id === effectId &&
+      (rec.data.answer === 'shipped' || rec.data.answer === 'not_shipped')
+    ) {
+      return rec.data.answer
+    }
+  }
+  return null
+}
+
+/** An answer as a sentence says it. */
+const spoken = (a: Answer): string => (a === 'shipped' ? 'shipped' : 'not shipped')
 
 /** The state document, or null once the refusal is printed. */
 async function stateOrRefuse(statePath: string): Promise<EngineState | null> {
@@ -282,36 +324,74 @@ export async function run(argv: string[]): Promise<number> {
       return 1
     }
 
-    // Bookkeeping, never a decision input: every check above has already
-    // accepted the answer, and the lookup only names the intent it closes.
-    const open = await openIntentsOrRefuse(statePath)
-    if (open === null) return 1
-    const answered = open.find((i) => i.plugin === plugin && i.effect_id === record.effect_id)
+    // The answer lives on the store, so uniqueness is checked there: a state
+    // write that did not land leaves the record indeterminate with the answer
+    // already recorded. This can only refuse or skip a duplicate record.
+    const answer: Answer = shipped ? 'shipped' : 'not_shipped'
+    let earlier: Answer | null
     try {
-      await appendAudit(statePath, 'fire.resolved', {
-        plugin,
-        effect_id: record.effect_id,
-        intent_seq: answered?.seq ?? null,
-        answer: shipped ? 'shipped' : 'not_shipped',
-      })
-    } catch (err) {
-      return refuseAppend(err)
+      earlier = await answerOnRecord(statePath, plugin, record.effect_id)
+    } catch {
+      process.stderr.write(
+        'The audit store could not be read, so whether this fire was already answered cannot be told. ' +
+          'Nothing was written.\n',
+      )
+      return 1
+    }
+    const fired = `the fire marked at ${record.marked_at} for ${plugin} (effect id ${record.effect_id})`
+    if (earlier !== null && earlier !== answer) {
+      process.stderr.write(
+        `The fire marked at ${record.marked_at} for ${plugin} (effect id ${record.effect_id}) was already ` +
+          `answered ${spoken(earlier)} on the audit record, so it cannot also be answered ` +
+          `${spoken(answer)}. Nothing was written.\n`,
+      )
+      return 1
+    }
+
+    if (earlier === null) {
+      // Bookkeeping, never a decision input: every check above has already
+      // accepted the answer, and the lookup only names the intent it closes.
+      const open = await openIntentsOrRefuse(statePath)
+      if (open === null) return 1
+      const answered = open.find((i) => i.plugin === plugin && i.effect_id === record.effect_id)
+      try {
+        await appendAudit(statePath, 'fire.resolved', {
+          plugin,
+          effect_id: record.effect_id,
+          intent_seq: answered?.seq ?? null,
+          answer,
+        })
+      } catch (err) {
+        return refuseAppend(err)
+      }
     }
 
     // The answer field only, never `confirmed_at`: that is the advance's.
     state.approvals[plugin] = shipped
       ? { ...record, shipped_at: new Date(now).toISOString() }
       : { ...record, not_shipped_at: new Date(now).toISOString() }
-    await writeEngineState(state, statePath)
-    const fired = `the fire marked at ${record.marked_at} for ${plugin} (effect id ${record.effect_id})`
+    try {
+      await writeEngineState(state, statePath)
+    } catch {
+      // Never the error's text: raw fs messages carry paths. The flag is the
+      // one given and the id the recorded one, never the typed text.
+      process.stderr.write(
+        `Your answer is on the audit record, but the state document could not be written, so ` +
+          `${plugin} still reads indeterminate. Run the same command again to finish it: ` +
+          `warpline resolve ${plugin} ${shipped ? '--shipped' : '--not-shipped'} ${record.effect_id}.\n`,
+      )
+      return 1
+    }
+    const already =
+      earlier === null ? '' : ' The answer was already on the audit record, so only the state document was written.'
     process.stdout.write(
       shipped
         ? `Resolved ${fired} as shipped, on your word that it reached the sink. The approval now ` +
             `reads spent and fires nothing. To fire again, approve the bytes again: ` +
-            `warpline approve ${plugin} --content --not-after <when>.\n`
+            `warpline approve ${plugin} --content --not-after <when>.${already}\n`
         : `Resolved ${fired} as not shipped, on your word that nothing reached the sink. The approval ` +
             `now reads spent and fires nothing. To ship those bytes, approve them again: ` +
-            `warpline approve ${plugin} --content --not-after <when>.\n`,
+            `warpline approve ${plugin} --content --not-after <when>.${already}\n`,
     )
     return 0
   })

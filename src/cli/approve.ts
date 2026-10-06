@@ -212,8 +212,8 @@ function markedUnconfirmed(plugin: string, approval: Approval): string {
   return (
     `${plugin} was marked at ${approval.marked_at} and never confirmed, so the runtime does not ` +
     `know whether those bytes shipped. Resolve it at the sink using effect id ${effect} first: ` +
-    `once the sink shows nothing arrived, answer it with ` +
-    `'warpline resolve ${plugin} --not-shipped <effect-id>'. Nothing was written.\n`
+    `answer it with 'warpline resolve ${plugin} --shipped <effect-id>' if the bytes arrived, or ` +
+    `'warpline resolve ${plugin} --not-shipped <effect-id>' if nothing did. Nothing was written.\n`
   )
 }
 
