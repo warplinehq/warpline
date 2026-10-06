@@ -50,7 +50,7 @@ Commands:
   deny       Record a no, so the next engine tick stops asking
   resolve    Answer a fire nothing confirmed: a marked content fire, or any open intent by its seq
   revoke     Clear the current session approval
-  audit      Print the record's head, export it after a seq, or check it against a Checkpoint
+  audit      Print the record's head, export it, check it against a Checkpoint, or pass over a line its walk stops on
   prefs      Set one guardrail in preferences.json, on the record
   principal  Add, disable or list the people and machines who may act
 

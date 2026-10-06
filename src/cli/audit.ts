@@ -1,5 +1,5 @@
 /**
- * `warpline audit` — read the audit store.
+ * `warpline audit` — read the audit store, and pass over a line its walk stops on.
  *
  * `head` prints the last record's seq and the sha256 of its bytes, or `0` and
  * 64 zeros before the first record. Keeping that line somewhere off this box is
@@ -12,19 +12,24 @@
  * `verify --checkpoint <file|->` checks the store against an anchor taken
  * earlier, and tells tampering from a torn tail.
  *
- * Every sub-verb takes no lock and writes nothing, so none creates a store on
- * a home that has none.
+ * `pass-over <seq>...` opens a new segment that passes over each named line the
+ * walk stops on, and edits none of them.
+ *
+ * `head`, `export` and `verify` take no lock and write nothing. `pass-over`
+ * takes the audit lock and appends one new segment. None of them creates a
+ * store on a home that has none.
  *
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { open } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
-import { c2spNote, parseAnchor, readCompleteLines, readHead, verifyStore, type Anchor } from '../lib/audit-log.js'
+import { AuditAppendError, c2spNote, parseAnchor, passOver, readCompleteLines, readHead, verifyStore, type Anchor } from '../lib/audit-log.js'
 import { engineStatePath } from '../lib/paths.js'
 
 export const USAGE = `Usage: warpline audit head [--c2sp]
        warpline audit export --after <seq>
        warpline audit verify --checkpoint <file|->
+       warpline audit pass-over <seq>...
 
 head      Prints the head of the audit record as "<seq> <hash>" on one line: the
           last record's seq and the sha256 of its bytes. Keep it somewhere off
@@ -35,6 +40,9 @@ export    Prints every complete record after <seq> as CloudEvents JSON, one per
 verify    Checks the record against a head kept off this box, read from <file>
           or from stdin with -. Exits 0 clean, 3 torn, 4 tampered, 5 wrong log,
           6 when the open intents cannot be read.
+pass-over Opens a new segment that passes over each named line of the active
+          segment the walk stops on. It edits none of them, and names each by
+          seq and sha256, which verify checks.
 `
 
 export const VERIFY_CLEAN = 0
@@ -60,6 +68,8 @@ export async function run(argv: string[]): Promise<number> {
       return exportAfter(rest)
     case 'verify':
       return verify(rest)
+    case 'pass-over':
+      return passOverLines(rest)
     default:
       process.stderr.write(USAGE)
       return 1
@@ -209,4 +219,29 @@ async function verify(args: string[]): Promise<number> {
   else for (const i of v.open_intents) lines.push(`open intent: seq ${i.seq} plugin ${i.plugin} run ${i.run_id}`)
   process.stdout.write(`${lines.join('\n')}\n`)
   return CODES[v.verdict]
+}
+
+async function passOverLines(args: string[]): Promise<number> {
+  let seqs: number[]
+  try {
+    const { positionals } = parseArgs({ args, options: {}, allowPositionals: true, strict: true })
+    if (positionals.length === 0) throw new Error('name at least one <seq>')
+    for (const p of positionals) {
+      if (!/^[1-9][0-9]*$/.test(p) || !Number.isSafeInteger(Number(p))) throw new Error('each <seq> is a positive integer')
+    }
+    seqs = positionals.map(Number)
+  } catch (err) {
+    return usage('pass-over', err)
+  }
+  try {
+    const { opened, passed } = await passOver(engineStatePath(), seqs)
+    process.stdout.write(
+      `Passed over seq ${passed.join(', ')} in a new segment that opens at seq ${opened}. No line was edited. Keep the new head off this box: warpline audit head\n`,
+    )
+    return 0
+  } catch (err) {
+    if (!(err instanceof AuditAppendError)) throw err
+    process.stderr.write(`audit pass-over: ${err.reason}. Nothing was written.\n`)
+    return 1
+  }
 }

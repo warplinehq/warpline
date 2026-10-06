@@ -551,8 +551,8 @@ describe('verify when the walk passes over or stops at a line', () => {
     expect(code).toBe(0)
   })
 
-  test('a carried field no writer writes gives verdict unreadable, exit 6 and a line naming the seq, and removing that last line by hand clears it', async () => {
-    const { seq } = await mailer()
+  test('a carried field no writer writes gives verdict unreadable, exit 6 and a line naming the seq', async () => {
+    await mailer()
     const anchor = await anchorFile()
     const bad = badIntent()
 
@@ -566,18 +566,6 @@ describe('verify when the walk passes over or stops at a line', () => {
     expect(named[0]).toContain('fire.intent')
     expect(stopped.stdout).not.toContain('open intent:')
     expect(stopped.stdout).not.toContain('WALK_SENTINEL_5d1')
-
-    // The recovery runtime-spec names: remove that one line by hand.
-    const path = join(auditDir(), segmentFiles().at(-1)!)
-    const text = readFileSync(path, 'utf8')
-    writeFileSync(path, text.slice(0, text.lastIndexOf('\n', text.length - 2) + 1))
-
-    const cleared = await verify(anchor)
-
-    expect(cleared.stdout).toContain('verdict: clean\n')
-    expect(cleared.stdout).toContain(`open intent: seq ${seq} plugin mailer run run-77\n`)
-    expect(unreadableLines(cleared.stdout)).toEqual([])
-    expect(cleared.code).toBe(0)
   })
 
   test('tampered outranks unreadable, and the unreadable line still prints', async () => {

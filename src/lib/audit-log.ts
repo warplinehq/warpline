@@ -101,12 +101,15 @@ const Scope = z.union([z.literal('*'), PluginName])
 const Entries = z.record(PrincipalId, Hex)
 /** Each changed id to its new entry digest, or null when it left the registry. */
 const ChangedEntries = z.record(PrincipalId, Hex.nullable())
+/** The lines a pass-over named, each by seq and the sha256 of its bytes. */
+const PassedOver = z.array(z.strictObject({ seq: Seq, sha256: Hex })).min(1)
 
 const DATA = {
   'segment.opened': z.strictObject({
     home: Urn,
     version: SemVer,
     fragment: z.strictObject({ bytes: z.number().int().positive(), sha256: Hex }).nullable(),
+    passed_over: PassedOver.optional(),
     authority: z.strictObject({
       preferences: Hex.nullable(),
       principals: z.strictObject({ sha256: Hex, entries: Entries }).nullable(),
@@ -214,6 +217,8 @@ type Reason =
   | 'a stale audit lock cannot be broken while .lock.break exists'
   | 'the active segment holds no readable last line'
   | 'write failed'
+  | 'the store has no segment to pass over'
+  | `seq ${number} is not a line the walk stops on in the active segment`
 
 /**
  * An append that did not happen. The message is built from the kind and a
@@ -432,6 +437,23 @@ function segmentState(lines: CarriedLine[], carried: Carried): Carried {
 }
 
 /**
+ * What the walk does with a line that is not its segment's first, at
+ * positional `seq`: stops at it, carries it, or passes over it unread (null).
+ * The walk and the pass-over's check both ask here, so the two cannot drift.
+ */
+function walkLine(line: string, seq: number): { refused: WalkRefusal } | { carried: CarriedLine | null } {
+  const r = parseRecord(line)
+  if (r === undefined) return { refused: `seq ${seq} is not a record` }
+  if (!Object.hasOwn(CARRIED, r.type)) return { carried: null }
+  const type = r.type as CarriedType
+  const data = CARRIED[type].safeParse(r.data)
+  if (!data.success) {
+    return { refused: `seq ${seq} holds ${type.slice('warpline.audit.'.length) as ShortKind<CarriedType>} data the walk cannot carry` }
+  }
+  return { carried: { type, seq: r.warplineseq, data: data.data } }
+}
+
+/**
  * The state a segment's complete lines walk to. The walk reads only what it
  * carries: each line's type, the opening line's carried fields, and for a type
  * in `CARRIED` the fields its rule names. Every other type and every other key
@@ -439,17 +461,18 @@ function segmentState(lines: CarriedLine[], carried: Carried): Carried {
  * at a line that is not a record, a first line that is not a `segment.opened`
  * it can carry, or a carried field no writer would write, so no such value
  * reaches a reader's output. `text` ends at a newline, or is empty, and its
- * first line is seq `firstSeq`.
+ * first line is seq `firstSeq`. A non-first line whose seq is in `skip` is
+ * passed over unread.
  */
-function stateOf(text: string, firstSeq: number): Walked {
+function stateOf(text: string, firstSeq: number, skip: ReadonlySet<number> = new Set()): Walked {
   const lines = text.split('\n').slice(0, -1)
   let opened: Carried | undefined
   const carried: CarriedLine[] = []
   for (const [i, line] of lines.entries()) {
     const seq = firstSeq + i
-    const r = parseRecord(line)
-    if (r === undefined) return { refused: `seq ${seq} is not a record` }
     if (i === 0) {
+      const r = parseRecord(line)
+      if (r === undefined) return { refused: `seq ${seq} is not a record` }
       const data = r.type === 'warpline.audit.segment.opened' ? OPENED_CARRIES.safeParse(r.data) : undefined
       if (data === undefined || !data.success) {
         return { refused: `seq ${seq} opens the active segment and is not a segment.opened the walk can carry` }
@@ -457,13 +480,11 @@ function stateOf(text: string, firstSeq: number): Walked {
       opened = data.data
       continue
     }
-    if (!Object.hasOwn(CARRIED, r.type)) continue
-    const type = r.type as CarriedType
-    const data = CARRIED[type].safeParse(r.data)
-    if (!data.success) {
-      return { refused: `seq ${seq} holds ${type.slice('warpline.audit.'.length) as ShortKind<CarriedType>} data the walk cannot carry` }
-    }
-    carried.push({ type, seq: r.warplineseq, data: data.data })
+    // A line a pass-over named is not read. The opening line never is.
+    if (skip.has(seq)) continue
+    const step = walkLine(line, seq)
+    if ('refused' in step) return step
+    if (step.carried !== null) carried.push(step.carried)
   }
   if (opened === undefined) {
     return { refused: `seq ${firstSeq} opens the active segment and is not a segment.opened the walk can carry` }
@@ -626,15 +647,22 @@ type Limits = { maxSegmentBytes: number; maxSegmentAgeMs: number }
  * 3. A segment at the size or age threshold is sealed, and the new segment
  *    opens with a Checkpoint over everything before the record.
  * 4. Otherwise the record goes to the active segment.
+ *
+ * With `passing` a new segment opens whatever the active one holds, after it
+ * as it stands. Each named seq must be a line of the active segment, not its
+ * first, that the walk stops on. The walk passes over exactly those lines, the
+ * opened line names each by seq and the hash of its bytes, and no record is
+ * written (`dataAfter` is null).
  */
 async function appendLocked(
   dir: string,
-  kind: EmitKind | 'checkpoint.recorded',
+  kind: EmitKind | 'checkpoint.recorded' | 'segment.opened',
   // From the head the record goes after: its seq, its hash and the home id.
-  // Only a Checkpoint's data depends on them.
-  dataAfter: (seq: number, head: string, source: string) => unknown,
+  // Only a Checkpoint's data depends on them. Null writes no record.
+  dataAfter: ((seq: number, head: string, source: string) => unknown) | null,
   time: number,
   limits: Limits,
+  passing?: readonly number[],
 ): Promise<{ seq: number; head: string }> {
   const segments = await listSegments(dir)
   // Genesis is a segment that opens on nothing: seq 1, a zero prev, empty state.
@@ -643,6 +671,7 @@ async function appendLocked(
   let prev = ZERO_HASH
   let state = EMPTY_STATE
   let fragment: { bytes: number; sha256: string } | null = null
+  let passed: { seq: number; sha256: string }[] | undefined
   let reason: 'size' | 'age' | null = null
   let opens = segments.length === 0
   const active = segments[segments.length - 1]
@@ -650,6 +679,7 @@ async function appendLocked(
   let activeSize = 0
   let path = activePath
 
+  if (passing !== undefined && active === undefined) throw new AuditAppendError(kind, 'the store has no segment to pass over')
   if (active !== undefined) {
     const tail = await lastLine(activePath)
     activeSize = tail.size
@@ -681,11 +711,25 @@ async function appendLocked(
         if (time - openedAt >= limits.maxSegmentAgeMs) reason = 'age'
       }
     }
-    opens = tail.torn || reason !== null || lastRecord.type === 'warpline.audit.segment.sealed'
+    opens = passing !== undefined || tail.torn || reason !== null || lastRecord.type === 'warpline.audit.segment.sealed'
 
     if (opens) {
       whole ??= await readFile(activePath)
-      const walked = stateOf(whole.toString('utf-8'), firstSeqOf(active))
+      if (passing !== undefined) {
+        // The complete lines, as bytes: each named one is hashed as written.
+        const lines: Buffer[] = []
+        for (let at = 0, nl = whole.indexOf(0x0a); nl !== -1; at = nl + 1, nl = whole.indexOf(0x0a, at)) {
+          lines.push(whole.subarray(at, nl))
+        }
+        passed = [...new Set(passing)].sort((a, b) => a - b).map((n) => {
+          const line = lines[n - firstSeqOf(active)]
+          if (n <= firstSeqOf(active) || line === undefined || !('refused' in walkLine(line.toString('utf-8'), n))) {
+            throw new AuditAppendError(kind, `seq ${n} is not a line the walk stops on in the active segment`)
+          }
+          return { seq: n, sha256: sha256(line) }
+        })
+      }
+      const walked = stateOf(whole.toString('utf-8'), firstSeqOf(active), new Set(passing))
       if ('refused' in walked) throw new AuditAppendError(kind, walked.refused)
       state = walked.state
     }
@@ -697,17 +741,23 @@ async function appendLocked(
   if (opens) {
     // Internal lines are not held to MAX_LINE_BYTES. The tail read and the
     // first-line read both follow a line of any length.
-    const opened = encode(
+    const line = encode(
       ++seq,
       source,
       prev,
       'segment.opened',
-      DATA['segment.opened'].parse({ home: source, version: packageVersion(), fragment, ...state }),
+      DATA['segment.opened'].parse({
+        home: source,
+        version: packageVersion(),
+        fragment,
+        ...(passed === undefined ? {} : { passed_over: passed }),
+        ...state,
+      }),
       time,
     )
     path = join(dir, segmentName(seq))
-    prev = headOf(opened)
-    fresh.push(opened)
+    prev = headOf(line)
+    fresh.push(line)
     if (sealed !== null) {
       const openedSeq = seq
       const checkpoint = encode(++seq, source, prev, 'checkpoint.recorded', { origin: source, size: openedSeq, root: prev }, time)
@@ -715,17 +765,19 @@ async function appendLocked(
       fresh.push(checkpoint)
     }
   }
-  const record = encode(seq + 1, source, prev, kind, dataAfter(seq, prev, source), time)
-  seq += 1
-  if (record.length > MAX_LINE_BYTES) throw new AuditAppendError(kind, 'line over 16384 bytes')
+  const record = dataAfter === null ? null : encode(seq + 1, source, prev, kind, dataAfter(seq, prev, source), time)
+  if (record !== null) {
+    seq += 1
+    if (record.length > MAX_LINE_BYTES) throw new AuditAppendError(kind, 'line over 16384 bytes')
+  }
 
   if (sealed !== null) await writeLine(activePath, sealed)
   for (const [i, line] of fresh.entries()) {
     await writeLine(path, line)
     if (i === 0) await syncDir(dir)
   }
-  await writeLine(path, record)
-  return { seq, head: headOf(record) }
+  if (record !== null) await writeLine(path, record)
+  return { seq, head: record === null ? prev : headOf(record) }
 }
 
 /**
@@ -841,6 +893,33 @@ export function recordCheckpoint(statePath: string, opts: AppendOpts = {}): Prom
       // cannot be read back, and the caller exits 70 on the null.
       return { seq, bytes: null, segments: null, checkpoint_seq: seq, indeterminate: null }
     }
+  })
+}
+
+/**
+ * Open a new segment after the active one as it stands, passing over each named
+ * line the walk stops on. No stored line is edited or removed: the new
+ * `segment.opened` names each one in `passed_over`, by seq and the sha256 of
+ * its bytes, and carries forward the state a walk that skips exactly those
+ * lines reaches. Writes no record. A due rotation seals first, as for any
+ * append. Rejects with `AuditAppendError` when nothing was written: no store
+ * (which this never creates), a seq that is not a line of the active segment
+ * the walk stops on, or another line the walk still stops on.
+ */
+export function passOver(
+  statePath: string,
+  seqs: readonly number[],
+  opts: AppendOpts = {},
+): Promise<{ seq: number; head: string; opened: number; passed: number[] }> {
+  const passed = [...new Set(seqs)].sort((a, b) => a - b)
+  // Checked before the lock, whose mkdir would create the store.
+  return segmentsIn(auditDirFor(statePath)).then((names) => {
+    if (names.length === 0) throw new AuditAppendError('segment.opened', 'the store has no segment to pass over')
+    return underLock(statePath, 'segment.opened', opts, async (dir, time, limits) => {
+      const { seq, head } = await appendLocked(dir, 'segment.opened', null, time, limits, passed)
+      // The segment just opened is the last one, named by its first seq.
+      return { seq, head, opened: firstSeqOf((await listSegments(dir)).at(-1) as string), passed }
+    })
   })
 }
 
@@ -1084,6 +1163,27 @@ export async function c2spNote(statePath: string): Promise<string> {
   return `${source}\n${seq}\n${Buffer.from(head, 'hex').toString('base64')}\n`
 }
 
+/**
+ * Whether a `passed_over` names, in rising seq order, only lines of the segment
+ * `prevName`, each hashing as recorded under the byte rule. Reads that segment
+ * only when called, so a store with no pass-over pays nothing.
+ */
+async function passedOverHolds(dir: string, prevName: string | undefined, named: unknown): Promise<boolean> {
+  const parsed = PassedOver.safeParse(named)
+  if (!parsed.success || prevName === undefined) return false
+  if (parsed.data.some((e, k) => k > 0 && e.seq <= (parsed.data[k - 1] as { seq: number }).seq)) return false
+  const want = new Map(parsed.data.map((e) => [e.seq, e.sha256]))
+  let seq = firstSeqOf(prevName) - 1
+  for await (const line of scan(join(dir, prevName))) {
+    seq += 1
+    const hash = want.get(seq)
+    if (hash === undefined) continue
+    if (sha256(line.subarray(0, line.length - 1)) !== hash) return false
+    want.delete(seq)
+  }
+  return want.size === 0
+}
+
 export type Verdict = 'clean' | 'torn' | 'tampered' | 'unreadable' | 'wrong_log'
 
 export interface Verification {
@@ -1105,8 +1205,9 @@ export interface Verification {
  * the box. A pure reader: no lock, no mkdir, nothing written.
  *
  * Tampered is any broken link, seq or file name, a partial line anywhere but
- * the very end that no later `segment.opened` acknowledges, an anchor beyond
- * the head, or an anchored line whose hash is not the anchor's. Torn is a
+ * the very end that no later `segment.opened` acknowledges, a `passed_over`
+ * entry that does not match the segment before it, an anchor beyond the head,
+ * or an anchored line whose hash is not the anchor's. Torn is a
  * partial line at the very end, an acknowledged fragment, or a last segment
  * whose last line is `segment.sealed`. Unreadable is a chain that checks clean
  * or torn whose active segment holds a line the walk cannot carry, so the open
@@ -1176,6 +1277,10 @@ export async function verifyStore(statePath: string, anchor: Anchor, now: number
           if (!acknowledges) return tampered(`seq ${seq + 1} does not acknowledge the partial line before it`)
           if (pending !== null) torn = `seq ${seq + 1} acknowledges a partial line the store kept`
           pending = null
+          const named: unknown = rec.data?.passed_over
+          if (named !== undefined && !(await passedOverHolds(dir, names[i - 1], named))) {
+            return tampered(`seq ${seq + 1}'s passed_over does not match the segment before it`)
+          }
         }
         n += 1
         seq += 1

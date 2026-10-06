@@ -3598,7 +3598,7 @@ The set is closed. A kind outside it cannot be written.
 | `ask.raised` | An Ask raised. |
 | `ask.answered` | An Ask answered. |
 | `handoff.tried` | A handoff tried. |
-| `segment.opened` | The first line of a segment file. |
+| `segment.opened` | The first line of a segment file. One opened by `warpline audit pass-over` names each line it passed over, by seq and sha256, as `passed_over`. |
 | `segment.sealed` | The last line of a segment file that is full or old. |
 | `checkpoint.recorded` | The head as it stood, so it can be exported and checked later. |
 
@@ -3750,11 +3750,29 @@ and every command that needs the walk refuses: an `advance`, `prefs set`,
 `principal`, `resolve`, and any append that rotates. `advance`, `prefs set`,
 `principal` and `resolve` print the same reason, which names the seq and the kind and nothing
 from the line. No warpline build writes such a line. Keep an export of the
-store, which is the account of what was there, then
-remove that one line from the active segment by hand.
-If records follow it, the next one no longer links, and verify reports
-`tampered` there against any anchor that covers it, which is the true account
-of what happened.
+store, then run `warpline audit pass-over <seq>...`, naming every line the walk
+stops on. If another line still stops the walk, it refuses and names that one.
+
+Pass-over edits no line. It opens a new segment after the active one as it
+stands. The new segment's `segment.opened` carries forward the state reached by
+a walk that skips exactly the named lines, and names each one in `passed_over`,
+by seq and the sha256 of its bytes under the byte rule. The lines stay where
+they are, and in every export. Verify checks each entry against the segment
+before it (§ Verify), so every anchor taken before or after the pass-over still
+holds. A partial last line is acknowledged in `fragment` beside it, as any
+rotation does. When a size or age rotation is due, it seals first and writes
+that rotation's Checkpoint, as any append does. Otherwise it writes no seal and
+no Checkpoint. It never writes a record, as the heal of a lost successor writes
+`segment.opened` only.
+
+It refuses with exit `1`, and writes nothing, for the active segment's own
+`segment.opened`, a seq outside the active segment (a sealed segment's line, or
+past the head), a line the walk carries, a store where another line it was not
+given still stops the walk, and a home with no store, where it creates nothing.
+A build that predates `passed_over` still reads the segment, because the walk
+strips keys it does not carry. A line that is not a record breaks the chain
+where it sits, so verify keeps reporting it `tampered` after a pass-over, which
+is the true account. The pass-over still lets the walk go on past it.
 
 **A torn tail.** A write that stops part way leaves a partial last line. The
 writer never writes past it and never removes it. The next append seals
@@ -3912,7 +3930,7 @@ compare against would read as fine when it could not look.
 |---------|------|---------|
 | `clean` | `0` | Every line links, and the line at the anchored seq hashes to the anchor. |
 | `torn` | `3` | As clean, except the store ends in a partial line, keeps a partial line that a later `segment.opened` acknowledges, or its last segment ends in `segment.sealed` with no successor. A crash leaves these. |
-| `tampered` | `4` | A line does not parse, its seq is not the next one, its `warplineprev` is not the previous line's hash, a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, the anchored seq is beyond the head, or the line at the anchored seq does not hash to the anchor. |
+| `tampered` | `4` | A line does not parse, its seq is not the next one, its `warplineprev` is not the previous line's hash, a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, a `segment.opened` has a `passed_over` that names a line not in the segment before it or one that does not hash as recorded, the anchored seq is beyond the head, or the line at the anchored seq does not hash to the anchor. |
 | `wrong log` | `5` | The anchor's origin is another home's id. |
 | `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), so the open intents cannot be listed. The reason names its seq. |
 
