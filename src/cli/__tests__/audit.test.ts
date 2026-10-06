@@ -695,32 +695,64 @@ describe('audit pass-over', () => {
     expect(walkChain(auditDir()).ok).toBe(true)
   })
 
-  test('a passed_over entry whose sha256 or seq does not match the line it names is tampered', async () => {
-    await mailer()
+  test('state recorded after a passed-over line is carried into the new segment.opened: an outcome closes, a later intent opens, and preferences and principals move on', async () => {
+    const { seq: intent } = await mailer()
     const bad = badIntent()
-    const h1 = await headText()
+    const prefs = sha('carried preferences')
+    const registry = sha('carried registry')
+    const entry = sha('carried entry for ops')
+    await appendAudit(statePath(), 'fire.outcome', { plugin: 'mailer', run_id: 'run-77', intent_seq: intent, status: 'success' })
+    const { seq: late } = await appendAudit(statePath(), 'fire.intent', {
+      plugin: 'late',
+      run_id: 'run-79',
+      class: 'session',
+      effect_id: null,
+      fingerprint: null,
+    })
+    await appendAudit(statePath(), 'preference.set', { key: 'review_gate', old: null, new: prefs })
+    await appendAudit(statePath(), 'principal.added', { id: 'ops', type: 'human', key_sha256: null, sha256: registry, entry_sha256: entry })
+
     expect((await passOver(bad)).code).toBe(0)
+
+    const first = readFileSync(join(auditDir(), segmentFiles().at(-1)!), 'utf8').split('\n')[0]!
+    const opened = JSON.parse(first) as { type: string; data: { open_intents: unknown; authority: unknown } }
+    expect(opened.type).toBe('warpline.audit.segment.opened')
+    expect(opened.data.open_intents).toEqual([{ seq: late, plugin: 'late', run_id: 'run-79', effect_id: null }])
+    expect(opened.data.authority).toEqual({ preferences: prefs, principals: { sha256: registry, entries: { ops: entry } } })
+  })
+
+  test('a passed_over entry whose sha256 or seq does not match the line it names is tampered, with a reason naming the opened seq and that entry', async () => {
+    await mailer()
+    const bad1 = badIntent()
+    const bad2 = badIntent()
+    const h1 = await headText()
+    expect((await passOver(bad1, bad2)).code).toBe(0)
     const path = join(auditDir(), segmentFiles().at(-1)!)
     const original = readFileSync(path)
     const text = original.toString('utf8')
     expect(text.indexOf('\n')).toBe(text.length - 1)
     const opened = seqOf(text.slice(0, -1))
+    expect(openedLine().data.passed_over?.map((e) => e.seq)).toEqual([bad1, bad2])
 
-    const edits: [string, (entry: { seq: number; sha256: string }) => void][] = [
-      ['a wrong sha256', (e) => void (e.sha256 = 'f'.repeat(64))],
-      ['a real line of the segment before, with another hash', (e) => void (e.seq = bad - 1)],
-      ['a seq that is not a line of the segment before', (e) => void (e.seq = opened)],
+    type Entry = { seq: number; sha256: string }
+    const named = (seq: number) => `reason: seq ${opened}'s passed_over entry for seq ${seq} does not match the segment before it`
+    const edits: [string, (entries: Entry[]) => void, string][] = [
+      ["the second entry's sha256 is wrong", (es) => void (es[1]!.sha256 = 'f'.repeat(64)), named(bad2)],
+      ['the first entry names a real line of the segment before, with another hash', (es) => void (es[0]!.seq = bad1 - 1), named(bad1 - 1)],
+      ['the second entry names a seq that is not a line of the segment before', (es) => void (es[1]!.seq = opened), named(opened)],
+      ['the entries do not rise', (es) => void es.reverse(), `reason: seq ${opened}'s passed_over does not match the segment before it`],
     ]
-    for (const [what, edit] of edits) {
-      const rec = JSON.parse(text) as { data: { passed_over: { seq: number; sha256: string }[] } }
-      edit(rec.data.passed_over[0]!)
+    for (const [what, edit, reason] of edits) {
+      const rec = JSON.parse(text) as { data: { passed_over: Entry[] } }
+      edit(rec.data.passed_over)
       writeFileSync(path, `${JSON.stringify(rec)}\n`)
 
       const v = await verifyAt(h1)
 
       expect({ what, code: v.code }).toEqual({ what, code: 4 })
       expect(v.stdout).toContain('verdict: tampered\n')
-      expect(v.stdout).toContain(`seq ${opened}'s passed_over does not match the segment before it`)
+      expect({ what, reason: v.stdout.split('\n').filter((l) => l.startsWith('reason: ')) }).toEqual({ what, reason: [reason] })
+      if (what === 'the entries do not rise') expect(v.stdout).not.toContain('entry for seq')
       writeFileSync(path, original)
     }
 
