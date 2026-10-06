@@ -673,12 +673,15 @@ export function approvalStanding(
  *
  * The runtime never makes it false on a handler's word. The advance confirms a
  * fire it saw finish, and the operator answers one they checked at the sink
- * with `warpline resolve <plugin> --not-shipped <effect-id>`, which writes
- * `not_shipped_at`. An answered record reads `spent`, is swept when its window
- * closes, and binds by fingerprint as a confirmed one does.
+ * with `warpline resolve <plugin> --shipped|--not-shipped <effect-id>`, which
+ * writes `shipped_at` or `not_shipped_at`. Either answer reads `spent`, is
+ * swept when its window closes, and binds by fingerprint as a confirmed fire
+ * does.
  */
 function fireUnanswered(a: Approval): boolean {
-  return a.marked_at !== null && a.confirmed_at === null && a.not_shipped_at === undefined
+  return (
+    a.marked_at !== null && a.confirmed_at === null && a.not_shipped_at === undefined && a.shipped_at === undefined
+  )
 }
 
 /**
@@ -704,8 +707,8 @@ function bindingStanding(
 
   // A record that fired, or began to, never authorises another fire. It is
   // `indeterminate` while nobody knows whether that fire reached the sink, and
-  // `spent` once the advance confirmed it or the operator answered it not
-  // shipped. The predicate is read, not restated, so this and the two
+  // `spent` once the advance confirmed it or the operator answered it. The
+  // predicate is read, not restated, so this and the two
   // readers that keep and release such records cannot disagree.
   if (approval.marked_at !== null || approval.confirmed_at !== null) {
     return fireUnanswered(approval) ? { standing: 'indeterminate', approval } : { standing: 'spent', approval }
@@ -1037,12 +1040,19 @@ function contentGateDetail(g: GateInput): string {
       return `unapproved: no content approval on file for '${g.plugin}'`
     case 'spent':
       // Spent by the operator's answer, not by a confirmed fire. Both instants
-      // are runtime-written; `not_shipped_at` is the answer command's clock,
-      // never a byte the operator typed.
+      // are runtime-written; `not_shipped_at` and `shipped_at` are the answer
+      // command's clock, never a byte the operator typed.
       if (s.approval.confirmed_at === null && s.approval.not_shipped_at !== undefined) {
         return (
           `unapproved: the content fire marked at ${s.approval.marked_at} was answered not shipped ` +
           `at ${s.approval.not_shipped_at}, so nothing fires on it; approve the bytes again to ship them`
+        )
+      }
+      if (s.approval.confirmed_at === null && s.approval.shipped_at !== undefined) {
+        return (
+          `unapproved: the content fire marked at ${s.approval.marked_at} ` +
+          `was answered shipped at ${s.approval.shipped_at}, so the approval is spent; ` +
+          'approve the bytes again to fire again'
         )
       }
       return `unapproved: the content approval was already spent at ${s.approval.confirmed_at}`

@@ -7,8 +7,8 @@
  * that dies mid-call, leaves the mark unconfirmed, and the approval reads
  * `indeterminate` on every advance after: the runtime cannot see the sink, so
  * it cannot tell whether the bytes arrived, and it never takes a handler's word
- * that they did not. The operator can look. This is where they say what they
- * found: nothing shipped.
+ * either way. The operator can look. This is where they say what they found:
+ * the bytes shipped, or nothing did.
  *
  * **Its own verb, because it grants nothing.** `approve` has three modes and
  * every one is a yes about something to come: a parked result applied, a
@@ -18,9 +18,9 @@
  * takes a fresh `approve --content`, over bytes the operator reads again.
  *
  * **The answer is the operator's word, and the record says so.** It is
- * written as `not_shipped_at` beside the mark, which stays, and it never
- * touches `confirmed_at`: that field is the advance's account of a fire it saw
- * finish, and this is a different fact from a different witness. No board
+ * written as `shipped_at` or `not_shipped_at` beside the mark, which stays,
+ * and it never touches `confirmed_at`: that field is the advance's account of
+ * a fire it saw finish, and this is a different fact from a different witness. No board
  * event and no run-log entry is written. The state document is where the
  * answer lives.
  *
@@ -29,7 +29,8 @@
  * inside the state lock, so a refused command leaves the document
  * byte-unchanged. "Indeterminate" is never re-derived here: the verb reads
  * `approvalStanding`, the one authority read, and answers only what it calls
- * `indeterminate`. No operator-typed text is echoed, the plugin name included:
+ * `indeterminate`, so a record that already holds an answer refuses a second
+ * one, either way round. No operator-typed text is echoed, the plugin name included:
  * the typed effect id is compared and never echoed or stored, and the refusal
  * prints the recorded id instead; the plugin is named only once a record was
  * found under it.
@@ -64,7 +65,7 @@
  * decides a marked record before it consults them.
  *
  * **The answer is on the audit record first**, as `fire.resolved` with
- * `answer: not_shipped`, and it closes the fire intent it answers. The open
+ * `answer: shipped` or `not_shipped`, and it closes the fire intent it answers. The open
  * intent is looked up only to name its seq in that record, and never changes
  * what this form accepts. A store that cannot take the record refuses the
  * answer, with nothing written.
@@ -77,11 +78,10 @@
  * fire, never writes the state document, and appends one `fire.resolved`
  * carrying the intent's plugin, effect id and seq and the operator's answer,
  * and nothing else. One case it hands back: a content fire still marked and
- * unconfirmed under the same effect id, answered not shipped, belongs to the
- * form above, the one writer of `not_shipped_at`, which closes the same
- * intent. Answered shipped, the intent closes and the approval keeps reading
- * `indeterminate`, because only an advance confirms a mark. Both forms check
- * the run lock first, by the same function, for the same reason.
+ * unconfirmed under the same effect id is answered only by the form above,
+ * either way, because that form is the one writer of both answer fields and
+ * closes the same intent. Both forms check the run lock first, by the same
+ * function, for the same reason.
  *
  * No content is erased here. An answered record binds its producer's content
  * by fingerprint until its window closes, as a confirmed one does, and the
@@ -103,13 +103,14 @@ import { deriveHost, isLockStale, isProcessAlive, readLock } from '../runtime/lo
 import { engineStatePath, lockPath as runLockPath, pluginsDir } from '../lib/paths.js'
 import { AuditAppendError, appendAudit, openIntents, type OpenIntent } from '../lib/audit-log.js'
 
-const USAGE = `Usage: warpline resolve <plugin> --not-shipped <effect-id>
+const USAGE = `Usage: warpline resolve <plugin> --shipped|--not-shipped <effect-id>
        warpline resolve --intent <seq> --shipped|--not-shipped
 
 The first answers a content fire that was marked and never confirmed, after you
-checked the sink with its effect id and found that nothing shipped. The approval
-then reads spent and fires nothing. To ship those bytes after all, approve them
-again: warpline approve <plugin> --content --not-after <when>.
+checked the sink with its effect id: --shipped when the bytes reached it,
+--not-shipped when nothing did. Either way the approval then reads spent and
+fires nothing. To fire those bytes again, approve them again:
+warpline approve <plugin> --content --not-after <when>.
 
 The second answers any fire intent the audit record still lists as open, after
 you checked whether its effect happened. It records your answer and nothing else.
@@ -190,14 +191,14 @@ async function stateOrRefuse(statePath: string): Promise<EngineState | null> {
 
 export async function run(argv: string[]): Promise<number> {
   if (argv.some((a) => a === '--intent' || a.startsWith('--intent='))) return runBySeq(argv)
-  let values: { 'not-shipped'?: string }
+  let values: { shipped?: string; 'not-shipped'?: string }
   let positionals: string[]
   try {
     // strict: true, so any other flag is refused by the parser rather than
     // ignored. A flag that vanishes silently is a lie about what was answered.
     const parsed = parseArgs({
       args: argv,
-      options: { 'not-shipped': { type: 'string' } },
+      options: { shipped: { type: 'string' }, 'not-shipped': { type: 'string' } },
       allowPositionals: true,
       strict: true,
     })
@@ -208,11 +209,18 @@ export async function run(argv: string[]): Promise<number> {
     return 1
   }
 
-  const typed = values['not-shipped']
-  if (typed === undefined) {
+  if (values.shipped === undefined && values['not-shipped'] === undefined) {
     process.stderr.write(USAGE)
     return 1
   }
+  if (values.shipped !== undefined && values['not-shipped'] !== undefined) {
+    process.stderr.write(
+      `resolve takes one answer, --shipped or --not-shipped, not both. Nothing was written.\n\n${USAGE}`,
+    )
+    return 1
+  }
+  const shipped = values.shipped !== undefined
+  const typed = (values.shipped ?? values['not-shipped'])!
   if (positionals.length !== 1) {
     process.stderr.write(
       `resolve answers one fire of one plugin, so it names exactly one plugin ` +
@@ -284,19 +292,26 @@ export async function run(argv: string[]): Promise<number> {
         plugin,
         effect_id: record.effect_id,
         intent_seq: answered?.seq ?? null,
-        answer: 'not_shipped',
+        answer: shipped ? 'shipped' : 'not_shipped',
       })
     } catch (err) {
       return refuseAppend(err)
     }
 
-    state.approvals[plugin] = { ...record, not_shipped_at: new Date(now).toISOString() }
+    // The answer field only, never `confirmed_at`: that is the advance's.
+    state.approvals[plugin] = shipped
+      ? { ...record, shipped_at: new Date(now).toISOString() }
+      : { ...record, not_shipped_at: new Date(now).toISOString() }
     await writeEngineState(state, statePath)
+    const fired = `the fire marked at ${record.marked_at} for ${plugin} (effect id ${record.effect_id})`
     process.stdout.write(
-      `Resolved the fire marked at ${record.marked_at} for ${plugin} (effect id ${record.effect_id}) ` +
-        `as not shipped, on your word that nothing reached the sink. The approval now reads spent ` +
-        `and fires nothing. To ship those bytes, approve them again: ` +
-        `warpline approve ${plugin} --content --not-after <when>.\n`,
+      shipped
+        ? `Resolved ${fired} as shipped, on your word that it reached the sink. The approval now ` +
+            `reads spent and fires nothing. To fire again, approve the bytes again: ` +
+            `warpline approve ${plugin} --content --not-after <when>.\n`
+        : `Resolved ${fired} as not shipped, on your word that nothing reached the sink. The approval ` +
+            `now reads spent and fires nothing. To ship those bytes, approve them again: ` +
+            `warpline approve ${plugin} --content --not-after <when>.\n`,
     )
     return 0
   })
@@ -365,22 +380,23 @@ async function runBySeq(argv: string[]): Promise<number> {
     }
 
     // A content intent whose approval still reads indeterminate under the same
-    // effect id is the content form's to answer not shipped: it is the one
-    // writer of `not_shipped_at`. The plugin and effect id printed come from
+    // effect id is the content form's to answer, either way: it is the one
+    // writer of both answer fields. The plugin and effect id printed come from
     // the record, which the walk checked.
-    let stillMarked = false
     if (intent.effect_id !== null) {
       const state = await stateOrRefuse(statePath)
       if (state === null) return 1
+      let stillMarked = false
       if (Object.hasOwn(state.approvals, intent.plugin)) {
         const { manifests } = await loadPluginManifests(pluginsDir())
         const standing = approvalStanding(state, intent.plugin, manifests, Date.now())
         stillMarked = standing.standing === 'indeterminate' && standing.approval.effect_id === intent.effect_id
       }
-      if (stillMarked && !shipped) {
+      if (stillMarked) {
         process.stderr.write(
           `That intent is a content fire for ${intent.plugin} still marked and unconfirmed. Answer it ` +
-            `with warpline resolve ${intent.plugin} --not-shipped ${intent.effect_id}, which records the ` +
+            `with warpline resolve ${intent.plugin} --shipped ${intent.effect_id} or ` +
+            `warpline resolve ${intent.plugin} --not-shipped ${intent.effect_id}, which records the ` +
             `answer in the state document too and closes this intent. Nothing was written.\n`,
         )
         return 1
@@ -400,10 +416,7 @@ async function runBySeq(argv: string[]): Promise<number> {
 
     process.stdout.write(
       `Closed fire intent ${intent.seq} for ${intent.plugin} (run ${intent.run_id}) as ` +
-        `${shipped ? 'shipped' : 'not shipped'}, on your word. The audit record keeps the intent and this answer.\n` +
-        (stillMarked
-          ? `The content approval for ${intent.plugin} still reads indeterminate: only an advance confirms a mark.\n`
-          : ''),
+        `${shipped ? 'shipped' : 'not shipped'}, on your word. The audit record keeps the intent and this answer.\n`,
     )
     return 0
   })
