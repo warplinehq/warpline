@@ -640,3 +640,175 @@ describe('a line the walk passes over wedges nothing', () => {
     }
   })
 })
+
+// -- Passing over a line the walk stops on -------------------------------------
+
+/** The head as `audit head` prints it, kept as text so an anchor can be written from it later. */
+const headText = async (): Promise<string> => (await capture(['audit', 'head'])).stdout
+
+/** Verify against a head kept earlier. */
+const verifyAt = async (text: string) => verify(await anchorFile(text))
+
+/** The stored line at `seq`, newline excluded, exactly as on disk. */
+const lineAt = (seq: number): string => storeLines().find((l) => seqOf(l) === seq)!
+
+/** The first line of the last segment, parsed. */
+const openedLine = () =>
+  JSON.parse(readFileSync(join(auditDir(), segmentFiles().at(-1)!), 'utf8').split('\n')[0]!) as {
+    type: string
+    warplineseq: number
+    data: { fragment: unknown; passed_over?: { seq: number; sha256: string }[] }
+  }
+
+const passOver = (...seqs: (number | string)[]) => capture(['audit', 'pass-over', ...seqs.map(String)])
+
+describe('audit pass-over', () => {
+  test('a line the walk stops on, with records after it, is passed over in a new segment, and verify is clean against anchors taken before and after', async () => {
+    const { seq: intent } = await mailer()
+    const h0 = await headText()
+    const bad = badIntent()
+    await grow(2)
+    const h1 = await headText()
+    expect((await verifyAt(h1)).code).toBe(6)
+    const [oldName] = segmentFiles() as [string]
+    const oldBytes = readFileSync(join(auditDir(), oldName))
+    const badLine = lineAt(bad)
+
+    const r = await passOver(bad)
+
+    expect(r.code).toBe(0)
+    expect(r.stderr).toBe('')
+    expect(r.stdout).not.toContain('WALK_SENTINEL_5d1')
+    expect(r.stderr).not.toContain('WALK_SENTINEL_5d1')
+    expect(readFileSync(join(auditDir(), oldName)).equals(oldBytes)).toBe(true)
+    expect(segmentFiles()).toHaveLength(2)
+    const opened = openedLine()
+    expect(opened.type).toBe('warpline.audit.segment.opened')
+    expect(opened.data.passed_over).toEqual([{ seq: bad, sha256: sha(Buffer.from(badLine, 'utf8')) }])
+
+    for (const h of [h0, h1]) {
+      const v = await verifyAt(h)
+      expect(v.stdout).toContain('verdict: clean\n')
+      expect(v.stdout).toContain(`open intent: seq ${intent} plugin mailer run run-77\n`)
+      expect(unreadableLines(v.stdout)).toEqual([])
+      expect(v.code).toBe(0)
+    }
+    const h2 = await headText()
+
+    await grow(1)
+    await grow(1, { maxSegmentBytes: 1 })
+    expect((await capture(['principal', 'list'])).code).toBe(0)
+
+    for (const h of [h0, h1, h2]) {
+      const v = await verifyAt(h)
+      expect(v.stdout).toContain('verdict: clean\n')
+      expect(v.code).toBe(0)
+    }
+    expect(walkChain(auditDir()).ok).toBe(true)
+  })
+
+  test('a passed_over entry whose sha256 or seq does not match the line it names is tampered', async () => {
+    await mailer()
+    const bad = badIntent()
+    const h1 = await headText()
+    expect((await passOver(bad)).code).toBe(0)
+    const path = join(auditDir(), segmentFiles().at(-1)!)
+    const original = readFileSync(path)
+    const text = original.toString('utf8')
+    expect(text.indexOf('\n')).toBe(text.length - 1)
+    const opened = seqOf(text.slice(0, -1))
+
+    const edits: [string, (entry: { seq: number; sha256: string }) => void][] = [
+      ['a wrong sha256', (e) => void (e.sha256 = 'f'.repeat(64))],
+      ['a real line of the segment before, with another hash', (e) => void (e.seq = bad - 1)],
+      ['a seq that is not a line of the segment before', (e) => void (e.seq = opened)],
+    ]
+    for (const [what, edit] of edits) {
+      const rec = JSON.parse(text) as { data: { passed_over: { seq: number; sha256: string }[] } }
+      edit(rec.data.passed_over[0]!)
+      writeFileSync(path, `${JSON.stringify(rec)}\n`)
+
+      const v = await verifyAt(h1)
+
+      expect({ what, code: v.code }).toEqual({ what, code: 4 })
+      expect(v.stdout).toContain('verdict: tampered\n')
+      expect(v.stdout).toContain(`seq ${opened}'s passed_over does not match the segment before it`)
+      writeFileSync(path, original)
+    }
+
+    const v = await verifyAt(h1)
+    expect(v.stdout).toContain('verdict: clean\n')
+    expect(v.code).toBe(0)
+  })
+
+  test('pass-over refuses the opening line, a line outside the active segment, a line the walk carries and a store another line still stops, writing nothing, and passes over every line once all are named', async () => {
+    await twoSegments()
+    const { seq: intent } = await mailer()
+    const bad1 = badIntent()
+    await grow(1)
+    const bad2 = badIntent()
+    const activeFirst = Number(segmentFiles().at(-1)!.slice(0, 16))
+    const { seq: head } = await readHead(statePath())
+    const before = await snapshotHome(home)
+
+    const refused = async (seqs: number[]): Promise<string> => {
+      const r = await passOver(...seqs)
+      expect({ seqs, code: r.code }).toEqual({ seqs, code: 1 })
+      expect(r.stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+      expect(r.stderr).not.toContain('WALK_SENTINEL_5d1')
+      expect(await snapshotHome(home)).toEqual(before)
+      return r.stderr
+    }
+    for (const seq of [activeFirst, 2, head + 1, intent]) {
+      expect(await refused([seq])).toContain(`seq ${seq} is not a line the walk stops on in the active segment`)
+    }
+    const stillStops = await refused([bad1])
+    expect(stillStops).toContain(`seq ${bad2} `)
+    expect(stillStops).toContain('fire.intent')
+
+    const h = await headText()
+    const r = await passOver(bad2, bad1)
+    expect(r.code).toBe(0)
+    expect(openedLine().data.passed_over).toEqual([
+      { seq: bad1, sha256: sha(Buffer.from(lineAt(bad1), 'utf8')) },
+      { seq: bad2, sha256: sha(Buffer.from(lineAt(bad2), 'utf8')) },
+    ])
+    const v = await verifyAt(h)
+    expect(v.stdout).toContain('verdict: clean\n')
+    expect(v.code).toBe(0)
+  })
+
+  test('a malformed pass-over is a usage error, and a home with no store is refused without creating one', async () => {
+    const none = await passOver(2)
+    expect(none.code).toBe(1)
+    expect(none.stderr).toContain('no segment to pass over')
+    expect(existsSync(auditDir())).toBe(false)
+
+    await grow(3)
+    const before = await snapshotHome(home)
+    for (const argv of [[], ['0'], ['01'], ['1e3'], ['abc'], ['--seq', '2'], ['2', '-x']]) {
+      const { code, stdout, stderr } = await capture(['audit', 'pass-over', ...argv])
+      expect({ argv, code, stdout }).toEqual({ argv, code: 1, stdout: '' })
+      expect(stderr).toContain('warpline audit pass-over <seq>')
+    }
+    expect(await snapshotHome(home)).toEqual(before)
+  })
+
+  test('a pass-over over a torn active segment acknowledges the fragment beside the line it passes over', async () => {
+    await mailer()
+    const bad = badIntent()
+    const h1 = await headText()
+    appendFileSync(join(auditDir(), segmentFiles().at(-1)!), '{"specversion":"1.0","id":')
+
+    const r = await passOver(bad)
+
+    expect(r.code).toBe(0)
+    const opened = openedLine()
+    expect(opened.data.fragment).not.toBeNull()
+    expect(opened.data.passed_over?.map((e) => e.seq)).toEqual([bad])
+    const v = await verifyAt(h1)
+    expect(v.stdout).toContain('verdict: torn\n')
+    expect(unreadableLines(v.stdout)).toEqual([])
+    expect(v.code).toBe(3)
+  })
+})
