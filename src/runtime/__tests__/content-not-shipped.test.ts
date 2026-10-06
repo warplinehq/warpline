@@ -32,7 +32,8 @@
  * the sweep that drops closed approvals, and the rule that releases content a
  * closed approval binds. The first two cases pin the standing, the third the
  * sweep, and the fourth the release. Any one reader left on its own copy of the
- * predicate turns one of them red.
+ * predicate turns one of them red. A shipped answer is the second answer that
+ * predicate reads, and the second describe pins its three readers the same way.
  *
  * **The invocation count is a directory of sentinel files outside the home.**
  * A file per invocation is what the handler did, and the count tells one fire
@@ -248,6 +249,62 @@ async function plantAnswered(over: Record<string, unknown> = {}): Promise<void> 
   await writeFile(statePath(), JSON.stringify(doc))
 }
 
+/**
+ * A closed record bound to an earlier run of the same bytes, answered through
+ * `field`, releases them by fingerprint. The same record unanswered does not.
+ */
+function expectReleasedOnlyWhenAnswered(field: 'not_shipped_at' | 'shipped_at'): void {
+  const producerManifest: PluginManifest = PluginManifestSchema.parse({
+    name: PRODUCER,
+    version: '1.0.0',
+    description: 'producer',
+    autonomy_level: 'autonomous',
+    ttl_hours: 24,
+  })
+  const manifests = new Map([[PRODUCER, producerManifest]])
+
+  const answered = defaultEngineState()
+  answered.plugin_runs[PRODUCER] = {
+    last_run_at: '2026-09-26T09:30:00.000Z',
+    status: 'success',
+    run_id: 'run-later',
+    last_output: { type: 'brief', format: 'json', body: BODY, run_id: 'run-later' },
+  }
+  // Bound to an earlier run of the same bytes, so only the fingerprint can
+  // match. A binding by run would pass whatever the predicate said.
+  answered.approvals[CONSUMER] = {
+    plugin: CONSUMER,
+    producer: PRODUCER,
+    fingerprint: proposalFingerprint(answered, PRODUCER, producerManifest),
+    run_id: 'run-earlier',
+    approved_at: '2019-12-01T00:00:00.000Z',
+    not_before: null,
+    not_after: '2020-01-01T00:00',
+    zone: 'UTC',
+    effect_id: 'c'.repeat(64),
+    marked_at: '2019-12-02T00:00:00.000Z',
+    confirmed_at: null,
+    [field]: ANSWERED_AT,
+  } as Approval
+
+  // The same state, the fire never answered.
+  const unanswered = structuredClone(answered)
+  const { [field]: _answer, ...open } = unanswered.approvals[CONSUMER] as Approval & Record<string, unknown>
+  unanswered.approvals[CONSUMER] = open as Approval
+
+  const now = Date.now()
+  eraseIfReleased(answered.plugin_runs, answered.pending_gates, PRODUCER, answered.approvals, manifests, now)
+  eraseIfReleased(unanswered.plugin_runs, unanswered.pending_gates, PRODUCER, unanswered.approvals, manifests, now)
+
+  // Answered, it binds by fingerprint as a confirmed fire does, so its
+  // closed window releases the bytes.
+  expect(answered.plugin_runs[PRODUCER]!.last_output!.erased_at).toBeDefined()
+  expect(answered.plugin_runs[PRODUCER]!.last_output!.body).toBeUndefined()
+  // Unanswered, it binds by run only, so identical bytes from a later run are
+  // not released on its account.
+  expect(unanswered.plugin_runs[PRODUCER]!.last_output!.body).toBe(BODY)
+}
+
 beforeEach(async () => {
   home = await createTestHome()
   _setHome(home.root)
@@ -335,56 +392,42 @@ describe('an indeterminate content fire the operator resolved as not shipped', (
   })
 
   test('a resolved record releases content it binds by fingerprint when its window closes', () => {
-    const producerManifest: PluginManifest = PluginManifestSchema.parse({
-      name: PRODUCER,
-      version: '1.0.0',
-      description: 'producer',
-      autonomy_level: 'autonomous',
-      ttl_hours: 24,
+    expectReleasedOnlyWhenAnswered('not_shipped_at')
+  })
+})
+
+describe('an indeterminate content fire the operator resolved as shipped', () => {
+  test('a record answered shipped reads spent, names when it was answered, and refuses nothing', async () => {
+    await advance()
+    await approveWhatWasRead()
+    await plantAnswered({ not_shipped_at: undefined, shipped_at: ANSWERED_AT })
+
+    const reasons: string[] = []
+    const result = await advance({
+      force: true,
+      onPluginEnd: (plugin, _status, _elapsed, reason) => {
+        if (plugin === CONSUMER && reason !== undefined) reasons.push(reason)
+      },
     })
-    const manifests = new Map([[PRODUCER, producerManifest]])
 
-    const answered = defaultEngineState()
-    answered.plugin_runs[PRODUCER] = {
-      last_run_at: '2026-09-26T09:30:00.000Z',
-      status: 'success',
-      run_id: 'run-later',
-      last_output: { type: 'brief', format: 'json', body: BODY, run_id: 'run-later' },
-    }
-    // Bound to an earlier run of the same bytes, so only the fingerprint can
-    // match. A binding by run would pass whatever the predicate said.
-    answered.approvals[CONSUMER] = {
-      plugin: CONSUMER,
-      producer: PRODUCER,
-      fingerprint: proposalFingerprint(answered, PRODUCER, producerManifest),
-      run_id: 'run-earlier',
-      approved_at: '2019-12-01T00:00:00.000Z',
-      not_before: null,
-      not_after: '2020-01-01T00:00',
-      zone: 'UTC',
-      effect_id: 'c'.repeat(64),
-      marked_at: '2019-12-02T00:00:00.000Z',
-      confirmed_at: null,
-      not_shipped_at: ANSWERED_AT,
-    } as Approval
+    expect(firedCount()).toBe(0)
+    expect(result.refused_plugins).toEqual([])
+    expect(reasons).toHaveLength(1)
+    expect(reasons[0]).toContain('answered shipped')
+    expect(reasons[0]).toContain(ANSWERED_AT)
+  })
 
-    // The same state, the fire never answered.
-    const unanswered = structuredClone(answered)
-    const { not_shipped_at: _answer, ...open } = unanswered.approvals[CONSUMER] as Approval & {
-      not_shipped_at?: string
-    }
-    unanswered.approvals[CONSUMER] = open as Approval
+  test('a record answered shipped is swept once its window closes', async () => {
+    await advance()
+    await approveWhatWasRead()
+    await plantAnswered({ not_shipped_at: undefined, shipped_at: ANSWERED_AT, not_after: '2020-01-01T00:00', zone: 'UTC' })
 
-    const now = Date.now()
-    eraseIfReleased(answered.plugin_runs, answered.pending_gates, PRODUCER, answered.approvals, manifests, now)
-    eraseIfReleased(unanswered.plugin_runs, unanswered.pending_gates, PRODUCER, unanswered.approvals, manifests, now)
+    await advance()
 
-    // Answered, it binds by fingerprint as a confirmed fire does, so its
-    // closed window releases the bytes.
-    expect(answered.plugin_runs[PRODUCER]!.last_output!.erased_at).toBeDefined()
-    expect(answered.plugin_runs[PRODUCER]!.last_output!.body).toBeUndefined()
-    // Unanswered, it binds by run only, so identical bytes from a later run are
-    // not released on its account.
-    expect(unanswered.plugin_runs[PRODUCER]!.last_output!.body).toBe(BODY)
+    expect(Object.hasOwn((await readState()).approvals, CONSUMER)).toBe(false)
+  })
+
+  test('a record answered shipped releases content it binds by fingerprint when its window closes', () => {
+    expectReleasedOnlyWhenAnswered('shipped_at')
   })
 })

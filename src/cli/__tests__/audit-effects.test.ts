@@ -688,6 +688,52 @@ describe('resolve', () => {
     expect(recordsOf('fire.resolved')).toEqual([])
     expectNoSentinel()
   })
+
+  test('resolve --shipped answers a still-marked content fire on the record before the state write, and the approval reads spent', async () => {
+    await fireAndFail(true)
+    const effectId = senderEffectId()
+    const intent = senderIntent()
+    const seen = recordedBefore(store, 'writeEngineState', 'fire.resolved')
+
+    const { code, stderr } = await capture(['resolve', 'sender', '--shipped', effectId])
+
+    expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
+    expect(seen()).toBe(true)
+    expect(recordsOf('fire.resolved')).toEqual([
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+    ])
+    expect((await audit.openIntents(statePathOf())).filter((i) => i.plugin === 'sender')).toEqual([])
+    expect(await senderStanding()).toBe('spent')
+    const record = (JSON.parse(readFileSync(statePathOf(), 'utf-8')) as {
+      approvals: Record<string, Record<string, unknown>>
+    }).approvals.sender!
+    expect(typeof record.shipped_at).toBe('string')
+    expect(new Date(record.shipped_at as string).toISOString()).toBe(record.shipped_at as string)
+    expect(Object.hasOwn(record, 'not_shipped_at')).toBe(false)
+    expect(record.confirmed_at).toBeNull()
+  })
+
+  for (const [first, second] of [
+    ['--shipped', '--not-shipped'],
+    ['--not-shipped', '--shipped'],
+  ] as const) {
+    test(`a second answer to one fire is refused and writes nothing: ${first} then ${second}`, async () => {
+      await fireAndFail(false)
+      const effectId = senderEffectId()
+      expect((await capture(['resolve', 'sender', first, effectId])).code).toBe(0)
+      const before = await snapshotHome(home)
+
+      const { code, stderr } = await capture(['resolve', 'sender', second, effectId])
+
+      expect(code).toBe(1)
+      expect(stderr).toContain('has no fire waiting on an answer')
+      expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+      expect(await snapshotHome(home)).toEqual(before)
+      expect(recordsOf('fire.resolved')).toEqual([
+        { plugin: 'sender', effect_id: effectId, intent_seq: null, answer: first === '--shipped' ? 'shipped' : 'not_shipped' },
+      ])
+    })
+  }
 })
 
 // -- Resolve by seq: any open intent ------------------------------------------
@@ -791,22 +837,20 @@ describe('resolve --intent', () => {
     expect(await snapshotHome(home)).toEqual(before)
   })
 
-  test('a content fire still marked and unconfirmed takes --shipped by seq, and its approval still reads indeterminate', async () => {
+  test('a content fire still marked and unconfirmed refuses --shipped by seq too, names both answers of the content form, and writes nothing', async () => {
     await fireAndFail(true)
     const intent = senderIntent()
     const effectId = senderEffectId()
-    const stateBefore = readFileSync(statePathOf())
+    const before = await snapshotHome(home)
 
-    const { code, stdout } = await capture(['resolve', '--intent', String(intent.warplineseq), '--shipped'])
+    const { code, stderr } = await capture(['resolve', '--intent', String(intent.warplineseq), '--shipped'])
 
-    expect(code).toBe(0)
-    expect(stdout).toContain('The content approval for sender still reads indeterminate')
-    expect(recordsOf('fire.resolved')).toEqual([
-      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
-    ])
-    expect((await audit.openIntents(statePathOf())).filter((i) => i.plugin === 'sender')).toEqual([])
-    expect(await senderStanding()).toBe('indeterminate')
-    expect(readFileSync(statePathOf())).toEqual(stateBefore)
+    expect(code).toBe(1)
+    expect(stderr).toContain(`warpline resolve sender --shipped ${effectId}`)
+    expect(stderr).toContain(`warpline resolve sender --not-shipped ${effectId}`)
+    expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+    expect(await snapshotHome(home)).toEqual(before)
+    expect((await audit.openIntents(statePathOf())).map((i) => i.seq)).toContain(intent.warplineseq)
   })
 
   test('a seq that is not an open intent is refused, names nothing typed, and writes nothing', async () => {
