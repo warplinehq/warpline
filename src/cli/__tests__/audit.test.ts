@@ -779,7 +779,8 @@ describe('audit pass-over', () => {
       expect(await snapshotHome(home)).toEqual(before)
       return r.stderr
     }
-    for (const seq of [activeFirst, 2, head + 1, intent]) {
+    expect(await refused([activeFirst])).toContain(`seq ${activeFirst} opens the active segment and cannot be passed over`)
+    for (const seq of [2, head + 1, intent]) {
       expect(await refused([seq])).toContain(`seq ${seq} is not a line the walk stops on in the active segment`)
     }
     const stillStops = await refused([bad1])
@@ -826,6 +827,32 @@ describe('audit pass-over', () => {
     expect(cp.data.root).toBe(sha(Buffer.from(third[0]!, 'utf8')))
     expect(openedLine().data.passed_over?.map((e) => e.seq)).toEqual([bad2])
     expect(walkChain(auditDir()).ok).toBe(true)
+  })
+
+  test('the opening line of the active segment cannot be passed over, and a walk stopped there names no pass-over', async () => {
+    await grow(2)
+    const [name] = segmentFiles() as [string]
+    const first = Number(name.slice(0, 16))
+    expect(first).toBe(1)
+    const before = await snapshotHome(home)
+
+    const r = await passOver(first)
+
+    expect(r.code).toBe(1)
+    expect(r.stderr).toContain(`seq ${first} opens the active segment and cannot be passed over`)
+    expect(r.stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+    expect(await snapshotHome(home)).toEqual(before)
+
+    // The opening line replaced by hand with one that is not a record, every other line kept.
+    const path = join(auditDir(), name)
+    const text = readFileSync(path, 'utf8')
+    writeFileSync(path, `${GARBLED}\n${text.slice(text.indexOf('\n') + 1)}`)
+
+    const listed = await capture(['principal', 'list'])
+    expect(listed.code).toBe(1)
+    expect(listed.stderr).toContain(`seq ${first} opens the active segment`)
+    expect(listed.stderr).not.toContain('warpline audit pass-over')
+    expect(listed.stderr).not.toContain('WALK_SENTINEL_5d1')
   })
 
   test('a malformed pass-over is a usage error, and a home with no store is refused without creating one', async () => {
@@ -1059,4 +1086,40 @@ describe('a line that is not a record', () => {
     expect(v.stdout).toContain('verdict: clean\n')
     expect(v.code).toBe(0)
   })
+})
+
+// -- A walk that stops names the way past it -----------------------------------
+
+describe('a walk that stops names the way past it', () => {
+  const stops: [string, () => Promise<number>][] = [
+    ['a line holding data the walk cannot carry', async () => badIntent()],
+    ['a last line that is not a record', async () => (await garble()).seq],
+  ]
+  for (const [what, stop] of stops) {
+    test(`every verb that needs the walk, and verify, name warpline audit pass-over: ${what}`, async () => {
+      await mailer()
+      const h0 = await headText()
+      const s = await stop()
+
+      const verbs: [string[], number][] = [
+        [['principal', 'list'], 1],
+        [['prefs', 'set', 'review_gate', 'true'], 1],
+        [['advance'], 75],
+        [['resolve', '--intent', String(s), '--shipped'], 1],
+      ]
+      for (const [argv, want] of verbs) {
+        const { code, stderr } = await capture(argv)
+        expect({ argv, code }).toEqual({ argv, code: want })
+        expect(stderr).toContain(`seq ${s} `)
+        expect(stderr).toContain('warpline audit pass-over')
+        expect(stderr).not.toContain('WALK_SENTINEL_5d1')
+      }
+
+      const v = await verifyAt(h0)
+      const named = unreadableLines(v.stdout)
+      expect(named).toHaveLength(1)
+      expect(named[0]).toContain('warpline audit pass-over')
+      expect(v.stdout).not.toContain('WALK_SENTINEL_5d1')
+    })
+  }
 })
