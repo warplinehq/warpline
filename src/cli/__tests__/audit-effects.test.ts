@@ -164,6 +164,34 @@ function failAppend(kind: string): { trips: () => number } {
   return { trips: () => trips }
 }
 
+/**
+ * Make the first state-document write throw, as a full disk would, before
+ * anything is written. Every later call goes to the real write.
+ */
+function failStateWriteOnce(): { trips: () => number } {
+  // Read BEFORE `spyOn`, as in `failAppend`.
+  const real = store.writeEngineState
+  let trips = 0
+  const spy = spyOn(store, 'writeEngineState').mockImplementation(async (payload, path) => {
+    if (trips === 0) {
+      trips += 1
+      throw Object.assign(new Error(SENTINEL), { code: 'ENOSPC' })
+    }
+    return real(payload, path)
+  })
+  installed.push(spy)
+  return { trips: () => trips }
+}
+
+/** `capture`, with a rejection read as `undefined` rather than failing the case. */
+async function captureOrThrown(argv: string[]): Promise<{ code: number; stdout: string; stderr: string } | undefined> {
+  try {
+    return await capture(argv)
+  } catch {
+    return undefined
+  }
+}
+
 describe('deny', () => {
   test('deny p writes its record before the state write', async () => {
     const realWrite = store.writeEngineState
@@ -734,6 +762,128 @@ describe('resolve', () => {
       ])
     })
   }
+
+  test('the content form refuses both answers at once, for one effect id or two, and writes nothing', async () => {
+    await fireAndFail(true)
+    const effectId = senderEffectId()
+    const before = await snapshotHome(home)
+
+    for (const other of [effectId, 'd'.repeat(64)]) {
+      const { code, stderr } = await capture(['resolve', 'sender', '--shipped', effectId, '--not-shipped', other])
+
+      expect(code).toBe(1)
+      expect(stderr).toContain('not both. Nothing was written.')
+    }
+    expect(await snapshotHome(home)).toEqual(before)
+    expect(recordsOf('fire.resolved')).toEqual([])
+  })
+})
+
+describe('resolve when its state write does not land', () => {
+  test('a failed state write after the answer is on the record exits 1, says the answer is there, names the command that finishes it, and prints none of the error', async () => {
+    await fireAndFail(true)
+    const effectId = senderEffectId()
+    const intent = senderIntent()
+    const spy = failStateWriteOnce()
+
+    const r = await captureOrThrown(['resolve', 'sender', '--shipped', effectId])
+
+    expect(r).toBeDefined()
+    expect(r!.code).toBe(1)
+    expect(r!.stderr).toContain('is on the audit record')
+    expect(r!.stderr).toContain(`warpline resolve sender --shipped ${effectId}`)
+    expect(r!.stderr).not.toContain(SENTINEL)
+    expect(spy.trips()).toBe(1)
+    expect(recordsOf('fire.resolved')).toEqual([
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+    ])
+    expect(await senderStanding()).toBe('indeterminate')
+  })
+
+  for (const [first, second] of [
+    ['--shipped', '--not-shipped'],
+    ['--not-shipped', '--shipped'],
+  ] as const) {
+    test(`the other answer is refused naming the one on the record, and the store keeps one answer: ${first} then ${second}`, async () => {
+      await fireAndFail(true)
+      const effectId = senderEffectId()
+      const intent = senderIntent()
+      const spy = failStateWriteOnce()
+      await captureOrThrown(['resolve', 'sender', first, effectId])
+      expect(spy.trips()).toBe(1)
+      expect(await senderStanding()).toBe('indeterminate')
+      const before = await snapshotHome(home)
+      const firstAnswer = first === '--shipped' ? 'shipped' : 'not_shipped'
+
+      const { code, stderr } = await capture(['resolve', 'sender', second, effectId])
+
+      expect(code).toBe(1)
+      expect(stderr).toContain(`already answered ${firstAnswer === 'shipped' ? 'shipped' : 'not shipped'} on the audit record`)
+      expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+      expect(await snapshotHome(home)).toEqual(before)
+      expect(recordsOf('fire.resolved')).toEqual([
+        { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: firstAnswer },
+      ])
+    })
+  }
+
+  for (const flag of ['--shipped', '--not-shipped'] as const) {
+    test(`the same answer again writes only the state document and no second record: ${flag}`, async () => {
+      await fireAndFail(true)
+      const effectId = senderEffectId()
+      const intent = senderIntent()
+      const spy = failStateWriteOnce()
+      await captureOrThrown(['resolve', 'sender', flag, effectId])
+      expect(spy.trips()).toBe(1)
+      const answer = flag === '--shipped' ? 'shipped' : 'not_shipped'
+
+      const { code, stdout, stderr } = await capture(['resolve', 'sender', flag, effectId])
+
+      expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
+      expect(stdout).toContain('already on the audit record')
+      expect(recordsOf('fire.resolved')).toEqual([
+        { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer },
+      ])
+      expect(await senderStanding()).toBe('spent')
+      const record = (JSON.parse(readFileSync(statePathOf(), 'utf-8')) as {
+        approvals: Record<string, Record<string, unknown>>
+      }).approvals.sender!
+      const field = flag === '--shipped' ? 'shipped_at' : 'not_shipped_at'
+      const otherField = flag === '--shipped' ? 'not_shipped_at' : 'shipped_at'
+      expect(typeof record[field]).toBe('string')
+      expect(new Date(record[field] as string).toISOString()).toBe(record[field] as string)
+      expect(Object.hasOwn(record, otherField)).toBe(false)
+      expect(record.confirmed_at).toBeNull()
+    })
+  }
+
+  test('an audit store that cannot be read for an earlier answer refuses the answer and writes nothing', async () => {
+    await fireAndFail(true)
+    const effectId = senderEffectId()
+    const stateBefore = readFileSync(statePathOf())
+    // Read BEFORE `spyOn`, as in `failAppend`.
+    const real = audit.readCompleteLines
+    let trips = 0
+    installed.push(
+      spyOn(audit, 'readCompleteLines').mockImplementation((statePath: string, afterSeq: number) => {
+        if (trips === 0) {
+          trips += 1
+          throw new Error(SENTINEL)
+        }
+        return real(statePath, afterSeq)
+      }),
+    )
+
+    const r = await captureOrThrown(['resolve', 'sender', '--not-shipped', effectId])
+
+    expect(r).toBeDefined()
+    expect(r!.code).toBe(1)
+    expect(r!.stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+    expect(r!.stderr).not.toContain(SENTINEL)
+    expect(trips).toBe(1)
+    expect(recordsOf('fire.resolved')).toEqual([])
+    expect(readFileSync(statePathOf())).toEqual(stateBefore)
+  })
 })
 
 // -- Resolve by seq: any open intent ------------------------------------------

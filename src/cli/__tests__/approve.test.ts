@@ -1882,6 +1882,8 @@ describe('warpline approve --content', () => {
     expect(stderr).toContain(MARKED.effect_id)
     expect(stderr).toContain(MARKED.marked_at)
     expect(stderr).toContain('Nothing was written')
+    expect(stderr).toContain(`warpline resolve ${CONSUMER} --shipped <effect-id>`)
+    expect(stderr).toContain(`warpline resolve ${CONSUMER} --not-shipped <effect-id>`)
     expect(await approvalsOnDisk()).toBe(before)
   })
 
@@ -1897,6 +1899,8 @@ describe('warpline approve --content', () => {
     expect(stderr).toContain(CONSUMER)
     expect(stderr).toContain(MARKED.effect_id)
     expect(stderr).toContain(MARKED.marked_at)
+    expect(stderr).toContain(`warpline resolve ${CONSUMER} --shipped <effect-id>`)
+    expect(stderr).toContain(`warpline resolve ${CONSUMER} --not-shipped <effect-id>`)
     expect(await approvalsOnDisk()).toBe(before)
   })
 
