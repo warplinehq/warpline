@@ -255,6 +255,43 @@ const firstSeqOf = (name: string): number => Number(name.slice(0, 16))
 
 const sha256 = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex')
 
+/** Each complete line of `bytes`, newline excluded. What follows the last newline is not a line. */
+function linesOf(bytes: Buffer): Buffer[] {
+  const lines: Buffer[] = []
+  for (let at = 0, nl = bytes.indexOf(0x0a); nl !== -1; at = nl + 1, nl = bytes.indexOf(0x0a, at)) {
+    lines.push(bytes.subarray(at, nl))
+  }
+  return lines
+}
+
+/**
+ * A `passed_over` value as position to sha256, or null when it is not a list
+ * of entries whose seqs rise. The one parse of that value.
+ */
+function passedOverEntries(named: unknown): ReadonlyMap<number, string> | null {
+  const parsed = PassedOver.safeParse(named)
+  if (!parsed.success) return null
+  const entries = new Map<number, string>()
+  let below = 0
+  for (const { seq, sha256: hash } of parsed.data) {
+    if (seq <= below) return null
+    entries.set(seq, hash)
+    below = seq
+  }
+  return entries
+}
+
+/**
+ * Whether `entries` passes over the line at position `seq` whose bytes,
+ * newline excluded, are `body`: only when an entry names that position and the
+ * bytes hash to it under the byte rule. Verify, the reader and the walk's skip
+ * all ask here, so no two of them can name a passed-over line differently.
+ */
+function isPassedOver(entries: ReadonlyMap<number, string>, seq: number, body: Buffer): boolean {
+  const hash = entries.get(seq)
+  return hash !== undefined && sha256(body) === hash
+}
+
 /** One stored line, newline included, with the envelope keys in their fixed order. */
 function encode(seq: number, source: string, prev: string, kind: AuditKind, data: unknown, time: number): Buffer {
   return Buffer.from(
@@ -474,16 +511,16 @@ function walkLine(line: string, seq: number): { refused: WalkRefusal } | { carri
  * is passed over, so a record a later build writes does not stop it. It stops
  * at a line that is not a record, a first line that is not a `segment.opened`
  * it can carry, or a carried field no writer would write, so no such value
- * reaches a reader's output. `text` ends at a newline, or is empty, and its
- * first line is seq `firstSeq`. A non-first line whose seq is in `skip` is
- * passed over unread.
+ * reaches a reader's output. Only the complete lines of `bytes` are read, and
+ * the first is at position `firstSeq`. A non-first line that `skip` names, by
+ * position and the sha256 of its bytes, is passed over unread.
  */
-function stateOf(text: string, firstSeq: number, skip: ReadonlySet<number> = new Set()): Walked {
-  const lines = text.split('\n').slice(0, -1)
+function stateOf(bytes: Buffer, firstSeq: number, skip: ReadonlyMap<number, string> = new Map()): Walked {
   let opened: Carried | undefined
   const carried: CarriedLine[] = []
-  for (const [i, line] of lines.entries()) {
+  for (const [i, body] of linesOf(bytes).entries()) {
     const seq = firstSeq + i
+    const line = body.toString('utf-8')
     // Whether or not it is a record, the opening line holds the state the
     // walk starts from, and no pass-over can name it.
     if (i === 0) {
@@ -496,7 +533,7 @@ function stateOf(text: string, firstSeq: number, skip: ReadonlySet<number> = new
       continue
     }
     // A line a pass-over named is not read. The opening line never is.
-    if (skip.has(seq)) continue
+    if (isPassedOver(skip, seq, body)) continue
     const step = walkLine(line, seq)
     if ('refused' in step) return step
     if (step.carried !== null) carried.push(step.carried)
@@ -785,12 +822,14 @@ type Limits = { maxSegmentBytes: number; maxSegmentAgeMs: number }
  * 4. Otherwise the record goes to the active segment.
  *
  * With `passing` a new segment opens whatever the active one holds, after it
- * as it stands. Each named seq must be a line of the active segment, not its
- * first, that the walk stops on. The walk passes over exactly those lines, the
- * opened line names each by seq and the hash of its bytes, and no record is
- * written (`dataAfter` is null). When the active segment ends in lines that are
- * not records, the new segment opens after the last record before them, and no
- * seal is written. Without `passing`, such a last line refuses every append.
+ * as it stands. Each named seq must be the position of a line of the active
+ * segment, not its first, that the walk stops on. The walk passes over exactly
+ * those lines, the opened line names each by position and the hash of its
+ * bytes, and no record is written (`dataAfter` is null). A pass-over opens at
+ * the position after the active segment's last record, whatever seq that
+ * record claims. When the active segment ends in lines that are not records,
+ * that is the last record before them, and no seal is written.
+ * Without `passing`, such a last line refuses every append.
  */
 async function appendLocked(
   dir: string,
@@ -835,14 +874,15 @@ async function appendLocked(
     }
     let lastRecord = last === null ? undefined : parseRecord(last.toString('utf-8'))
     // The complete lines, as bytes, for a pass-over: each named one is hashed as written.
-    const lines: Buffer[] = []
+    let lines: Buffer[] = []
+    // The index in `lines` of the line `last` names, for a pass-over.
+    let lastAt = -1
     // Whether a pass-over stepped back over trailing lines that are not records.
     let stepped = false
     if (passing !== undefined && last !== null) {
       whole ??= await readFile(activePath)
-      for (let at = 0, nl = whole.indexOf(0x0a); nl !== -1; at = nl + 1, nl = whole.indexOf(0x0a, at)) {
-        lines.push(whole.subarray(at, nl))
-      }
+      lines = linesOf(whole)
+      lastAt = lines.length - 1
       // A pass-over opens after the last record before them, so each still
       // ends its segment and the next segment.opened can name it.
       if (lastRecord === undefined) {
@@ -851,14 +891,17 @@ async function appendLocked(
         if (lastRecord === undefined) {
           throw new AuditAppendError(kind, `seq ${firstSeqOf(active)} opens the active segment and is not a segment.opened the walk can carry`)
         }
-        last = lines[k + 1] as Buffer
+        lastAt = k + 1
+        last = lines[lastAt] as Buffer
         stepped = true
       }
     }
     if (last === null || lastRecord === undefined) {
       throw new AuditAppendError(kind, 'the active segment holds no readable last line')
     }
-    seq = lastRecord.warplineseq
+    // A pass-over counts position, so a seq the last record claims is never
+    // carried forward. An ordinary append takes the tail's claim.
+    seq = passing === undefined ? lastRecord.warplineseq : firstSeqOf(active) + lastAt
     source = lastRecord.source
     prev = sha256(last)
 
@@ -885,7 +928,7 @@ async function appendLocked(
           return { seq: n, sha256: sha256(line) }
         })
       }
-      const walked = stateOf(whole.toString('utf-8'), firstSeqOf(active), new Set(passing))
+      const walked = stateOf(whole, firstSeqOf(active), new Map((passed ?? []).map((e) => [e.seq, e.sha256])))
       if ('refused' in walked) throw new AuditAppendError(kind, walked.refused)
       state = walked.state
     }
@@ -1193,8 +1236,8 @@ async function segmentsIn(dir: string): Promise<string[]> {
 async function activeState(dir: string): Promise<Walked> {
   const active = (await segmentsIn(dir)).at(-1)
   if (active === undefined) return { state: EMPTY_STATE }
-  const text = await readFile(join(dir, active), 'utf-8')
-  return stateOf(text.slice(0, text.lastIndexOf('\n') + 1), firstSeqOf(active))
+  const bytes = await readFile(join(dir, active))
+  return stateOf(bytes.subarray(0, bytes.lastIndexOf(0x0a) + 1), firstSeqOf(active))
 }
 
 const bySeq = (intents: OpenIntent[]): OpenIntent[] => [...intents].sort((a, b) => a.seq - b.seq)
@@ -1239,22 +1282,41 @@ async function* scan(path: string): AsyncGenerator<Buffer, Buffer> {
 }
 
 /**
- * Every complete line after `afterSeq`, newline included, in seq order across
- * segments, a chunk at a time. A pure reader: no lock, no mkdir. A partial
- * line is never yielded; the next segment's `segment.opened` acknowledges it.
- * No store yields nothing.
+ * One complete line as the store holds it. `seq` is its position: the seq its
+ * segment is named for plus the lines before it in that file. `line` is its
+ * bytes, newline included. `record` is what `parseRecord` reads from it.
+ * `passedOver` is true only when the next segment's opening line names that
+ * position in `passed_over` and the line's bytes still hash as named.
  */
-export async function* readCompleteLines(statePath: string, afterSeq: number): AsyncGenerator<Buffer> {
+export type StoredLine = { seq: number; line: Buffer; record: StoredRecord | undefined; passedOver: boolean }
+
+/**
+ * Every complete line whose position is after `afterSeq`, segment by segment
+ * in name order, a chunk at a time. This is the one positional reader. A seq
+ * here is a line's position, never the `warplineseq` the line claims, which
+ * verify checks. Whether a line is passed over is decided by `isPassedOver`,
+ * the rule verify and the walk use. A pure reader: no lock, no mkdir. A
+ * partial line is never yielded; the next segment's `segment.opened`
+ * acknowledges it. No store yields nothing.
+ */
+export async function* readCompleteLines(statePath: string, afterSeq: number): AsyncGenerator<StoredLine> {
   const dir = auditDirFor(statePath)
   const names = await segmentsIn(dir)
   // The last file that starts at or before the first line wanted.
   let from = 0
   for (const [i, name] of names.entries()) if (firstSeqOf(name) <= afterSeq + 1) from = i
-  for (const name of names.slice(from)) {
+  for (const [i, name] of names.entries()) {
+    if (i < from) continue
+    const next = names[i + 1]
+    const opening = next === undefined ? undefined : await firstLine(join(dir, next))
+    const named: unknown = opening === undefined ? undefined : parseRecord(opening.toString('utf-8'))?.data?.passed_over
+    const entries = (named === undefined ? null : passedOverEntries(named)) ?? new Map<number, string>()
     let seq = firstSeqOf(name) - 1
     for await (const line of scan(join(dir, name))) {
       seq += 1
-      if (seq > afterSeq) yield line
+      if (seq <= afterSeq) continue
+      const body = line.subarray(0, line.length - 1)
+      yield { seq, line, record: parseRecord(body.toString('utf-8')), passedOver: isPassedOver(entries, seq, body) }
     }
   }
 }
@@ -1329,35 +1391,33 @@ export async function c2spNote(statePath: string): Promise<string> {
 }
 
 /**
- * Whether a `passed_over` names, in rising seq order, only lines of the segment
- * `prevName`, each hashing as recorded under the byte rule. Resolves `true`
- * when every entry holds. Otherwise resolves the failing entry's seq: the
- * first, in scan order, whose line hashes to something else, or the smallest
- * left unmatched once the segment ends. The seq is null when the list as a
- * whole fails: it is not a list of entries, its seqs do not rise, or there is
- * no segment before. Reads that segment only when called, so a store with no
- * pass-over pays nothing.
+ * Whether a `passed_over` names, in rising seq order, only positions of lines
+ * of the segment `prevName`, each hashing as recorded under the byte rule.
+ * Resolves the positions it matched when every entry holds. Otherwise resolves
+ * the failing entry's seq: the first, in scan order, whose line hashes to
+ * something else, or the smallest left unmatched once the segment ends. The
+ * seq is null when the list as a whole fails: it is not a list of entries, its
+ * seqs do not rise, or there is no segment before. Reads that segment only
+ * when called, so a store with no pass-over pays nothing.
  */
 async function passedOverHolds(
   dir: string,
   prevName: string | undefined,
   named: unknown,
-): Promise<true | { seq: number | null }> {
-  const parsed = PassedOver.safeParse(named)
-  if (!parsed.success || prevName === undefined) return { seq: null }
-  if (parsed.data.some((e, k) => k > 0 && e.seq <= (parsed.data[k - 1] as { seq: number }).seq)) return { seq: null }
-  const want = new Map(parsed.data.map((e) => [e.seq, e.sha256]))
+): Promise<ReadonlySet<number> | { seq: number | null }> {
+  const entries = passedOverEntries(named)
+  if (entries === null || prevName === undefined) return { seq: null }
+  const matched = new Set<number>()
   let seq = firstSeqOf(prevName) - 1
   for await (const line of scan(join(dir, prevName))) {
     seq += 1
-    const hash = want.get(seq)
-    if (hash === undefined) continue
-    if (sha256(line.subarray(0, line.length - 1)) !== hash) return { seq }
-    want.delete(seq)
+    if (!entries.has(seq)) continue
+    if (!isPassedOver(entries, seq, line.subarray(0, line.length - 1))) return { seq }
+    matched.add(seq)
   }
   // The entries rise, so the first left is the smallest.
-  const [left] = want.keys()
-  return left === undefined ? true : { seq: left }
+  const left = [...entries.keys()].find((s) => !matched.has(s))
+  return left === undefined ? matched : { seq: left }
 }
 
 export type Verdict = 'clean' | 'torn' | 'tampered' | 'unreadable' | 'wrong_log'
@@ -1382,8 +1442,9 @@ export interface Verification {
  *
  * Tampered is any broken link, seq or file name, a line that is not a record
  * other than at the end of a segment the next `segment.opened` names in
- * `passed_over` (such a line moves no seq or link, and is never the line an
- * anchor is compared with; a next segment holding no record names nothing), a
+ * `passed_over` by position (such a line moves no seq or link, and is never
+ * the line an anchor is compared with; a next segment holding no record names
+ * nothing), a record whose `warplineseq` is not its position, a
  * partial line anywhere but the very end that no
  * later `segment.opened` acknowledges, a `passed_over` entry that does not
  * match the segment before it, an anchor beyond the head, or an anchored line
@@ -1472,16 +1533,17 @@ export async function verifyStore(statePath: string, anchor: Anchor, now: number
           if (pending !== null) torn = `seq ${seq + 1} acknowledges a partial line the store kept`
           pending = null
           const named: unknown = rec.data?.passed_over
-          const holds = named === undefined ? true : await passedOverHolds(dir, names[i - 1], named)
-          if (holds !== true) {
+          const holds = named === undefined ? new Set<number>() : await passedOverHolds(dir, names[i - 1], named)
+          if ('seq' in holds) {
             return tampered(
               holds.seq === null
                 ? `seq ${seq + 1}'s passed_over does not match the segment before it`
                 : `seq ${seq + 1}'s passed_over entry for seq ${holds.seq} does not match the segment before it`,
             )
           }
-          // passedOverHolds checked each entry's hash; each carried line must be one.
-          const unnamed = carried.find((c) => !(named as { seq: number }[] | undefined)?.some((e) => e.seq === c))
+          // A line is named by its position and its bytes: each carried line
+          // must be one passedOverHolds matched.
+          const unnamed = carried.find((c) => !holds.has(c))
           if (unnamed !== undefined) return tampered(`seq ${unnamed} is not a record`)
           carried = []
         }

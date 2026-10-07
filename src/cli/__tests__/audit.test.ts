@@ -1158,6 +1158,30 @@ describe('a line that is not a record', () => {
       expect(stdout).not.toContain('WALK_SENTINEL_5d1')
     })
   }
+
+  test('passed over at the end of a segment shares its position with the opening line after it, and export prints it only for an --after below the last record before it', async () => {
+    await mailer()
+    await grow(1)
+    const { seq: g } = await garble()
+    const [oldName] = segmentFiles() as [string]
+    const oldText = readFileSync(join(auditDir(), oldName), 'utf8')
+    const oldLines = oldText.split('\n').slice(0, -1)
+    expect(oldLines.at(-1)).toBe(GARBLED)
+
+    expect((await passOver(g)).code).toBe(0)
+    expect(segmentFiles()).toEqual([oldName, nameOf(g)])
+    const newText = readFileSync(join(auditDir(), nameOf(g)), 'utf8')
+    expect(seqOf(newText.split('\n')[0]!)).toBe(g)
+
+    const exported = async (after: number): Promise<string> => {
+      const r = await capture(['audit', 'export', '--after', String(after)])
+      expect(r.code).toBe(0)
+      return r.stdout
+    }
+    expect(await exported(g - 1)).toBe(newText)
+    expect(await exported(g - 2)).toBe(`${oldLines.at(-2)}\n${GARBLED}\n${newText}`)
+    expect(await exported(0)).toBe(oldText + newText)
+  })
 })
 
 // -- A walk that stops names the way past it -----------------------------------

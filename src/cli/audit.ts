@@ -148,7 +148,7 @@ async function exportAfter(args: string[]): Promise<number> {
   out.on('error', onError)
   out.on('close', onClose)
   try {
-    for await (const line of readCompleteLines(engineStatePath(), after)) {
+    for await (const { line } of readCompleteLines(engineStatePath(), after)) {
       if (failed !== null || closed) break
       if (out.write(line)) continue
       await new Promise<void>((resolve) => {

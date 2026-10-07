@@ -2637,7 +2637,8 @@ own verb and not a mode of
 - Before it writes, it reads the audit store for
   an earlier `fire.resolved` with this plugin and effect id (the next bullets
   say what that changes).
-  Only a line that is a record counts, and not one a `segment.opened` names in `passed_over`, whose answer is lost to the walk as § 14 says.
+  Only a line that is a record counts, and not one that a `segment.opened` names in `passed_over` at its position while its bytes still hash as that entry records: that answer is lost to the walk as § 14 says.
+  Position is as § 14 Segments defines it, whatever seq the line claims.
   With none there, it appends `fire.resolved` (§ 14):
   the plugin, the effect id, the seq of the `fire.intent` with that plugin and
   effect id when one is still open, else null, and `answer: shipped` or
@@ -3553,10 +3554,10 @@ claimed.
 
 ### Record format
 
-Each line is one CloudEvents 1.0 structured-mode JSON object followed by a
-newline. CloudEvents defines a single object and a JSON array batch but no
+Each line the writer writes is one CloudEvents 1.0 structured-mode JSON object followed by a newline.
+CloudEvents defines a single object and a JSON array batch but no
 line-delimited format, so one object per line is warpline's own convention.
-Every line is called an audit record.
+Such a line is called an audit record.
 
 The keys are written in this order, and a reader may rely on it:
 
@@ -3568,16 +3569,17 @@ The keys are written in this order, and a reader may rely on it:
 | `type` | `warpline.audit.<kind>`, one of the kinds below. |
 | `time` | RFC 3339 UTC, when the record was appended. |
 | `datacontenttype` | `"application/json"` |
-| `warplineseq` | An integer, `1` for the first line, and the previous line's plus one after that. Contiguous across the whole store. |
-| `warplineprev` | The lowercase hex sha256 of the previous line, or 64 `0`s on the first line. |
+| `warplineseq` | An integer, `1` for the first line, and the previous record's plus one after that. Contiguous across the whole store. |
+| `warplineprev` | The lowercase hex sha256 of the previous record, or 64 `0`s on the first line. |
 | `data` | The kind's own fields. See below. |
 
 **The byte rule.** The hash input is the exact bytes of a line as stored, with
-its trailing newline excluded. `warplineprev` is the hash of the previous line
-under that rule. Nothing is re-serialized to compute or check it, so a verifier
-needs no canonical JSON form and compares bytes. A line's own hash, the head
-hash when it is the last line, is never stored in that line. It is stored in
-the next line's `warplineprev`, or nowhere if there is none.
+its trailing newline excluded.
+`warplineprev` is the hash of the previous record under that rule.
+Nothing is re-serialized to compute or check it, so a verifier
+needs no canonical JSON form and compares bytes.
+A record's own hash is never stored in that record.
+It is stored in the next record's `warplineprev`, or nowhere if there is none.
 
 `warplineseq` is a CloudEvents Integer, so it is valid up to 2,147,483,647
 records. `source` plus `id` is unique per record, as CloudEvents requires,
@@ -3615,7 +3617,7 @@ The set is closed. A kind outside it cannot be written.
 | `ask.raised` | An Ask raised. |
 | `ask.answered` | An Ask answered. |
 | `handoff.tried` | A handoff tried. |
-| `segment.opened` | The first line of a segment file. One opened by `warpline audit pass-over` names each line it passed over, by seq and sha256, as `passed_over`. |
+| `segment.opened` | The first line of a segment file. One opened by `warpline audit pass-over` names each line it passed over, by its position and sha256, as `passed_over`. |
 | `segment.sealed` | The last line of a segment file that is full or old. |
 | `checkpoint.recorded` | The head as it stood, so it can be exported and checked later. |
 
@@ -3829,9 +3831,9 @@ stops on. If another line still stops the walk, it refuses and names that one.
 Pass-over edits no line. It opens a new segment after the active one as it
 stands. The new segment's `segment.opened` carries forward the state reached by
 a walk that skips exactly the named lines, and names each one in `passed_over`,
-by seq and the sha256 of its bytes under the byte rule. Whatever a passed-over
-line said is lost to the walk. Its bytes stay where they are and in every
-export, but the new `segment.opened` keeps only its seq and sha256, so an
+by its position and the sha256 of its bytes under the byte rule. Whatever a passed-over
+line said is lost to the walk.
+Its bytes stay where they are and `--after 0` exports them (§ Export), but the new `segment.opened` keeps only its position and sha256, so an
 intent it opened is not carried and one it closed stays open. Verify checks
 each entry against the segment
 before it (§ Verify), so every anchor taken before or after the pass-over still
@@ -3841,6 +3843,16 @@ that rotation's Checkpoint, as any append does. Otherwise it writes no seal and
 no Checkpoint. Apart from a due rotation's seal and Checkpoint, it writes
 nothing but the new `segment.opened`, as the heal of a lost successor writes
 only that.
+
+The position of a line is the seq its segment is named for, plus the lines before it in that file.
+The `warplineseq` a line carries is what the line claims about its position, and
+verify reports a record whose claim is not its position `tampered`.
+A `segment.opened` names lines of the segment before it by position.
+The walk, `resolve` and verify take a line as passed over only at that position,
+and only while its bytes still hash as the entry records.
+A pass-over opens the new segment at the position after the active segment's last record,
+whatever seq that record claims, so a pass-over carries no claimed seq forward.
+When lines that are not records end the active segment, the first of them therefore shares its position with the new segment's opening line.
 
 It refuses with exit `1`, and writes nothing, for a seq outside the active
 segment (a sealed segment's line, or past the head), a line the walk carries, a
@@ -3860,11 +3872,11 @@ later one. A first line that is not a record has no recovery in this build.
 
 A line that is not a record is passed over the same way. When it ends the
 active segment, as a write that went wrong leaves it, the new segment opens
-after the last record before it: its `segment.opened` takes that record's seq
-plus one, links to that record's hash, and names the line in `passed_over` by
-its place in the segment and the sha256 of its bytes. Verify reports `tampered`
-at that line until the pass-over, and `clean` after it against anchors taken
-before and after. No size or age seal is written past such a line, as none is
+after the last record before it: its `segment.opened` takes the position after that record,
+links to that record's hash, and names the line in `passed_over` by
+its position and the sha256 of its bytes.
+Verify reports `tampered` at that line until the pass-over, and no longer after it, against anchors taken before and after.
+No size or age seal is written past such a line, as none is
 written past a partial one. One with records after it in its segment can only
 be put there by hand, and it breaks the chain where it sits, so verify keeps
 reporting it `tampered` after a pass-over, which is the true account.
@@ -3947,7 +3959,7 @@ the lock. `warpline audit export`, `audit head` and every other reader write
 none.
 
 It is shaped like a C2SP tlog checkpoint and is not one. There is
-no Merkle tree, so `size` counts lines in a linear chain and `root` is the hash
+no Merkle tree, so `size` counts records in a linear chain and `root` is the hash
 of the last one, not a tree root. There is no signature either. A witness tool or a
 C2SP verifier cannot check it. What it gives you is a head to export and keep
 off the box, inside the record itself, at the cadence of your scheduler.
@@ -3987,24 +3999,28 @@ dead-man file does not carry it.
 
 ### Export
 
-`warpline audit export --after <seq>` prints every complete record after that
-seq, in seq order across segments, one CloudEvents structured-mode object per
-line, with its bytes unchanged. One object per line is warpline's own
+`warpline audit export --after <seq>` starts at the last segment whose name is at or below that seq plus one.
+From there it prints, segment by segment in name order, every complete line whose position is after that seq, with its bytes unchanged, a record as one CloudEvents structured-mode object per line.
+One object per line is warpline's own
 convention (§ Record format). Checkpoints are records, so they travel with the
-stream. `--after` takes `0` or a positive integer, nothing else: `-1`, `01`,
-`1e3` and a missing `--after` are usage errors with exit `1`. `--after 0`
-prints the whole store, and on a store with no partial line its output equals
-the segment files concatenated in name order, byte for byte. At the head it
-prints nothing and exits `0`. Past the head it prints nothing, names the head
-on stderr as `beyond head`, and exits `1`.
+stream.
+`--after` takes `0` or a positive integer up to 9007199254740991, nothing else: `-1`, `01`, `1e3`, a larger integer and a missing `--after` are usage errors with exit `1`.
+`--after 0` prints every complete line in the store, and on a store with no partial line its output equals the segment files concatenated in name order, byte for byte.
+At the head it prints nothing and exits `0`.
+Past the head it prints nothing, names the head on stderr as `beyond head`, and exits `1`.
+
+What this section says export prints, and what `audit head` prints (§ Genesis and the head), is promised only on a store `audit verify` reports `clean`, `torn` or `unreadable`.
+On a tampered store verify's verdict is the true account, and export still prints only complete lines, segment by segment in name order.
+
+Export prints a line that is not a record, passed over at the end of a segment, exactly when `--after` is below the position of the last record before it, as `--after 0` is.
 
 When the active segment's last complete line is not a record, there is no head
-to hold `--after` against. Export prints every complete line after the seq
-given, that line included, and exits `0`,
+to hold `--after` against.
+Export prints by the rule above, that line included, and exits `0`,
 so an export can be kept before a pass-over.
 
-A partial line is never exported. The `segment.opened` that follows it already
-records its length and digest (§ Segments), and stands in for it.
+A partial line is never exported.
+When a `segment.opened` follows it, that line records its length and digest (§ Segments), and stands in for it.
 
 Export reads only. It takes no lock, writes no Checkpoint and adds no byte to
 the store. It reads each segment a chunk at a time and waits for the reader
@@ -4020,8 +4036,8 @@ The store is tamper-evident relative to the last exported Checkpoint, and this
 is the check that makes it so. The anchor is read from the file, or from stdin
 with `-`, up to 64 KiB, in either form:
 
-- `<seq> <hex>` on one line, as `audit head` prints it.
-- The note body `audit head --c2sp` prints: origin, size and base64 root, read
+- `<seq> <hex>` on one line, as `audit head` prints it, seq up to 9007199254740991.
+- The note body `audit head --c2sp` prints: origin, size up to 9007199254740991 and base64 root, read
   up to the first empty line.
 
 There is no unanchored check. Without `--checkpoint`, or with an anchor that is
@@ -4030,9 +4046,9 @@ compare against would read as fine when it could not look.
 
 | Verdict | Exit | Meaning |
 |---------|------|---------|
-| `clean` | `0` | Every line links, and the line at the anchored seq hashes to the anchor. |
+| `clean` | `0` | Every record links to the previous record's hash (64 `0`s for the first record). The record at the anchored seq hashes to the anchor, or the anchor is `0` with 64 `0`s. |
 | `torn` | `3` | As clean, except the store ends in a partial line, keeps a partial line that a later `segment.opened` acknowledges, or its last segment ends in `segment.sealed` with no successor. A crash leaves these. |
-| `tampered` | `4` | A line does not parse, other than lines at the end of a segment that the next `segment.opened` names in `passed_over`; a next segment that holds no record names nothing, its seq is not the next one, its `warplineprev` is not the previous line's hash, a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, a `segment.opened` has a `passed_over` that names a line not in the segment before it or one that does not hash as recorded, the anchored seq is beyond the head, or the line at the anchored seq does not hash to the anchor. |
+| `tampered` | `4` | A complete line does not parse, other than the last complete lines of a segment that the next `segment.opened` names in `passed_over` by position (a next segment that holds no record names nothing), a record's `warplineseq` is not its position, its `warplineprev` is not the previous record's hash (64 `0`s for the first record), a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, a `segment.opened` has a `passed_over` that names a position not in the segment before it or a line that does not hash as recorded, the anchored seq is beyond the head, or the record at the anchored seq does not hash to the anchor. |
 | `wrong log` | `5` | The anchor's origin is another home's id. |
 | `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), or no complete line at all, as a crash between creating a segment and its first write leaves, so the open intents cannot be listed. The reason names its seq. |
 

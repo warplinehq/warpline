@@ -110,7 +110,7 @@ import {
 import type { EngineState } from '../schemas/engine-state.js'
 import { deriveHost, isLockStale, isProcessAlive, readLock } from '../runtime/lock.js'
 import { engineStatePath, lockPath as runLockPath, pluginsDir } from '../lib/paths.js'
-import { AuditAppendError, appendAudit, openIntents, parseRecord, readCompleteLines, type OpenIntent } from '../lib/audit-log.js'
+import { AuditAppendError, appendAudit, openIntents, readCompleteLines, type OpenIntent } from '../lib/audit-log.js'
 
 const USAGE = `Usage: warpline resolve <plugin> --shipped|--not-shipped <effect-id>
        warpline resolve --intent <seq> --shipped|--not-shipped
@@ -193,35 +193,26 @@ type Answer = 'shipped' | 'not_shipped'
  * The answer an earlier `fire.resolved` gave this plugin's fire with this
  * effect id, or null when the store holds none. Only a record counts: a line
  * that is not one carries no answer, and verify reports it. Nor does a line a
- * `segment.opened` names in `passed_over`, whose answer is lost to the walk
- * (§ 14). That pass-over sits in a later segment, so it is applied after the
- * scan. Throws when the store cannot be read: the caller refuses on that.
+ * `segment.opened` names in `passed_over` at its position while its bytes
+ * still hash as named, since that line's answer is lost to the walk (§ 14).
+ * The reader decides both. Throws when the store cannot be read: the caller
+ * refuses on that.
  */
 // ponytail: reads every segment once per answer, which a rare operator command
 // can afford. An answered-effect set carried in `segment.opened` is the upgrade path.
 async function answerOnRecord(statePath: string, plugin: string, effectId: string): Promise<Answer | null> {
-  const passed = new Set<number>()
-  const found: { seq: number; answer: Answer }[] = []
-  for await (const line of readCompleteLines(statePath, 0)) {
-    const rec = parseRecord(line.toString('utf-8'))
-    if (rec === undefined) continue
-    if (rec.type === 'warpline.audit.segment.opened') {
-      const named: unknown = rec.data?.passed_over
-      if (!Array.isArray(named)) continue
-      for (const entry of named) {
-        const seq: unknown = entry?.seq
-        if (Number.isSafeInteger(seq)) passed.add(seq as number)
-      }
-    } else if (
-      rec.type === 'warpline.audit.fire.resolved' &&
-      rec.data?.plugin === plugin &&
-      rec.data.effect_id === effectId &&
-      (rec.data.answer === 'shipped' || rec.data.answer === 'not_shipped')
+  for await (const { record, passedOver } of readCompleteLines(statePath, 0)) {
+    if (record === undefined || passedOver) continue
+    if (
+      record.type === 'warpline.audit.fire.resolved' &&
+      record.data?.plugin === plugin &&
+      record.data.effect_id === effectId &&
+      (record.data.answer === 'shipped' || record.data.answer === 'not_shipped')
     ) {
-      found.push({ seq: rec.warplineseq, answer: rec.data.answer })
+      return record.data.answer
     }
   }
-  return found.find((f) => !passed.has(f.seq))?.answer ?? null
+  return null
 }
 
 /** An answer as a sentence says it. */
