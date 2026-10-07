@@ -18,7 +18,7 @@
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
@@ -28,6 +28,7 @@ import { approvalStanding, loadPluginManifests } from '../../runtime/engine.js'
 import { _setHome, lockPath as runLockPath } from '../../lib/paths.js'
 import { acquireLock, releaseLock } from '../../runtime/lock.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
+import { appendRelinked } from '../../lib/__tests__/helpers/audit-chain.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
 import { main } from '../warpline.js'
 
@@ -883,6 +884,66 @@ describe('resolve when its state write does not land', () => {
     expect(trips).toBe(1)
     expect(recordsOf('fire.resolved')).toEqual([])
     expect(readFileSync(statePathOf())).toEqual(stateBefore)
+  })
+})
+
+describe('resolve and lines that hold no answer', () => {
+  test('a line shaped like an answer that is not a record is no answer: resolve refuses with the walk until it is passed over, then records the answer', async () => {
+    await fireAndFail(true)
+    const effectId = senderEffectId()
+    const intent = senderIntent()
+    const dir = join(home, 'audit')
+    const active = readdirSync(dir).filter((f) => f.endsWith('.jsonl')).sort().at(-1)!
+    const n = (await audit.readHead(statePathOf())).seq + 1
+    // No `warplineseq` and no `source`: shaped like an answer, and not a record.
+    appendFileSync(
+      join(dir, active),
+      `${JSON.stringify({ type: 'warpline.audit.fire.resolved', data: { plugin: 'sender', effect_id: effectId, answer: 'shipped' } })}\n`,
+    )
+    const stateBefore = readFileSync(statePathOf())
+
+    const refused = await capture(['resolve', 'sender', '--shipped', effectId])
+
+    expect(refused.code).toBe(1)
+    expect(refused.stderr).toContain('is not a record')
+    expect(refused.stdout).not.toContain('already on the audit record')
+    expect(readFileSync(statePathOf())).toEqual(stateBefore)
+
+    expect((await capture(['audit', 'pass-over', String(n)])).code).toBe(0)
+    const { code, stdout, stderr } = await capture(['resolve', 'sender', '--shipped', effectId])
+
+    expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
+    expect(stdout).not.toContain('already on the audit record')
+    expect(
+      auditLines(home)
+        .filter((l) => l.type === 'warpline.audit.fire.resolved' && typeof l.warplineseq === 'number')
+        .map((l) => l.data),
+    ).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' }])
+    expect(await senderStanding()).toBe('spent')
+  })
+
+  test('an answer the walk stopped on and the operator passed over is no answer, and the other answer is recorded', async () => {
+    await fireAndFail(true)
+    const effectId = senderEffectId()
+    const intent = senderIntent()
+    // A chain-valid record whose intent seq the walk refuses, so it stops here.
+    const n = appendRelinked(join(home, 'audit'), 'warpline.audit.fire.resolved', {
+      plugin: 'sender',
+      effect_id: effectId,
+      intent_seq: 0,
+      answer: 'shipped',
+    })
+    expect((await capture(['audit', 'pass-over', String(n)])).code).toBe(0)
+
+    const { code, stderr } = await capture(['resolve', 'sender', '--not-shipped', effectId])
+
+    expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
+    expect(
+      auditLines(home)
+        .filter((l) => l.type === 'warpline.audit.fire.resolved' && l.warplineseq !== n)
+        .map((l) => l.data),
+    ).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'not_shipped' }])
+    expect(await senderStanding()).toBe('spent')
   })
 })
 
