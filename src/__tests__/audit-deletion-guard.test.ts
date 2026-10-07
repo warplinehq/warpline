@@ -46,9 +46,9 @@ const COMMENT = /^\s*(\*|\/\/)/
 const EXPECTED: Record<string, number> = {
   'src/board/state-manager.ts': 2,
   'src/cli/scaffold.ts': 2,
-  // The token-checked release (the end of a hold, the exit hook, and a dead
-  // breaker's break file), a stale lock's removal under the break file, and
-  // the break file's own removal.
+  // The token-checked release (the end of a hold and the exit hook), a gone
+  // holder's lock removal under the break file, and the breaker's removal of
+  // its own break file.
   'src/lib/audit-log.ts': 3,
   'src/lib/fs-atomic.ts': 3,
   'src/lib/jsonl-logger.ts': 1,

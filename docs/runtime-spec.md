@@ -3673,62 +3673,74 @@ prints nothing on stdout, and names `warpline audit verify` and
 ### Writing
 
 One writer appends at a time. Within a process, appends queue behind each
-other. Across processes they take the audit lock, `audit/.lock`, created
-exclusively. It holds a random token, the time it was taken, the holder's
-process id and the machine identifier § 12 derives. On Linux the identifier
-also carries the holder's pid namespace, so containers that share a machine id
-are not taken for one machine. When the namespace cannot be read, the holder
-names no machine. A writer waits for the lock, polling every 50 ms, for up to
-10 seconds.
+other. Across processes, writers take the audit lock, `audit/.lock`, a
+symbolic link made in one step whose text names the holder: a random token,
+the holder's process id, the machine identifier § 12 derives, and the time it
+was taken, which is for people and judges nothing. Making the link either
+creates it with that text or fails because it exists, so a lock is never empty
+and never half-written. On Linux the identifier also carries the holder's pid
+namespace and the kernel's boot id. So containers that share a machine id, and
+clones of one machine image, are not taken for one machine, and a process id
+from before a reboot is never tested after it. When either cannot be read, the
+holder names no machine. A writer waits for the lock, polling every 50 ms, for
+up to 10 seconds.
 
-A lock whose holder is gone on this machine is broken at once: the lock's
-identifier and this writer's are both known and equal, and the process no
-longer runs. Any other lock is broken only by age, once it is older than 30
-seconds, by the time it holds or by its file time when it cannot be read. A
-missing identifier never equals another, so a process id from another machine
-or another pid namespace is never tested.
+A lock is broken only when its holder is provably gone on this machine: it
+names a process id and a machine, that machine is this one, and no such
+process runs. A process that belongs to another user counts as running.
+No lock is broken for its age. A lock whose holder still runs, however long it
+has held the lock, or that names another machine, one that cannot be told, or
+no process, or that cannot be read as a holder at all, stays until its holder
+removes it or someone removes it by hand.
 
-One writer at a time breaks a lock. It first creates `audit/.lock.break`
-exclusively, holding the same fields, reads the lock again, and removes it only
-while it still holds the token it was judged by. A lock that cannot be read is
-removed only while it is still that old by its file time. Then the breaker
-removes the break file. So two writers that both find a dead holder's lock
-cannot both take it, and a lock replaced in between is kept. A break file left
-behind goes the same way as a lock: one whose holder is gone on this machine,
-or one older than 30 seconds that names no machine, is cleared, and only while
-it still holds the token it was judged by.
+One writer at a time breaks a lock. It makes `audit/.lock.break` the same way,
+reads the lock again, judges it again, and removes it only while it still
+names the token it was judged by and its holder is still gone. Then it removes
+its own break file. The break runs without a wait, and a gone holder cannot
+release, so the lock cannot change between that second judgment and the
+removal. A lock replaced in between is kept until it is judged itself.
+A break file is never removed by another writer, whatever it names and however
+old it is. While one is there no lock is broken, and an append that can only
+go on past a gone holder refuses in time, naming `.lock.break`.
 
-A writer removes its own lock only while it still holds that writer's token.
+A writer removes its own lock only while it still names that writer's token.
 It does so at the end of its hold, and from an exit hook when the process ends
 through `process.exit` while holding it, as `advance` does on SIGINT and
-SIGTERM. A lock that cannot be taken in time is an append failure, whatever is
-at the lock's path.
+SIGTERM. A holder killed outright, by SIGKILL or by a signal to a command with
+no handler, runs no exit hook. On a machine that identifies itself, the next
+writer breaks its lock at once. A lock that cannot be taken in time is an
+append failure, whatever is at the lock's path. The refusal names the holder's process id and
+whether it is on this machine, or says the holder names no process. It says to
+remove the lock by hand only once that process is gone.
 
 Four cases stay open.
 
-A holder killed outright, by SIGKILL, or by SIGINT or SIGTERM to a command with
-no handler, runs no exit hook. On a machine that identifies itself, the next
-writer breaks its lock at once. On one that cannot, appends fail until the lock
-is 30 seconds old.
+A holder that hangs while it runs blocks every append until it is killed, as
+§ 12 chooses for the run lock.
 
-A holder that is alive but paused past 30 seconds (suspended, swapped out, or
-slow inside a rotation's walk of the whole active segment) loses its lock. Its
-later write can interleave with the next holder's, and `audit verify` then
-reports the chain as tampered.
+A holder that died on another machine that shares the home, on one that cannot
+identify itself, or before a reboot leaves its lock for removal by hand. So
+does a breaker killed outright inside its break, for its break file.
 
-The exit hook removes the lock in the last instant of the process. A write
-still in flight then can land after the next writer took the lock, a window of
-microseconds, and `audit verify` reports it.
+A dead holder whose process id was reused reads as running. Its lock stays,
+and the refusal names that pid. If it is not a warpline process, the lock can
+be removed by hand. A process start time in the identifier is the upgrade path.
 
-The identifier's own ceiling from § 12 holds: two machines that share a machine
-id, here also on one pid namespace, look like one. And a dead holder whose
-process id is already reused reads as alive, so its lock waits the 30 seconds.
+There is no fence on the store itself. A holder judged gone that is not,
+through an identifier two machines share that the boot id does not tell apart,
+or a write still in flight when the exit hook removed its lock (a window of
+microseconds), can interleave with the next holder's write, and `audit verify`
+reports it.
 
-If appends keep failing with `audit lock not acquired in time`, or name
-`.lock.break`, while no warpline process is running, what is left is something
-warpline cannot clear. That is a lock it cannot remove, such as a directory, or
-a `.lock.break` that names no holder, which only an older build leaves, or one
-it cannot read. Remove `audit/.lock` and `audit/.lock.break` by hand.
+When appends keep refusing, read the refusal. Once the process it names is
+gone, or no warpline process runs on any machine that shares the home, remove
+`audit/.lock` by hand, and `audit/.lock.break` when the refusal names it.
+Remove a break file only once no warpline process runs. One removed while its
+breaker is still inside the break, a window of a few milliseconds,
+lets a second breaker in, and the first breaker then removes the second one's
+break file without checking whose it is. So two breaks can overlap, and one
+can remove a lock a new holder has just taken. Warpline never removes a lock
+or break file it cannot read as a holder, such as a directory or a plain file.
 
 The state lock (§ 12) is always taken first. A command that holds the state
 lock may append, and the store never takes the state lock, so the two are

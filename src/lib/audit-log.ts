@@ -31,8 +31,8 @@
  * each kind from the line that names the call and reports every other line
  * naming them, so a kind passed any other way is invisible to it.
  */
-import { mkdir, open, readdir, readFile, stat, unlink } from 'node:fs/promises'
-import { closeSync, createReadStream, openSync, readFileSync, readlinkSync, unlinkSync, writeSync } from 'node:fs'
+import { mkdir, open, readdir, readFile, stat } from 'node:fs/promises'
+import { createReadStream, readFileSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
@@ -46,7 +46,6 @@ const AUDIT_DIR_NAME = 'audit'
 const ZERO_HASH = '0'.repeat(64)
 const LOCK_TIMEOUT_MS = 10_000
 const LOCK_POLL_MS = 50
-const LOCK_STALE_MS = 30_000
 const TAIL_BYTES = 65_536
 const SEGMENT_NAME = /^\d{16}\.jsonl$/
 
@@ -215,7 +214,10 @@ type Reason =
   | 'line over 16384 bytes'
   | 'audit lock not acquired'
   | 'audit lock not acquired in time'
-  | 'a stale audit lock cannot be broken while .lock.break exists'
+  | 'audit lock not acquired in time: its holder is gone, and .lock.break exists; remove audit/.lock.break by hand only once no warpline process is running'
+  | 'audit lock not acquired in time: its holder names no process; remove audit/.lock by hand only once no warpline process is running'
+  | `audit lock not acquired in time: pid ${number} on this machine holds it; remove audit/.lock by hand only once that process is gone`
+  | `audit lock not acquired in time: pid ${number} holds it, not on this machine or on one that cannot be told; remove audit/.lock by hand only once that process is gone`
   | 'the active segment holds no readable last line'
   | 'write failed'
   | 'the store has no segment to pass over'
@@ -226,7 +228,8 @@ type Reason =
  * An append that did not happen. The message is built from the kind and a
  * fixed phrase only, never from the data, a schema issue or a path, because it
  * reaches stderr and from there the operator's mail. The one phrase that names
- * something names a segment file, whose name is only digits.
+ * something names a segment file, whose name is only digits. A lock refusal
+ * names a holder's pid, which is only digits too.
  */
 export class AuditAppendError extends Error {
   /** The fixed phrase the message ends in, for a caller that names it. */
@@ -519,21 +522,29 @@ let ourHostMemo: { value: string | null } | undefined
 
 /**
  * This machine as a lock names it: § 12's machine identifier, and on Linux
- * that joined by `:` to the pid namespace (`/proc/self/ns/pid`). Null when
- * either part cannot be had. The namespace keeps two containers that share
- * `/etc/machine-id` from reading each other's live holder as dead. Memoized,
- * because a process never changes machine or pid namespace.
+ * that joined by `:` to the pid namespace (`/proc/self/ns/pid`), then by `:`
+ * to the boot id (`/proc/sys/kernel/random/boot_id`). Null when any part
+ * cannot be had, or the boot id is empty. Memoized, because a process never
+ * changes machine, pid namespace or boot.
  *
- * ponytail: two machines that share a machine id on the same namespace inode,
- * a cloned image, still look like one. Boot time in the identity is the
- * upgrade path.
+ * The namespace keeps containers that share `/etc/machine-id` apart. The boot
+ * id keeps cloned machines apart, since they share a machine id and the root
+ * namespace inode. It also keeps a pid from before a reboot from being tested
+ * after it. A mismatch reads as another machine, so the lock is kept. A lock
+ * left by a crash just before a reboot therefore needs removal by hand.
+ *
+ * ponytail: a dead holder whose pid is reused reads alive, and fails closed.
+ * A process start time in the identity is the upgrade path: Linux
+ * `/proc/PID/stat` field 22, and on macOS a `ps` spawn.
  */
 function ourHost(): string | null {
   if (ourHostMemo === undefined) {
     let value = deriveHost()
     if (value !== null && process.platform === 'linux') {
       try {
-        value = `${value}:${readlinkSync('/proc/self/ns/pid')}`
+        const ns = readlinkSync('/proc/self/ns/pid')
+        const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf-8').trim()
+        value = boot === '' ? null : `${value}:${ns}:${boot}`
       } catch {
         value = null
       }
@@ -544,118 +555,126 @@ function ourHost(): string | null {
 }
 
 /**
- * Create `path` exclusively, naming its holder: `{ token, at, pid, host }`.
- * True when taken, false when the file already exists, and any other error is
- * thrown. Synchronous, so no `process.exit` can land between creating the file
- * and naming the holder in it.
+ * Make `path` a symbolic link whose text names its holder:
+ * `{ token, pid, host, at }`. True when made, false when something is already
+ * at the path, and any other error is thrown.
+ *
+ * One call makes the entry and its text together, so a lock or break file is
+ * never empty or half-written (atomic even over NFS, per Mercurial). It is
+ * synchronous, so `held` is set in the same stretch. The text stays far below
+ * any link-length limit.
  */
 function take(path: string, token: string): boolean {
-  const text = JSON.stringify({ token, at: Date.now(), pid: process.pid, host: ourHost() })
-  let fd: number
   try {
-    fd = openSync(path, 'wx')
+    symlinkSync(JSON.stringify({ token, pid: process.pid, host: ourHost(), at: Date.now() }), path)
+    return true
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false
     throw err
   }
-  try {
-    writeSync(fd, text)
-  } finally {
-    closeSync(fd)
-  }
-  return true
 }
+
+/** A lock or break file as this writer can judge it. */
+type Holder = { token: string | null; pid: number | null; here: boolean; gone: boolean }
 
 /**
  * Who holds the lock or break file at `path`, as far as this writer can tell.
- * Null only when the file is gone, or cannot even be stat'ed.
+ * Null only when nothing is there.
  *
- * `token` is the holder's token, or null when the file cannot be read or names
- * none. `stale` is true when the holder is gone on this machine: it names a
- * pid and a host, the host is known and equal to this writer's, and no such
- * process runs. It is also true when the file is older than 30 s, by the time
- * it holds, or by its file time when it holds none. A missing host never
- * equals another, so a pid from another machine or pid namespace is never
- * judged here.
+ * Anything that is not a link whose text parses to an object (a directory, a
+ * plain file, any other text) names no holder: no token, no pid, not here, not
+ * gone. Otherwise `token` is its string token and `pid` its positive process
+ * id, each null when it names none. `here` is true when it names a host equal
+ * to this writer's known one. `gone` is true only when it names a token, a pid
+ * and this machine, and no such process runs.
+ *
+ * It reads no time, and a holder it cannot name is never gone.
  */
-async function holderOf(path: string): Promise<{ token: string | null; stale: boolean } | null> {
-  let named: { token?: unknown; at?: unknown; pid?: unknown; host?: unknown } = {}
+function holderOf(path: string): Holder | null {
+  let named: { token?: unknown; pid?: unknown; host?: unknown }
   try {
-    const parsed: unknown = JSON.parse(await readFile(path, 'utf-8'))
-    if (typeof parsed === 'object' && parsed !== null) named = parsed
+    const parsed: unknown = JSON.parse(readlinkSync(path, 'utf8'))
+    if (typeof parsed !== 'object' || parsed === null) return { token: null, pid: null, here: false, gone: false }
+    named = parsed
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+    return { token: null, pid: null, here: false, gone: false }
   }
   const token = typeof named.token === 'string' ? named.token : null
-  const { pid, host } = named
-  if (typeof pid === 'number' && Number.isSafeInteger(pid) && pid > 0 && typeof host === 'string' && host === ourHost() && !isProcessAlive(pid)) {
-    return { token, stale: true }
-  }
-  let at: number
-  if (typeof named.at === 'number') {
-    at = named.at
-  } else {
-    try {
-      at = (await stat(path)).mtimeMs
-    } catch {
-      return null
-    }
-  }
-  return { token, stale: Date.now() - at > LOCK_STALE_MS }
+  const pid = typeof named.pid === 'number' && Number.isSafeInteger(named.pid) && named.pid > 0 ? named.pid : null
+  const host = ourHost()
+  const here = host !== null && typeof named.host === 'string' && named.host === host
+  return { token, pid, here, gone: token !== null && pid !== null && here && !isProcessAlive(pid) }
 }
 
 /**
- * Remove a stale lock, one writer at a time, and only the lock that was judged.
+ * Remove a lock whose holder is gone, one writer at a time, and only the lock
+ * that was judged.
  *
- * The break file is created exclusively first, naming its holder as a lock
- * does. Under it the lock is read again and removed only while it holds
- * `token`, the token it was judged by. A lock that could not be read has no
- * token, and is removed only while it still has none and is still stale. For
- * one token a judgment only grows staler: the audit lock has no heartbeat, and
- * a dead pid stays dead. So the token compare is the whole re-check for a lock
- * that can be read, and a lock some other breaker replaced is left alone.
+ * It makes `.lock.break` the way a lock is made. When something is already
+ * there it stops: no branch removes or clears a break file this writer did not
+ * make. Under its own break file it reads the lock again and judges it again,
+ * and removes it only while it still names `token` and its holder is still
+ * gone. Then it removes its own break file.
  *
- * A break file already there is judged the same way. One whose holder is gone
- * on this machine, or one older than 30 s that names no machine, is cleared
- * through the token-checked release, and the caller tries again at once. One
- * that names no holder is kept.
+ * The second judgment is mandatory (Mercurial; GnuPG T5884 is the bug without
+ * it). The break runs with no await, and a gone holder cannot release, so the
+ * lock cannot change between the second judgment and the removal (review
+ * WR-04). The bare break-file removal is safe because no other writer removes
+ * or replaces a break file, and nothing awaits between making and removing it
+ * (review IN-01 and WR-02), short of a removal by hand inside that window,
+ * which § 14 Writing names.
  */
-async function breakStale(
-  dir: string,
-  lockPath: string,
-  token: string | null,
-): Promise<'removed' | 'cleared' | 'kept' | 'break file held'> {
+function breakStale(dir: string, lockPath: string, token: string): 'removed' | 'kept' | 'break file held' {
   const breakPath = join(dir, '.lock.break')
   try {
-    if (!take(breakPath, randomUUID())) {
-      const breaker = await holderOf(breakPath)
-      if (breaker?.stale && breaker.token !== null && release(breakPath, breaker.token)) return 'cleared'
-      return 'break file held'
-    }
+    if (!take(breakPath, randomUUID())) return 'break file held'
   } catch {
     return 'kept'
   }
   try {
-    const now = await holderOf(lockPath)
-    if (now === null) return 'kept'
-    const judged = token === null ? now.token === null && now.stale : now.token === token
-    if (!judged) return 'kept'
-    await unlink(lockPath)
+    const now = holderOf(lockPath)
+    if (now === null || now.token !== token || !now.gone) return 'kept'
+    unlinkSync(lockPath)
     return 'removed'
   } catch (err) {
-    // A lock already gone is as good as removed. Anything else, a directory
-    // say, cannot be broken here.
+    // A lock already gone is as good as removed.
     return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'removed' : 'kept'
   } finally {
-    await unlink(breakPath).catch(() => {})
+    try {
+      unlinkSync(breakPath)
+    } catch {}
   }
+}
+
+/**
+ * Why a wait for the lock ended without it. The holder's pid reaches the
+ * message only after it parsed as a positive safe integer, so only digits do.
+ */
+function lockRefusal(seen: Holder | null, breakHeld: boolean): Reason {
+  if (breakHeld) {
+    return 'audit lock not acquired in time: its holder is gone, and .lock.break exists; remove audit/.lock.break by hand only once no warpline process is running'
+  }
+  if (seen === null) return 'audit lock not acquired in time'
+  if (seen.pid === null) {
+    return 'audit lock not acquired in time: its holder names no process; remove audit/.lock by hand only once no warpline process is running'
+  }
+  if (seen.here) {
+    return `audit lock not acquired in time: pid ${seen.pid} on this machine holds it; remove audit/.lock by hand only once that process is gone`
+  }
+  return `audit lock not acquired in time: pid ${seen.pid} holds it, not on this machine or on one that cannot be told; remove audit/.lock by hand only once that process is gone`
 }
 
 /**
  * Take the audit lock, waiting up to `timeoutMs`. The lock names its holder,
  * and is recorded in `held` in the same synchronous stretch that took it, so
- * the exit hook below can see it. A lock whose holder is gone on this machine,
- * or that is older than 30 s, is broken through the break file.
+ * the exit hook below can see it. A lock whose holder is provably gone on this
+ * machine is broken through the break file. No lock is broken for its age.
+ *
+ * ponytail: a hung live holder blocks every append until it is killed, as the
+ * run lock's does. A holder misjudged gone, through an identity two machines
+ * share that the boot id does not tell apart, can fork the chain. A fence the
+ * store checks at write time is the upgrade path.
  */
 async function acquire(dir: string, lockPath: string, kind: string, timeoutMs: number): Promise<string> {
   const token = randomUUID()
@@ -671,22 +690,13 @@ async function acquire(dir: string, lockPath: string, kind: string, timeoutMs: n
     }
     // Only this pass's answer counts toward the reason the wait ends with.
     let breakHeld = false
-    const seen = await holderOf(lockPath)
-    if (seen?.stale) {
-      // ponytail: a holder alive but paused past 30 s (suspended, swapped
-      // out, or slow inside a rotation's whole-segment walk and datasyncs)
-      // loses its lock, and its late write can interleave with the next
-      // holder's. A fencing token checked at write time is the upgrade path.
-      const broken = await breakStale(dir, lockPath, seen.token)
-      if (broken === 'removed' || broken === 'cleared') continue
+    const seen = holderOf(lockPath)
+    if (seen?.gone && seen.token !== null) {
+      const broken = breakStale(dir, lockPath, seen.token)
+      if (broken === 'removed') continue
       breakHeld = broken === 'break file held'
     }
-    if (Date.now() >= deadline) {
-      throw new AuditAppendError(
-        kind,
-        breakHeld ? 'a stale audit lock cannot be broken while .lock.break exists' : 'audit lock not acquired in time',
-      )
-    }
+    if (Date.now() >= deadline) throw new AuditAppendError(kind, lockRefusal(seen, breakHeld))
     await sleep(LOCK_POLL_MS)
   }
 }
@@ -698,7 +708,7 @@ async function acquire(dir: string, lockPath: string, kind: string, timeoutMs: n
  */
 function release(path: string, token: string): boolean {
   try {
-    const named = JSON.parse(readFileSync(path, 'utf-8')) as { token?: unknown } | null
+    const named = JSON.parse(readlinkSync(path, 'utf8')) as { token?: unknown } | null
     if (named?.token !== token) return false
     unlinkSync(path)
     return true
