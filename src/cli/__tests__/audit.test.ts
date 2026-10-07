@@ -20,6 +20,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -596,7 +597,7 @@ describe('verify when the walk passes over or stops at a line', () => {
     expect(stdout).not.toContain('open intent:')
   })
 
-  test('an active segment that holds no complete line reads unreadable, exit 6, naming the seq it should open at', async () => {
+  test('an active segment that holds no complete line reads unreadable, exit 6, naming the file and that it is moved aside by hand', async () => {
     await mailer()
     await grow(1)
     const h0 = await headText()
@@ -612,10 +613,50 @@ describe('verify when the walk passes over or stops at a line', () => {
       expect(code).toBe(6)
       const why = reasons(stdout)
       expect(why).toHaveLength(1)
-      expect(why[0]).toContain(`seq ${s + 1} opens the active segment`)
+      expect(why[0]).toContain(`segment ${nameOf(s + 1)} holds no complete line`)
+      expect(why[0]).toContain('move it aside by hand')
       const named = unreadableLines(stdout)
       expect(named).toHaveLength(1)
-      expect(named[0]).toContain(`seq ${s + 1} opens the active segment`)
+      expect(named[0]).toContain(`segment ${nameOf(s + 1)} holds no complete line`)
+      expect(named[0]).toContain('move it aside by hand')
+    }
+  })
+
+  test('an active segment that holds no complete line refuses every append, the walk and pass-over naming the file, and once it is moved out of the store the next append goes through and verify reads clean', async () => {
+    await mailer()
+
+    // Empty, as a crash between creating the file and its first write leaves it, then only a partial line.
+    for (const [i, bytes] of ['', '{"specversion":"1.0","id":'].entries()) {
+      await grow(1)
+      const h0 = await headText()
+      const { seq: s } = await readHead(statePath())
+      const name = nameOf(s + 1)
+      writeFileSync(join(auditDir(), name), bytes)
+      const WANT = `segment ${name} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`
+
+      let reason: unknown
+      try {
+        await appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null })
+      } catch (err) {
+        reason = (err as { reason?: unknown }).reason
+      }
+      expect(reason).toBe(WANT)
+
+      const passed = await passOver(s)
+      expect(passed.code).toBe(1)
+      expect(passed.stderr).toContain(WANT)
+
+      const listed = await capture(['principal', 'list'])
+      expect(listed.code).toBe(1)
+      expect(listed.stderr).toContain(WANT)
+
+      // The hand step the refusal names. The file holds no record, so nothing on the chain goes with it.
+      renameSync(join(auditDir(), name), join(home, `aside-${i}.jsonl`))
+      await grow(1)
+      expect(segmentFiles()).not.toContain(name)
+      const v = await verifyAt(h0)
+      expect(v.stdout).toContain('verdict: clean\n')
+      expect(v.code).toBe(0)
     }
   })
 })

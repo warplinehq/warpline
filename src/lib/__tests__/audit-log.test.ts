@@ -428,7 +428,17 @@ describe('the lock when its file is odd', () => {
 
 const STORE = join(import.meta.dir, '..', 'audit-log.ts')
 
-type ChildMode = 'exit' | 'replaced' | 'linux-boot' | 'linux-noboot' | 'linux-nons'
+type ChildMode =
+  | 'exit'
+  | 'replaced'
+  | 'linux-boot'
+  | 'linux-noboot'
+  | 'linux-nons'
+  | 'nolink-EPERM'
+  | 'nolink-ENOTSUP'
+  | 'nolink-ENOSYS'
+  | 'nolink-EIO'
+  | 'break-EACCES'
 
 /**
  * Runs a child that imports the store by absolute path and appends once, with a
@@ -441,6 +451,13 @@ type ChildMode = 'exit' | 'replaced' | 'linux-boot' | 'linux-noboot' | 'linux-no
  * link and a boot id, `linux-noboot` fails the boot id read, and `linux-nons`
  * fails the namespace read. Every other path calls through. Their `now` prints
  * the lock's text.
+ *
+ * The `nolink-` modes and `break-EACCES` spy on `fs.symlinkSync` the same way,
+ * before the store loads. In a `nolink-` mode every call throws an error whose
+ * `code` is the mode's suffix, as a mount without symbolic links answers. In
+ * `break-EACCES` only a call that makes `.lock.break` throws, with `EACCES`, and
+ * every other call goes to the real function. These modes wait 300 ms for the
+ * lock. In every mode a rejected append prints its message to stdout and exits 1.
  */
 function childAppend(mode: ChildMode): ReturnType<typeof spawnSync> & { stdout: string } {
   const script = join(tmp, 'child-append.ts')
@@ -470,19 +487,35 @@ if (mode.startsWith('linux-')) {
     return realReadFileSync(path, ...rest)
   })
 }
+const failsLinks = mode.startsWith('nolink-') || mode === 'break-EACCES'
+if (failsLinks) {
+  const realSymlinkSync = fs.symlinkSync
+  const failing = (code) => Object.assign(new Error(code), { code })
+  spyOn(fs, 'symlinkSync').mockImplementation((target, path, ...rest) => {
+    if (mode.startsWith('nolink-')) throw failing(mode.slice('nolink-'.length))
+    if (String(path).endsWith('.lock.break')) throw failing('EACCES')
+    return realSymlinkSync(target, path, ...rest)
+  })
+}
 const { appendAudit } = await import(${JSON.stringify(STORE)})
-await appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, {
-  now: () => {
-    if (mode === 'exit') process.exit(130)
-    if (mode === 'replaced') {
-      fs.unlinkSync(lockPath)
-      fs.symlinkSync(JSON.stringify({ token: 'next-holder', pid: 1, host: null, at: Date.now() }), lockPath)
-      process.exit(130)
-    }
-    process.stdout.write(fs.readlinkSync(lockPath, 'utf8'))
-    return Date.now()
-  },
-})
+try {
+  await appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, {
+    ...(failsLinks ? { lockTimeoutMs: 300 } : {}),
+    now: () => {
+      if (mode === 'exit') process.exit(130)
+      if (mode === 'replaced') {
+        fs.unlinkSync(lockPath)
+        fs.symlinkSync(JSON.stringify({ token: 'next-holder', pid: 1, host: null, at: Date.now() }), lockPath)
+        process.exit(130)
+      }
+      process.stdout.write(fs.readlinkSync(lockPath, 'utf8'))
+      return Date.now()
+    },
+  })
+} catch (err) {
+  process.stdout.write(err.message)
+  process.exit(1)
+}
 `,
   )
   return spawnSync(process.execPath, [script, statePath, mode], { env: { ...process.env }, encoding: 'utf8' })
@@ -732,6 +765,47 @@ describe('the lock names its holder', () => {
         }
       } finally {
         spy.mockRestore()
+      }
+    },
+  )
+
+  test('a home whose filesystem cannot hold a symbolic link refuses the append saying so, and writes nothing', async () => {
+    await lift()
+    const segment = readFileSync(segmentPath())
+    for (const code of ['EPERM', 'ENOTSUP', 'ENOSYS']) {
+      const child = childAppend(`nolink-${code}` as ChildMode)
+      expect({ code, status: child.status }).toEqual({ code, status: 1 })
+      expect(child.stdout).toBe(
+        'audit store: could not append denial.lifted: audit lock not acquired: the filesystem under the home cannot hold a symbolic link (docs/runtime-spec.md § 14)',
+      )
+      expect(present(lockPath())).toBe(false)
+      expect(readFileSync(segmentPath())).toEqual(segment)
+    }
+    // Any other failure to make the link keeps the bare reason.
+    const other = childAppend('nolink-EIO')
+    expect(other.status).toBe(1)
+    expect(other.stdout).toBe('audit store: could not append denial.lifted: audit lock not acquired')
+    expect(readFileSync(segmentPath())).toEqual(segment)
+  })
+
+  test.skipIf(HOST === null)(
+    'a lock whose holder is gone but which cannot be removed refuses saying its holder is gone, and to remove the lock by hand',
+    async () => {
+      await lift()
+      plantLock(lockPath(), { token: 'gone', pid: deadPid(), host: HOST, at: Date.now() })
+      try {
+        const text = lockText(lockPath())
+        const segment = readFileSync(segmentPath())
+        const child = childAppend('break-EACCES')
+        expect(child.status).toBe(1)
+        expect(child.stdout).toBe(
+          'audit store: could not append denial.lifted: audit lock not acquired in time: its holder is gone, and the lock could not be removed; remove audit/.lock by hand',
+        )
+        expect(lockText(lockPath())).toBe(text)
+        expect(present(breakPath())).toBe(false)
+        expect(readFileSync(segmentPath())).toEqual(segment)
+      } finally {
+        rmSync(lockPath(), { force: true })
       }
     },
   )
