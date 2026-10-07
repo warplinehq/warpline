@@ -947,6 +947,140 @@ describe('resolve and lines that hold no answer', () => {
   })
 })
 
+/** The segment file names under `<home>/audit`, in name order. */
+function segmentNames(): string[] {
+  return readdirSync(join(home, 'audit'))
+    .filter((f) => f.endsWith('.jsonl'))
+    .sort()
+}
+
+/**
+ * Append to the active segment, at position n (the head plus one), a
+ * chain-valid record-shaped answer for sender that claims seq n + 1000. Its
+ * intent seq is 0, so the walk stops on it. Returns n and the line's text,
+ * newline excluded.
+ */
+async function plantMisnumbered(effectId: string): Promise<{ n: number; text: string }> {
+  const { seq, head } = await audit.readHead(statePathOf())
+  const n = seq + 1
+  const names = segmentNames()
+  const dir = join(home, 'audit')
+  const first = JSON.parse(readFileSync(join(dir, names[0]!), 'utf-8').split('\n')[0]!) as { source: string }
+  const text = JSON.stringify({
+    specversion: '1.0',
+    id: String(n + 1000),
+    source: first.source,
+    type: 'warpline.audit.fire.resolved',
+    time: new Date().toISOString(),
+    datacontenttype: 'application/json',
+    warplineseq: n + 1000,
+    warplineprev: head,
+    data: { plugin: 'sender', effect_id: effectId, intent_seq: 0, answer: 'shipped' },
+  })
+  appendFileSync(join(dir, names.at(-1)!), `${text}\n`)
+  return { n, text }
+}
+
+/**
+ * A genuine `shipped` answer on the record with its state write failed, then a
+ * line that is not a record inserted by hand before it, so the answer moves
+ * from position g to g + 1, then `audit pass-over g`.
+ */
+async function answerBehindInsertedLine(): Promise<{ effectId: string; intent: Line; g: number }> {
+  await fireAndFail(true)
+  const effectId = senderEffectId()
+  const intent = senderIntent()
+  const spy = failStateWriteOnce()
+  await captureOrThrown(['resolve', 'sender', '--shipped', effectId])
+  expect(spy.trips()).toBe(1)
+  const g = (await audit.readHead(statePathOf())).seq
+  const path = join(home, 'audit', segmentNames().at(-1)!)
+  const lines = readFileSync(path, 'utf-8').split('\n').slice(0, -1)
+  lines.splice(lines.length - 1, 0, '{"note":"put here by hand"}')
+  writeFileSync(path, `${lines.join('\n')}\n`)
+  expect((await capture(['audit', 'pass-over', String(g)])).code).toBe(0)
+  return { effectId, intent, g }
+}
+
+/** The data of every `fire.resolved` line that carries a numeric seq. */
+function numberedAnswers(): Record<string, unknown>[] {
+  return auditLines(home)
+    .filter((l) => l.type === 'warpline.audit.fire.resolved' && typeof l.warplineseq === 'number')
+    .map((l) => l.data)
+}
+
+describe('a passed-over line is the line at its position', () => {
+  test('an answer passed over at its position is no answer, whatever seq it claims, and the other answer is recorded', async () => {
+    await fireAndFail(true)
+    const effectId = senderEffectId()
+    const intent = senderIntent()
+    const { n } = await plantMisnumbered(effectId)
+    expect((await capture(['audit', 'pass-over', String(n)])).code).toBe(0)
+
+    const { code, stderr } = await capture(['resolve', 'sender', '--not-shipped', effectId])
+
+    expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
+    expect(
+      auditLines(home)
+        .filter((l) => l.type === 'warpline.audit.fire.resolved' && l.warplineseq !== n + 1000)
+        .map((l) => l.data),
+    ).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'not_shipped' }])
+    expect(await senderStanding()).toBe('spent')
+  })
+
+  test('a line inserted before a real answer and passed over hides nothing: the other answer is refused and the store keeps one', async () => {
+    const { effectId, intent } = await answerBehindInsertedLine()
+    const before = await snapshotHome(home)
+
+    const { code, stderr } = await capture(['resolve', 'sender', '--not-shipped', effectId])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('already answered shipped on the audit record')
+    expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+    expect(await snapshotHome(home)).toEqual(before)
+    expect(numberedAnswers()).toEqual([
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+    ])
+  })
+
+  test('a pass-over past a line that claims another seq opens the next segment at the position after it, naming the line by its position', async () => {
+    await fireAndFail(true)
+    const effectId = senderEffectId()
+    const { n, text } = await plantMisnumbered(effectId)
+
+    expect((await capture(['audit', 'pass-over', String(n)])).code).toBe(0)
+
+    const last = segmentNames().at(-1)!
+    expect(last).toBe(`${String(n + 1).padStart(16, '0')}.jsonl`)
+    const opened = JSON.parse(readFileSync(join(home, 'audit', last), 'utf-8').split('\n')[0]!) as Line
+    expect(opened.warplineseq).toBe(n + 1)
+    expect(opened.type).toBe('warpline.audit.segment.opened')
+    expect(opened.data.passed_over).toEqual([{ seq: n, sha256: hex(text) }])
+  })
+
+  test('a passed_over entry whose sha256 is not the bytes at its position hides nothing: the other answer is refused and the store keeps one', async () => {
+    const { effectId, intent } = await answerBehindInsertedLine()
+    // Take the inserted line back out, so the real answer is at the named
+    // position again while the entry still carries the inserted line's hash.
+    const path = join(home, 'audit', segmentNames().at(-2)!)
+    const kept = readFileSync(path, 'utf-8')
+      .split('\n')
+      .filter((l) => l !== '{"note":"put here by hand"}')
+    writeFileSync(path, kept.join('\n'))
+    const before = await snapshotHome(home)
+
+    const { code, stderr } = await capture(['resolve', 'sender', '--not-shipped', effectId])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('already answered shipped on the audit record')
+    expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
+    expect(await snapshotHome(home)).toEqual(before)
+    expect(numberedAnswers()).toEqual([
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+    ])
+  })
+})
+
 // -- Resolve by seq: any open intent ------------------------------------------
 
 /**
