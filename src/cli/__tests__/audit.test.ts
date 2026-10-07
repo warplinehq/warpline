@@ -592,6 +592,29 @@ describe('verify when the walk passes over or stops at a line', () => {
     expect(named[0]).toContain('fire.intent')
     expect(stdout).not.toContain('open intent:')
   })
+
+  test('an active segment that holds no complete line reads unreadable, exit 6, naming the seq it should open at', async () => {
+    await mailer()
+    await grow(1)
+    const h0 = await headText()
+    const { seq: s } = await readHead(statePath())
+    const path = join(auditDir(), nameOf(s + 1))
+
+    // Empty, then only a partial line: the walk has no opening line to start from either way.
+    for (const bytes of ['', '{"specversion":"1.0","id":']) {
+      writeFileSync(path, bytes)
+      const { code, stdout } = await verifyAt(h0)
+
+      expect(stdout).toContain('verdict: unreadable\n')
+      expect(code).toBe(6)
+      const why = reasons(stdout)
+      expect(why).toHaveLength(1)
+      expect(why[0]).toContain(`seq ${s + 1} opens the active segment`)
+      const named = unreadableLines(stdout)
+      expect(named).toHaveLength(1)
+      expect(named[0]).toContain(`seq ${s + 1} opens the active segment`)
+    }
+  })
 })
 
 describe('a line the walk passes over wedges nothing', () => {
@@ -1110,6 +1133,28 @@ describe('a line that is not a record', () => {
     expect(v.stdout).toContain('verdict: clean\n')
     expect(v.code).toBe(0)
   })
+
+  // A pass-over that dies between creating its segment and writing to it leaves either.
+  const successors: [string, string][] = [
+    ['at the end of a segment whose successor is empty is tampered, naming its seq', ''],
+    ['at the end of a segment whose successor holds only a partial line is tampered, naming its seq', '{"specversion":"1.0","id":'],
+  ]
+  for (const [title, bytes] of successors) {
+    test(title, async () => {
+      await mailer()
+      const h0 = await headText()
+      const { seq: g } = await garble()
+      writeFileSync(join(auditDir(), nameOf(g)), bytes)
+
+      const { code, stdout } = await verifyAt(h0)
+
+      expect(stdout).toContain('verdict: tampered\n')
+      expect(code).toBe(4)
+      expect(reasons(stdout)).toEqual([`reason: seq ${g} is not a record`])
+      expect(unreadableLines(stdout)).toHaveLength(1)
+      expect(stdout).not.toContain('WALK_SENTINEL_5d1')
+    })
+  }
 })
 
 // -- A walk that stops names the way past it -----------------------------------
