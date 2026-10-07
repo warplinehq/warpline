@@ -1373,14 +1373,17 @@ export interface Verification {
  * Tampered is any broken link, seq or file name, a line that is not a record
  * other than at the end of a segment the next `segment.opened` names in
  * `passed_over` (such a line moves no seq or link, and is never the line an
- * anchor is compared with), a partial line anywhere but the very end that no
+ * anchor is compared with; a next segment holding no record names nothing), a
+ * partial line anywhere but the very end that no
  * later `segment.opened` acknowledges, a `passed_over` entry that does not
  * match the segment before it, an anchor beyond the head, or an anchored line
  * whose hash is not the anchor's. Torn is a partial line at the very end, an
  * acknowledged fragment, or a last segment whose last line is
  * `segment.sealed`. Unreadable is a chain that checks clean
  * or torn whose active segment holds a line the walk cannot carry, so the open
- * intents cannot be listed. A re-linked rewrite passes every link, so the
+ * intents cannot be listed. An active segment holding no complete line is
+ * unreadable too, since the walk has no opening line to start from. A
+ * re-linked rewrite passes every link, so the
  * anchor is what catches it. Wrong log, then tampered, then unreadable, then
  * torn.
  */
@@ -1498,6 +1501,8 @@ export async function verifyStore(statePath: string, anchor: Anchor, now: number
       torn = `segment ${name} is empty`
     }
   }
+  // A trailing line that is not a record, whose next segment never got a record, was named by nothing.
+  if (carried.length > 0) return tampered(`seq ${carried[0]} is not a record`)
   if (lastType === 'warpline.audit.segment.sealed') torn = `seq ${seq} seals the last segment, and nothing follows it`
 
   if (anchor.seq === 0) {

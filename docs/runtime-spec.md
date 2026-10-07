@@ -4018,9 +4018,9 @@ compare against would read as fine when it could not look.
 |---------|------|---------|
 | `clean` | `0` | Every line links, and the line at the anchored seq hashes to the anchor. |
 | `torn` | `3` | As clean, except the store ends in a partial line, keeps a partial line that a later `segment.opened` acknowledges, or its last segment ends in `segment.sealed` with no successor. A crash leaves these. |
-| `tampered` | `4` | A line does not parse, other than lines at the end of a segment that the next `segment.opened` names in `passed_over`, its seq is not the next one, its `warplineprev` is not the previous line's hash, a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, a `segment.opened` has a `passed_over` that names a line not in the segment before it or one that does not hash as recorded, the anchored seq is beyond the head, or the line at the anchored seq does not hash to the anchor. |
+| `tampered` | `4` | A line does not parse, other than lines at the end of a segment that the next `segment.opened` names in `passed_over`; a next segment that holds no record names nothing, its seq is not the next one, its `warplineprev` is not the previous line's hash, a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, a `segment.opened` has a `passed_over` that names a line not in the segment before it or one that does not hash as recorded, the anchored seq is beyond the head, or the line at the anchored seq does not hash to the anchor. |
 | `wrong log` | `5` | The anchor's origin is another home's id. |
-| `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), so the open intents cannot be listed. The reason names its seq. |
+| `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), or no complete line at all, as a crash between creating a segment and its first write leaves, so the open intents cannot be listed. The reason names its seq. |
 
 When more than one applies, wrong log wins, then tampered, then unreadable,
 then torn. None of the codes is `70`, `75` or `130`.
