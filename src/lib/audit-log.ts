@@ -206,16 +206,17 @@ export type AuditData<K extends AuditKind> = z.infer<(typeof DATA)[K]>
 // -- Errors ------------------------------------------------------------------
 
 type Reason =
-  | `segment ${string} holds only a partial line`
   | WalkRefusal
   | 'unknown kind'
   | 'internal kind'
   | 'data rejected by its schema'
   | 'line over 16384 bytes'
   | 'audit lock not acquired'
+  | 'audit lock not acquired: the filesystem under the home cannot hold a symbolic link (docs/runtime-spec.md § 14)'
   | 'audit lock not acquired in time'
   | 'audit lock not acquired in time: its holder is gone, and .lock.break exists; remove audit/.lock.break by hand only once no warpline process is running'
   | 'audit lock not acquired in time: its holder names no process; remove audit/.lock by hand only once no warpline process is running'
+  | 'audit lock not acquired in time: its holder is gone, and the lock could not be removed; remove audit/.lock by hand'
   | `audit lock not acquired in time: pid ${number} on this machine holds it; remove audit/.lock by hand only once that process is gone`
   | `audit lock not acquired in time: pid ${number} holds it, not on this machine or on one that cannot be told; remove audit/.lock by hand only once that process is gone`
   | 'the active segment holds no readable last line'
@@ -421,12 +422,15 @@ const PASS_IT_OVER = '; pass it over with warpline audit pass-over (docs/runtime
 /**
  * Why a walk stopped: a seq, a kind the walk carries and fixed words, never a
  * line's data. A line pass-over can name says so. The opening line cannot be
- * passed over, so its refusal names no pass-over.
+ * passed over, so its refusal names no pass-over. A segment with no complete
+ * line has no opening line, and its refusal names the file, whose name is only
+ * digits, and the hand step.
  */
 type WalkRefusal =
   | `seq ${number} is not a record${typeof PASS_IT_OVER}`
   | `seq ${number} opens the active segment and is not a segment.opened the walk can carry`
   | `seq ${number} holds ${ShortKind<CarriedType>} data the walk cannot carry${typeof PASS_IT_OVER}`
+  | `segment ${string} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`
 
 type Walked = { state: Carried } | { refused: WalkRefusal }
 
@@ -513,7 +517,9 @@ function walkLine(line: string, seq: number): { refused: WalkRefusal } | { carri
  * it can carry, or a carried field no writer would write, so no such value
  * reaches a reader's output. Only the complete lines of `bytes` are read, and
  * the first is at position `firstSeq`. A non-first line that `skip` names, by
- * position and the sha256 of its bytes, is passed over unread.
+ * position and the sha256 of its bytes, is passed over unread. With no complete
+ * line there is nothing to start from, and the refusal names the segment and
+ * says to move it aside by hand.
  */
 function stateOf(bytes: Buffer, firstSeq: number, skip: ReadonlyMap<number, string> = new Map()): Walked {
   let opened: Carried | undefined
@@ -539,7 +545,7 @@ function stateOf(bytes: Buffer, firstSeq: number, skip: ReadonlyMap<number, stri
     if (step.carried !== null) carried.push(step.carried)
   }
   if (opened === undefined) {
-    return { refused: `seq ${firstSeq} opens the active segment and is not a segment.opened the walk can carry` }
+    return { refused: `segment ${segmentName(firstSeq)} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)` }
   }
   return { state: segmentState(carried, opened) }
 }
@@ -567,8 +573,11 @@ let ourHostMemo: { value: string | null } | undefined
  * The namespace keeps containers that share `/etc/machine-id` apart. The boot
  * id keeps cloned machines apart, since they share a machine id and the root
  * namespace inode. It also keeps a pid from before a reboot from being tested
- * after it. A mismatch reads as another machine, so the lock is kept. A lock
- * left by a crash just before a reboot therefore needs removal by hand.
+ * after it. A mismatch reads as another machine, so the lock is kept.
+ * On Linux, a lock left by a crash just before a reboot therefore needs
+ * removal by hand. Elsewhere the host outlives a reboot, so a pid from before
+ * it is tested after it: a free one is broken, and a reused one reads alive,
+ * as the note below says.
  *
  * ponytail: a dead holder whose pid is reused reads alive, and fails closed.
  * A process start time in the identity is the upgrade path: Linux
@@ -687,12 +696,15 @@ function breakStale(dir: string, lockPath: string, token: string): 'removed' | '
 /**
  * Why a wait for the lock ended without it. The holder's pid reaches the
  * message only after it parsed as a positive safe integer, so only digits do.
+ * A gone holder's lock that the break did not remove, because the break file
+ * could not be made or the removal was refused, says its holder is gone.
  */
 function lockRefusal(seen: Holder | null, breakHeld: boolean): Reason {
   if (breakHeld) {
     return 'audit lock not acquired in time: its holder is gone, and .lock.break exists; remove audit/.lock.break by hand only once no warpline process is running'
   }
   if (seen === null) return 'audit lock not acquired in time'
+  if (seen.gone) return 'audit lock not acquired in time: its holder is gone, and the lock could not be removed; remove audit/.lock by hand'
   if (seen.pid === null) {
     return 'audit lock not acquired in time: its holder names no process; remove audit/.lock by hand only once no warpline process is running'
   }
@@ -723,6 +735,10 @@ async function acquire(dir: string, lockPath: string, kind: string, timeoutMs: n
         return token
       }
     } catch (err) {
+      // What a mount without symbolic links answers.
+      if (['EPERM', 'ENOTSUP', 'ENOSYS'].includes((err as NodeJS.ErrnoException).code ?? '')) {
+        throw new AuditAppendError(kind, 'audit lock not acquired: the filesystem under the home cannot hold a symbolic link (docs/runtime-spec.md § 14)', err)
+      }
       throw new AuditAppendError(kind, 'audit lock not acquired', err)
     }
     // Only this pass's answer counts toward the reason the wait ends with.
@@ -830,6 +846,10 @@ type Limits = { maxSegmentBytes: number; maxSegmentAgeMs: number }
  * record claims. When the active segment ends in lines that are not records,
  * that is the last record before them, and no seal is written.
  * Without `passing`, such a last line refuses every append.
+ *
+ * An active segment that holds no complete line, empty or holding only a
+ * partial line, refuses every append and pass-over naming the file and the
+ * hand step: its successor would need its own name. Nothing here moves it.
  */
 async function appendLocked(
   dir: string,
@@ -866,7 +886,7 @@ async function appendLocked(
       const bytes = await readFile(activePath)
       const end = bytes.lastIndexOf(0x0a)
       // A successor would need this file's own name.
-      if (end === -1) throw new AuditAppendError(kind, `segment ${active} holds only a partial line`)
+      if (end === -1) throw new AuditAppendError(kind, `segment ${active} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`)
       const tornBytes = bytes.subarray(end + 1)
       fragment = { bytes: tornBytes.length, sha256: sha256(tornBytes) }
       whole = bytes.subarray(0, end + 1)
@@ -896,9 +916,8 @@ async function appendLocked(
         stepped = true
       }
     }
-    if (last === null || lastRecord === undefined) {
-      throw new AuditAppendError(kind, 'the active segment holds no readable last line')
-    }
+    if (last === null) throw new AuditAppendError(kind, `segment ${active} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`)
+    if (lastRecord === undefined) throw new AuditAppendError(kind, 'the active segment holds no readable last line')
     // A pass-over counts position, so a seq the last record claims is never
     // carried forward. An ordinary append takes the tail's claim.
     seq = passing === undefined ? lastRecord.warplineseq : firstSeqOf(active) + lastAt

@@ -3682,7 +3682,10 @@ symbolic link made in one step whose text names the holder: a random token,
 the holder's process id, the machine identifier § 12 derives, and the time it
 was taken, which is for people and judges nothing. Making the link either
 creates it with that text or fails because it exists, so a lock is never empty
-and never half-written. On Linux the identifier also carries the holder's pid
+and never half-written. So the home's filesystem must be able to hold a
+symbolic link. On one that cannot, every append refuses with
+`audit lock not acquired: the filesystem under the home cannot hold a symbolic link`,
+and nothing is written. On Linux the identifier also carries the holder's pid
 namespace and the kernel's boot id. So containers that share a machine id, and
 clones of one machine image, are not taken for one machine, and a process id
 from before a reboot is never tested after it. When either cannot be read, the
@@ -3715,7 +3718,9 @@ no handler, runs no exit hook. On a machine that identifies itself, the next
 writer breaks its lock at once. A lock that cannot be taken in time is an
 append failure, whatever is at the lock's path. The refusal names the holder's process id and
 whether it is on this machine, or says the holder names no process. It says to
-remove the lock by hand only once that process is gone.
+remove the lock by hand only once that process is gone. When its holder is gone
+but its lock could not be removed, the refusal says so, and says to remove the
+lock by hand.
 
 Four cases stay open.
 
@@ -3723,8 +3728,11 @@ A holder that hangs while it runs blocks every append until it is killed, as
 § 12 chooses for the run lock.
 
 A holder that died on another machine that shares the home, on one that cannot
-identify itself, or before a reboot leaves its lock for removal by hand. So
-does a breaker killed outright inside its break, for its break file.
+identify itself, or, on Linux, before a reboot leaves its lock for removal by
+hand. So does a breaker killed outright inside its break, for its break file.
+Elsewhere the machine identifier outlives a reboot, so a process id from
+before it is tested after it: a free one reads gone and its lock is broken at
+once, and a reused one reads as running, as the next case says.
 
 A dead holder whose process id was reused reads as running. Its lock stays,
 and the refusal names that pid. If it is not a warpline process, the lock can
@@ -3869,6 +3877,8 @@ active segment and is not a segment.opened the walk can carry`, whether the line
 is a `segment.opened` this build cannot carry or not a record at all. The first
 case is a line only a later build writes, so run the build that wrote it, or a
 later one. A first line that is not a record has no recovery in this build.
+An active segment with no complete line has no first line, and
+has its own refusal and recovery (§ A torn tail).
 
 A line that is not a record is passed over the same way. When it ends the
 active segment, as a write that went wrong leaves it, the new segment opens
@@ -3887,9 +3897,16 @@ writer never writes past it and never removes it. The next append seals
 nothing, because a partial line can't be sealed past. It opens a new segment
 after the last complete line, whose `segment.opened` records the fragment's
 length in bytes and its sha256 as `fragment`, and then writes the record.
-Every byte of the torn file stays as it was. A segment that holds only a
-partial line can't be followed, because its successor would need the same
-name. Appends are refused, naming that file, until it is moved aside by hand.
+Every byte of the torn file stays as it was. An active segment that holds no
+complete line, empty as a crash between creating it and its first write leaves,
+or holding only a partial line, can't be followed, because its successor would
+need the same name, and it has no opening line for the walk to start from.
+Every append, pass-over and walk refuses with
+`segment <name> holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`,
+naming the file, and verify reports `unreadable` with that reason.
+Move the file out of `audit/` by hand. It holds no record, so nothing on the
+chain is lost, and the next append goes after the last line of the segment
+before it.
 
 **A lost successor.** A crash between the sealed line and the new file leaves
 an active segment that ends in `segment.sealed`. The next append heals it. It
@@ -4050,7 +4067,7 @@ compare against would read as fine when it could not look.
 | `torn` | `3` | As clean, except the store ends in a partial line, keeps a partial line that a later `segment.opened` acknowledges, or its last segment ends in `segment.sealed` with no successor. A crash leaves these. |
 | `tampered` | `4` | A complete line does not parse, other than the last complete lines of a segment that the next `segment.opened` names in `passed_over` by position (a next segment that holds no record names nothing), a record's `warplineseq` is not its position, its `warplineprev` is not the previous record's hash (64 `0`s for the first record), a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, a `segment.opened` has a `passed_over` that names a position not in the segment before it or a line that does not hash as recorded, the anchored seq is beyond the head, or the record at the anchored seq does not hash to the anchor. |
 | `wrong log` | `5` | The anchor's origin is another home's id. |
-| `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), or no complete line at all, as a crash between creating a segment and its first write leaves, so the open intents cannot be listed. The reason names its seq. |
+| `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), or no complete line at all, as a crash between creating a segment and its first write leaves, so the open intents cannot be listed. The reason names its seq, or, for an active segment with no complete line, names the file and says to move it aside by hand (§ 14 Segments). |
 
 When more than one applies, wrong log wins, then tampered, then unreadable,
 then torn. None of the codes is `70`, `75` or `130`.
@@ -4060,13 +4077,14 @@ re-link every `warplineprev` behind them, and every link then checks. Only the
 anchor catches that: the line at its seq no longer hashes to it, or the seq is
 gone.
 
-Verify prints `verdict`, the anchor, the head, how stale the anchor is, a
+Verify prints `verdict`, the anchor, the head when there is one, how stale the anchor is, a
 `reason` naming a seq or a file and the rule it broke when the verdict is not
 clean, and one `open intent` line per fire intent nothing has closed, each with
 its seq, plugin and run id. When the open intents cannot be read, it prints one
 `open intents unreadable` line naming why in their place, under any verdict,
-and never an empty list. Staleness is the head seq minus the anchored seq in
-records, and the time since the anchored record's `time` in seconds, the second
+and never an empty list.
+Staleness is the seq of the last record minus the anchored seq in records,
+and the time since the anchored record's `time` in seconds, the second
 only once that record's hash has matched. An anchor at the head is `0 records`
 stale. Verify never prints a record's data or the anchor file's text.
 
