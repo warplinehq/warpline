@@ -316,10 +316,10 @@ async function lastLine(path: string): Promise<{ line: Buffer | null; torn: bool
   }
 }
 
-type StoredRecord = { warplineseq: number; source: string; type: string; time?: unknown; data?: any }
+export type StoredRecord = { warplineseq: number; source: string; type: string; time?: unknown; data?: any }
 
 /** A stored line's envelope, or undefined when it is not one of ours. */
-function parseRecord(line: string): StoredRecord | undefined {
+export function parseRecord(line: string): StoredRecord | undefined {
   try {
     const r = JSON.parse(line)
     if (Seq.safeParse(r?.warplineseq).success && typeof r.source === 'string' && typeof r.type === 'string') return r

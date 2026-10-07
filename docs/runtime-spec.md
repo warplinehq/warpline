@@ -2636,7 +2636,9 @@ own verb and not a mode of
   never writes, heals or removes the lock.
 - Before it writes, it reads the audit store for
   an earlier `fire.resolved` with this plugin and effect id (the next bullets
-  say what that changes). With none there, it appends `fire.resolved` (§ 14):
+  say what that changes).
+  Only a line that is a record counts, and not one a `segment.opened` names in `passed_over`, whose answer is lost to the walk as § 14 says.
+  With none there, it appends `fire.resolved` (§ 14):
   the plugin, the effect id, the seq of the `fire.intent` with that plugin and
   effect id when one is still open, else null, and `answer: shipped` or
   `not_shipped`. That record closes the intent.
