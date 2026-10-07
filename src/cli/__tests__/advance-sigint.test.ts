@@ -21,8 +21,8 @@
  * The audit lock case is about what an interrupt leaves behind. An advance
  * signalled while it holds `audit/.lock` exits through `process.exit(130)`, so
  * the hold's own release never runs. The store's exit hook removes the lock on
- * the way out, and the next advance must run at once rather than fail every
- * append until the lock is 30 seconds old.
+ * the way out, and the next advance must run at once rather than refuse every
+ * append until someone removes the lock by hand.
  *
  * The normal-exit drain guard pipes a document larger than the pipe buffer
  * into a reader that waits before it reads. Against a bin that exits without
@@ -59,13 +59,16 @@
 import { test, expect, beforeAll, afterAll, afterEach } from 'bun:test'
 import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
 
 /** The bin entry, not the plugin-run module: this is the path a scheduler runs. */
 const ENTRY = testFixturesDir(import.meta.url, '../../bin/warpline.ts')
+
+/** Whether `path` exists, by lstat, which sees a symbolic link whatever its target. */
+const present = (path: string): boolean => lstatSync(path, { throwIfNoEntry: false }) !== undefined
 
 /** The built bin, the path a real consumer runs under node. */
 const BIN = testFixturesDir(import.meta.url, '../../../dist/bin/warpline.js')
@@ -185,10 +188,10 @@ export const manifest = ${JSON.stringify({ name: 'loud', ...MANIFEST })}\n`,
   )
   writeFileSync(
     join(plugin, 'handler.ts'),
-    `import { existsSync, writeFileSync } from 'node:fs'
+    `import { lstatSync, writeFileSync } from 'node:fs'
 export async function handler() {
   writeFileSync(${JSON.stringify(join(dir, 'pid'))}, String(process.pid))
-  while (!existsSync(${JSON.stringify(join(dir, 'signalled'))})) {
+  while (lstatSync(${JSON.stringify(join(dir, 'signalled'))}, { throwIfNoEntry: false }) === undefined) {
     await new Promise(resolve => setTimeout(resolve, 10))
   }
   await new Promise(resolve => setTimeout(resolve, 100))
@@ -246,7 +249,7 @@ const drains = new Set<{ child: ChildProcess; signalled: string; pidFile: string
 function releaseDrains(): void {
   for (const { child, signalled, pidFile } of drains) {
     try {
-      if (existsSync(dirname(signalled))) writeFileSync(signalled, '')
+      if (present(dirname(signalled))) writeFileSync(signalled, '')
     } catch {}
     try {
       const pid = Number(readFileSync(pidFile, 'utf8'))
@@ -328,7 +331,7 @@ async function advanceKilledWith(
   })
 
   const deadline = Date.now() + 15_000
-  while (!existsSync(lock)) {
+  while (!present(lock)) {
     if (Date.now() > deadline) throw new Error('the advance never took its run lock')
     await new Promise<void>(resolve => setTimeout(resolve, 20))
   }
@@ -433,7 +436,7 @@ async function sigtermDrain(
 
   const deadline = Date.now() + 15_000
   let pid = ''
-  while ((pid = existsSync(pidFile) ? readFileSync(pidFile, 'utf8') : '') === '') {
+  while ((pid = present(pidFile) ? readFileSync(pidFile, 'utf8') : '') === '') {
     if (Date.now() > deadline) {
       released() // release the reader so the pipeline can end
       throw new Error('the slow plugin never wrote its pid')
@@ -497,7 +500,8 @@ for (const [name, runtime, entry] of [
  * The hold is kept open by a FIFO in place of the first segment. The store
  * reads the segment under the audit lock before it appends, and a read of a
  * FIFO with no writer blocks, so the advance sits inside its hold until the
- * signal lands. The audit lock existing is the readiness marker.
+ * signal lands. The audit lock existing is the readiness marker. A held audit
+ * lock is a symbolic link whose target does not exist, so only lstat sees it.
  *
  * Bun only. Measured when this case was written: under node 24 the blocked
  * FIFO read keeps the process from exiting after the handler and the exit
@@ -538,13 +542,13 @@ test('an advance interrupted while it holds the audit lock leaves no lock, and t
       first?.on('exit', (code, sig) => resolve({ code, signal: sig }))
     })
     const deadline = Date.now() + 15_000
-    while (!existsSync(auditLock)) {
+    while (!present(auditLock)) {
       if (Date.now() > deadline) throw new Error('the advance never took the audit lock')
       await new Promise<void>(resolve => setTimeout(resolve, 20))
     }
     first.kill('SIGTERM')
     const firstExit = await exited
-    const lockLeft = existsSync(auditLock)
+    const lockLeft = present(auditLock)
 
     // The run lock is left too, because the run lock's own release never ran
     // either. Healing a dead holder's run lock belongs to § 12 and is pinned in

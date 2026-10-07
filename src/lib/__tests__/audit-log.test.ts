@@ -17,7 +17,7 @@ import { createHash } from 'node:crypto'
 import {
   appendFileSync,
   chmodSync,
-  existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -26,6 +26,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
@@ -76,7 +77,7 @@ const lift = () => audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', 
 describe('audit store: genesis and the chain', () => {
   test('readHead on a home with no store is seq 0 and 64 zeros, and creates nothing', async () => {
     expect(await audit.readHead(statePath)).toEqual({ seq: 0, head: '0'.repeat(64) })
-    expect(existsSync(auditDir)).toBe(false)
+    expect(present(auditDir)).toBe(false)
   })
 
   test('the first append writes genesis then the record, chained over the written bytes', async () => {
@@ -180,53 +181,50 @@ describe('audit store: what it refuses writes nothing and echoes nothing', () =>
   })
 })
 
-describe('audit store: the lock', () => {
-  test('a lock held by a live holder makes the append reject once its timeout passes, and the lock stays', async () => {
-    await lift()
-    const lockPath = join(auditDir, '.lock')
-    writeFileSync(lockPath, JSON.stringify({ token: 'held-by-other', at: Date.now() }))
-    const segment = readFileSync(join(auditDir, '0000000000000001.jsonl'))
-
-    const started = Date.now()
-    let caught: unknown
-    try {
-      await audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 200 })
-    } catch (err) {
-      caught = err
-    }
-    expect(Date.now() - started).toBeLessThan(2000)
-    expect((caught as Error | undefined)?.name).toBe('AuditAppendError')
-    expect(readFileSync(join(auditDir, '0000000000000001.jsonl'))).toEqual(segment)
-    expect(readFileSync(lockPath, 'utf-8')).toContain('held-by-other')
-  })
-
-  test('a lock older than 30 s is broken and the append proceeds', async () => {
-    await lift()
-    const lockPath = join(auditDir, '.lock')
-    writeFileSync(lockPath, JSON.stringify({ token: 'held-by-other', at: Date.now() - 31_000 }))
-
-    const result = await lift()
-
-    expect(result.seq).toBe(3)
-    expect(existsSync(lockPath)).toBe(false)
-  })
-
-  test('20 appends issued at once from one process come out contiguous and whole', async () => {
-    const results = await Promise.all(Array.from({ length: 20 }, () => lift()))
-
-    expect(new Set(results.map((r) => r.seq)).size).toBe(20)
-    const lines = segmentLines()
-    expect(lines).toHaveLength(21)
-    expect(lines.map((l) => (JSON.parse(l) as { warplineseq: number }).warplineseq)).toEqual(
-      Array.from({ length: 21 }, (_, i) => i + 1),
-    )
-  })
-})
-
+/**
+ * The audit lock as a case sees it. A held lock is a symbolic link whose text
+ * names its holder, and whose target does not exist. So every presence check
+ * on it uses lstat: a check that follows the link reads a held lock as absent,
+ * and every 'no lock left' assertion would then pass whatever the store did.
+ */
 const lockPath = () => join(auditDir, '.lock')
 const breakPath = () => join(auditDir, '.lock.break')
 const segmentPath = () => join(auditDir, '0000000000000001.jsonl')
 const sixtySecondsAgo = () => new Date(Date.now() - 60_000)
+const present = (path: string): boolean => lstatSync(path, { throwIfNoEntry: false }) !== undefined
+const lockText = (path: string): string => readlinkSync(path, 'utf8')
+const plantLock = (path: string, holder: object): void => symlinkSync(JSON.stringify(holder), path)
+
+/**
+ * This machine as the store names it in a lock: the machine identifier, and on
+ * Linux that joined to the pid namespace and the boot id, or null when any part
+ * is missing. Computed here from the identity module and `/proc`, not borrowed
+ * from the store.
+ */
+const HOST: string | null = (() => {
+  const base = deriveHost()
+  if (base === null || process.platform !== 'linux') return base
+  try {
+    const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf-8').trim()
+    return boot === '' ? null : `${base}:${readlinkSync('/proc/self/ns/pid')}:${boot}`
+  } catch {
+    return null
+  }
+})()
+
+/** The pid of a process that has already exited, checked gone before use. */
+function deadPid(): number {
+  const { pid } = spawnSync(process.execPath, ['-e', '0'])
+  try {
+    process.kill(pid, 0)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return pid
+  }
+  throw new Error(`pid ${pid} is still running`)
+}
+
+/** A process idling until killed. Kill it in `finally`. */
+const liveChild = () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
 
 type Settled = { settled: 'resolved'; value: { seq: number } } | { settled: 'rejected'; error: unknown } | { settled: 'pending' }
 
@@ -256,6 +254,72 @@ const rejected = (out: Settled): unknown => {
   return out.settled === 'rejected' ? out.error : undefined
 }
 
+/** The rejection's message, or undefined when the append did not reject. */
+const refusal = async (out: Promise<Settled>): Promise<string | undefined> =>
+  (rejected(await out) as Error | undefined)?.message
+
+describe('audit store: the lock', () => {
+  test('a lock held by a live holder makes the append reject once its timeout passes, and the lock stays', async () => {
+    await lift()
+    const lockPath = join(auditDir, '.lock')
+    writeFileSync(lockPath, JSON.stringify({ token: 'held-by-other', at: Date.now() }))
+    const segment = readFileSync(join(auditDir, '0000000000000001.jsonl'))
+
+    const started = Date.now()
+    let caught: unknown
+    try {
+      await audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 200 })
+    } catch (err) {
+      caught = err
+    }
+    expect(Date.now() - started).toBeLessThan(2000)
+    expect((caught as Error | undefined)?.name).toBe('AuditAppendError')
+    expect(readFileSync(join(auditDir, '0000000000000001.jsonl'))).toEqual(segment)
+    expect(readFileSync(lockPath, 'utf-8')).toContain('held-by-other')
+  })
+
+  test('a lock older than 30 s is never broken for its age, whether its holder is alive here or it cannot be read as a holder', async () => {
+    await lift()
+    const live = liveChild()
+    try {
+      plantLock(lockPath(), { token: 'aged-live', pid: live.pid, host: HOST, at: Date.now() - 31_000 })
+      const text = lockText(lockPath())
+      const linked = oddAppend()
+      try {
+        expect((rejected(await linked.settled) as Error | undefined)?.name).toBe('AuditAppendError')
+        expect(lockText(lockPath())).toBe(text)
+        expect(present(breakPath())).toBe(false)
+      } finally {
+        await clear(linked.append)
+      }
+    } finally {
+      live.kill('SIGKILL')
+    }
+
+    writeFileSync(lockPath(), JSON.stringify({ token: 'aged', at: Date.now() - 31_000 }))
+    const bytes = readFileSync(lockPath())
+    const plain = oddAppend()
+    try {
+      expect((rejected(await plain.settled) as Error | undefined)?.name).toBe('AuditAppendError')
+      expect(readFileSync(lockPath())).toEqual(bytes)
+      expect(present(breakPath())).toBe(false)
+    } finally {
+      await clear(plain.append)
+    }
+  })
+
+  test('20 appends issued at once from one process come out contiguous and whole', async () => {
+    const results = await Promise.all(Array.from({ length: 20 }, () => lift()))
+
+    expect(new Set(results.map((r) => r.seq)).size).toBe(20)
+    const lines = segmentLines()
+    expect(lines).toHaveLength(21)
+    expect(lines.map((l) => (JSON.parse(l) as { warplineseq: number }).warplineseq)).toEqual(
+      Array.from({ length: 21 }, (_, i) => i + 1),
+    )
+  })
+})
+
 describe('the lock when its file is odd', () => {
   const root = process.getuid?.() === 0
 
@@ -281,7 +345,7 @@ describe('the lock when its file is odd', () => {
     try {
       expect((rejected(await settled) as Error | undefined)?.name).toBe('AuditAppendError')
       expect(statSync(lockPath()).isDirectory()).toBe(true)
-      expect(existsSync(breakPath())).toBe(false)
+      expect(present(breakPath())).toBe(false)
       expect(readFileSync(segmentPath())).toEqual(segment)
     } finally {
       await clear(append)
@@ -295,7 +359,7 @@ describe('the lock when its file is odd', () => {
     const { append, settled } = oddAppend()
     try {
       expect((rejected(await settled) as Error | undefined)?.name).toBe('AuditAppendError')
-      expect(existsSync(breakPath())).toBe(false)
+      expect(present(breakPath())).toBe(false)
       expect(readFileSync(segmentPath())).toEqual(segment)
     } finally {
       await clear(append)
@@ -303,19 +367,19 @@ describe('the lock when its file is odd', () => {
   })
 
   test.skipIf(root)(
-    'a lock file the writer cannot read, older than 30 s, is broken by its file time and the append proceeds',
+    'a lock file the writer cannot read, older than 30 s, is never broken, and the append fails in time and the file stays',
     async () => {
       await lift()
       writeFileSync(lockPath(), JSON.stringify({ token: 'crashed', at: Date.now() - 60_000 }))
       chmodSync(lockPath(), 0o000)
       utimesSync(lockPath(), sixtySecondsAgo(), sixtySecondsAgo())
+      const segment = readFileSync(segmentPath())
       const { append, settled } = oddAppend()
       try {
-        const out = await settled
-        expect(out.settled).toBe('resolved')
-        expect(out.settled === 'resolved' ? out.value.seq : undefined).toBe(3)
-        expect(existsSync(lockPath())).toBe(false)
-        expect(existsSync(breakPath())).toBe(false)
+        expect((rejected(await settled) as Error | undefined)?.name).toBe('AuditAppendError')
+        expect(present(lockPath())).toBe(true)
+        expect(present(breakPath())).toBe(false)
+        expect(readFileSync(segmentPath())).toEqual(segment)
       } finally {
         await clear(append)
       }
@@ -330,87 +394,92 @@ describe('the lock when its file is odd', () => {
     const { append, settled } = oddAppend()
     try {
       expect((rejected(await settled) as Error | undefined)?.name).toBe('AuditAppendError')
-      expect(existsSync(lockPath())).toBe(true)
+      expect(present(lockPath())).toBe(true)
       expect(readFileSync(segmentPath())).toEqual(segment)
     } finally {
       await clear(append)
     }
   })
 
-  test('a stale lock with a break file beside it fails in time naming the break file', async () => {
-    await lift()
-    writeFileSync(lockPath(), JSON.stringify({ token: 'crashed', at: Date.now() - 31_000 }))
-    writeFileSync(breakPath(), '')
-    const segment = readFileSync(segmentPath())
-    const { append, settled } = oddAppend()
-    try {
-      const err = rejected(await settled) as Error | undefined
-      expect(err?.name).toBe('AuditAppendError')
-      expect(err?.message).toContain('.lock.break')
-      expect(readFileSync(lockPath(), 'utf-8')).toContain('crashed')
-      expect(existsSync(breakPath())).toBe(true)
-      expect(readFileSync(segmentPath())).toEqual(segment)
-    } finally {
-      await clear(append)
-    }
-  })
+  test.skipIf(HOST === null)(
+    'a lock whose holder is gone on this machine, beside a break file that names no holder, fails in time naming the break file, and both stay',
+    async () => {
+      await lift()
+      plantLock(lockPath(), { token: 'gone', pid: deadPid(), host: HOST, at: Date.now() })
+      writeFileSync(breakPath(), '')
+      utimesSync(breakPath(), sixtySecondsAgo(), sixtySecondsAgo())
+      const text = lockText(lockPath())
+      const segment = readFileSync(segmentPath())
+      const { append, settled } = oddAppend()
+      try {
+        const message = await refusal(settled)
+        expect(message).toContain('.lock.break')
+        expect(message).toContain('remove audit/.lock.break by hand')
+        expect(lockText(lockPath())).toBe(text)
+        expect(present(breakPath())).toBe(true)
+        expect(readFileSync(breakPath(), 'utf8')).toBe('')
+        expect(readFileSync(segmentPath())).toEqual(segment)
+      } finally {
+        await clear(append)
+      }
+    },
+  )
 })
 
-/**
- * This machine as the store names it in a lock: the machine identifier, and on
- * Linux that joined to the pid namespace, or null when either is missing.
- * Computed here from the identity module and the namespace link, not borrowed
- * from the store.
- */
-const HOST: string | null = (() => {
-  const base = deriveHost()
-  if (base === null || process.platform !== 'linux') return base
-  try {
-    return `${base}:${readlinkSync('/proc/self/ns/pid')}`
-  } catch {
-    return null
-  }
-})()
+const STORE = join(import.meta.dir, '..', 'audit-log.ts')
 
-/** The pid of a process that has already exited, checked gone before use. */
-function deadPid(): number {
-  const { pid } = spawnSync(process.execPath, ['-e', '0'])
-  try {
-    process.kill(pid, 0)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ESRCH') return pid
-  }
-  throw new Error(`pid ${pid} is still running`)
-}
-
-/** A process idling until killed. Kill it in `finally`. */
-const liveChild = () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
-
-const writeLock = (path: string, lock: object) => writeFileSync(path, JSON.stringify(lock))
+type ChildMode = 'exit' | 'replaced' | 'linux-boot' | 'linux-noboot' | 'linux-nons'
 
 /**
  * Runs a child that imports the store by absolute path and appends once, with a
  * `now` that acts inside the hold. `exit` exits 130 there. `replaced` puts
- * another holder's lock in place first, then exits 130. `linux` claims the
- * Linux platform before its first append and prints the lock's text there.
+ * another holder's lock in place first, then exits 130.
+ *
+ * The three `linux-` modes claim the Linux platform and spy on `node:fs` before
+ * they import the store, because a spy reaches the store's named imports only
+ * when it is in place before the store loads. `linux-boot` serves a namespace
+ * link and a boot id, `linux-noboot` fails the boot id read, and `linux-nons`
+ * fails the namespace read. Every other path calls through. Their `now` prints
+ * the lock's text.
  */
-function childAppend(mode: 'exit' | 'replaced' | 'linux'): ReturnType<typeof spawnSync> & { stdout: string } {
+function childAppend(mode: ChildMode): ReturnType<typeof spawnSync> & { stdout: string } {
   const script = join(tmp, 'child-append.ts')
   writeFileSync(
     script,
-    `import { readFileSync, writeFileSync } from 'node:fs'
-import { appendAudit } from ${JSON.stringify(join(import.meta.dir, '..', 'audit-log.ts'))}
+    `import * as fs from 'node:fs'
+import { spyOn } from 'bun:test'
 const [statePath, mode] = process.argv.slice(2)
 const lockPath = ${JSON.stringify(lockPath())}
-if (mode === 'linux') Object.defineProperty(process, 'platform', { value: 'linux' })
+if (mode.startsWith('linux-')) {
+  const realReadFileSync = fs.readFileSync
+  const realReadlinkSync = fs.readlinkSync
+  const missing = () => Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
+  Object.defineProperty(process, 'platform', { value: 'linux' })
+  spyOn(fs, 'readlinkSync').mockImplementation((path, ...rest) => {
+    if (path === '/proc/self/ns/pid') {
+      if (mode === 'linux-nons') throw missing()
+      return 'pid:[4026531836]'
+    }
+    return realReadlinkSync(path, ...rest)
+  })
+  spyOn(fs, 'readFileSync').mockImplementation((path, ...rest) => {
+    if (path === '/proc/sys/kernel/random/boot_id') {
+      if (mode === 'linux-noboot') throw missing()
+      return 'b0b0b0b0-1111-2222-3333-444455556666\\n'
+    }
+    return realReadFileSync(path, ...rest)
+  })
+}
+const { appendAudit } = await import(${JSON.stringify(STORE)})
 await appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, {
   now: () => {
     if (mode === 'exit') process.exit(130)
     if (mode === 'replaced') {
-      writeFileSync(lockPath, JSON.stringify({ token: 'next-holder', at: Date.now(), pid: 1, host: null }))
+      fs.unlinkSync(lockPath)
+      fs.symlinkSync(JSON.stringify({ token: 'next-holder', pid: 1, host: null, at: Date.now() }), lockPath)
       process.exit(130)
     }
-    process.stdout.write(readFileSync(lockPath, 'utf-8'))
+    process.stdout.write(fs.readlinkSync(lockPath, 'utf8'))
     return Date.now()
   },
 })
@@ -420,30 +489,33 @@ await appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }
 }
 
 describe('the lock names its holder', () => {
-  test('a held lock names its token, its time, this process and this machine', async () => {
-    let seen = ''
+  test('a held lock is a symbolic link that names its token, this process, this machine and its time', async () => {
+    let linked = false
+    let text = ''
     await audit.appendAudit(
       statePath,
       'denial.lifted',
       { plugin: 'p', fingerprint: null },
       {
         now: () => {
-          seen = readFileSync(lockPath(), 'utf-8')
+          linked = lstatSync(lockPath()).isSymbolicLink()
+          if (linked) text = lockText(lockPath())
           return Date.now()
         },
       },
     )
-    const lock = JSON.parse(seen) as Record<string, unknown>
+    expect(linked).toBe(true)
+    const lock = JSON.parse(text) as Record<string, unknown>
     expect(typeof lock.token).toBe('string')
-    expect(typeof lock.at).toBe('number')
     expect(lock.pid).toBe(process.pid)
     expect(lock.host).toBe(HOST)
-    expect(existsSync(lockPath())).toBe(false)
+    expect(typeof lock.at).toBe('number')
+    expect(present(lockPath())).toBe(false)
   })
 
   test.skipIf(HOST === null)('a lock whose holder is gone on this machine is taken at once', async () => {
     await lift()
-    writeLock(lockPath(), { token: 'gone', at: Date.now(), pid: deadPid(), host: HOST })
+    plantLock(lockPath(), { token: 'gone', pid: deadPid(), host: HOST, at: Date.now() })
     const started = Date.now()
     const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 2000 })
     try {
@@ -454,117 +526,121 @@ describe('the lock names its holder', () => {
       expect(out.settled).toBe('resolved')
       expect(Date.now() - started).toBeLessThan(1000)
       expect(segmentLines()).toHaveLength(3)
-      expect(existsSync(lockPath())).toBe(false)
-      expect(existsSync(breakPath())).toBe(false)
+      expect(present(lockPath())).toBe(false)
+      expect(present(breakPath())).toBe(false)
     } finally {
       await clear(append)
     }
   })
 
-  test('a lock whose holder is alive on this machine is not taken', async () => {
-    await lift()
-    const live = liveChild()
-    try {
-      writeLock(lockPath(), { token: 'live', at: Date.now(), pid: live.pid, host: HOST })
-      const bytes = readFileSync(lockPath())
-      const segment = readFileSync(segmentPath())
-      const { append, settled } = oddAppend()
+  test.skipIf(HOST === null)(
+    'a lock whose holder is alive on this machine is not taken, and the refusal names its pid, this machine and removal by hand',
+    async () => {
+      await lift()
+      const live = liveChild()
       try {
-        expect((rejected(await settled) as Error | undefined)?.message).toContain('audit lock not acquired in time')
-        expect(readFileSync(lockPath())).toEqual(bytes)
-        expect(readFileSync(segmentPath())).toEqual(segment)
+        plantLock(lockPath(), { token: 'live', pid: live.pid, host: HOST, at: Date.now() })
+        const text = lockText(lockPath())
+        const segment = readFileSync(segmentPath())
+        const { append, settled } = oddAppend()
+        try {
+          const message = await refusal(settled)
+          expect(message).toContain('audit lock not acquired in time')
+          expect(message).toContain(`pid ${live.pid} on this machine`)
+          expect(message).toContain('remove audit/.lock by hand')
+          expect(lockText(lockPath())).toBe(text)
+          expect(readFileSync(segmentPath())).toEqual(segment)
+        } finally {
+          await clear(append)
+        }
       } finally {
-        await clear(append)
+        live.kill('SIGKILL')
       }
-    } finally {
-      live.kill('SIGKILL')
-    }
-  })
+    },
+  )
 
-  test('a lock that names no machine is broken only by age', async () => {
+  test('a lock that names no machine or no process is never broken, however old', async () => {
     await lift()
     const dead = deadPid()
-    writeLock(lockPath(), { token: 'nameless', at: Date.now(), pid: dead, host: null })
-    const bytes = readFileSync(lockPath())
-    const fresh = oddAppend()
-    try {
-      rejected(await fresh.settled)
-      expect(readFileSync(lockPath())).toEqual(bytes)
-    } finally {
-      await fresh.append.catch(() => {})
-    }
-
-    writeLock(lockPath(), { token: 'nameless', at: Date.now() - 31_000, pid: dead, host: null })
-    const old = oddAppend()
-    try {
-      expect((await old.settled).settled).toBe('resolved')
-      expect(existsSync(lockPath())).toBe(false)
-    } finally {
-      await clear(old.append)
-    }
-  })
-
-  test('a lock from another machine or another pid namespace is broken only by age, whatever its pid', async () => {
-    await lift()
-    const dead = deadPid()
-    for (const host of ['f'.repeat(64), `${deriveHost()}:pid:[1]`]) {
-      writeLock(lockPath(), { token: 'foreign', at: Date.now(), pid: dead, host })
-      const bytes = readFileSync(lockPath())
-      const { append, settled } = oddAppend()
-      try {
-        rejected(await settled)
-        expect(readFileSync(lockPath())).toEqual(bytes)
-      } finally {
-        await clear(append)
+    const holders: [object, string[]][] = [
+      [{ token: 'nameless', pid: dead, host: null }, [`pid ${dead}`, 'not on this machine']],
+      [{ token: 'nameless', pid: dead }, [`pid ${dead}`, 'not on this machine']],
+      [{ token: 'nameless' }, ['names no process']],
+    ]
+    for (const [holder, words] of holders) {
+      for (const at of [Date.now(), Date.now() - 31_000]) {
+        plantLock(lockPath(), { ...holder, at })
+        const text = lockText(lockPath())
+        const { append, settled } = oddAppend()
+        try {
+          const message = await refusal(settled)
+          for (const word of words) expect(message).toContain(word)
+          expect(lockText(lockPath())).toBe(text)
+        } finally {
+          await clear(append)
+        }
       }
     }
   })
 
-  test.skipIf(HOST === null)('a break file whose holder is gone on this machine is cleared, and the stale lock is broken', async () => {
+  test('a lock from another machine, pid namespace or boot is never broken, however old, whatever its pid', async () => {
     await lift()
-    writeLock(lockPath(), { token: 'crashed', at: Date.now() - 31_000 })
-    writeLock(breakPath(), { token: 'breaker', at: Date.now(), pid: deadPid(), host: HOST })
-    const { append, settled } = oddAppend()
-    try {
-      expect((await settled).settled).toBe('resolved')
-      expect(existsSync(lockPath())).toBe(false)
-      expect(existsSync(breakPath())).toBe(false)
-    } finally {
-      await clear(append)
+    const dead = deadPid()
+    const ns = process.platform === 'linux' ? readlinkSync('/proc/self/ns/pid') : 'pid:[4026531836]'
+    const hosts = [
+      'f'.repeat(64),
+      `${deriveHost()}:pid:[1]`,
+      `${deriveHost()}:${ns}:00000000-0000-0000-0000-000000000000`,
+    ]
+    for (const host of hosts) {
+      for (const at of [Date.now(), Date.now() - 31_000]) {
+        plantLock(lockPath(), { token: 'foreign', pid: dead, host, at })
+        const text = lockText(lockPath())
+        const { append, settled } = oddAppend()
+        try {
+          expect(await refusal(settled)).toContain('not on this machine')
+          expect(lockText(lockPath())).toBe(text)
+        } finally {
+          await clear(append)
+        }
+      }
     }
   })
 
-  test('a break file from a machine that cannot be told is cleared at 30 s by its time, and one that names no holder is not', async () => {
-    await lift()
-    writeLock(lockPath(), { token: 'crashed', at: Date.now() - 31_000 })
-    writeLock(breakPath(), { token: 'breaker', at: Date.now() - 31_000, pid: deadPid(), host: null })
-    const first = oddAppend()
-    try {
-      expect((await first.settled).settled).toBe('resolved')
-      expect(existsSync(lockPath())).toBe(false)
-      expect(existsSync(breakPath())).toBe(false)
-    } finally {
-      await clear(first.append)
-    }
-
-    writeLock(lockPath(), { token: 'crashed', at: Date.now() - 31_000 })
-    writeFileSync(breakPath(), '')
-    utimesSync(breakPath(), sixtySecondsAgo(), sixtySecondsAgo())
-    const second = oddAppend()
-    try {
-      expect((rejected(await second.settled) as Error | undefined)?.message).toContain('.lock.break')
-      expect(existsSync(breakPath())).toBe(true)
-    } finally {
-      await clear(second.append)
-    }
-  })
+  test.skipIf(HOST === null)(
+    'a break file is never cleared, even one whose holder is gone on this machine or one older than 30 s, and the append refuses naming it',
+    async () => {
+      await lift()
+      const dead = deadPid()
+      const dead2 = deadPid()
+      for (const breaker of [
+        { token: 'breaker', pid: dead2, host: HOST, at: Date.now() },
+        { token: 'breaker', pid: dead2, host: null, at: Date.now() - 31_000 },
+      ]) {
+        plantLock(lockPath(), { token: 'gone', pid: dead, host: HOST, at: Date.now() })
+        plantLock(breakPath(), breaker)
+        const lock = lockText(lockPath())
+        const brk = lockText(breakPath())
+        const { append, settled } = oddAppend()
+        try {
+          const message = await refusal(settled)
+          expect(message).toContain('.lock.break')
+          expect(message).toContain('remove audit/.lock.break by hand')
+          expect(lockText(lockPath())).toBe(lock)
+          expect(lockText(breakPath())).toBe(brk)
+        } finally {
+          await clear(append)
+        }
+      }
+    },
+  )
 
   test('a process that exits holding the lock removes it on the way out', async () => {
     await lift()
     const segment = readFileSync(segmentPath())
     const child = childAppend('exit')
     expect(child.status).toBe(130)
-    expect(existsSync(lockPath())).toBe(false)
+    expect(present(lockPath())).toBe(false)
     expect(readFileSync(segmentPath())).toEqual(segment)
   })
 
@@ -573,49 +649,92 @@ describe('the lock names its holder', () => {
     try {
       const child = childAppend('replaced')
       expect(child.status).toBe(130)
-      expect(readFileSync(lockPath(), 'utf-8')).toContain('next-holder')
+      expect(lockText(lockPath())).toContain('next-holder')
     } finally {
       rmSync(lockPath(), { force: true })
     }
   })
 
-  test('on Linux the lock names the pid namespace, and names no machine when it cannot be read', async () => {
+  test('on Linux the lock names the pid namespace and the boot id, and names no machine when either cannot be read', async () => {
     await lift()
-    const child = childAppend('linux')
-    expect(child.status).toBe(0)
-    const lock = JSON.parse(child.stdout) as Record<string, unknown>
-    const link = existsSync('/proc/self/ns/pid') ? readlinkSync('/proc/self/ns/pid') : null
-    expect(lock.pid).toBe(child.pid)
-    expect(lock.host).toBe(link === null ? null : `${deriveHost()}:${link}`)
+    const base = deriveHost()
+    const cases: [ChildMode, string | null][] = [
+      ['linux-boot', base === null ? null : `${base}:pid:[4026531836]:b0b0b0b0-1111-2222-3333-444455556666`],
+      ['linux-noboot', null],
+      ['linux-nons', null],
+    ]
+    for (const [mode, host] of cases) {
+      const child = childAppend(mode)
+      expect(child.status).toBe(0)
+      const lock = JSON.parse(child.stdout) as Record<string, unknown>
+      expect(lock.pid).toBe(child.pid)
+      expect(lock.host).toBe(host)
+    }
   })
 
-  test('a lock replaced between its judgment and the break is kept', async () => {
+  test.skipIf(HOST === null)('a lock replaced between its judgment and the break is kept until it is judged itself', async () => {
     await lift()
-    const live = liveChild()
-    let tripped = 0
+    const dead = deadPid()
+    const dead2 = deadPid()
     const real = hostIdentity.isProcessAlive
+    let calls = 0
+    let sightings = 0
     const spy = spyOn(hostIdentity, 'isProcessAlive').mockImplementation((pid: number) => {
-      if (tripped > 0) return real(pid)
-      tripped++
-      writeLock(lockPath(), { token: 'next', at: Date.now(), pid: live.pid, host: HOST })
-      return false
+      calls++
+      if (calls === 1) {
+        unlinkSync(lockPath())
+        plantLock(lockPath(), { token: 'next', pid: dead2, host: HOST, at: Date.now() })
+        return false
+      }
+      try {
+        if (lockText(lockPath()).includes('"next"')) sightings++
+      } catch {}
+      return real(pid)
     })
     try {
-      writeLock(lockPath(), { token: 'gone', at: Date.now(), pid: deadPid(), host: HOST })
-      const { append, settled } = oddAppend()
+      plantLock(lockPath(), { token: 'gone', pid: dead, host: HOST, at: Date.now() })
+      const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 2000 })
       try {
-        expect((rejected(await settled) as Error | undefined)?.message).toContain('audit lock not acquired in time')
-        expect(readFileSync(lockPath(), 'utf-8')).toContain('"next"')
-        expect(existsSync(breakPath())).toBe(false)
-        expect(tripped).toBe(1)
+        const out = await append.then(
+          () => 'resolved',
+          () => 'rejected',
+        )
+        expect(out).toBe('resolved')
+        expect(sightings).toBeGreaterThanOrEqual(2)
+        expect(present(lockPath())).toBe(false)
+        expect(present(breakPath())).toBe(false)
       } finally {
         await clear(append)
       }
     } finally {
       spy.mockRestore()
-      live.kill('SIGKILL')
     }
   })
+
+  test.skipIf(HOST === null)(
+    'a lock judged gone is judged again under the break file, and kept when its holder reads alive there',
+    async () => {
+      await lift()
+      const dead = deadPid()
+      let calls = 0
+      const spy = spyOn(hostIdentity, 'isProcessAlive').mockImplementation(() => ++calls > 1)
+      try {
+        plantLock(lockPath(), { token: 'gone', pid: dead, host: HOST, at: Date.now() })
+        const text = lockText(lockPath())
+        const { append, settled } = oddAppend()
+        try {
+          expect(await refusal(settled)).toContain(`pid ${dead} on this machine`)
+          expect(calls).toBeGreaterThanOrEqual(2)
+          expect(lockText(lockPath())).toBe(text)
+          expect(present(breakPath())).toBe(false)
+        } finally {
+          await clear(append)
+        }
+      } finally {
+        spy.mockRestore()
+      }
+    },
+  )
 })
 
 describe('audit store: every append is synced before it resolves', () => {
@@ -686,7 +805,7 @@ describe('segments', () => {
 
   /** An append that also proves no existing byte moved. */
   async function kept(kind: string, data: unknown, opts?: Opts) {
-    const before = existsSync(auditDir) ? snap() : new Map<string, Buffer>()
+    const before = present(auditDir) ? snap() : new Map<string, Buffer>()
     const result = await append(statePath, kind, data, opts)
     expectPrefix(before)
     return result

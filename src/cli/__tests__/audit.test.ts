@@ -15,7 +15,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   appendFileSync,
-  existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -33,6 +33,9 @@ import { appendRelinked, forge, walkChain, type ForgeOp } from '../../lib/__test
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
 import { main } from '../warpline.js'
+
+/** Whether `path` exists, by lstat: a held audit lock is a symbolic link whose target does not exist. */
+const present = (path: string): boolean => lstatSync(path, { throwIfNoEntry: false }) !== undefined
 
 /** The built bin, for the one case that feeds stdin. */
 const BIN = testFixturesDir(import.meta.url, '../../../dist/bin/warpline.js')
@@ -113,7 +116,7 @@ describe('warpline audit', () => {
     expect(code).toBe(0)
     expect(stdout).toBe(`0 ${'0'.repeat(64)}\n`)
     expect(stderr).toBe('')
-    expect(existsSync(join(home, 'audit'))).toBe(false)
+    expect(present(join(home, 'audit'))).toBe(false)
   })
 
   test("audit head after a deny prints the last line's seq and the hash of its bytes", async () => {
@@ -173,7 +176,7 @@ async function grow(n: number, opts: { maxSegmentBytes?: number } = {}): Promise
 
 /** Appends over 2048-byte segments until there are exactly two. */
 async function twoSegments(): Promise<void> {
-  for (let i = 0; !existsSync(auditDir()) || segmentFiles().length < 2; i++) {
+  for (let i = 0; !present(auditDir()) || segmentFiles().length < 2; i++) {
     if (i > 50) throw new Error('no second segment after 50 appends')
     await grow(1, { maxSegmentBytes: 2048 })
   }
@@ -272,7 +275,7 @@ describe('audit export', () => {
     expect(code).toBe(0)
     expect(stdout.length).toBeGreaterThan(0)
     expect(await snapshotHome(auditDir())).toEqual(before)
-    expect(existsSync(join(auditDir(), '.lock'))).toBe(false)
+    expect(present(join(auditDir(), '.lock'))).toBe(false)
   })
 
   test('a bad or missing --after is refused with usage on stderr and nothing on stdout', async () => {
@@ -500,7 +503,7 @@ describe('--c2sp', () => {
     expect(code).toBe(1)
     expect(stdout).toBe('')
     expect(stderr).toContain('no records yet')
-    expect(existsSync(auditDir())).toBe(false)
+    expect(present(auditDir())).toBe(false)
   })
 
   test('--c2sp takes no lock and adds no byte to the store', async () => {
@@ -906,7 +909,7 @@ describe('audit pass-over', () => {
     const none = await passOver(2)
     expect(none.code).toBe(1)
     expect(none.stderr).toContain('no segment to pass over')
-    expect(existsSync(auditDir())).toBe(false)
+    expect(present(auditDir())).toBe(false)
 
     await grow(3)
     const before = await snapshotHome(home)

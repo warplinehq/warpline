@@ -4,7 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { spawn } from 'node:child_process'
-import { appendFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, cpSync, lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { appendAudit, readHead } from '../audit-log.js'
@@ -101,11 +101,11 @@ describe('the held-out chain walker', () => {
     writeFileSync(
       script,
       [
-        `import { existsSync, writeFileSync } from 'node:fs'`,
+        `import { lstatSync, writeFileSync } from 'node:fs'`,
         `import { appendAudit } from ${JSON.stringify(STORE)}`,
         `const [statePath, go, name] = process.argv.slice(2) as [string, string, string]`,
         `writeFileSync(go + '.' + name, '')`,
-        `while (!existsSync(go)) await Bun.sleep(5)`,
+        `while (lstatSync(go, { throwIfNoEntry: false }) === undefined) await Bun.sleep(5)`,
         `for (let i = 0; i < 40; i++) await appendAudit(statePath, 'denial.lifted', { plugin: name, fingerprint: null })`,
         '',
       ].join('\n'),
@@ -119,7 +119,8 @@ describe('the held-out chain walker', () => {
       })
     const a = run('alpha')
     const b = run('beta')
-    while (!existsSync(`${go}.alpha`) || !existsSync(`${go}.beta`)) await Bun.sleep(5)
+    const present = (path: string): boolean => lstatSync(path, { throwIfNoEntry: false }) !== undefined
+    while (!present(`${go}.alpha`) || !present(`${go}.beta`)) await Bun.sleep(5)
     writeFileSync(go, '')
     const results = await Promise.all([a, b])
     expect(results).toEqual([
@@ -142,6 +143,6 @@ describe('the held-out chain walker', () => {
     const per = (name: string) =>
       records.filter((r) => r.type === 'warpline.audit.denial.lifted' && r.data.plugin === name).length
     expect([per('alpha'), per('beta')]).toEqual([40, 40])
-    expect(existsSync(join(auditDir, '.lock'))).toBe(false)
+    expect(present(join(auditDir, '.lock'))).toBe(false)
   })
 })
