@@ -439,6 +439,15 @@ type ChildMode =
   | 'nolink-ENOSYS'
   | 'nolink-EIO'
   | 'break-EACCES'
+  | 'plain'
+  | 'unlink-EACCES'
+  | 'rejudge-retaken'
+  | 'rejudge-released'
+  | 'rejudge-alive'
+  | 'break-EACCES-retaken'
+  | 'break-EACCES-released'
+  | 'break-EACCES-alive'
+  | 'breakheld-retaken'
 
 /**
  * Runs a child that imports the store by absolute path and appends once, with a
@@ -457,16 +466,38 @@ type ChildMode =
  * `code` is the mode's suffix, as a mount without symbolic links answers. In
  * `break-EACCES` only a call that makes `.lock.break` throws, with `EACCES`, and
  * every other call goes to the real function. These modes wait 300 ms for the
- * lock. In every mode a rejected append prints its message to stdout and exits 1.
+ * lock.
+ *
+ * The modes below change the lock after the store judged it, from inside the
+ * store's first call that makes `.lock.break`. Each spies before the store
+ * loads too. A live holder is `{ token: 'live' }` naming this test process,
+ * which is the child's parent, and this machine. An alive one names token
+ * 'gone' with that same pid.
+ * - `rejudge-retaken`, `rejudge-released` and `rejudge-alive` make the break
+ *   file, then put a live holder in the lock, leave no lock, or put an alive
+ *   one in it, so the store judges it again under the break file.
+ * - `break-EACCES-retaken`, `break-EACCES-released` and `break-EACCES-alive`
+ *   change the lock the same way, then fail to make the break file with `EACCES`.
+ * - `breakheld-retaken` puts a live holder in the lock, then answers `EEXIST`,
+ *   as when another breaker holds the break file, and makes none.
+ * - `unlink-EACCES` fails only the removal of the lock, with `EACCES`.
+ * - `plain` changes nothing.
+ * Every later call goes to the real function.
+ *
+ * `timeoutMs`, when given, is the wait for the lock. Without it every mode
+ * keeps the wait above. The child is killed after 4 s, so one that never
+ * settles fails its case instead of hanging the file. In every mode a rejected
+ * append prints its message to stdout and exits 1.
  */
-function childAppend(mode: ChildMode): ReturnType<typeof spawnSync> & { stdout: string } {
+function childAppend(mode: ChildMode, timeoutMs?: number): ReturnType<typeof spawnSync> & { stdout: string } {
   const script = join(tmp, 'child-append.ts')
   writeFileSync(
     script,
     `import * as fs from 'node:fs'
 import { spyOn } from 'bun:test'
-const [statePath, mode] = process.argv.slice(2)
+const [statePath, mode, timeout] = process.argv.slice(2)
 const lockPath = ${JSON.stringify(lockPath())}
+const HOST = ${JSON.stringify(HOST)}
 if (mode.startsWith('linux-')) {
   const realReadFileSync = fs.readFileSync
   const realReadlinkSync = fs.readlinkSync
@@ -488,19 +519,48 @@ if (mode.startsWith('linux-')) {
   })
 }
 const failsLinks = mode.startsWith('nolink-') || mode === 'break-EACCES'
+const realSymlinkSync = fs.symlinkSync
+const realUnlinkSync = fs.unlinkSync
+const failing = (code) => Object.assign(new Error(code), { code })
 if (failsLinks) {
-  const realSymlinkSync = fs.symlinkSync
-  const failing = (code) => Object.assign(new Error(code), { code })
   spyOn(fs, 'symlinkSync').mockImplementation((target, path, ...rest) => {
     if (mode.startsWith('nolink-')) throw failing(mode.slice('nolink-'.length))
     if (String(path).endsWith('.lock.break')) throw failing('EACCES')
     return realSymlinkSync(target, path, ...rest)
   })
 }
+// What the lock becomes after it was judged: a live holder, no lock, or the judged token with a live holder.
+const changeTo = /^(rejudge|break-EACCES|breakheld)-(retaken|released|alive)$/.exec(mode)?.[2]
+if (changeTo !== undefined) {
+  const relock = () => {
+    realUnlinkSync(lockPath)
+    if (changeTo === 'released') return
+    const token = changeTo === 'retaken' ? 'live' : 'gone'
+    realSymlinkSync(JSON.stringify({ token, pid: process.ppid, host: HOST, at: Date.now() }), lockPath)
+  }
+  let first = true
+  spyOn(fs, 'symlinkSync').mockImplementation((target, path, ...rest) => {
+    if (!first || !String(path).endsWith('.lock.break')) return realSymlinkSync(target, path, ...rest)
+    first = false
+    if (mode.startsWith('rejudge-')) {
+      const made = realSymlinkSync(target, path, ...rest)
+      relock()
+      return made
+    }
+    relock()
+    throw failing(mode.startsWith('breakheld-') ? 'EEXIST' : 'EACCES')
+  })
+}
+if (mode === 'unlink-EACCES') {
+  spyOn(fs, 'unlinkSync').mockImplementation((path, ...rest) => {
+    if (String(path) === lockPath) throw failing('EACCES')
+    return realUnlinkSync(path, ...rest)
+  })
+}
 const { appendAudit } = await import(${JSON.stringify(STORE)})
 try {
   await appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, {
-    ...(failsLinks ? { lockTimeoutMs: 300 } : {}),
+    ...(timeout !== undefined ? { lockTimeoutMs: Number(timeout) } : failsLinks ? { lockTimeoutMs: 300 } : {}),
     now: () => {
       if (mode === 'exit') process.exit(130)
       if (mode === 'replaced') {
@@ -518,7 +578,8 @@ try {
 }
 `,
   )
-  return spawnSync(process.execPath, [script, statePath, mode], { env: { ...process.env }, encoding: 'utf8' })
+  const args = timeoutMs === undefined ? [script, statePath, mode] : [script, statePath, mode, String(timeoutMs)]
+  return spawnSync(process.execPath, args, { env: { ...process.env }, encoding: 'utf8', timeout: 4000 })
 }
 
 describe('the lock names its holder', () => {
@@ -769,14 +830,14 @@ describe('the lock names its holder', () => {
     },
   )
 
-  test('a home whose filesystem cannot hold a symbolic link refuses the append saying so, and writes nothing', async () => {
+  test('a home that refuses the lock as a symbolic link gets a refusal naming the error and the likely cause, and nothing is written', async () => {
     await lift()
     const segment = readFileSync(segmentPath())
     for (const code of ['EPERM', 'ENOTSUP', 'ENOSYS']) {
       const child = childAppend(`nolink-${code}` as ChildMode)
       expect({ code, status: child.status }).toEqual({ code, status: 1 })
       expect(child.stdout).toBe(
-        'audit store: could not append denial.lifted: audit lock not acquired: the filesystem under the home cannot hold a symbolic link (docs/runtime-spec.md § 14)',
+        `audit store: could not append denial.lifted: audit lock not acquired: making its symbolic link failed with ${code}; the filesystem under the home might not hold one (docs/runtime-spec.md § 14)`,
       )
       expect(present(lockPath())).toBe(false)
       expect(readFileSync(segmentPath())).toEqual(segment)
@@ -809,6 +870,206 @@ describe('the lock names its holder', () => {
       }
     },
   )
+})
+
+describe.skipIf(HOST === null)('the lock as it stands when the wait ends', () => {
+  const said = (reason: string) => `audit store: could not append denial.lifted: ${reason}`
+  const LIVE = () =>
+    said(`audit lock not acquired in time: pid ${process.pid} on this machine holds it; remove audit/.lock by hand only once that process is gone`)
+  const NAMELESS = said(
+    'audit lock not acquired in time: its holder names no process; remove audit/.lock by hand only once no warpline process is running',
+  )
+  const UNREMOVED = said('audit lock not acquired in time: its holder is gone, and the lock could not be removed; remove audit/.lock by hand')
+  const gone = () => plantLock(lockPath(), { token: 'gone', pid: deadPid(), host: HOST })
+
+  /**
+   * One lock state at the deadline. `stdout` null means the append goes
+   * through. `lock` is what is at the lock's path afterwards: the planted text,
+   * nothing, the planted directory, or a holder the child put there.
+   */
+  type Row = {
+    title: string
+    plant: () => void
+    mode: ChildMode
+    stdout: () => string | null
+    lock: 'unchanged' | 'none' | 'directory' | { token: string; pid: number }
+    breakFile: 'none' | 'unchanged'
+  }
+
+  const rows: Row[] = [
+    {
+      title: 'live on this machine: the refusal names its pid and this machine, and removal only once it is gone',
+      plant: () => plantLock(lockPath(), { token: 'live', pid: process.pid, host: HOST }),
+      mode: 'plain',
+      stdout: LIVE,
+      lock: 'unchanged',
+      breakFile: 'none',
+    },
+    {
+      title: 'live elsewhere or on a machine that cannot be told: the refusal names its pid, and removal only once it is gone',
+      plant: () => plantLock(lockPath(), { token: 'foreign', pid: deadPid(), host: 'f'.repeat(64) }),
+      mode: 'plain',
+      stdout: () => {
+        const { pid } = JSON.parse(lockText(lockPath())) as { pid: number }
+        return said(
+          `audit lock not acquired in time: pid ${pid} holds it, not on this machine or on one that cannot be told; remove audit/.lock by hand only once that process is gone`,
+        )
+      },
+      lock: 'unchanged',
+      breakFile: 'none',
+    },
+    {
+      title: 'naming no process: the refusal says so, and removal only once no warpline process runs',
+      plant: () => plantLock(lockPath(), { token: 'nameless' }),
+      mode: 'plain',
+      stdout: () => NAMELESS,
+      lock: 'unchanged',
+      breakFile: 'none',
+    },
+    {
+      title: 'a directory: the refusal says it names no process',
+      plant: () => mkdirSync(lockPath()),
+      mode: 'plain',
+      stdout: () => NAMELESS,
+      lock: 'directory',
+      breakFile: 'none',
+    },
+    {
+      title: 'gone, and removable: the append takes the lock',
+      plant: gone,
+      mode: 'plain',
+      stdout: () => null,
+      lock: 'none',
+      breakFile: 'none',
+    },
+    {
+      title: 'gone, where the break file cannot be made: the refusal says the holder is gone and the lock could not be removed',
+      plant: gone,
+      mode: 'break-EACCES',
+      stdout: () => UNREMOVED,
+      lock: 'unchanged',
+      breakFile: 'none',
+    },
+    {
+      title: 'gone, where removing it is refused: the refusal says the holder is gone and the lock could not be removed',
+      plant: gone,
+      mode: 'unlink-EACCES',
+      stdout: () => UNREMOVED,
+      lock: 'unchanged',
+      breakFile: 'none',
+    },
+    {
+      title: 'gone, beside a break file: the refusal names the break file',
+      plant: () => {
+        gone()
+        plantLock(breakPath(), { token: 'breaker', pid: deadPid(), host: HOST })
+      },
+      mode: 'plain',
+      stdout: () =>
+        said(
+          'audit lock not acquired in time: its holder is gone, and .lock.break exists; remove audit/.lock.break by hand only once no warpline process is running',
+        ),
+      lock: 'unchanged',
+      breakFile: 'unchanged',
+    },
+    {
+      title: 'changed after it was judged, under the break file, to a live holder: the refusal names that pid, and removal only once it is gone',
+      plant: gone,
+      mode: 'rejudge-retaken',
+      stdout: LIVE,
+      lock: { token: 'live', pid: process.pid },
+      breakFile: 'none',
+    },
+    {
+      title: 'changed after it was judged, under the break file, to no lock: the append takes the lock',
+      plant: gone,
+      mode: 'rejudge-released',
+      stdout: () => null,
+      lock: 'none',
+      breakFile: 'none',
+    },
+    {
+      title:
+        'changed after it was judged, under the break file, to the same token with a live holder: the refusal names that pid, and removal only once it is gone',
+      plant: gone,
+      mode: 'rejudge-alive',
+      stdout: LIVE,
+      lock: { token: 'gone', pid: process.pid },
+      breakFile: 'none',
+    },
+    {
+      title: 'changed after it was judged, as the break file failed, to a live holder: the refusal names that pid, and removal only once it is gone',
+      plant: gone,
+      mode: 'break-EACCES-retaken',
+      stdout: LIVE,
+      lock: { token: 'live', pid: process.pid },
+      breakFile: 'none',
+    },
+    {
+      title: 'changed after it was judged, as the break file failed, to no lock: the refusal names no holder',
+      plant: gone,
+      mode: 'break-EACCES-released',
+      stdout: () => said('audit lock not acquired in time'),
+      lock: 'none',
+      breakFile: 'none',
+    },
+    {
+      title:
+        'changed after it was judged, as the break file failed, to the same token with a live holder: the refusal names that pid, and removal only once it is gone',
+      plant: gone,
+      mode: 'break-EACCES-alive',
+      stdout: LIVE,
+      lock: { token: 'gone', pid: process.pid },
+      breakFile: 'none',
+    },
+    {
+      title:
+        'changed after it was judged, while another breaker held the break file, to a live holder: the refusal names that pid and not the break file',
+      plant: gone,
+      mode: 'breakheld-retaken',
+      stdout: LIVE,
+      lock: { token: 'live', pid: process.pid },
+      breakFile: 'none',
+    },
+  ]
+
+  for (const row of rows) {
+    test(row.title, async () => {
+      await lift()
+      row.plant()
+      try {
+        const segment = readFileSync(segmentPath())
+        const text = row.lock === 'unchanged' ? lockText(lockPath()) : undefined
+        const brk = row.breakFile === 'unchanged' ? lockText(breakPath()) : undefined
+        const want = row.stdout()
+
+        const child = childAppend(row.mode, 0)
+
+        if (want === null) {
+          expect(child.status).toBe(0)
+          const after = readFileSync(segmentPath())
+          expect(after.subarray(0, segment.length).equals(segment)).toBe(true)
+          const added = after.subarray(segment.length).toString('utf8')
+          expect(added.endsWith('\n') && added.indexOf('\n') === added.length - 1).toBe(true)
+        } else {
+          expect({ status: child.status, stdout: child.stdout }).toEqual({ status: 1, stdout: want })
+          expect(readFileSync(segmentPath()).equals(segment)).toBe(true)
+        }
+        if (row.lock === 'unchanged') expect(lockText(lockPath())).toBe(text!)
+        else if (row.lock === 'none') expect(present(lockPath())).toBe(false)
+        else if (row.lock === 'directory') expect(lstatSync(lockPath()).isDirectory()).toBe(true)
+        else {
+          const holder = JSON.parse(lockText(lockPath())) as Record<string, unknown>
+          expect({ token: holder.token, pid: holder.pid, host: holder.host }).toEqual({ ...row.lock, host: HOST })
+        }
+        if (row.breakFile === 'unchanged') expect(lockText(breakPath())).toBe(brk!)
+        else expect(present(breakPath())).toBe(false)
+      } finally {
+        rmSync(lockPath(), { recursive: true, force: true })
+        rmSync(breakPath(), { force: true })
+      }
+    })
+  }
 })
 
 describe('audit store: every append is synced before it resolves', () => {

@@ -148,6 +148,13 @@ describe('warpline audit', () => {
     expect(stdout).toBe('')
     expect(stderr).toContain('warpline audit head')
   })
+
+  test('the usage of audit says export prints every complete line after the seq, a record as CloudEvents JSON', async () => {
+    const { stderr } = await capture(['audit'])
+
+    expect(stderr).toContain('Prints every complete line after <seq>')
+    expect(stderr).not.toContain('every complete record')
+  })
 })
 
 // -- export, verify and --c2sp ------------------------------------------------
@@ -596,69 +603,6 @@ describe('verify when the walk passes over or stops at a line', () => {
     expect(named[0]).toContain('fire.intent')
     expect(stdout).not.toContain('open intent:')
   })
-
-  test('an active segment that holds no complete line reads unreadable, exit 6, naming the file and that it is moved aside by hand', async () => {
-    await mailer()
-    await grow(1)
-    const h0 = await headText()
-    const { seq: s } = await readHead(statePath())
-    const path = join(auditDir(), nameOf(s + 1))
-
-    // Empty, then only a partial line: the walk has no opening line to start from either way.
-    for (const bytes of ['', '{"specversion":"1.0","id":']) {
-      writeFileSync(path, bytes)
-      const { code, stdout } = await verifyAt(h0)
-
-      expect(stdout).toContain('verdict: unreadable\n')
-      expect(code).toBe(6)
-      const why = reasons(stdout)
-      expect(why).toHaveLength(1)
-      expect(why[0]).toContain(`segment ${nameOf(s + 1)} holds no complete line`)
-      expect(why[0]).toContain('move it aside by hand')
-      const named = unreadableLines(stdout)
-      expect(named).toHaveLength(1)
-      expect(named[0]).toContain(`segment ${nameOf(s + 1)} holds no complete line`)
-      expect(named[0]).toContain('move it aside by hand')
-    }
-  })
-
-  test('an active segment that holds no complete line refuses every append, the walk and pass-over naming the file, and once it is moved out of the store the next append goes through and verify reads clean', async () => {
-    await mailer()
-
-    // Empty, as a crash between creating the file and its first write leaves it, then only a partial line.
-    for (const [i, bytes] of ['', '{"specversion":"1.0","id":'].entries()) {
-      await grow(1)
-      const h0 = await headText()
-      const { seq: s } = await readHead(statePath())
-      const name = nameOf(s + 1)
-      writeFileSync(join(auditDir(), name), bytes)
-      const WANT = `segment ${name} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`
-
-      let reason: unknown
-      try {
-        await appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null })
-      } catch (err) {
-        reason = (err as { reason?: unknown }).reason
-      }
-      expect(reason).toBe(WANT)
-
-      const passed = await passOver(s)
-      expect(passed.code).toBe(1)
-      expect(passed.stderr).toContain(WANT)
-
-      const listed = await capture(['principal', 'list'])
-      expect(listed.code).toBe(1)
-      expect(listed.stderr).toContain(WANT)
-
-      // The hand step the refusal names. The file holds no record, so nothing on the chain goes with it.
-      renameSync(join(auditDir(), name), join(home, `aside-${i}.jsonl`))
-      await grow(1)
-      expect(segmentFiles()).not.toContain(name)
-      const v = await verifyAt(h0)
-      expect(v.stdout).toContain('verdict: clean\n')
-      expect(v.code).toBe(0)
-    }
-  })
 })
 
 describe('a line the walk passes over wedges nothing', () => {
@@ -1082,7 +1026,7 @@ describe('a line that is not a record', () => {
     } catch (err) {
       reason = (err as { reason?: unknown }).reason
     }
-    expect(reason).toBe('the active segment holds no readable last line')
+    expect(reason).toBe(`seq ${g} is not a record; pass it over with warpline audit pass-over (docs/runtime-spec.md § 14)`)
 
     const listed = await capture(['principal', 'list'])
     expect(listed.code).toBe(1)
@@ -1178,28 +1122,6 @@ describe('a line that is not a record', () => {
     expect(v.code).toBe(0)
   })
 
-  // A pass-over that dies between creating its segment and writing to it leaves either.
-  const successors: [string, string][] = [
-    ['at the end of a segment whose successor is empty is tampered, naming its seq', ''],
-    ['at the end of a segment whose successor holds only a partial line is tampered, naming its seq', '{"specversion":"1.0","id":'],
-  ]
-  for (const [title, bytes] of successors) {
-    test(title, async () => {
-      await mailer()
-      const h0 = await headText()
-      const { seq: g } = await garble()
-      writeFileSync(join(auditDir(), nameOf(g)), bytes)
-
-      const { code, stdout } = await verifyAt(h0)
-
-      expect(stdout).toContain('verdict: tampered\n')
-      expect(code).toBe(4)
-      expect(reasons(stdout)).toEqual([`reason: seq ${g} is not a record`])
-      expect(unreadableLines(stdout)).toHaveLength(1)
-      expect(stdout).not.toContain('WALK_SENTINEL_5d1')
-    })
-  }
-
   test('passed over at the end of a segment shares its position with the opening line after it, and export prints it only for an --after below the last record before it', async () => {
     await mailer()
     await grow(1)
@@ -1259,4 +1181,373 @@ describe('a walk that stops names the way past it', () => {
       expect(v.stdout).not.toContain('WALK_SENTINEL_5d1')
     })
   }
+})
+
+// -- What a crash leaves before or at a new segment ----------------------------
+
+describe('what a crash leaves before or at a new segment', () => {
+  /** The partial line a write that stopped part way leaves. */
+  const PARTIAL = '{"specversion":"1.0","id":'
+  const MOVE = (n: number) => `segment ${nameOf(n)} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`
+  const CARRY = (b: number) =>
+    `seq ${b} holds fire.intent data the walk cannot carry; pass it over with warpline audit pass-over (docs/runtime-spec.md § 14)`
+  const NOTREC = (g: number) => `seq ${g} is not a record; pass it over with warpline audit pass-over (docs/runtime-spec.md § 14)`
+
+  /**
+   * What verify, `audit head`, an append and `principal list` give at one step.
+   * `next` is the `open intents unreadable` line's words, or null for none.
+   */
+  type Step = {
+    verdict: 'clean' | 'torn' | 'tampered' | 'unreadable'
+    exit: number
+    reason: string
+    next: string | null
+    head: 'prints' | 'refuses'
+    append?: 'refuses' | 'goes through'
+  }
+  type End = { verdict: 'clean' | 'torn'; exit: number; reason: string | null }
+  /** The head kept before the shape was made, the newest segment's first seq, the line the walk stops on, and the open intent. */
+  type Ctx = { h0: string; n: number; stop?: number; intent?: number }
+
+  const U = (x: string): Step => ({ verdict: 'unreadable', exit: 6, reason: x, next: x, head: 'refuses', append: 'refuses' })
+  const CLEAN: End = { verdict: 'clean', exit: 0, reason: null }
+  const acknowledged = (seq: number): End => ({ verdict: 'torn', exit: 3, reason: `seq ${seq} acknowledges a partial line the store kept` })
+
+  /** The first seq of the newest segment. */
+  const newest = (): number => Number(segmentFiles().at(-1)!.slice(0, 16))
+  /** The newest segment overwritten with what a crash right after creating it leaves. */
+  const leave = (content: string): number => {
+    const n = newest()
+    writeFileSync(join(auditDir(), nameOf(n)), content)
+    return n
+  }
+  const tear = () => appendFileSync(join(auditDir(), segmentFiles().at(-1)!), PARTIAL)
+
+  const shapes: { what: string; build: (content: string) => Promise<Ctx>; steps: (c: Ctx) => Step[]; end: (c: Ctx) => End }[] = [
+    {
+      what: 'genesis',
+      build: async (content) => {
+        const h0 = await headText()
+        expect(h0).toBe(`0 ${'0'.repeat(64)}\n`)
+        mkdirSync(auditDir())
+        writeFileSync(join(auditDir(), nameOf(1)), content)
+        return { h0, n: 1 }
+      },
+      steps: (c) => [U(MOVE(c.n))],
+      end: () => CLEAN,
+    },
+    {
+      what: 'a rotation',
+      build: async (content) => {
+        const { seq: intent } = await mailer()
+        await grow(1)
+        const h0 = await headText()
+        await grow(1, { maxSegmentBytes: 1 })
+        return { h0, n: leave(content), intent }
+      },
+      steps: (c) => [
+        U(MOVE(c.n)),
+        { verdict: 'torn', exit: 3, reason: `seq ${c.n - 1} seals the last segment, and nothing follows it`, next: null, head: 'prints' },
+      ],
+      end: () => CLEAN,
+    },
+    {
+      what: 'a pass-over that sealed a due rotation',
+      build: async (content) => {
+        const { seq: intent } = await mailer()
+        const stop = badIntent()
+        await grow(1)
+        const h0 = await headText()
+        await passOverLib(statePath(), [stop], { maxSegmentBytes: 1 })
+        return { h0, n: leave(content), stop, intent }
+      },
+      steps: (c) => [
+        U(MOVE(c.n)),
+        { verdict: 'unreadable', exit: 6, reason: CARRY(c.stop!), next: CARRY(c.stop!), head: 'prints', append: 'refuses' },
+      ],
+      end: () => CLEAN,
+    },
+    {
+      what: 'the heal of a partial last line',
+      build: async (content) => {
+        const { seq: intent } = await mailer()
+        await grow(1)
+        const h0 = await headText()
+        tear()
+        await grow(1)
+        return { h0, n: leave(content), intent }
+      },
+      steps: (c) => [
+        U(MOVE(c.n)),
+        { verdict: 'torn', exit: 3, reason: `the store ends in a partial line after seq ${c.n - 1}`, next: null, head: 'prints' },
+      ],
+      end: (c) => acknowledged(c.n),
+    },
+    {
+      what: 'a pass-over past a partial last line',
+      build: async (content) => {
+        const { seq: intent } = await mailer()
+        const stop = badIntent()
+        await grow(1)
+        const h0 = await headText()
+        tear()
+        await passOverLib(statePath(), [stop])
+        return { h0, n: leave(content), stop, intent }
+      },
+      steps: (c) => [
+        U(MOVE(c.n)),
+        { verdict: 'unreadable', exit: 6, reason: CARRY(c.stop!), next: CARRY(c.stop!), head: 'prints', append: 'refuses' },
+      ],
+      end: (c) => acknowledged(c.n),
+    },
+    {
+      what: 'a pass-over of a line with records after it',
+      build: async (content) => {
+        const { seq: intent } = await mailer()
+        const stop = badIntent()
+        await grow(1)
+        const h0 = await headText()
+        await passOverLib(statePath(), [stop])
+        return { h0, n: leave(content), stop, intent }
+      },
+      steps: (c) => [
+        U(MOVE(c.n)),
+        { verdict: 'unreadable', exit: 6, reason: CARRY(c.stop!), next: CARRY(c.stop!), head: 'prints', append: 'goes through' },
+      ],
+      end: () => CLEAN,
+    },
+    {
+      what: 'a pass-over of lines that are not records at the end',
+      build: async (content) => {
+        const { seq: intent } = await mailer()
+        await grow(1)
+        const h0 = await headText()
+        const { seq: stop } = await garble()
+        await passOverLib(statePath(), [stop])
+        return { h0, n: leave(content), stop, intent }
+      },
+      steps: (c) => [
+        { verdict: 'tampered', exit: 4, reason: `seq ${c.stop} is not a record`, next: MOVE(c.n), head: 'refuses', append: 'refuses' },
+        { verdict: 'tampered', exit: 4, reason: `seq ${c.stop} is not a record`, next: NOTREC(c.stop!), head: 'refuses', append: 'refuses' },
+      ],
+      end: () => CLEAN,
+    },
+    {
+      what: 'a pass-over of lines that are not records before a partial last line',
+      build: async (content) => {
+        const { seq: intent } = await mailer()
+        await grow(1)
+        const h0 = await headText()
+        const { seq: stop } = await garble()
+        tear()
+        await passOverLib(statePath(), [stop])
+        return { h0, n: leave(content), stop, intent }
+      },
+      steps: (c) => [
+        { verdict: 'tampered', exit: 4, reason: `seq ${c.stop} is not a record`, next: MOVE(c.n), head: 'refuses', append: 'refuses' },
+        { verdict: 'tampered', exit: 4, reason: `seq ${c.stop} is not a record`, next: NOTREC(c.stop!), head: 'refuses', append: 'refuses' },
+      ],
+      end: (c) => acknowledged(c.stop!),
+    },
+  ]
+
+  /**
+   * Each step's words, then the step those words name and nothing else, then
+   * the next append and verify against the head kept before the shape was made.
+   */
+  async function follow(ctx: Ctx, steps: Step[], end: End): Promise<void> {
+    const outputs: string[] = []
+    const moved: { aside: string; bytes: Buffer }[] = []
+    for (const [k, step] of steps.entries()) {
+      const v = await verifyAt(ctx.h0)
+      outputs.push(v.stdout, v.stderr)
+      expect({ k, code: v.code }).toEqual({ k, code: step.exit })
+      expect(v.stdout).toContain(`verdict: ${step.verdict}\n`)
+      expect(reasons(v.stdout)).toEqual([`reason: ${step.reason}`])
+      expect(unreadableLines(v.stdout)).toEqual(step.next === null ? [] : [`open intents unreadable: ${step.next}`])
+
+      const h = await capture(['audit', 'head'])
+      outputs.push(h.stdout, h.stderr)
+      if (step.head === 'refuses') {
+        expect({ code: h.code, stdout: h.stdout, stderr: h.stderr }).toEqual({
+          code: 1,
+          stdout: '',
+          stderr: `audit head: there is no head to print: ${step.next}.\n`,
+        })
+      } else {
+        expect(h.code).toBe(0)
+      }
+
+      if (step.next !== null) {
+        const appended = await appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null }).then(
+          () => 'resolved',
+          (err: unknown) => (err as { reason?: unknown }).reason,
+        )
+        expect(appended).toBe(step.append === 'goes through' ? 'resolved' : step.next)
+      }
+      const listed = await capture(['principal', 'list'])
+      outputs.push(listed.stdout, listed.stderr)
+      if (step.next === null) {
+        expect(listed.code).toBe(0)
+      } else {
+        expect(listed.code).toBe(1)
+        expect(listed.stderr).toContain(step.next)
+      }
+
+      // Only what the printed line names, through the two hand steps it can name.
+      const printed = unreadableLines(v.stdout)[0]?.slice('open intents unreadable: '.length)
+      if (printed === undefined) continue
+      const aside = /^segment (\d{16}\.jsonl) holds no complete line; move it aside by hand/.exec(printed)
+      const pass = /^seq (\d+) [^;]*; pass it over with warpline audit pass-over/.exec(printed)
+      if (aside !== null) {
+        const to = join(home, `aside-${k}.jsonl`)
+        const bytes = readFileSync(join(auditDir(), aside[1]!))
+        renameSync(join(auditDir(), aside[1]!), to)
+        moved.push({ aside: to, bytes })
+      } else if (pass !== null) {
+        const r = await passOver(Number(pass[1]))
+        outputs.push(r.stdout, r.stderr)
+        expect(r.code).toBe(0)
+      } else {
+        throw new Error(`no step is named by: ${printed}`)
+      }
+    }
+    for (const out of outputs) expect(out).not.toContain('WALK_SENTINEL_5d1')
+
+    await grow(1)
+    // What was moved aside stays out of the store, as it was.
+    for (const { aside, bytes } of moved) {
+      expect(segmentFiles()).not.toContain(aside.slice(aside.lastIndexOf('/') + 1))
+      expect(readFileSync(aside).equals(bytes)).toBe(true)
+    }
+    const v = await verifyAt(ctx.h0)
+    expect(v.stdout).toContain(`verdict: ${end.verdict}\n`)
+    expect(v.code).toBe(end.exit)
+    expect(reasons(v.stdout)).toEqual(end.reason === null ? [] : [`reason: ${end.reason}`])
+    expect(unreadableLines(v.stdout)).toEqual([])
+    if (ctx.intent !== undefined) expect(v.stdout).toContain(`open intent: seq ${ctx.intent} plugin mailer run run-77\n`)
+    expect(v.stdout).not.toContain('WALK_SENTINEL_5d1')
+  }
+
+  for (const shape of shapes) {
+    for (const [content, bytes] of [
+      ['empty', ''],
+      ['holding a partial line', PARTIAL],
+    ] as const) {
+      const ends = shape.what.includes('partial') ? 'torn' : 'clean'
+      test(`${shape.what}, its new segment left ${content}: each refusal names the next step, and taking it leaves a store that appends and verifies ${ends}`, async () => {
+        const ctx = await shape.build(bytes)
+        expect(ctx.n).toBe(newest())
+        const end = shape.end(ctx)
+        expect(end.verdict).toBe(ends)
+        await follow(ctx, shape.steps(ctx), end)
+      })
+    }
+  }
+
+  test('a rotation that stopped after its seal: nothing refuses, verify reads torn, and the next append heals it to clean', async () => {
+    const { seq: intent } = await mailer()
+    await grow(1)
+    const h0 = await headText()
+    await grow(1, { maxSegmentBytes: 1 })
+    const n = newest()
+    rmSync(join(auditDir(), nameOf(n)))
+    await follow(
+      { h0, n, intent },
+      [{ verdict: 'torn', exit: 3, reason: `seq ${n - 1} seals the last segment, and nothing follows it`, next: null, head: 'prints' }],
+      CLEAN,
+    )
+  })
+
+  test('a write that stopped part way: nothing refuses, verify reads torn, and the next append acknowledges the partial line, still torn', async () => {
+    const { seq: intent } = await mailer()
+    await grow(1)
+    const h0 = await headText()
+    const s = Number(h0.split(' ')[0])
+    tear()
+    await follow(
+      { h0, n: newest(), intent },
+      [{ verdict: 'torn', exit: 3, reason: `the store ends in a partial line after seq ${s}`, next: null, head: 'prints' }],
+      acknowledged(s + 1),
+    )
+  })
+
+  test('runtime-spec § 14 and the exit-75 row of the recipe state one rule for the next step, and restate no refusal', () => {
+    const spec = readFileSync(testFixturesDir(import.meta.url, '../../../docs/runtime-spec.md'), 'utf8')
+    const from = spec.indexOf('\n## 14. The audit store')
+    const to = spec.indexOf('\n## 15. ', from)
+    expect(from).toBeGreaterThanOrEqual(0)
+    expect(to).toBeGreaterThan(from)
+    const s14 = spec.slice(from, to)
+    expect(s14.length).toBeGreaterThan(0)
+
+    const recipe = readFileSync(testFixturesDir(import.meta.url, '../../../docs/scheduler-recipe.md'), 'utf8')
+    const rows = recipe.split('\n').filter((l) => l.startsWith('| Exits `75` every tick'))
+    expect(rows).toHaveLength(1)
+    const row = rows[0]!
+
+    for (const rule of [
+      '### When the store refuses',
+      'The refusal names what is wrong and the next step.',
+      'prints that refusal on its `open intents unreadable` line under any verdict',
+      'The refusal is worded from the lock as it stands when the wait ends, never from an earlier look.',
+      'is not removed, and the writer judges it again at once',
+    ]) {
+      expect({ rule, in14: s14.includes(rule) }).toEqual({ rule, in14: true })
+    }
+    for (const rule of ['Stderr names what is wrong and the next step', 'open intents unreadable']) {
+      expect({ rule, inRow: row.includes(rule) }).toEqual({ rule, inRow: true })
+    }
+
+    // A refusal's own words live in the code, never in either text.
+    for (const words of [
+      'move it aside by hand',
+      'pass it over with warpline audit pass-over',
+      'could not be removed',
+      'only once that process is gone',
+      'only once no warpline process is running',
+      'might not hold one',
+      'there is no head to print:',
+    ]) {
+      expect({ words, in14: s14.includes(words), inRow: row.includes(words) }).toEqual({ words, in14: false, inRow: false })
+    }
+
+    // The per-shape sentences the one rule replaced, so a sentence put back goes red.
+    for (const sentence of [
+      'names `warpline audit verify` and',
+      'the filesystem under the home cannot hold a symbolic link',
+      'naming `.lock.break`',
+      "The refusal names the holder's process id and",
+      'remove the lock by hand only once that process is gone',
+      'but its lock could not be removed, the refusal says so',
+      'and the refusal names that pid',
+      'When appends keep refusing, read the refusal.',
+      '`audit verify` reports `unreadable` and names the seq',
+      '`open intents unreadable` line carries the same reason',
+      "stops at the active segment's first line says no such thing",
+      'has its own refusal and recovery',
+      'Verify reports `tampered` at that line until the pass-over',
+      'after a pass-over, which is the true account',
+      'Every append, pass-over and walk refuses with',
+      'naming the file, and verify reports `unreadable` with that reason',
+      'Move the file out of `audit/` by hand.',
+      'the next append goes after the last line of the segment',
+      'names the file and says to move it aside by hand',
+      'or only a partial one (§ A torn tail)',
+      'An active segment with no complete line has no first line',
+      'A lock replaced in between is kept until it is judged itself.',
+      'Remove a break file only once no warpline process runs.',
+    ]) {
+      expect({ sentence, in14: s14.includes(sentence) }).toEqual({ sentence, in14: false })
+    }
+    for (const sentence of [
+      'Stderr names its seq, and its kind when it is a record',
+      'names no pass-over, because that line cannot be passed over',
+      'has its own reason, which names the file and says to move it aside by hand',
+      'It says which file to remove by hand, and when',
+      'Stderr names the holder',
+    ]) {
+      expect({ sentence, inRow: row.includes(sentence) }).toEqual({ sentence, inRow: false })
+    }
+  })
 })
