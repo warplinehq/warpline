@@ -448,6 +448,7 @@ type ChildMode =
   | 'break-EACCES-released'
   | 'break-EACCES-alive'
   | 'breakheld-retaken'
+  | 'breakheld-stays'
 
 /**
  * Runs a child that imports the store by absolute path and appends once, with a
@@ -480,6 +481,7 @@ type ChildMode =
  *   change the lock the same way, then fail to make the break file with `EACCES`.
  * - `breakheld-retaken` puts a live holder in the lock, then answers `EEXIST`,
  *   as when another breaker holds the break file, and makes none.
+ * - `breakheld-stays` answers `EEXIST` the same way and leaves the lock as it is.
  * - `unlink-EACCES` fails only the removal of the lock, with `EACCES`.
  * - `plain` changes nothing.
  * Every later call goes to the real function.
@@ -549,6 +551,14 @@ if (changeTo !== undefined) {
     }
     relock()
     throw failing(mode.startsWith('breakheld-') ? 'EEXIST' : 'EACCES')
+  })
+}
+if (mode === 'breakheld-stays') {
+  let first = true
+  spyOn(fs, 'symlinkSync').mockImplementation((target, path, ...rest) => {
+    if (!first || !String(path).endsWith('.lock.break')) return realSymlinkSync(target, path, ...rest)
+    first = false
+    throw failing('EEXIST')
   })
 }
 if (mode === 'unlink-EACCES') {
@@ -973,6 +983,28 @@ describe.skipIf(HOST === null)('the lock as it stands when the wait ends', () =>
       breakFile: 'unchanged',
     },
     {
+      title: 'live on this machine, beside a break file: the refusal names its pid and not the break file',
+      plant: () => {
+        plantLock(lockPath(), { token: 'live', pid: process.pid, host: HOST })
+        plantLock(breakPath(), { token: 'breaker', pid: deadPid(), host: HOST })
+      },
+      mode: 'plain',
+      stdout: LIVE,
+      lock: 'unchanged',
+      breakFile: 'unchanged',
+    },
+    {
+      title: 'gone, where another breaker held the break file and left none: the refusal names its pid on this machine and not the break file',
+      plant: gone,
+      mode: 'breakheld-stays',
+      stdout: () => {
+        const { pid } = JSON.parse(lockText(lockPath())) as { pid: number }
+        return said(`audit lock not acquired in time: pid ${pid} on this machine holds it; remove audit/.lock by hand only once that process is gone`)
+      },
+      lock: 'unchanged',
+      breakFile: 'none',
+    },
+    {
       title: 'changed after it was judged, under the break file, to a live holder: the refusal names that pid, and removal only once it is gone',
       plant: gone,
       mode: 'rejudge-retaken',
@@ -1361,6 +1393,31 @@ describe('segments', () => {
 
     expect(lastOpened().data.open_intents).toEqual([{ seq: b.seq, plugin: 'b', run_id: 'r2', effect_id: null }])
     expect(lastOpened().data.authority).toEqual({ preferences: null, principals: null })
+  })
+})
+
+describe('an empty newest segment the writer did not make', () => {
+  test('under a name no append opens, it is refused under the lock, never written into, and read as not yet written', async () => {
+    await lift()
+    const head = await audit.readHead(statePath)
+    const stray = join(auditDir, '0000000000000009.jsonl')
+    writeFileSync(stray, '')
+    const first = readFileSync(segmentPath())
+
+    const reason = await lift().then(
+      () => 'resolved',
+      (err: unknown) => (err as { reason?: unknown }).reason,
+    )
+
+    expect(reason).toBe('segment 0000000000000009.jsonl holds no complete line, and this append does not open it')
+    expect(readFileSync(segmentPath()).equals(first)).toBe(true)
+    expect(statSync(stray).size).toBe(0)
+    expect(await audit.readHead(statePath)).toEqual(head)
+    expect(await audit.verifyStore(statePath, { seq: head.seq, hex: head.head }, Date.now())).toMatchObject({
+      verdict: 'tampered',
+      reason: `segment 0000000000000009.jsonl is not named by its first seq ${head.seq + 1}`,
+      intents_unreadable: null,
+    })
   })
 })
 

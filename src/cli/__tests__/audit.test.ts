@@ -11,7 +11,7 @@
  * Everything this file writes goes under temp dirs (AGENTS.md Rule 2).
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   appendFileSync,
@@ -20,6 +20,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   renameSync,
   rmSync,
   statSync,
@@ -1192,24 +1193,38 @@ describe('what a crash leaves before or at a new segment', () => {
   const CARRY = (b: number) =>
     `seq ${b} holds fire.intent data the walk cannot carry; pass it over with warpline audit pass-over (docs/runtime-spec.md § 14)`
   const NOTREC = (g: number) => `seq ${g} is not a record; pass it over with warpline audit pass-over (docs/runtime-spec.md § 14)`
+  const SEAL = (s: number) => `seq ${s} seals the last segment, and nothing follows it`
+  const PART = (s: number) => `the store ends in a partial line after seq ${s}`
+  const EMPTY = (n: number) => `segment ${nameOf(n)} is empty`
+  const NR = (g: number) => `seq ${g} is not a record`
+  /** What an append that resolves gives, in place of a refusal. */
+  const THROUGH = 'goes through'
 
   /**
    * What verify, `audit head`, an append and `principal list` give at one step.
-   * `next` is the `open intents unreadable` line's words, or null for none.
+   * `reason` is verify's `reason:` line and `next` its `open intents unreadable`
+   * line, each null for none. `append` is THROUGH or the append's exact refusal.
    */
   type Step = {
     verdict: 'clean' | 'torn' | 'tampered' | 'unreadable'
     exit: number
-    reason: string
+    reason: string | null
     next: string | null
     head: 'prints' | 'refuses'
-    append?: 'refuses' | 'goes through'
+    append: string
   }
+  const st = (
+    verdict: Step['verdict'],
+    exit: number,
+    reason: string | null,
+    next: string | null,
+    head: Step['head'],
+    append: string,
+  ): Step => ({ verdict, exit, reason, next, head, append })
   type End = { verdict: 'clean' | 'torn'; exit: number; reason: string | null }
   /** The head kept before the shape was made, the newest segment's first seq, the line the walk stops on, and the open intent. */
   type Ctx = { h0: string; n: number; stop?: number; intent?: number }
 
-  const U = (x: string): Step => ({ verdict: 'unreadable', exit: 6, reason: x, next: x, head: 'refuses', append: 'refuses' })
   const CLEAN: End = { verdict: 'clean', exit: 0, reason: null }
   const acknowledged = (seq: number): End => ({ verdict: 'torn', exit: 3, reason: `seq ${seq} acknowledges a partial line the store kept` })
 
@@ -1223,7 +1238,24 @@ describe('what a crash leaves before or at a new segment', () => {
   }
   const tear = () => appendFileSync(join(auditDir(), segmentFiles().at(-1)!), PARTIAL)
 
-  const shapes: { what: string; build: (content: string) => Promise<Ctx>; steps: (c: Ctx) => Step[]; end: (c: Ctx) => End }[] = [
+  /** The steps of the four pass-over shapes whose walk stops at a line that holds data it cannot carry. */
+  const carried = (c: Ctx, content: string, then: string): Step[] =>
+    content === ''
+      ? [st('unreadable', 6, CARRY(c.stop!), CARRY(c.stop!), 'prints', CARRY(c.stop!))]
+      : [
+          st('unreadable', 6, CARRY(c.stop!), CARRY(c.stop!), 'prints', MOVE(c.n)),
+          st('unreadable', 6, CARRY(c.stop!), CARRY(c.stop!), 'prints', then),
+        ]
+  /** The steps of the two shapes whose walk stops at a line that is not a record. */
+  const notRecords = (c: Ctx, content: string): Step[] =>
+    content === ''
+      ? [st('tampered', 4, NR(c.stop!), NOTREC(c.stop!), 'refuses', NOTREC(c.stop!))]
+      : [
+          st('tampered', 4, NR(c.stop!), NOTREC(c.stop!), 'refuses', MOVE(c.n)),
+          st('tampered', 4, NR(c.stop!), NOTREC(c.stop!), 'refuses', NOTREC(c.stop!)),
+        ]
+
+  const shapes: { what: string; build: (content: string) => Promise<Ctx>; steps: (c: Ctx, content: string) => Step[]; end: (c: Ctx) => End }[] = [
     {
       what: 'genesis',
       build: async (content) => {
@@ -1233,7 +1265,10 @@ describe('what a crash leaves before or at a new segment', () => {
         writeFileSync(join(auditDir(), nameOf(1)), content)
         return { h0, n: 1 }
       },
-      steps: (c) => [U(MOVE(c.n))],
+      steps: (c, content) =>
+        content === ''
+          ? [st('torn', 3, EMPTY(c.n), null, 'prints', THROUGH)]
+          : [st('torn', 3, PART(0), null, 'prints', MOVE(c.n)), st('clean', 0, null, null, 'prints', THROUGH)],
       end: () => CLEAN,
     },
     {
@@ -1245,10 +1280,10 @@ describe('what a crash leaves before or at a new segment', () => {
         await grow(1, { maxSegmentBytes: 1 })
         return { h0, n: leave(content), intent }
       },
-      steps: (c) => [
-        U(MOVE(c.n)),
-        { verdict: 'torn', exit: 3, reason: `seq ${c.n - 1} seals the last segment, and nothing follows it`, next: null, head: 'prints' },
-      ],
+      steps: (c, content) =>
+        content === ''
+          ? [st('torn', 3, SEAL(c.n - 1), null, 'prints', THROUGH)]
+          : [st('torn', 3, SEAL(c.n - 1), null, 'prints', MOVE(c.n)), st('torn', 3, SEAL(c.n - 1), null, 'prints', THROUGH)],
       end: () => CLEAN,
     },
     {
@@ -1261,10 +1296,7 @@ describe('what a crash leaves before or at a new segment', () => {
         await passOverLib(statePath(), [stop], { maxSegmentBytes: 1 })
         return { h0, n: leave(content), stop, intent }
       },
-      steps: (c) => [
-        U(MOVE(c.n)),
-        { verdict: 'unreadable', exit: 6, reason: CARRY(c.stop!), next: CARRY(c.stop!), head: 'prints', append: 'refuses' },
-      ],
+      steps: (c, content) => carried(c, content, CARRY(c.stop!)),
       end: () => CLEAN,
     },
     {
@@ -1277,10 +1309,10 @@ describe('what a crash leaves before or at a new segment', () => {
         await grow(1)
         return { h0, n: leave(content), intent }
       },
-      steps: (c) => [
-        U(MOVE(c.n)),
-        { verdict: 'torn', exit: 3, reason: `the store ends in a partial line after seq ${c.n - 1}`, next: null, head: 'prints' },
-      ],
+      steps: (c, content) =>
+        content === ''
+          ? [st('torn', 3, EMPTY(c.n), null, 'prints', THROUGH)]
+          : [st('torn', 3, PART(c.n - 1), null, 'prints', MOVE(c.n)), st('torn', 3, PART(c.n - 1), null, 'prints', THROUGH)],
       end: (c) => acknowledged(c.n),
     },
     {
@@ -1294,10 +1326,7 @@ describe('what a crash leaves before or at a new segment', () => {
         await passOverLib(statePath(), [stop])
         return { h0, n: leave(content), stop, intent }
       },
-      steps: (c) => [
-        U(MOVE(c.n)),
-        { verdict: 'unreadable', exit: 6, reason: CARRY(c.stop!), next: CARRY(c.stop!), head: 'prints', append: 'refuses' },
-      ],
+      steps: (c, content) => carried(c, content, CARRY(c.stop!)),
       end: (c) => acknowledged(c.n),
     },
     {
@@ -1310,10 +1339,7 @@ describe('what a crash leaves before or at a new segment', () => {
         await passOverLib(statePath(), [stop])
         return { h0, n: leave(content), stop, intent }
       },
-      steps: (c) => [
-        U(MOVE(c.n)),
-        { verdict: 'unreadable', exit: 6, reason: CARRY(c.stop!), next: CARRY(c.stop!), head: 'prints', append: 'goes through' },
-      ],
+      steps: (c, content) => carried(c, content, THROUGH),
       end: () => CLEAN,
     },
     {
@@ -1326,10 +1352,7 @@ describe('what a crash leaves before or at a new segment', () => {
         await passOverLib(statePath(), [stop])
         return { h0, n: leave(content), stop, intent }
       },
-      steps: (c) => [
-        { verdict: 'tampered', exit: 4, reason: `seq ${c.stop} is not a record`, next: MOVE(c.n), head: 'refuses', append: 'refuses' },
-        { verdict: 'tampered', exit: 4, reason: `seq ${c.stop} is not a record`, next: NOTREC(c.stop!), head: 'refuses', append: 'refuses' },
-      ],
+      steps: notRecords,
       end: () => CLEAN,
     },
     {
@@ -1343,27 +1366,33 @@ describe('what a crash leaves before or at a new segment', () => {
         await passOverLib(statePath(), [stop])
         return { h0, n: leave(content), stop, intent }
       },
-      steps: (c) => [
-        { verdict: 'tampered', exit: 4, reason: `seq ${c.stop} is not a record`, next: MOVE(c.n), head: 'refuses', append: 'refuses' },
-        { verdict: 'tampered', exit: 4, reason: `seq ${c.stop} is not a record`, next: NOTREC(c.stop!), head: 'refuses', append: 'refuses' },
-      ],
+      steps: notRecords,
       end: (c) => acknowledged(c.stop!),
     },
   ]
 
+  /** One append, as THROUGH with what it resolved, or as its refusal's reason. */
+  const tryAppend = (): Promise<{ said: string; kept?: { seq: number; head: string } }> =>
+    appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null }).then(
+      (kept) => ({ said: THROUGH, kept }),
+      (err: unknown) => ({ said: String((err as { reason?: unknown }).reason) }),
+    )
+
   /**
    * Each step's words, then the step those words name and nothing else, then
-   * the next append and verify against the head kept before the shape was made.
+   * one more append and verify against the head kept before the shape was made.
+   * Resolves the files it moved aside.
    */
-  async function follow(ctx: Ctx, steps: Step[], end: End): Promise<void> {
+  async function follow(ctx: Ctx, steps: Step[], end: End): Promise<{ aside: string; bytes: Buffer }[]> {
     const outputs: string[] = []
     const moved: { aside: string; bytes: Buffer }[] = []
+    const kept: { seq: number; head: string }[] = []
     for (const [k, step] of steps.entries()) {
       const v = await verifyAt(ctx.h0)
       outputs.push(v.stdout, v.stderr)
       expect({ k, code: v.code }).toEqual({ k, code: step.exit })
       expect(v.stdout).toContain(`verdict: ${step.verdict}\n`)
-      expect(reasons(v.stdout)).toEqual([`reason: ${step.reason}`])
+      expect(reasons(v.stdout)).toEqual(step.reason === null ? [] : [`reason: ${step.reason}`])
       expect(unreadableLines(v.stdout)).toEqual(step.next === null ? [] : [`open intents unreadable: ${step.next}`])
 
       const h = await capture(['audit', 'head'])
@@ -1378,13 +1407,10 @@ describe('what a crash leaves before or at a new segment', () => {
         expect(h.code).toBe(0)
       }
 
-      if (step.next !== null) {
-        const appended = await appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null }).then(
-          () => 'resolved',
-          (err: unknown) => (err as { reason?: unknown }).reason,
-        )
-        expect(appended).toBe(step.append === 'goes through' ? 'resolved' : step.next)
-      }
+      const appended = await tryAppend()
+      expect({ k, append: appended.said }).toEqual({ k, append: step.append })
+      if (appended.kept !== undefined) kept.push(appended.kept)
+
       const listed = await capture(['principal', 'list'])
       outputs.push(listed.stdout, listed.stderr)
       if (step.next === null) {
@@ -1394,12 +1420,27 @@ describe('what a crash leaves before or at a new segment', () => {
         expect(listed.stderr).toContain(step.next)
       }
 
-      // Only what the printed line names, through the two hand steps it can name.
-      const printed = unreadableLines(v.stdout)[0]?.slice('open intents unreadable: '.length)
-      if (printed === undefined) continue
-      const aside = /^segment (\d{16}\.jsonl) holds no complete line; move it aside by hand/.exec(printed)
-      const pass = /^seq (\d+) [^;]*; pass it over with warpline audit pass-over/.exec(printed)
+      // Only what the append's refusal names, or verify's line when the append went through.
+      const named = appended.said === THROUGH ? unreadableLines(v.stdout)[0]?.slice('open intents unreadable: '.length) : appended.said
+      if (named === undefined) {
+        expect({ k, last: steps.length - 1 }).toEqual({ k, last: k })
+        continue
+      }
+      const passPattern = /^seq (\d+) [^;]*; pass it over with warpline audit pass-over/
+      const aside = /^segment (\d{16}\.jsonl) holds no complete line; move it aside by hand/.exec(named)
+      const pass = passPattern.exec(named)
       if (aside !== null) {
+        // A reader of verify's line takes the pass-over it names, and the pass-over, holding the lock, names the same file.
+        const viaVerify = step.next === null ? null : passPattern.exec(step.next)
+        if (viaVerify !== null) {
+          const r = await passOver(Number(viaVerify[1]))
+          outputs.push(r.stdout, r.stderr)
+          expect({ code: r.code, stdout: r.stdout, stderr: r.stderr }).toEqual({
+            code: 1,
+            stdout: '',
+            stderr: `audit pass-over: ${named}. Nothing was written.\n`,
+          })
+        }
         const to = join(home, `aside-${k}.jsonl`)
         const bytes = readFileSync(join(auditDir(), aside[1]!))
         renameSync(join(auditDir(), aside[1]!), to)
@@ -1409,16 +1450,21 @@ describe('what a crash leaves before or at a new segment', () => {
         outputs.push(r.stdout, r.stderr)
         expect(r.code).toBe(0)
       } else {
-        throw new Error(`no step is named by: ${printed}`)
+        throw new Error(`no step is named by: ${named}`)
       }
     }
     for (const out of outputs) expect(out).not.toContain('WALK_SENTINEL_5d1')
 
-    await grow(1)
-    // What was moved aside stays out of the store, as it was.
-    for (const { aside, bytes } of moved) {
-      expect(segmentFiles()).not.toContain(aside.slice(aside.lastIndexOf('/') + 1))
-      expect(readFileSync(aside).equals(bytes)).toBe(true)
+    const last = await tryAppend()
+    expect(last.said).toBe(THROUGH)
+    kept.push(last.kept!)
+    // What was moved aside is as it was.
+    for (const { aside, bytes } of moved) expect(readFileSync(aside).equals(bytes)).toBe(true)
+    // No record an append resolved is lost: each is still stored at its seq under its head.
+    const stored = storeLines()
+    for (const { seq, head } of kept) {
+      const line = stored.find((l) => sha(l) === head)
+      expect({ seq, at: line === undefined ? null : seqOf(line) }).toEqual({ seq, at: seq })
     }
     const v = await verifyAt(ctx.h0)
     expect(v.stdout).toContain(`verdict: ${end.verdict}\n`)
@@ -1427,22 +1473,31 @@ describe('what a crash leaves before or at a new segment', () => {
     expect(unreadableLines(v.stdout)).toEqual([])
     if (ctx.intent !== undefined) expect(v.stdout).toContain(`open intent: seq ${ctx.intent} plugin mailer run run-77\n`)
     expect(v.stdout).not.toContain('WALK_SENTINEL_5d1')
+    return moved
   }
 
   for (const shape of shapes) {
-    for (const [content, bytes] of [
-      ['empty', ''],
-      ['holding a partial line', PARTIAL],
-    ] as const) {
-      const ends = shape.what.includes('partial') ? 'torn' : 'clean'
-      test(`${shape.what}, its new segment left ${content}: each refusal names the next step, and taking it leaves a store that appends and verifies ${ends}`, async () => {
-        const ctx = await shape.build(bytes)
-        expect(ctx.n).toBe(newest())
-        const end = shape.end(ctx)
-        expect(end.verdict).toBe(ends)
-        await follow(ctx, shape.steps(ctx), end)
+    const ends = shape.what.includes('partial') ? 'torn' : 'clean'
+    test(`${shape.what}, its new segment left empty: the next writer opens it where it is, no record is lost, and the store verifies ${ends}`, async () => {
+      const ctx = await shape.build('')
+      expect(ctx.n).toBe(newest())
+      const end = shape.end(ctx)
+      expect(end.verdict).toBe(ends)
+      const moved = await follow(ctx, shape.steps(ctx, ''), end)
+      expect(moved).toEqual([])
+      expect(JSON.parse(readFileSync(join(auditDir(), nameOf(ctx.n)), 'utf8').split('\n')[0]!)).toMatchObject({
+        type: 'warpline.audit.segment.opened',
+        warplineseq: ctx.n,
       })
-    }
+    })
+    test(`${shape.what}, its new segment left holding a partial line: only a writer holding the lock names the move aside, no record is lost, and the store verifies ${ends}`, async () => {
+      const ctx = await shape.build(PARTIAL)
+      expect(ctx.n).toBe(newest())
+      const end = shape.end(ctx)
+      expect(end.verdict).toBe(ends)
+      const moved = await follow(ctx, shape.steps(ctx, PARTIAL), end)
+      expect(moved.map((m) => m.bytes.toString('utf8'))).toEqual([PARTIAL])
+    })
   }
 
   test('a rotation that stopped after its seal: nothing refuses, verify reads torn, and the next append heals it to clean', async () => {
@@ -1452,11 +1507,7 @@ describe('what a crash leaves before or at a new segment', () => {
     await grow(1, { maxSegmentBytes: 1 })
     const n = newest()
     rmSync(join(auditDir(), nameOf(n)))
-    await follow(
-      { h0, n, intent },
-      [{ verdict: 'torn', exit: 3, reason: `seq ${n - 1} seals the last segment, and nothing follows it`, next: null, head: 'prints' }],
-      CLEAN,
-    )
+    await follow({ h0, n, intent }, [st('torn', 3, SEAL(n - 1), null, 'prints', THROUGH)], CLEAN)
   })
 
   test('a write that stopped part way: nothing refuses, verify reads torn, and the next append acknowledges the partial line, still torn', async () => {
@@ -1465,38 +1516,38 @@ describe('what a crash leaves before or at a new segment', () => {
     const h0 = await headText()
     const s = Number(h0.split(' ')[0])
     tear()
-    await follow(
-      { h0, n: newest(), intent },
-      [{ verdict: 'torn', exit: 3, reason: `the store ends in a partial line after seq ${s}`, next: null, head: 'prints' }],
-      acknowledged(s + 1),
-    )
+    await follow({ h0, n: newest(), intent }, [st('torn', 3, PART(s), null, 'prints', THROUGH)], acknowledged(s + 1))
   })
 
-  test('runtime-spec § 14 and the exit-75 row of the recipe state one rule for the next step, and restate no refusal', () => {
+  test('runtime-spec § 14 and the exit-75 row of the recipe state one rule for the next step, and restate no refusal, however the text is wrapped', () => {
+    /** Every run of whitespace as one space, so a sentence wrapped at any word reads the same. */
+    const flat = (t: string): string => t.replace(/\s+/g, ' ')
     const spec = readFileSync(testFixturesDir(import.meta.url, '../../../docs/runtime-spec.md'), 'utf8')
     const from = spec.indexOf('\n## 14. The audit store')
     const to = spec.indexOf('\n## 15. ', from)
     expect(from).toBeGreaterThanOrEqual(0)
     expect(to).toBeGreaterThan(from)
-    const s14 = spec.slice(from, to)
+    const s14 = flat(spec.slice(from, to))
     expect(s14.length).toBeGreaterThan(0)
 
     const recipe = readFileSync(testFixturesDir(import.meta.url, '../../../docs/scheduler-recipe.md'), 'utf8')
     const rows = recipe.split('\n').filter((l) => l.startsWith('| Exits `75` every tick'))
     expect(rows).toHaveLength(1)
-    const row = rows[0]!
+    const row = flat(rows[0]!)
 
     for (const rule of [
       '### When the store refuses',
-      'The refusal names what is wrong and the next step.',
-      'prints that refusal on its `open intents unreadable` line under any verdict',
+      'The refusal names what is wrong, and the next step when there is one.',
+      'A command that does not hold the audit lock never names a step by hand on a segment file, and reads a newest segment that holds no complete line as not yet written.',
+      "prints the walk's refusal on its `open intents unreadable` line under any verdict",
+      'writes into it only when that opens a segment of the same name',
       'The refusal is worded from the lock as it stands when the wait ends, never from an earlier look.',
       'is not removed, and the writer judges it again at once',
     ]) {
-      expect({ rule, in14: s14.includes(rule) }).toEqual({ rule, in14: true })
+      expect({ rule, in14: s14.includes(flat(rule)) }).toEqual({ rule, in14: true })
     }
-    for (const rule of ['Stderr names what is wrong and the next step', 'open intents unreadable']) {
-      expect({ rule, inRow: row.includes(rule) }).toEqual({ rule, inRow: true })
+    for (const rule of ['Stderr names what is wrong, and the next step when there is one']) {
+      expect({ rule, inRow: row.includes(flat(rule)) }).toEqual({ rule, inRow: true })
     }
 
     // A refusal's own words live in the code, never in either text.
@@ -1509,10 +1560,10 @@ describe('what a crash leaves before or at a new segment', () => {
       'might not hold one',
       'there is no head to print:',
     ]) {
-      expect({ words, in14: s14.includes(words), inRow: row.includes(words) }).toEqual({ words, in14: false, inRow: false })
+      expect({ words, in14: s14.includes(flat(words)), inRow: row.includes(flat(words)) }).toEqual({ words, in14: false, inRow: false })
     }
 
-    // The per-shape sentences the one rule replaced, so a sentence put back goes red.
+    // The sentences the one rule replaced, so a sentence put back goes red however it is wrapped.
     for (const sentence of [
       'names `warpline audit verify` and',
       'the filesystem under the home cannot hold a symbolic link',
@@ -1537,8 +1588,15 @@ describe('what a crash leaves before or at a new segment', () => {
       'An active segment with no complete line has no first line',
       'A lock replaced in between is kept until it is judged itself.',
       'Remove a break file only once no warpline process runs.',
+      'The refusal names what is wrong and the next step.',
+      'until it names no next step',
+      'or the segment holds no complete line, there is no head to print',
+      'or no complete line at all, as a crash between creating a segment and its first write leaves',
+      'empty as a crash between creating it and its first write leaves',
+      "can't be followed, because its successor would need the same name",
+      'Nothing appends past it, and the walk cannot start',
     ]) {
-      expect({ sentence, in14: s14.includes(sentence) }).toEqual({ sentence, in14: false })
+      expect({ sentence, in14: s14.includes(flat(sentence)) }).toEqual({ sentence, in14: false })
     }
     for (const sentence of [
       'Stderr names its seq, and its kind when it is a record',
@@ -1546,8 +1604,120 @@ describe('what a crash leaves before or at a new segment', () => {
       'has its own reason, which names the file and says to move it aside by hand',
       'It says which file to remove by hand, and when',
       'Stderr names the holder',
+      'Stderr names what is wrong and the next step',
+      "prints the store's next step on its `open intents unreadable` line",
     ]) {
-      expect({ sentence, inRow: row.includes(sentence) }).toEqual({ sentence, inRow: false })
+      expect({ sentence, inRow: row.includes(flat(sentence)) }).toEqual({ sentence, inRow: false })
     }
+  })
+})
+
+// -- A writer paused between creating a segment and its first line -------------
+
+describe('a writer paused between creating a segment and writing its first line', () => {
+  const STORE_SRC = join(import.meta.dir, '..', '..', 'lib', 'audit-log.ts')
+
+  /** Polls for `path` every 10 ms, up to `ms`. */
+  async function until(path: string, ms: number): Promise<boolean> {
+    const deadline = Date.now() + ms
+    while (!present(path) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10))
+    return present(path)
+  }
+
+  test('audit head, audit verify and resolve name no step by hand while the writer holds the lock, head is the line the new segment follows, and its record is in the store once it ends', async () => {
+    const { seq: i } = await mailer()
+    await grow(1)
+    const h0 = await headText()
+
+    const paused = join(home, 'paused')
+    const resume = join(home, 'resume')
+    const script = join(home, 'paused-writer.ts')
+    // The spy is in place before the store loads, so it reaches the store's named import of `open`.
+    writeFileSync(
+      script,
+      `import * as fsp from 'node:fs/promises'
+import { lstatSync, writeFileSync } from 'node:fs'
+import { spyOn } from 'bun:test'
+const [statePath, store, paused, resume] = process.argv.slice(2)
+const realOpen = fsp.open
+spyOn(fsp, 'open').mockImplementation(async (path, flags, ...rest) => {
+  if (flags !== 'a' || lstatSync(path, { throwIfNoEntry: false }) !== undefined) return realOpen(path, flags, ...rest)
+  const fh = await realOpen(path, flags, ...rest)
+  writeFileSync(paused, '')
+  const deadline = Date.now() + 10_000
+  while (lstatSync(resume, { throwIfNoEntry: false }) === undefined) {
+    if (Date.now() > deadline) process.exit(2)
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  return fh
+})
+const { appendAudit } = await import(store)
+const { seq } = await appendAudit(
+  statePath,
+  'fire.intent',
+  { plugin: 'mailer', run_id: 'run-78', class: 'session', effect_id: null, fingerprint: null },
+  { maxSegmentBytes: 1 },
+)
+process.stdout.write(String(seq))
+`,
+    )
+    const child = spawn(process.execPath, [script, statePath(), STORE_SRC, paused, resume], { stdio: ['ignore', 'pipe', 'pipe'] })
+    let out = ''
+    child.stdout.on('data', (d: Buffer) => (out += d.toString('utf8')))
+    const exited = new Promise<number | null>((r) => child.on('exit', (code) => r(code)))
+
+    const outputs: string[] = []
+    let printed = ''
+    try {
+      expect(await until(paused, 5000)).toBe(true)
+      expect(statSync(join(auditDir(), segmentFiles().at(-1)!)).size).toBe(0)
+      expect((JSON.parse(readlinkSync(join(auditDir(), '.lock'), 'utf8')) as { pid: number }).pid).toBe(child.pid!)
+
+      const before = storeLines().at(-1)!
+      const h = await capture(['audit', 'head'])
+      outputs.push(h.stdout, h.stderr)
+      expect(h).toEqual({ code: 0, stdout: `${seqOf(before)} ${sha(before)}\n`, stderr: '' })
+      printed = h.stdout
+
+      const v = await verifyAt(h0)
+      outputs.push(v.stdout, v.stderr)
+      expect(v.code).toBe(3)
+      expect(v.stdout).toContain('verdict: torn\n')
+      expect(reasons(v.stdout)).toEqual([`reason: seq ${seqOf(before)} seals the last segment, and nothing follows it`])
+      expect(unreadableLines(v.stdout)).toEqual([])
+      expect(v.stdout).toContain(`open intent: seq ${i} plugin mailer run run-77\n`)
+
+      const r = await capture(['resolve', '--intent', String(seqOf(before) + 3), '--shipped'])
+      outputs.push(r.stdout, r.stderr)
+      expect({ code: r.code, stderr: r.stderr }).toEqual({
+        code: 1,
+        stderr: 'No open fire intent has that seq, so there is nothing to answer. warpline audit verify lists the open ones. Nothing was written.\n',
+      })
+    } finally {
+      writeFileSync(resume, '')
+    }
+    for (const o of outputs) {
+      expect(o).not.toContain('by hand')
+      expect(o).not.toContain('move it aside')
+    }
+
+    const timer = setTimeout(() => child.kill('SIGKILL'), 5000)
+    const code = await exited
+    clearTimeout(timer)
+    expect(code).toBe(0)
+    const s = Number(out)
+
+    const opened = JSON.parse(readFileSync(join(auditDir(), segmentFiles().at(-1)!), 'utf8').split('\n')[0]!) as {
+      warplineseq: number
+      warplineprev: string
+    }
+    expect(`${opened.warplineseq - 1} ${opened.warplineprev}\n`).toBe(printed)
+    expect(JSON.parse(lineAt(s))).toMatchObject({ type: 'warpline.audit.fire.intent', data: { run_id: 'run-78' } })
+
+    const after = await verifyAt(h0)
+    expect(after.code).toBe(0)
+    expect(after.stdout).toContain('verdict: clean\n')
+    expect(after.stdout).toContain(`open intent: seq ${s} plugin mailer run run-78\n`)
+    expect(after.stdout).toContain(`open intent: seq ${i} plugin mailer run run-77\n`)
   })
 })
