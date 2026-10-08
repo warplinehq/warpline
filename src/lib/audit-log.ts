@@ -220,6 +220,8 @@ type Reason =
   | `audit lock not acquired in time: pid ${number} on this machine holds it; remove audit/.lock by hand only once that process is gone`
   | `audit lock not acquired in time: pid ${number} holds it, not on this machine or on one that cannot be told; remove audit/.lock by hand only once that process is gone`
   | 'the active segment holds no readable last line'
+  | `segment ${string} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`
+  | `segment ${string} holds no complete line, and this append does not open it`
   | 'write failed'
   | 'the store has no segment to pass over'
   | `seq ${number} is not a line the walk stops on in the active segment`
@@ -424,13 +426,13 @@ const PASS_IT_OVER = '; pass it over with warpline audit pass-over (docs/runtime
  * line's data. A line pass-over can name says so. The opening line cannot be
  * passed over, so its refusal names no pass-over. A segment with no complete
  * line has no opening line, and its refusal names the file, whose name is only
- * digits, and the hand step.
+ * digits, and no step. Only a writer holding the lock names a step for it.
  */
 type WalkRefusal =
   | `seq ${number} is not a record${typeof PASS_IT_OVER}`
   | `seq ${number} opens the active segment and is not a segment.opened the walk can carry`
   | `seq ${number} holds ${ShortKind<CarriedType>} data the walk cannot carry${typeof PASS_IT_OVER}`
-  | `segment ${string} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`
+  | `segment ${string} holds no complete line`
 
 type Walked = { state: Carried } | { refused: WalkRefusal }
 
@@ -519,7 +521,7 @@ function walkLine(line: string, seq: number): { refused: WalkRefusal } | { carri
  * the first is at position `firstSeq`. A non-first line that `skip` names, by
  * position and the sha256 of its bytes, is passed over unread. With no complete
  * line there is nothing to start from, and the refusal names the segment and
- * says to move it aside by hand.
+ * no step. Only a writer holding the lock names one.
  */
 function stateOf(bytes: Buffer, firstSeq: number, skip: ReadonlyMap<number, string> = new Map()): Walked {
   let opened: Carried | undefined
@@ -545,7 +547,7 @@ function stateOf(bytes: Buffer, firstSeq: number, skip: ReadonlyMap<number, stri
     if (step.carried !== null) carried.push(step.carried)
   }
   if (opened === undefined) {
-    return { refused: `segment ${segmentName(firstSeq)} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)` }
+    return { refused: `segment ${segmentName(firstSeq)} holds no complete line` }
   }
   return { state: segmentState(carried, opened) }
 }
@@ -868,11 +870,17 @@ type Limits = { maxSegmentBytes: number; maxSegmentAgeMs: number }
  * that is the last record before them, and no seal is written.
  * Without `passing`, such a last line refuses every append.
  *
- * An active segment that holds no complete line, empty or holding only a
- * partial line, refuses every append and pass-over: its successor would need
- * its own name. Nothing here moves it. That refusal, and the one for a last
- * line that is not a record, is the walk's own over the active segment, so the
- * next step it names is the one every reader of the walk names.
+ * A newest segment that is empty never got its opening line. It is taken out
+ * of the list before anything is derived, so everything is derived as if it
+ * were absent, and the write goes into it, through the same `writeLine`, only
+ * when it opens a segment of that name. Otherwise nothing is written, and the
+ * refusal is the walk's own over the segment before when the walk stops there,
+ * or else names the file and no step. A newest segment holding only a partial
+ * line refuses every append and pass-over, naming the file and the move aside.
+ * That refusal is given only here, under the lock, and nothing here moves the
+ * file. The refusal for a last line that is not a record is the walk's own over
+ * the active segment, so the next step it names is the one every reader of the
+ * walk names.
  */
 async function appendLocked(
   dir: string,
@@ -885,6 +893,9 @@ async function appendLocked(
   passing?: readonly number[],
 ): Promise<{ seq: number; head: string }> {
   const segments = await listSegments(dir)
+  // A newest segment left empty never got its opening line, so it is not yet opened.
+  const tip = segments.at(-1)
+  const unopened = tip !== undefined && (await stat(join(dir, tip))).size === 0 ? segments.pop() : undefined
   // Genesis is a segment that opens on nothing: seq 1, a zero prev, empty state.
   let seq = 0
   let source = `urn:uuid:${randomUUID()}`
@@ -940,8 +951,12 @@ async function appendLocked(
         stepped = true
       }
     }
-    // No complete line, or a last one that is not a record: the walk's own refusal names the next step.
-    if (last === null || lastRecord === undefined) {
+    // Every writer refuses this shape, so the step stays true however late it is read.
+    if (last === null) {
+      throw new AuditAppendError(kind, `segment ${active} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`)
+    }
+    // A last line that is not a record: the walk's own refusal names the next step.
+    if (lastRecord === undefined) {
       const walked = await activeState(dir)
       throw new AuditAppendError(kind, 'refused' in walked ? walked.refused : 'the active segment holds no readable last line')
     }
@@ -1009,6 +1024,14 @@ async function appendLocked(
       prev = headOf(checkpoint)
       fresh.push(checkpoint)
     }
+  }
+  // The empty file is written into only when this write opens a segment of its name.
+  if (unopened !== undefined && path !== join(dir, unopened)) {
+    const walked = await activeState(dir)
+    throw new AuditAppendError(
+      kind,
+      'refused' in walked ? walked.refused : `segment ${unopened} holds no complete line, and this append does not open it`,
+    )
   }
   const record = dataAfter === null ? null : encode(seq + 1, source, prev, kind, dataAfter(seq, prev, source), time)
   if (record !== null) {
@@ -1176,20 +1199,15 @@ export function passOver(
 /**
  * The head: the last complete line's seq and the hash of its bytes, or seq 0
  * and the zero hash before the first record. A pure reader: no lock, no mkdir.
- * Rejects with an Error named `AuditHeadUnreadableError` when the active
- * segment holds no complete line, or its last one is not a record. Its own
- * `reason` is the walk's refusal over the active segment, which names the next
- * step, the same words an append gives.
+ * A newest segment that holds no complete line is read as not yet written, so
+ * the head is the last line before it, and seq 0 when there is none. Rejects
+ * with an Error named `AuditHeadUnreadableError` only when the last complete
+ * line is not a record. Its own `reason` is the walk's refusal over the active
+ * segment, which names the next step, the same words an append gives.
  */
 export async function readHead(statePath: string): Promise<{ seq: number; head: string }> {
   const dir = auditDirFor(statePath)
-  let segments: string[]
-  try {
-    segments = await listSegments(dir)
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { seq: 0, head: ZERO_HASH }
-    throw err
-  }
+  const segments = await writtenSegments(dir)
   if (segments.length === 0) return { seq: 0, head: ZERO_HASH }
   const { line } = await lastLine(join(dir, segments[segments.length - 1] as string))
   const rec = line === null ? undefined : parseRecord(line.toString('utf-8'))
@@ -1280,11 +1298,25 @@ async function segmentsIn(dir: string): Promise<string[]> {
 }
 
 /**
+ * The segment names a reader reads: every one, less a newest one that holds no
+ * complete line. A writer makes that shape on every segment it opens, between
+ * creating the file and writing its first line, so a reader reads the store as
+ * ending before it.
+ */
+async function writtenSegments(dir: string): Promise<string[]> {
+  const names = await segmentsIn(dir)
+  const newest = names.at(-1)
+  if (newest !== undefined && (await lastLine(join(dir, newest))).line === null) names.pop()
+  return names
+}
+
+/**
  * The state the active segment's complete lines walk to, the empty state with
- * no store, or the walk's refusal.
+ * no store, or the walk's refusal. The active segment is the newest one a
+ * reader reads.
  */
 async function activeState(dir: string): Promise<Walked> {
-  const active = (await segmentsIn(dir)).at(-1)
+  const active = (await writtenSegments(dir)).at(-1)
   if (active === undefined) return { state: EMPTY_STATE }
   const bytes = await readFile(join(dir, active))
   return stateOf(bytes.subarray(0, bytes.lastIndexOf(0x0a) + 1), firstSeqOf(active))
@@ -1499,11 +1531,11 @@ export interface Verification {
  * later `segment.opened` acknowledges, a `passed_over` entry that does not
  * match the segment before it, an anchor beyond the head, or an anchored line
  * whose hash is not the anchor's. Torn is a partial line at the very end, an
- * acknowledged fragment, or a last segment whose last line is
- * `segment.sealed`. Unreadable is a chain that checks clean
- * or torn whose active segment holds a line the walk cannot carry, so the open
- * intents cannot be listed. An active segment holding no complete line is
- * unreadable too, since the walk has no opening line to start from. A
+ * acknowledged fragment, a newest segment that holds no complete line, or a
+ * last segment whose last line is `segment.sealed`. Unreadable is a chain that
+ * checks clean or torn whose active segment holds a line the walk cannot
+ * carry, so the open intents cannot be listed. The open intents are read as if
+ * a newest segment that holds no complete line were absent. A
  * re-linked rewrite passes every link, so the
  * anchor is what catches it. Wrong log, then tampered, then unreadable, then
  * torn.

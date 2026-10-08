@@ -3669,10 +3669,9 @@ It is not a valid C2SP checkpoint. It carries no signature line, and the root
 is the head of a hash chain, not a Merkle root. On an empty store it refuses
 with exit `1` and prints nothing, because there is no home id yet to name.
 
-When the active segment's last complete line is not a record, or the segment
-holds no complete line, there is no head to print. `audit head` and `--c2sp`
-exit `1`, print nothing on stdout, and print the walk's refusal on stderr
-(§ When the store refuses).
+When the active segment's last complete line is not a record, there is no head
+to print, and `audit head` and `--c2sp` exit `1`, print nothing on stdout, and
+print the walk's refusal on stderr (§ When the store refuses).
 
 ### Writing
 
@@ -3881,11 +3880,11 @@ writer never writes past it and never removes it. The next append seals
 nothing, because a partial line can't be sealed past. It opens a new segment
 after the last complete line, whose `segment.opened` records the fragment's
 length in bytes and its sha256 as `fragment`, and then writes the record.
-Every byte of the torn file stays as it was. An active segment that holds no
-complete line, empty as a crash between creating it and its first write leaves,
-or holding only a partial line, can't be followed, because its successor would
-need the same name, and it has no opening line for the walk to start from.
-It holds no record. Nothing appends past it, and the walk cannot start (§ When the store refuses).
+Every byte of the torn file stays as it was. A newest segment that holds no
+complete line holds no record. When it is empty, a writer derives what it
+writes as if the file were absent, and writes into it only when that opens a
+segment of the same name, or else refuses. When it holds only a partial line,
+every append and pass-over refuses (§ When the store refuses).
 
 **A lost successor.** A crash between the sealed line and the new file leaves
 an active segment that ends in `segment.sealed`. The next append heals it. It
@@ -4043,10 +4042,10 @@ compare against would read as fine when it could not look.
 | Verdict | Exit | Meaning |
 |---------|------|---------|
 | `clean` | `0` | Every record links to the previous record's hash (64 `0`s for the first record). The record at the anchored seq hashes to the anchor, or the anchor is `0` with 64 `0`s. |
-| `torn` | `3` | As clean, except the store ends in a partial line, keeps a partial line that a later `segment.opened` acknowledges, or its last segment ends in `segment.sealed` with no successor. A crash leaves these. |
+| `torn` | `3` | As clean, except the store ends in a partial line or in a segment that holds no complete line, keeps a partial line that a later `segment.opened` acknowledges, or its last segment ends in `segment.sealed` with no successor. A crash leaves these. |
 | `tampered` | `4` | A complete line does not parse, other than the last complete lines of a segment that the next `segment.opened` names in `passed_over` by position (a next segment that holds no record names nothing), a record's `warplineseq` is not its position, its `warplineprev` is not the previous record's hash (64 `0`s for the first record), a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, a `segment.opened` has a `passed_over` that names a position not in the segment before it or a line that does not hash as recorded, the anchored seq is beyond the head, or the record at the anchored seq does not hash to the anchor. |
 | `wrong log` | `5` | The anchor's origin is another home's id. |
-| `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), or no complete line at all, as a crash between creating a segment and its first write leaves, so the open intents cannot be listed. The reason is the walk's refusal (§ When the store refuses). |
+| `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), so the open intents cannot be listed. The reason is the walk's refusal (§ When the store refuses). |
 
 When more than one applies, wrong log wins, then tampered, then unreadable,
 then torn. None of the codes is `70`, `75` or `130`.
@@ -4073,14 +4072,15 @@ the store.
 ### When the store refuses
 
 A crash, a killed command or a lock left behind can leave the store where an
-append, or a command that needs the walk, will not go on.
-The refusal names what is wrong and the next step.
-It is fixed words, a seq, a segment file name or a process id, and never a
-line's data. For the store, `audit verify`
-prints that refusal on its `open intents unreadable` line under any verdict,
-so the next step shows even when the verdict is `tampered`. Take the step, then
-run verify again against the head you kept, until it names no next step. The
-words of each refusal live in the code, and this section does not repeat them.
+append, or a command that needs the walk, will not go on. The refusal names
+what is wrong, and the next step when there is one. It is fixed words, a seq, a
+segment file name, a process id or an errno code, and never a line's data. A
+command that does not hold the audit lock never names a step by hand on a
+segment file, and reads a newest segment that holds no complete line as not yet
+written. `audit verify` prints the walk's refusal on its
+`open intents unreadable` line under any verdict. Take the step, then run the
+command again. The words of each refusal live in the code, and this section
+does not repeat them.
 
 ## 15. The principal registry
 
