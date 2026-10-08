@@ -3670,9 +3670,9 @@ is the head of a hash chain, not a Merkle root. On an empty store it refuses
 with exit `1` and prints nothing, because there is no home id yet to name.
 
 When the active segment's last complete line is not a record, or the segment
-holds no complete line, there is no head to print. `audit head` exits `1`,
-prints nothing on stdout, and names `warpline audit verify` and
-`warpline audit pass-over` on stderr. `--c2sp` does the same.
+holds no complete line, there is no head to print. `audit head` and `--c2sp`
+exit `1`, print nothing on stdout, and print the walk's refusal on stderr
+(§ When the store refuses).
 
 ### Writing
 
@@ -3683,9 +3683,9 @@ the holder's process id, the machine identifier § 12 derives, and the time it
 was taken, which is for people and judges nothing. Making the link either
 creates it with that text or fails because it exists, so a lock is never empty
 and never half-written. So the home's filesystem must be able to hold a
-symbolic link. On one that cannot, every append refuses with
-`audit lock not acquired: the filesystem under the home cannot hold a symbolic link`,
-and nothing is written. On Linux the identifier also carries the holder's pid
+symbolic link.
+On one that cannot, every append refuses, and nothing is written.
+On Linux the identifier also carries the holder's pid
 namespace and the kernel's boot id. So containers that share a machine id, and
 clones of one machine image, are not taken for one machine, and a process id
 from before a reboot is never tested after it. When either cannot be read, the
@@ -3705,10 +3705,10 @@ reads the lock again, judges it again, and removes it only while it still
 names the token it was judged by and its holder is still gone. Then it removes
 its own break file. The break runs without a wait, and a gone holder cannot
 release, so the lock cannot change between that second judgment and the
-removal. A lock replaced in between is kept until it is judged itself.
+removal.
+A lock that changed in between, gone, replaced or no longer read as gone, is not removed, and the writer judges it again at once.
 A break file is never removed by another writer, whatever it names and however
-old it is. While one is there no lock is broken, and an append that can only
-go on past a gone holder refuses in time, naming `.lock.break`.
+old it is. While one is there no lock is broken.
 
 A writer removes its own lock only while it still names that writer's token.
 It does so at the end of its hold, and from an exit hook when the process ends
@@ -3716,11 +3716,10 @@ through `process.exit` while holding it, as `advance` does on SIGINT and
 SIGTERM. A holder killed outright, by SIGKILL or by a signal to a command with
 no handler, runs no exit hook. On a machine that identifies itself, the next
 writer breaks its lock at once. A lock that cannot be taken in time is an
-append failure, whatever is at the lock's path. The refusal names the holder's process id and
-whether it is on this machine, or says the holder names no process. It says to
-remove the lock by hand only once that process is gone. When its holder is gone
-but its lock could not be removed, the refusal says so, and says to remove the
-lock by hand.
+append failure, whatever is at the lock's path.
+The refusal is worded from the lock as it stands when the wait ends, never from an earlier look.
+It says to remove a lock by hand with no condition only when its holder is
+provably gone and removing it failed (§ When the store refuses).
 
 Four cases stay open.
 
@@ -3734,9 +3733,8 @@ Elsewhere the machine identifier outlives a reboot, so a process id from
 before it is tested after it: a free one reads gone and its lock is broken at
 once, and a reused one reads as running, as the next case says.
 
-A dead holder whose process id was reused reads as running. Its lock stays,
-and the refusal names that pid. If it is not a warpline process, the lock can
-be removed by hand. A process start time in the identifier is the upgrade path.
+A dead holder whose process id was reused reads as running, and its lock
+stays. If it is not a warpline process, the lock can be removed by hand. A process start time in the identifier is the upgrade path.
 
 There is no fence on the store itself. A holder judged gone that is not,
 through an identifier two machines share that the boot id does not tell apart,
@@ -3744,12 +3742,8 @@ or a write still in flight when the exit hook removed its lock (a window of
 microseconds), can interleave with the next holder's write, and `audit verify`
 reports it.
 
-When appends keep refusing, read the refusal. Once the process it names is
-gone, or no warpline process runs on any machine that shares the home, remove
-`audit/.lock` by hand, and `audit/.lock.break` when the refusal names it.
-Remove a break file only once no warpline process runs. One removed while its
-breaker is still inside the break, a window of a few milliseconds,
-lets a second breaker in, and the first breaker then removes the second one's
+A break file removed by hand while its breaker is still inside the break, a
+window of a few milliseconds, lets a second breaker in, and the first breaker then removes the second one's
 break file without checking whose it is. So two breaks can overlap, and one
 can remove a lock a new holder has just taken. Warpline never removes a lock
 or break file it cannot read as a holder, such as a directory or a plain file.
@@ -3824,17 +3818,12 @@ older reader. A line that is not a record, a first line that is not a
 `segment.opened` it can carry, or a carried field no writer would write stops
 the walk, so no such value reaches a reader's output.
 
-**A walk that stops.** `audit verify` reports `unreadable` and names the seq,
-and every command that needs the walk refuses: an `advance`, `prefs set`,
-`principal`, `resolve`, and any append that rotates. `advance`, `prefs set`,
-`principal` and `resolve` print the same reason, which names the seq and the kind and nothing
-from the line, and ends by saying to pass the line over with `warpline audit pass-over`:
-`; pass it over with warpline audit pass-over (docs/runtime-spec.md § 14)`.
-Verify's `open intents unreadable` line carries the same reason. A walk that
-stops at the active segment's first line says no such thing, because that line
-cannot be passed over (below). No warpline build writes such a line. Keep an export of the
-store, then run `warpline audit pass-over <seq>...`, naming every line the walk
-stops on. If another line still stops the walk, it refuses and names that one.
+**A walk that stops.** Every command that needs the walk refuses: an
+`advance`, `prefs set`, `principal`, `resolve`, and any append that opens a
+segment or finds no record at the end of the active segment. Each gives the walk's refusal
+(§ When the store refuses). Keep an export of the store, then run
+`warpline audit pass-over <seq>...`, naming every line the walk stops on. If
+another line still stops the walk, it refuses and names that one.
 
 Pass-over edits no line. It opens a new segment after the active one as it
 stands. The new segment's `segment.opened` carries forward the state reached by
@@ -3864,9 +3853,8 @@ When lines that are not records end the active segment, the first of them theref
 
 It refuses with exit `1`, and writes nothing, for a seq outside the active
 segment (a sealed segment's line, or past the head), a line the walk carries, a
-store where another line it was not given still stops the walk, an active
-segment that holds no complete line, or only a partial one (§ A torn tail), and
-a home with no store, where it creates nothing. A build that predates
+store where another line it was not given still stops the walk, and a home
+with no store, where it creates nothing. A build that predates
 `passed_over` still reads the segment, because the walk strips keys it does not
 carry.
 
@@ -3877,19 +3865,15 @@ active segment and is not a segment.opened the walk can carry`, whether the line
 is a `segment.opened` this build cannot carry or not a record at all. The first
 case is a line only a later build writes, so run the build that wrote it, or a
 later one. A first line that is not a record has no recovery in this build.
-An active segment with no complete line has no first line, and
-has its own refusal and recovery (§ A torn tail).
 
 A line that is not a record is passed over the same way. When it ends the
 active segment, as a write that went wrong leaves it, the new segment opens
 after the last record before it: its `segment.opened` takes the position after that record,
 links to that record's hash, and names the line in `passed_over` by
 its position and the sha256 of its bytes.
-Verify reports `tampered` at that line until the pass-over, and no longer after it, against anchors taken before and after.
 No size or age seal is written past such a line, as none is
 written past a partial one. One with records after it in its segment can only
-be put there by hand, and it breaks the chain where it sits, so verify keeps
-reporting it `tampered` after a pass-over, which is the true account.
+be put there by hand, and it breaks the chain where it sits.
 The pass-over still lets the walk go on past it.
 
 **A torn tail.** A write that stops part way leaves a partial last line. The
@@ -3901,12 +3885,7 @@ Every byte of the torn file stays as it was. An active segment that holds no
 complete line, empty as a crash between creating it and its first write leaves,
 or holding only a partial line, can't be followed, because its successor would
 need the same name, and it has no opening line for the walk to start from.
-Every append, pass-over and walk refuses with
-`segment <name> holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`,
-naming the file, and verify reports `unreadable` with that reason.
-Move the file out of `audit/` by hand. It holds no record, so nothing on the
-chain is lost, and the next append goes after the last line of the segment
-before it.
+It holds no record. Nothing appends past it, and the walk cannot start (§ When the store refuses).
 
 **A lost successor.** A crash between the sealed line and the new file leaves
 an active segment that ends in `segment.sealed`. The next append heals it. It
@@ -4067,7 +4046,7 @@ compare against would read as fine when it could not look.
 | `torn` | `3` | As clean, except the store ends in a partial line, keeps a partial line that a later `segment.opened` acknowledges, or its last segment ends in `segment.sealed` with no successor. A crash leaves these. |
 | `tampered` | `4` | A complete line does not parse, other than the last complete lines of a segment that the next `segment.opened` names in `passed_over` by position (a next segment that holds no record names nothing), a record's `warplineseq` is not its position, its `warplineprev` is not the previous record's hash (64 `0`s for the first record), a segment is not named by its first seq, a partial line anywhere but the very end goes unacknowledged, a `segment.opened` has a `passed_over` that names a position not in the segment before it or a line that does not hash as recorded, the anchored seq is beyond the head, or the record at the anchored seq does not hash to the anchor. |
 | `wrong log` | `5` | The anchor's origin is another home's id. |
-| `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), or no complete line at all, as a crash between creating a segment and its first write leaves, so the open intents cannot be listed. The reason names its seq, or, for an active segment with no complete line, names the file and says to move it aside by hand (§ 14 Segments). |
+| `unreadable` | `6` | The chain checks clean or torn, but the active segment holds a line the walk cannot carry (§ 14 Segments), or no complete line at all, as a crash between creating a segment and its first write leaves, so the open intents cannot be listed. The reason is the walk's refusal (§ When the store refuses). |
 
 When more than one applies, wrong log wins, then tampered, then unreadable,
 then torn. None of the codes is `70`, `75` or `130`.
@@ -4090,6 +4069,18 @@ stale. Verify never prints a record's data or the anchor file's text.
 
 Verify reads only. It takes no lock, writes no Checkpoint and adds no byte to
 the store.
+
+### When the store refuses
+
+A crash, a killed command or a lock left behind can leave the store where an
+append, or a command that needs the walk, will not go on.
+The refusal names what is wrong and the next step.
+It is fixed words, a seq, a segment file name or a process id, and never a
+line's data. For the store, `audit verify`
+prints that refusal on its `open intents unreadable` line under any verdict,
+so the next step shows even when the verdict is `tampered`. Take the step, then
+run verify again against the head you kept, until it names no next step. The
+words of each refusal live in the code, and this section does not repeat them.
 
 ## 15. The principal registry
 

@@ -6,8 +6,8 @@
  * what a later check of the store is measured against. `head --c2sp` prints the
  * same head as an unsigned C2SP-shaped note body.
  *
- * `export --after <seq>` streams every complete record after that seq, a line
- * at a time, and waits for the reader before it writes more.
+ * `export --after <seq>` streams every complete line after that seq, one at a
+ * time, and waits for the reader before it writes more.
  *
  * `verify --checkpoint <file|->` checks the store against an anchor taken
  * earlier, and tells tampering from a torn tail.
@@ -35,8 +35,8 @@ head      Prints the head of the audit record as "<seq> <hash>" on one line: the
           last record's seq and the sha256 of its bytes. Keep it somewhere off
           this box. --c2sp prints it as an unsigned note body instead: the
           home id, the seq and the base64 hash, one per line.
-export    Prints every complete record after <seq> as CloudEvents JSON, one per
-          line. <seq> is 0 or a positive integer, at most the head.
+export    Prints every complete line after <seq> as stored, one per line, a record as
+          CloudEvents JSON. <seq> is 0 or a positive integer, at most the head.
 verify    Checks the record against a head kept off this box, read from <file>
           or from stdin with -. Exits 0 clean, 3 torn, 4 tampered, 5 wrong log,
           6 when the open intents cannot be read.
@@ -89,9 +89,7 @@ async function head(args: string[]): Promise<number> {
     h = await readHead(engineStatePath())
   } catch (err) {
     if ((err as Error).name !== 'AuditHeadUnreadableError') throw err
-    process.stderr.write(
-      'audit head: the active segment holds no readable last line, so there is no head to print. warpline audit verify names the line, and warpline audit pass-over <seq> goes past a last line that is not a record.\n',
-    )
+    process.stderr.write(`audit head: there is no head to print: ${(err as { reason: string }).reason}.\n`)
     return 1
   }
   if (!c2sp) {

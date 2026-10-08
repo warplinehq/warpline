@@ -212,7 +212,7 @@ type Reason =
   | 'data rejected by its schema'
   | 'line over 16384 bytes'
   | 'audit lock not acquired'
-  | 'audit lock not acquired: the filesystem under the home cannot hold a symbolic link (docs/runtime-spec.md § 14)'
+  | `audit lock not acquired: making its symbolic link failed with ${'EPERM' | 'ENOTSUP' | 'ENOSYS'}; the filesystem under the home might not hold one (docs/runtime-spec.md § 14)`
   | 'audit lock not acquired in time'
   | 'audit lock not acquired in time: its holder is gone, and .lock.break exists; remove audit/.lock.break by hand only once no warpline process is running'
   | 'audit lock not acquired in time: its holder names no process; remove audit/.lock by hand only once no warpline process is running'
@@ -661,7 +661,14 @@ function holderOf(path: string): Holder | null {
  * there it stops: no branch removes or clears a break file this writer did not
  * make. Under its own break file it reads the lock again and judges it again,
  * and removes it only while it still names `token` and its holder is still
- * gone. Then it removes its own break file.
+ * gone. Then it removes its own break file. Its outcomes:
+ *
+ * - 'removed': the judged lock is gone, removed here or already.
+ * - 'changed': the lock is no longer the one judged (gone, another token, or a
+ *   holder that no longer reads as gone), and the caller judges it again at once.
+ * - 'kept': the removal itself failed for the judged token: making the break
+ *   file threw, or removing the lock threw.
+ * - 'break file held': something is already at `.lock.break`.
  *
  * The second judgment is mandatory (Mercurial; GnuPG T5884 is the bug without
  * it). The break runs with no await, and a gone holder cannot release, so the
@@ -671,7 +678,7 @@ function holderOf(path: string): Holder | null {
  * (review IN-01 and WR-02), short of a removal by hand inside that window,
  * which § 14 Writing names.
  */
-function breakStale(dir: string, lockPath: string, token: string): 'removed' | 'kept' | 'break file held' {
+function breakStale(dir: string, lockPath: string, token: string): 'removed' | 'kept' | 'changed' | 'break file held' {
   const breakPath = join(dir, '.lock.break')
   try {
     if (!take(breakPath, randomUUID())) return 'break file held'
@@ -680,7 +687,7 @@ function breakStale(dir: string, lockPath: string, token: string): 'removed' | '
   }
   try {
     const now = holderOf(lockPath)
-    if (now === null || now.token !== token || !now.gone) return 'kept'
+    if (now === null || now.token !== token || !now.gone) return 'changed'
     unlinkSync(lockPath)
     return 'removed'
   } catch (err) {
@@ -694,24 +701,29 @@ function breakStale(dir: string, lockPath: string, token: string): 'removed' | '
 }
 
 /**
- * Why a wait for the lock ended without it. The holder's pid reaches the
- * message only after it parsed as a positive safe integer, so only digits do.
- * A gone holder's lock that the break did not remove, because the break file
- * could not be made or the removal was refused, says its holder is gone.
+ * Why a wait for the lock ended without it, built from the lock as it stands
+ * when the wait ends: `now` is the lock read then, `breakHere` whether
+ * something is at `.lock.break` then, and `notRemoved` the token whose removal
+ * this pass saw fail. The one removal by hand with no condition is for a gone
+ * holder whose removal of that same token failed in this pass. The holder's pid
+ * reaches the message only after it parsed as a positive safe integer, so only
+ * digits do.
  */
-function lockRefusal(seen: Holder | null, breakHeld: boolean): Reason {
-  if (breakHeld) {
+function lockRefusal(now: Holder | null, breakHere: boolean, notRemoved: string | null): Reason {
+  if (now === null) return 'audit lock not acquired in time'
+  if (now.gone && breakHere) {
     return 'audit lock not acquired in time: its holder is gone, and .lock.break exists; remove audit/.lock.break by hand only once no warpline process is running'
   }
-  if (seen === null) return 'audit lock not acquired in time'
-  if (seen.gone) return 'audit lock not acquired in time: its holder is gone, and the lock could not be removed; remove audit/.lock by hand'
-  if (seen.pid === null) {
+  if (now.gone && notRemoved !== null && now.token === notRemoved) {
+    return 'audit lock not acquired in time: its holder is gone, and the lock could not be removed; remove audit/.lock by hand'
+  }
+  if (now.pid === null) {
     return 'audit lock not acquired in time: its holder names no process; remove audit/.lock by hand only once no warpline process is running'
   }
-  if (seen.here) {
-    return `audit lock not acquired in time: pid ${seen.pid} on this machine holds it; remove audit/.lock by hand only once that process is gone`
+  if (now.here) {
+    return `audit lock not acquired in time: pid ${now.pid} on this machine holds it; remove audit/.lock by hand only once that process is gone`
   }
-  return `audit lock not acquired in time: pid ${seen.pid} holds it, not on this machine or on one that cannot be told; remove audit/.lock by hand only once that process is gone`
+  return `audit lock not acquired in time: pid ${now.pid} holds it, not on this machine or on one that cannot be told; remove audit/.lock by hand only once that process is gone`
 }
 
 /**
@@ -735,21 +747,30 @@ async function acquire(dir: string, lockPath: string, kind: string, timeoutMs: n
         return token
       }
     } catch (err) {
-      // What a mount without symbolic links answers.
-      if (['EPERM', 'ENOTSUP', 'ENOSYS'].includes((err as NodeJS.ErrnoException).code ?? '')) {
-        throw new AuditAppendError(kind, 'audit lock not acquired: the filesystem under the home cannot hold a symbolic link (docs/runtime-spec.md § 14)', err)
+      // What a mount without symbolic links answers, among other causes, so
+      // the refusal names the code and the likely cause and asserts neither.
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === 'EPERM' || code === 'ENOTSUP' || code === 'ENOSYS') {
+        throw new AuditAppendError(
+          kind,
+          `audit lock not acquired: making its symbolic link failed with ${code}; the filesystem under the home might not hold one (docs/runtime-spec.md § 14)`,
+          err,
+        )
       }
       throw new AuditAppendError(kind, 'audit lock not acquired', err)
     }
-    // Only this pass's answer counts toward the reason the wait ends with.
-    let breakHeld = false
+    // The token whose removal this pass saw fail, if any.
+    let notRemoved: string | null = null
     const seen = holderOf(lockPath)
     if (seen?.gone && seen.token !== null) {
       const broken = breakStale(dir, lockPath, seen.token)
-      if (broken === 'removed') continue
-      breakHeld = broken === 'break file held'
+      if (broken === 'removed' || broken === 'changed') continue
+      if (broken === 'kept') notRemoved = seen.token
     }
-    if (Date.now() >= deadline) throw new AuditAppendError(kind, lockRefusal(seen, breakHeld))
+    // The lock and the break file are read again here, so the reason never describes an earlier look.
+    if (Date.now() >= deadline) {
+      throw new AuditAppendError(kind, lockRefusal(holderOf(lockPath), holderOf(join(dir, '.lock.break')) !== null, notRemoved))
+    }
     await sleep(LOCK_POLL_MS)
   }
 }
@@ -848,8 +869,10 @@ type Limits = { maxSegmentBytes: number; maxSegmentAgeMs: number }
  * Without `passing`, such a last line refuses every append.
  *
  * An active segment that holds no complete line, empty or holding only a
- * partial line, refuses every append and pass-over naming the file and the
- * hand step: its successor would need its own name. Nothing here moves it.
+ * partial line, refuses every append and pass-over: its successor would need
+ * its own name. Nothing here moves it. That refusal, and the one for a last
+ * line that is not a record, is the walk's own over the active segment, so the
+ * next step it names is the one every reader of the walk names.
  */
 async function appendLocked(
   dir: string,
@@ -885,12 +908,13 @@ async function appendLocked(
     if (tail.torn) {
       const bytes = await readFile(activePath)
       const end = bytes.lastIndexOf(0x0a)
-      // A successor would need this file's own name.
-      if (end === -1) throw new AuditAppendError(kind, `segment ${active} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`)
-      const tornBytes = bytes.subarray(end + 1)
-      fragment = { bytes: tornBytes.length, sha256: sha256(tornBytes) }
-      whole = bytes.subarray(0, end + 1)
-      last = whole.subarray(whole.lastIndexOf(0x0a, end - 1) + 1, end)
+      // With no complete line there is no fragment to acknowledge: the refusal below names the file.
+      if (end !== -1) {
+        const tornBytes = bytes.subarray(end + 1)
+        fragment = { bytes: tornBytes.length, sha256: sha256(tornBytes) }
+        whole = bytes.subarray(0, end + 1)
+        last = whole.subarray(whole.lastIndexOf(0x0a, end - 1) + 1, end)
+      }
     }
     let lastRecord = last === null ? undefined : parseRecord(last.toString('utf-8'))
     // The complete lines, as bytes, for a pass-over: each named one is hashed as written.
@@ -916,8 +940,11 @@ async function appendLocked(
         stepped = true
       }
     }
-    if (last === null) throw new AuditAppendError(kind, `segment ${active} holds no complete line; move it aside by hand (docs/runtime-spec.md § 14)`)
-    if (lastRecord === undefined) throw new AuditAppendError(kind, 'the active segment holds no readable last line')
+    // No complete line, or a last one that is not a record: the walk's own refusal names the next step.
+    if (last === null || lastRecord === undefined) {
+      const walked = await activeState(dir)
+      throw new AuditAppendError(kind, 'refused' in walked ? walked.refused : 'the active segment holds no readable last line')
+    }
     // A pass-over counts position, so a seq the last record claims is never
     // carried forward. An ordinary append takes the tail's claim.
     seq = passing === undefined ? lastRecord.warplineseq : firstSeqOf(active) + lastAt
@@ -1150,7 +1177,9 @@ export function passOver(
  * The head: the last complete line's seq and the hash of its bytes, or seq 0
  * and the zero hash before the first record. A pure reader: no lock, no mkdir.
  * Rejects with an Error named `AuditHeadUnreadableError` when the active
- * segment holds no complete line, or its last one is not a record.
+ * segment holds no complete line, or its last one is not a record. Its own
+ * `reason` is the walk's refusal over the active segment, which names the next
+ * step, the same words an append gives.
  */
 export async function readHead(statePath: string): Promise<{ seq: number; head: string }> {
   const dir = auditDirFor(statePath)
@@ -1165,7 +1194,9 @@ export async function readHead(statePath: string): Promise<{ seq: number; head: 
   const { line } = await lastLine(join(dir, segments[segments.length - 1] as string))
   const rec = line === null ? undefined : parseRecord(line.toString('utf-8'))
   if (line === null || rec === undefined) {
-    const err = new Error('audit store: the active segment holds no readable last line')
+    const walked = await activeState(dir)
+    const reason = 'refused' in walked ? walked.refused : 'the active segment holds no readable last line'
+    const err = Object.assign(new Error(`audit store: there is no head to print: ${reason}`), { reason })
     err.name = 'AuditHeadUnreadableError'
     throw err
   }
