@@ -871,9 +871,10 @@ type Limits = { maxSegmentBytes: number; maxSegmentAgeMs: number }
  * Without `passing`, such a last line refuses every append.
  *
  * A newest segment that is empty never got its opening line. It is taken out
- * of the list before anything is derived, so everything is derived as if it
- * were absent, and the write goes into it, through the same `writeLine`, only
- * when it opens a segment of that name. Otherwise nothing is written, and the
+ * of the list before anything is derived, and everything is derived as the
+ * writer that created it would have, which decided no seal. The write goes
+ * into it, through the same `writeLine`, only when it opens a segment of that
+ * name. Otherwise nothing is written, and the
  * refusal is the walk's own over the segment before when the walk stops there,
  * or else names the file and no step. A newest segment holding only a partial
  * line refuses every append and pass-over, naming the file and the move aside.
@@ -967,7 +968,8 @@ async function appendLocked(
     prev = sha256(last)
 
     // Nothing is sealed past a line that is not a record, which would then no longer end its segment.
-    if (!tail.torn && !stepped && lastRecord.type !== 'warpline.audit.segment.sealed') {
+    // The writer that left the empty file did not seal, or the segment before would end in segment.sealed.
+    if (unopened === undefined && !tail.torn && !stepped && lastRecord.type !== 'warpline.audit.segment.sealed') {
       if (tail.size >= limits.maxSegmentBytes) reason = 'size'
       else {
         const first = await firstLine(activePath)

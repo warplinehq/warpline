@@ -3881,10 +3881,10 @@ nothing, because a partial line can't be sealed past. It opens a new segment
 after the last complete line, whose `segment.opened` records the fragment's
 length in bytes and its sha256 as `fragment`, and then writes the record.
 Every byte of the torn file stays as it was. A newest segment that holds no
-complete line holds no record. When it is empty, a writer derives what it
-writes as if the file were absent, and writes into it only when that opens a
-segment of the same name, or else refuses. When it holds only a partial line,
-every append and pass-over refuses (§ When the store refuses).
+complete line holds no record. When it is empty, the writer derives what the
+writer that created the file would have, and writes into it only when that
+opens a segment of the same name, or else refuses. When it holds only a
+partial line, every append and pass-over refuses (§ When the store refuses).
 
 **A lost successor.** A crash between the sealed line and the new file leaves
 an active segment that ends in `segment.sealed`. The next append heals it. It
