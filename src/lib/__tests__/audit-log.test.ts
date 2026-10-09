@@ -1419,6 +1419,35 @@ describe('an empty newest segment the writer did not make', () => {
       intents_unreadable: null,
     })
   })
+
+  test('a pass-over that opens another name is refused under the lock, and writes nothing', async () => {
+    await lift()
+    const stop = appendRelinked(auditDir, 'warpline.audit.fire.intent', {
+      plugin: 'bad\u0007',
+      run_id: 'run-78',
+      class: 'session',
+      effect_id: null,
+      fingerprint: null,
+    })
+    await lift()
+    const head = await audit.readHead(statePath)
+    const stray = join(auditDir, '0000000000000009.jsonl')
+    writeFileSync(stray, '')
+    const first = readFileSync(segmentPath())
+
+    const reason = await audit.passOver(statePath, [stop]).then(
+      () => 'resolved',
+      (err: unknown) => (err as { reason?: unknown }).reason,
+    )
+
+    expect(reason).toBe(
+      `seq ${stop} holds fire.intent data the walk cannot carry; pass it over with warpline audit pass-over (docs/runtime-spec.md § 14)`,
+    )
+    expect(readdirSync(auditDir).filter((n) => n.endsWith('.jsonl')).sort()).toEqual(['0000000000000001.jsonl', '0000000000000009.jsonl'])
+    expect(readFileSync(segmentPath()).equals(first)).toBe(true)
+    expect(statSync(stray).size).toBe(0)
+    expect(await audit.readHead(statePath)).toEqual(head)
+  })
 })
 
 describe('authority files', () => {

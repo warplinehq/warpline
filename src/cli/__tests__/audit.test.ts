@@ -29,7 +29,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { appendAudit, passOver as passOverLib, readHead } from '../../lib/audit-log.js'
+import { appendAudit, passOver as passOverLib, readHead, SEGMENT_MAX_AGE_MS } from '../../lib/audit-log.js'
 import { _setHome } from '../../lib/paths.js'
 import { appendRelinked, forge, walkChain, type ForgeOp } from '../../lib/__tests__/helpers/audit-chain.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
@@ -1224,6 +1224,13 @@ describe('what a crash leaves before or at a new segment', () => {
   type End = { verdict: 'clean' | 'torn'; exit: number; reason: string | null }
   /** The head kept before the shape was made, the newest segment's first seq, the line the walk stops on, and the open intent. */
   type Ctx = { h0: string; n: number; stop?: number; intent?: number }
+  /** What every writer on the re-run is given so that a rotation is due. */
+  type Due = { now?: () => number; maxSegmentBytes?: number }
+  /** Each way a rotation comes due by the re-run: the clock 31 days on, or a size every segment is past. */
+  const DUE: { by: 'age' | 'size'; opts: Due }[] = [
+    { by: 'age', opts: { now: () => Date.now() + SEGMENT_MAX_AGE_MS + 86_400_000 } },
+    { by: 'size', opts: { maxSegmentBytes: 1 } },
+  ]
 
   const CLEAN: End = { verdict: 'clean', exit: 0, reason: null }
   const acknowledged = (seq: number): End => ({ verdict: 'torn', exit: 3, reason: `seq ${seq} acknowledges a partial line the store kept` })
@@ -1255,7 +1262,7 @@ describe('what a crash leaves before or at a new segment', () => {
           st('tampered', 4, NR(c.stop!), NOTREC(c.stop!), 'refuses', NOTREC(c.stop!)),
         ]
 
-  const shapes: { what: string; build: (content: string) => Promise<Ctx>; steps: (c: Ctx, content: string) => Step[]; end: (c: Ctx) => End }[] = [
+  const shapes: { what: string; build: (content: string) => Promise<Ctx>; steps: (c: Ctx, content: string, due: boolean) => Step[]; end: (c: Ctx) => End }[] = [
     {
       what: 'genesis',
       build: async (content) => {
@@ -1339,7 +1346,8 @@ describe('what a crash leaves before or at a new segment', () => {
         await passOverLib(statePath(), [stop])
         return { h0, n: leave(content), stop, intent }
       },
-      steps: (c, content) => carried(c, content, THROUGH),
+      // A due rotation must seal, and a seal needs the walk, which stops at the line.
+      steps: (c, content, due) => carried(c, content, due ? CARRY(c.stop!) : THROUGH),
       end: () => CLEAN,
     },
     {
@@ -1372,8 +1380,8 @@ describe('what a crash leaves before or at a new segment', () => {
   ]
 
   /** One append, as THROUGH with what it resolved, or as its refusal's reason. */
-  const tryAppend = (): Promise<{ said: string; kept?: { seq: number; head: string } }> =>
-    appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null }).then(
+  const tryAppend = (due?: Due): Promise<{ said: string; kept?: { seq: number; head: string } }> =>
+    appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null }, due).then(
       (kept) => ({ said: THROUGH, kept }),
       (err: unknown) => ({ said: String((err as { reason?: unknown }).reason) }),
     )
@@ -1381,9 +1389,21 @@ describe('what a crash leaves before or at a new segment', () => {
   /**
    * Each step's words, then the step those words name and nothing else, then
    * one more append and verify against the head kept before the shape was made.
-   * Resolves the files it moved aside.
+   * Resolves the files it moved aside. It runs a pass-over through the command,
+   * or with `due` through the store, printed as the command would print it.
    */
-  async function follow(ctx: Ctx, steps: Step[], end: End): Promise<{ aside: string; bytes: Buffer }[]> {
+  async function follow(ctx: Ctx, steps: Step[], end: End, due?: Due): Promise<{ aside: string; bytes: Buffer }[]> {
+    const passAt = (seq: number): Promise<{ code: number; stdout: string; stderr: string }> =>
+      due === undefined
+        ? passOver(seq)
+        : passOverLib(statePath(), [seq], due).then(
+            () => ({ code: 0, stdout: '', stderr: '' }),
+            (err: unknown) => ({
+              code: 1,
+              stdout: '',
+              stderr: `audit pass-over: ${String((err as { reason?: unknown }).reason)}. Nothing was written.\n`,
+            }),
+          )
     const outputs: string[] = []
     const moved: { aside: string; bytes: Buffer }[] = []
     const kept: { seq: number; head: string }[] = []
@@ -1407,7 +1427,7 @@ describe('what a crash leaves before or at a new segment', () => {
         expect(h.code).toBe(0)
       }
 
-      const appended = await tryAppend()
+      const appended = await tryAppend(due)
       expect({ k, append: appended.said }).toEqual({ k, append: step.append })
       if (appended.kept !== undefined) kept.push(appended.kept)
 
@@ -1433,7 +1453,7 @@ describe('what a crash leaves before or at a new segment', () => {
         // A reader of verify's line takes the pass-over it names, and the pass-over, holding the lock, names the same file.
         const viaVerify = step.next === null ? null : passPattern.exec(step.next)
         if (viaVerify !== null) {
-          const r = await passOver(Number(viaVerify[1]))
+          const r = await passAt(Number(viaVerify[1]))
           outputs.push(r.stdout, r.stderr)
           expect({ code: r.code, stdout: r.stdout, stderr: r.stderr }).toEqual({
             code: 1,
@@ -1446,18 +1466,20 @@ describe('what a crash leaves before or at a new segment', () => {
         renameSync(join(auditDir(), aside[1]!), to)
         moved.push({ aside: to, bytes })
       } else if (pass !== null) {
-        const r = await passOver(Number(pass[1]))
+        const r = await passAt(Number(pass[1]))
         outputs.push(r.stdout, r.stderr)
-        expect(r.code).toBe(0)
+        expect({ k, code: r.code, stderr: r.stderr }).toEqual({ k, code: 0, stderr: '' })
       } else {
         throw new Error(`no step is named by: ${named}`)
       }
     }
     for (const out of outputs) expect(out).not.toContain('WALK_SENTINEL_5d1')
 
-    const last = await tryAppend()
+    const last = await tryAppend(due)
     expect(last.said).toBe(THROUGH)
     kept.push(last.kept!)
+    // Every segment was opened where it is, and none is left empty beside a newer one.
+    expect(segmentFiles().filter((n) => statSync(join(auditDir(), n)).size === 0)).toEqual([])
     // What was moved aside is as it was.
     for (const { aside, bytes } of moved) expect(readFileSync(aside).equals(bytes)).toBe(true)
     // No record an append resolved is lost: each is still stored at its seq under its head.
@@ -1478,26 +1500,29 @@ describe('what a crash leaves before or at a new segment', () => {
 
   for (const shape of shapes) {
     const ends = shape.what.includes('partial') ? 'torn' : 'clean'
-    test(`${shape.what}, its new segment left empty: the next writer opens it where it is, no record is lost, and the store verifies ${ends}`, async () => {
-      const ctx = await shape.build('')
-      expect(ctx.n).toBe(newest())
-      const end = shape.end(ctx)
-      expect(end.verdict).toBe(ends)
-      const moved = await follow(ctx, shape.steps(ctx, ''), end)
-      expect(moved).toEqual([])
-      expect(JSON.parse(readFileSync(join(auditDir(), nameOf(ctx.n)), 'utf8').split('\n')[0]!)).toMatchObject({
-        type: 'warpline.audit.segment.opened',
-        warplineseq: ctx.n,
+    for (const due of [undefined, ...DUE]) {
+      const rerun = due === undefined ? '' : `, re-run once a rotation is due by ${due.by}`
+      test(`${shape.what}, its new segment left empty${rerun}: the next writer opens it where it is, no record is lost, and the store verifies ${ends}`, async () => {
+        const ctx = await shape.build('')
+        expect(ctx.n).toBe(newest())
+        const end = shape.end(ctx)
+        expect(end.verdict).toBe(ends)
+        const moved = await follow(ctx, shape.steps(ctx, '', due !== undefined), end, due?.opts)
+        expect(moved).toEqual([])
+        expect(JSON.parse(readFileSync(join(auditDir(), nameOf(ctx.n)), 'utf8').split('\n')[0]!)).toMatchObject({
+          type: 'warpline.audit.segment.opened',
+          warplineseq: ctx.n,
+        })
       })
-    })
-    test(`${shape.what}, its new segment left holding a partial line: only a writer holding the lock names the move aside, no record is lost, and the store verifies ${ends}`, async () => {
-      const ctx = await shape.build(PARTIAL)
-      expect(ctx.n).toBe(newest())
-      const end = shape.end(ctx)
-      expect(end.verdict).toBe(ends)
-      const moved = await follow(ctx, shape.steps(ctx, PARTIAL), end)
-      expect(moved.map((m) => m.bytes.toString('utf8'))).toEqual([PARTIAL])
-    })
+      test(`${shape.what}, its new segment left holding a partial line${rerun}: only a writer holding the lock names the move aside, no record is lost, and the store verifies ${ends}`, async () => {
+        const ctx = await shape.build(PARTIAL)
+        expect(ctx.n).toBe(newest())
+        const end = shape.end(ctx)
+        expect(end.verdict).toBe(ends)
+        const moved = await follow(ctx, shape.steps(ctx, PARTIAL, due !== undefined), end, due?.opts)
+        expect(moved.map((m) => m.bytes.toString('utf8'))).toEqual([PARTIAL])
+      })
+    }
   }
 
   test('a rotation that stopped after its seal: nothing refuses, verify reads torn, and the next append heals it to clean', async () => {
@@ -1541,6 +1566,7 @@ describe('what a crash leaves before or at a new segment', () => {
       'A command that does not hold the audit lock never names a step by hand on a segment file, and reads a newest segment that holds no complete line as not yet written.',
       "prints the walk's refusal on its `open intents unreadable` line under any verdict",
       'writes into it only when that opens a segment of the same name',
+      'the writer derives what the writer that created the file would have',
       'The refusal is worded from the lock as it stands when the wait ends, never from an earlier look.',
       'is not removed, and the writer judges it again at once',
     ]) {
@@ -1595,6 +1621,7 @@ describe('what a crash leaves before or at a new segment', () => {
       'empty as a crash between creating it and its first write leaves',
       "can't be followed, because its successor would need the same name",
       'Nothing appends past it, and the walk cannot start',
+      'as if the file were absent',
     ]) {
       expect({ sentence, in14: s14.includes(flat(sentence)) }).toEqual({ sentence, in14: false })
     }
