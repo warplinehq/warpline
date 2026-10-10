@@ -1277,7 +1277,10 @@ there is no daemon, no keyring and no server.
 | `expires_at`       | ISO 8601 string    | The earliest expiry across `scope_windows`. On a file without `scope_windows`, when the grant stops being honoured for every scope. Always written, and a file whose `expires_at` will not parse is corrupt. |
 | `scopes`           | `"*"` or `string[]` | `"*"` approves every plugin. An array approves exactly the plugin **directory** names it lists — the same key the engine passes to the gate, not `manifest.name`. Always written sorted, so both the file and its diff are stable. |
 | `min_reader_version` | integer, optional | The oldest reader that may interpret the file. A reader whose own version (`GRANT_READER_VERSION`, 1 in this build) is lower refuses the whole file, and so does any value that is not a finite number. Nothing writes it yet. |
-| `scope_windows`    | object, optional   | One window per scope key (a plugin name, or `"*"`), each with its own `first_granted_at` and `expires_at`. Each scope expires on its own clock and is capped at its own ceiling. Written by `warpline approve`; `grantApproval` does not write it. |
+| `scope_windows`    | object, optional   | One window per scope key (a plugin name, or `"*"`), each with its own `first_granted_at` and `expires_at`. Each scope expires on its own clock and is capped at its own ceiling. Written by `warpline approve`; `grantApproval` does not write it. A window may also carry `issuer`: the registered id, human or machine, that `--principal` named on the last approve that named the scope. It is absent when none was named, and read as none when it is not a valid id. A session window's issuer may be either type; a standing grant's issuer is always a human (`### Standing grants` below). |
+
+A fire's attribution (§ 14) lists each live window that covers it as its own
+entry, so a live `"*"` window and the plugin's own window are two entries.
 
 The file is written with `JSON.stringify(payload, null, 2)`. It is a plain
 TypeScript `interface`, not a Zod schema, and carries no `schema_version`: the
@@ -1299,6 +1302,10 @@ which ignores `scope_windows`, expires every scope at the soonest window's
 expiry. A rollback narrows authority and never widens it. An older build's
 `approve` rewrites the file without `scope_windows`, and the file then reads
 the old way again.
+
+A window's `issuer` is newer than `scope_windows`. An older build ignores
+it, and an older build's `approve` rewrites the file without it, so
+attribution narrows and authority does not change.
 
 **Approving a parked result never writes this file.** `warpline approve` answers
 whichever gate is waiting, and when a parked result is waiting it records that
@@ -1471,7 +1478,8 @@ later one is the failure this behaviour exists to prevent.
 | Output | One line per live scope, each with its own expiry, then `Grant file: <path>`. |
 | Default TTL | 4 hours. |
 | `--all` | The only path to `"*"`. No positional name is ever treated as a wildcard. It prints the number of side-effecting plugins and the total number of declared side effects it covers before granting. |
-| Concurrent approve | The file is not locked, and the outcome is last-write-wins: each invocation reads the live grant, merges in memory and writes the whole result, so of two overlapping invocations the later write wins outright and the earlier one's scopes are lost. |
+| Issuer | The last grant that named a scope sets its issuer, none included. A scope the command did not name keeps its issuer. |
+| Concurrent approve | Serialised by the state lock: each invocation checks the principal, records the grant and writes the file inside one hold, so two overlapping invocations both land. |
 | Zero duration | Rejected before anything is written. `--ttl` takes a positive integer followed by `m`, `h` or `d`; a bare `0` fails the grammar and `0h` fails the positive-value check. The command exits 1 and the file is untouched. |
 | Empty scope list | Reachable only from the library path, which writes an empty `scopes` array. It approves nothing — an empty list is not a synonym for `"*"`. The command cannot produce one: `approve` with no plugin name and no `--all` prints usage and exits 1. |
 
@@ -1480,6 +1488,12 @@ check and before it merges, carrying the scopes asked for (`["*"]` for
 `--all`), the requested TTL in milliseconds or null, and the `--replace` and
 `--long` flags. When that record cannot be written, it says so on stderr,
 grants nothing and exits 1.
+
+`--principal <id>` names who is approving. It must name an active registered
+principal of either type. It is checked under the state lock, recorded as
+`principal` on `grant.issued`, and never taken from the environment or the
+account running the command. With a parked result waiting the flag is
+refused, because applying a parked result is not recorded with a principal.
 
 The 23-hour ceiling belongs to the merge path, not to the file. `mergeGrant`,
 behind `warpline approve`, is the only code that computes it; `grantApproval`,

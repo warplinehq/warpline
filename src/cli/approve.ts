@@ -81,6 +81,7 @@ import {
 } from '../runtime/engine.js'
 import { DEFAULT_TTL_MS, liveGrantScopes, mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
 import { appendAudit } from '../lib/audit-log.js'
+import { requirePrincipal } from '../lib/principals.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
 import {
@@ -118,6 +119,8 @@ Options:
   --ttl <dur>  Requested lifetime, e.g. 30m, 4h, 3d. Default ${DEFAULT_TTL_H}h.
   --replace    Overwrite the current scope list instead of adding to it.
   --long       Permit an expiry past ${CEILING_H}h from the first grant.
+  --principal <id>  Who is approving: a registered, active principal.
+                    Optional, never inferred.
 
 Content approval (one plugin, declaring approval_class: 'content'):
   --content         Approve the bytes its single dependency has already
@@ -128,6 +131,8 @@ Content approval (one plugin, declaring approval_class: 'content'):
   --zone <iana>     IANA zone both bounds are read in. Default: UTC.
   --remove          Withdraw the content approval. Only with --content; a
                     session grant is withdrawn with 'warpline revoke'.
+  --principal <id>  Who is approving: a registered, active principal.
+                    Optional, never inferred.
 `
 
 const MINUTE = 60 * 1000
@@ -256,7 +261,7 @@ function escapeForOperator(body: string): string {
  */
 async function approveContent(
   consumer: string,
-  values: { 'not-after'?: string; 'not-before'?: string; zone?: string },
+  values: { 'not-after'?: string; 'not-before'?: string; zone?: string; principal?: string },
   manifests: Map<string, PluginManifest>,
 ): Promise<number> {
   const manifest = manifests.get(consumer)
@@ -277,6 +282,13 @@ async function approveContent(
   const lockPath = pathsForStateFile(statePath).lockPath
 
   return await withStateLockAt(lockPath, async () => {
+    // Checked in the hold, so a principal disabled while this waited is refused.
+    const actor = await requirePrincipal(values.principal, 'active')
+    if ('refused' in actor) {
+      process.stderr.write(`approve: --principal: ${actor.refused}. Nothing was approved.\n`)
+      return 1
+    }
+
     // Read once the lock is held. The wait can outlast a --not-after, and every
     // decision below (the closed-window check, standing, approved_at, erasure) is
     // about the state this write replaces, so it reads the clock at that instant.
@@ -475,7 +487,7 @@ async function approveContent(
         opens_at: new Date(opensAt).toISOString(),
         closes_at: new Date(closesAt).toISOString(),
         replaced_fingerprint: replaced !== undefined && HEX64.test(replaced.fingerprint) ? replaced.fingerprint : null,
-        principal: null,
+        principal: actor.id,
       })
     } catch {
       process.stderr.write('The audit store could not record this content approval. Nothing was written.\n')
@@ -552,12 +564,19 @@ async function approveContent(
  */
 async function removeContentApproval(
   consumer: string,
+  values: { principal?: string },
   manifests: Map<string, PluginManifest>,
 ): Promise<number> {
   const statePath = engineStatePath()
   const lockPath = pathsForStateFile(statePath).lockPath
 
   return await withStateLockAt(lockPath, async () => {
+    const actor = await requirePrincipal(values.principal, 'active')
+    if ('refused' in actor) {
+      process.stderr.write(`approve: --principal: ${actor.refused}. Nothing was removed.\n`)
+      return 1
+    }
+
     // Read once the lock is held, for the reason `approveContent` gives.
     const now = Date.now()
     let state: EngineState
@@ -602,7 +621,7 @@ async function removeContentApproval(
       await appendAudit(statePath, 'content_approval.withdrawn', {
         plugin: consumer,
         fingerprint: HEX64.test(withdrawn.fingerprint) ? withdrawn.fingerprint : null,
-        principal: null,
+        principal: actor.id,
       })
     } catch {
       process.stderr.write(
@@ -634,6 +653,7 @@ export async function run(argv: string[]): Promise<number> {
     'not-before'?: string
     zone?: string
     remove?: boolean
+    principal?: string
   }
   let positionals: string[]
   try {
@@ -651,6 +671,7 @@ export async function run(argv: string[]): Promise<number> {
         'not-before': { type: 'string' },
         zone: { type: 'string' },
         remove: { type: 'boolean' },
+        principal: { type: 'string' },
       },
       allowPositionals: true,
       strict: true,
@@ -755,7 +776,7 @@ export async function run(argv: string[]): Promise<number> {
   // this name against the manifests would report it unknown and strand its
   // record in the state document with no CLI gesture that reaches it.
   if (values.content && values.remove) {
-    return await removeContentApproval(positionals[0]!, manifests)
+    return await removeContentApproval(positionals[0]!, values, manifests)
   }
 
   // Name validation, all of it, before any write.
@@ -801,44 +822,51 @@ export async function run(argv: string[]): Promise<number> {
   // mistake gate-first exists to prevent. A missing file yields defaults, so a
   // fresh install still reaches the Grant path unchanged.
   const statePath = engineStatePath()
-  if (!values.all) {
-    // **The named path is one locked read-modify-write, and it has to be.**
-    // Everything below reads the state document and then writes it back through
-    // `applyPendingGate`, and R11's own Edge Coverage row assumes that window is
-    // serialised against a concurrent `approve --content`. It was not: only the
-    // content branch took a lock, this branch read and wrote outside one, and
-    // `applyPendingGate` writes state per call without taking one of its own. A
-    // content approval landing from a second attachment between the read and the
-    // apply was simply overwritten.
-    //
-    // The lock wraps the LOOP rather than each call, because the module
-    // docstring's observation above is what makes per-call locking wrong here:
-    // `applyPendingGate` writes state per call, so several gated plugins are
-    // several read-modify-writes over one in-memory document, and a lock
-    // released between them reopens the window it was taken to close.
-    //
-    // Nothing nests. `applyPendingGate` takes no lock — the sibling gate in
-    // `engine.ts` asserts that its body never names one — and the imported lock
-    // is a non-reentrant `O_EXCL` acquire that would block for the state
-    // manager's full ceiling and then throw.
-    //
-    // The same derived lock path the content branch uses: the lock that guards
-    // THIS document, never whatever the state manager's module paths happen to
-    // point at.
-    //
-    // `null` means "fell through to the Grant path"; every other value is this
-    // command's exit code, decided while the lock was held.
-    const lockPath = pathsForStateFile(statePath).lockPath
-    // The lock is an `O_EXCL` file, so its directory has to exist before the
-    // acquire — and on a fresh home it does not, because `resolveHome` creates
-    // nothing. Without this, `approve <plugin>` on a brand-new install died
-    // with an ENOENT on a lock file instead of merging the Grant it was asked
-    // for. `recursive: true` so an existing directory is a no-op rather than a
-    // second failure mode.
-    await mkdir(dirname(lockPath), { recursive: true })
-    const settled = await withStateLockAt(
-      lockPath,
-      async (): Promise<number | null> => {
+  // The same derived lock path the content branch uses: the lock that guards
+  // THIS document, never whatever the state manager's module paths happen to
+  // point at.
+  const lockPath = pathsForStateFile(statePath).lockPath
+  // The lock is an `O_EXCL` file, so its directory has to exist before the
+  // acquire — and on a fresh home it does not, because `resolveHome` creates
+  // nothing. Without this, `approve <plugin>` on a brand-new install died
+  // with an ENOENT on a lock file instead of merging the Grant it was asked
+  // for. `recursive: true` so an existing directory is a no-op rather than a
+  // second failure mode.
+  await mkdir(dirname(lockPath), { recursive: true })
+
+  // `--all` cannot answer a parked result, so its hold covers the grant path
+  // alone: the principal check, the record and the write (D-18).
+  if (values.all) {
+    return await withStateLockAt(lockPath, () =>
+      writeSessionGrant(values, positionals, ttlMs, manifests, statePath, approvalPath, now),
+    )
+  }
+
+  // **The named path is one locked read-modify-write, and it has to be.**
+  // Everything below reads the state document and then writes it back through
+  // `applyPendingGate`, and R11's own Edge Coverage row assumes that window is
+  // serialised against a concurrent `approve --content`. It was not: only the
+  // content branch took a lock, this branch read and wrote outside one, and
+  // `applyPendingGate` writes state per call without taking one of its own. A
+  // content approval landing from a second attachment between the read and the
+  // apply was simply overwritten.
+  //
+  // The lock wraps the LOOP rather than each call, because the module
+  // docstring's observation above is what makes per-call locking wrong here:
+  // `applyPendingGate` writes state per call, so several gated plugins are
+  // several read-modify-writes over one in-memory document, and a lock
+  // released between them reopens the window it was taken to close.
+  //
+  // Nothing nests. `applyPendingGate` takes no lock — the sibling gate in
+  // `engine.ts` asserts that its body never names one — and the imported lock
+  // is a non-reentrant `O_EXCL` acquire that would block for the state
+  // manager's full ceiling and then throw. `writeSessionGrant` takes none
+  // either, so the grant path runs inside this hold without nesting.
+  //
+  // Every return is this command's exit code, decided while the lock was held.
+  return await withStateLockAt(
+    lockPath,
+    async (): Promise<number> => {
     let state
     try {
       state = await readEngineState(statePath)
@@ -881,6 +909,16 @@ export async function run(argv: string[]): Promise<number> {
     }
 
     if (gated.length > 0) {
+      // No audit kind records a parked apply yet, so a principal named here
+      // would be recorded nowhere. Refused by name rather than dropped (D-19).
+      if (values.principal !== undefined) {
+        process.stderr.write(
+          'approve: --principal names who grants authority, and applying a parked result is not ' +
+            'recorded with a principal. Nothing was applied.\n',
+        )
+        return 1
+      }
+
       // Counted, not latched. `applyPendingGate` writes state per call, so with
       // several gated plugins a third refusal leaves the first two applied —
       // and a bare `failed` flag exited 1 while printing nothing to say that
@@ -1064,14 +1102,36 @@ export async function run(argv: string[]): Promise<number> {
       )
       return 1
     }
-        // Fell through: no parked gate to apply and no denial standing in the
-        // way. The Grant write below touches the grant file and not this
-        // document, so it happens OUTSIDE the lock rather than holding it over
-        // an unrelated file.
-        return null
-      },
-    )
-    if (settled !== null) return settled
+
+    // Fell through: no parked gate to apply and no denial standing in the
+    // way. The principal check, the record and the grant write share this
+    // hold, which serialises concurrent approves: each one reads the grant
+    // file after the last one wrote it, so both land.
+    return await writeSessionGrant(values, positionals, ttlMs, manifests, statePath, approvalPath, now)
+    },
+  )
+}
+
+/**
+ * The Grant path: check the principal, record the grant, merge it into the
+ * session approval file, and narrate. Runs only inside the caller's state-lock
+ * hold, and takes no lock of its own: the lock is a non-reentrant `O_EXCL`
+ * file (P9).
+ */
+async function writeSessionGrant(
+  values: { all?: boolean; replace?: boolean; long?: boolean; principal?: string },
+  positionals: string[],
+  ttlMs: number | undefined,
+  manifests: Map<string, PluginManifest>,
+  statePath: string,
+  approvalPath: string,
+  now: number,
+): Promise<number> {
+  // Checked in the hold, so a principal disabled while this waited is refused.
+  const actor = await requirePrincipal(values.principal, 'active')
+  if ('refused' in actor) {
+    process.stderr.write(`approve: --principal: ${actor.refused}. Nothing was granted.\n`)
+    return 1
   }
 
   // On the audit record before the grant file changes, and after every refusal
@@ -1085,7 +1145,7 @@ export async function run(argv: string[]): Promise<number> {
       ttl_ms: ttlMs ?? null,
       replace: values.replace === true,
       long: values.long === true,
-      principal: null,
+      principal: actor.id,
     })
   } catch {
     process.stderr.write('The audit store could not record this grant, so nothing was granted.\n')
@@ -1139,7 +1199,7 @@ export async function run(argv: string[]): Promise<number> {
 
   const result = await mergeGrant(
     values.all ? '*' : positionals,
-    { ttlMs, replace: values.replace, long: values.long, now },
+    { ttlMs, replace: values.replace, long: values.long, now, principal: actor.id },
     approvalPath,
   )
 

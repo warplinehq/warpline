@@ -2102,8 +2102,8 @@ describe('contributor expectations', () => {
     // file, exact literal, where it belongs and why it is load-bearing
     const CLAIMS: [string, string, string][] = [
       ['docs/runtime-spec.md', 'never gated', '§ 9 read semantics — an empty `side_effects` array skips the gate entirely, the one approval fact a reader most easily gets backwards'],
-      ['docs/runtime-spec.md', '| Concurrent approve |', '§ 9 merge table — two overlapping invocations are a race, not an atomic merge'],
-      ['docs/runtime-spec.md', 'last-write-wins', '§ 9 merge table — the outcome of that race, stated so nobody infers a lock that does not exist'],
+      ['docs/runtime-spec.md', '| Concurrent approve |', '§ 9 merge table — what two overlapping invocations do to each other'],
+      ['docs/runtime-spec.md', 'Serialised by the state lock', '§ 9 merge table — the lock is what makes two overlapping approves both land, so the row must keep saying it is there'],
       ['docs/runtime-spec.md', '| Zero duration |', '§ 9 merge table — rejected before anything is written'],
       ['docs/runtime-spec.md', '| Empty scope list |', '§ 9 merge table — approves nothing; an empty list is not a synonym for "*"'],
       ['docs/doctrine.md', 'session-scoped, not per-action', '## Side-Effect Approval — the shape of the decision an operator is making'],
