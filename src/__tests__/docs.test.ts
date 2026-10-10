@@ -42,7 +42,13 @@ import { dirname, join, relative } from 'node:path'
 import { buildPlanModel } from '../cli/plan.js'
 import { renderPlan } from '../cli/plan-render.js'
 import { _setHome } from '../lib/paths.js'
-import { DEFAULT_TTL_MS, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
+import {
+  DEFAULT_STANDING_PERIOD_MS,
+  DEFAULT_TTL_MS,
+  MAX_GRANT_WINDOW_MS,
+  MAX_STANDING_HARD_MAX_MS,
+  MAX_STANDING_PERIOD_MS,
+} from '../runtime/approval-gate.js'
 import { PluginManifestSchema } from '../schemas/plugin-manifest.js'
 import { RefusalReasonSchema } from '../schemas/run-log.js'
 
@@ -1973,6 +1979,22 @@ describe('approval numbers stay true across the docs', () => {
       ['docs/doctrine.md', `${ceilingHours}-hour ceiling`],
       ['docs/first-plugin.md', `${ceilingHours}-hour ceiling`],
     ])
+    expect(offenders).toEqual([])
+  })
+
+  test('every document states the standing caps the issue path enforces', () => {
+    const DAY_MS = 24 * HOUR_MS
+    const defaultPeriodHours = DEFAULT_STANDING_PERIOD_MS / HOUR_MS
+    const maxPeriodDays = MAX_STANDING_PERIOD_MS / DAY_MS
+    const maxHardDays = MAX_STANDING_HARD_MAX_MS / DAY_MS
+    const offenders = missing(
+      'DEFAULT_STANDING_PERIOD_MS, MAX_STANDING_PERIOD_MS and MAX_STANDING_HARD_MAX_MS',
+      `${defaultPeriodHours}h, ${maxPeriodDays}d and ${maxHardDays}d`,
+      [
+        ['docs/runtime-spec.md', `at most ${maxPeriodDays} days (default ${defaultPeriodHours} hours)`],
+        ['docs/runtime-spec.md', `at most ${maxHardDays} days`],
+      ],
+    )
     expect(offenders).toEqual([])
   })
 })

@@ -46,7 +46,7 @@ Commands:
   scaffold   Generate a plugin directory from the template, or --from a shipped example
   configure  Write a plugin's config from the inputs its manifest declares
   run        Invoke a single plugin handler directly
-  approve    Grant a side-effect approval for this session
+  approve    Grant a side-effect approval for this session, or a standing one for a machine
   deny       Record a no, so the next engine tick stops asking
   resolve    Answer a fire nothing confirmed: a marked content fire, or any open intent by its seq
   revoke     Clear the current session approval
