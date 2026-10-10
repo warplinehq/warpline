@@ -1567,34 +1567,37 @@ is written as `"grants": []`.
 | `id` | string | 12 random lowercase hex characters. Issue refuses an id already in the file. |
 | `holder` | principal id | The principal the grant authorises. It must be an active machine in `principals.json` (§ 15) for the grant to be live. |
 | `issuer` | principal id | Always the active human who issued it. Never the holder. |
-| `scopes` | `string[]` | The plugin directory names it covers, sorted, without duplicates. Never `"*"`: a standing grant names every plugin it covers. |
+| `scopes` | `string[]` | The plugin directory names it covers, sorted, without duplicates. Never `"*"`: a standing grant names every plugin it covers. Each is a plugin name as the audit store's records take one: 1 to 255 characters, none of them a C0 control character, DEL, `/` or `\`. |
 | `issued_at` | ISO 8601 string | When it was issued. The hard maximum is measured from here. |
-| `period_start` | ISO 8601 string | Set at issue, and moved only by a renewal. The renewal deadline is measured from here. |
+| `period_start` | ISO 8601 string | Set at issue, and moved only by a renewal. The renewal deadline is measured from here. Never before `issued_at`, and never after the hard maximum. |
 | `period_ms` | integer | The renewal period in milliseconds. At most 7 days, and 24 hours when the issuer names none. |
 | `hard_max_ms` | integer | How long after `issued_at` the grant can stay live, however often it is renewed. At most 90 days, and at least `period_ms`. |
 
 Deadlines are derived from these fields, never stored.
 
-**The live rule.** A standing grant is live at `now` when all three hold:
+**The live rule.** A standing grant is live at `now` when all four hold:
 
 - `now` ≤ `period_start + period_ms`, the renewal deadline;
 - `now` ≤ `issued_at + hard_max_ms`, the hard maximum;
+- `period_start` ≤ `now`, so the period has started;
 - `principals.json` was read and names `holder` an active machine.
 
 Both instants are inclusive, like a session window's expiry. Live or lapsed is
 derived on every read from the fields, the clock and the registry. Nothing ever
 writes a lapse into the file.
 
-A grant that is not live is lapsed, for one of six reasons. When several apply,
+A grant that is not live is lapsed, for one of seven reasons. When several apply,
 the first in this order is the one reported:
 
 1. `hard max`: past the hard maximum.
 2. `not renewed`: past the renewal deadline.
-3. `registry unreadable`: no usable registry was read (below). A missing
+3. `future dated`: `period_start` is later than `now`. A clock that ran ahead
+   when the grant was issued or renewed, then was set back, leaves one.
+4. `registry unreadable`: no usable registry was read (below). A missing
    `principals.json` is one: it says nothing about any holder.
-4. `holder not registered`: the registry was read and does not name the holder.
-5. `holder not machine`: the holder is a human.
-6. `holder disabled`: the holder is a disabled machine.
+5. `holder not registered`: the registry was read and does not name the holder.
+6. `holder not machine`: the holder is a human.
+7. `holder disabled`: the holder is a disabled machine.
 
 `hard max`, `not renewed` and `holder not registered` are final: the lapse
 cannot clear, and only a new grant fixes it. A holder missing from
@@ -1605,15 +1608,27 @@ a hand edit can write it back, and the store records that edit as
 not final. Such a lapse clears, with no renewal, if `principals.json` names the
 holder an active machine before the grant's next expiry, the earlier of its
 renewal deadline and its hard maximum. After that expiry the lapse is final.
+`future dated` is not final either. It clears, with no renewal, when the clock
+reaches `period_start`, which the read keeps at or before the hard maximum.
+
+**The caps hold for every stored grant.** The caps are constants in code,
+never preferences, and no file can raise them. The read refuses a grant whose
+`period_ms` or `hard_max_ms` is over its cap, or whose `period_start` is
+before `issued_at` or after the hard maximum, and a grant whose period has not
+started is lapsed. So a grant is live only inside its current period and
+before its hard maximum, whatever its stored timestamps say: at most 7 days
+from any read to its renewal deadline, and at most 90 days from `issued_at`. A
+grant dated ahead of the clock gains no life from the lead.
 
 A lapsed grant stays in the standing grants file until revoked. Nothing
 collects it.
 
 **The whole file or nothing.** The standing grants file is read whole. Any
-malformed entry, a cap exceeded, a duplicate id, or a `min_reader_version` this
-build does not read makes the whole file unreadable, so one bad entry takes
-every grant in it down, and then no standing grant is live. A missing file
-holds none. No read throws.
+malformed entry, a cap exceeded, a scope that is not a plugin name, a
+`period_start` outside `issued_at` and the hard maximum, a duplicate id, or a
+`min_reader_version` this build does not read makes the whole file unreadable,
+so one bad entry takes every grant in it down, and then no standing grant is
+live. A missing file holds none. No read throws.
 
 **Reader version.** `min_reader_version` is read before any other field, and a
 file asking for a reader newer than `STANDING_READER_VERSION`, 1 in this build,
@@ -1647,12 +1662,13 @@ reads the warpline home's file.
 ```
 
 The next expiry is the earlier of the renewal deadline and the hard maximum. A
-lapsed grant's line ends `lapsed (<reason>)`, with one of the six reasons
+lapsed grant's line ends `lapsed (<reason>)`, with one of the seven reasons
 above. The lines come in the gate's order, by next expiry and then by id, and
-no line shows a principal's key. The read takes any non-empty scope but `*`, so
-a hand-edited file can hold one that is not a plugin name. Its control bytes,
-C1 included, print as `\xNN` and a backslash doubles, so no scope reaches the
-terminal as bytes it acts on. With no standing grant the section is absent.
+no line shows a principal's key. The read refuses a scope that is not a plugin
+name, so no scope holds a C0 control byte or DEL. A plugin name can hold a C1
+one, so `plan` escapes every control byte, C1 included, as `\xNN`, and a
+backslash doubles. No scope reaches the terminal as bytes it acts on. With no
+standing grant the section is absent.
 A standing grants file that cannot be read, for any cause, prints the one line
 `Standing grants: none live — the standing grants file cannot be read`, never
 an absent section, and shows no cause.
@@ -1680,12 +1696,10 @@ grant. On `approve`, `--standing` names the kind of grant. On `revoke`,
   gated, so a standing grant over either would cover nothing.
 - The renewal period, `--period`, is at most 7 days (default 24 hours). The
   hard maximum, `--hard-max`, is required, at most 90 days, and never shorter
-  than the period. The caps are constants in code, never preferences, so no
-  preference can raise them. The read checks each stored grant's `period_ms`
-  and `hard_max_ms` against the caps, but not `issued_at` and `period_start`
-  against each other or the clock. A hand-edited file, or a grant issued while
-  the clock ran ahead, can date a grant in the future, and it then stays live
-  past the caps by that much.
+  than the period. The caps are constants in code, never preferences, and no
+  file can raise them (above).
+- Each scope must be a plugin name (`scopes`, above). A scope that is not one
+  is refused before anything is written.
 - `--all`, `--ttl`, `--long`, `--replace` and the content flags (`--content`,
   `--remove`, `--not-after`, `--not-before`, `--zone`) are refused beside
   `--standing`. `--holder`, `--period` and `--hard-max` are refused without it.
@@ -1715,6 +1729,8 @@ standing grant's renewal period from now.
   lapse the grant clears, with no renewal, if `principals.json` names the
   holder an active machine before the grant's next expiry, and the refusal
   prints that moment.
+- A `future dated` grant is refused too. The refusal prints `period_start`,
+  when the lapse clears, and the next expiry, after which it is final.
 - An unknown id, and a standing grants file that cannot be read, are refused.
 
 Every refusal exits 1 and writes nothing. The command appends `grant.renewed`

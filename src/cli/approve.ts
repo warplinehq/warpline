@@ -1308,6 +1308,8 @@ function issueRefusalText(refusal: IssueRefusal): string {
       return 'a standing grant names at least one plugin'
     case 'all-scopes':
       return 'a standing grant never covers every plugin'
+    case 'bad-scope':
+      return 'a scope is not a plugin name'
     case 'bad-period':
       return 'the renewal period is not a positive whole number of milliseconds'
     case 'period-over-cap':

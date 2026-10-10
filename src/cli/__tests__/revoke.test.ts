@@ -297,6 +297,26 @@ describe('an unreadable standing grants file refuses, naming why and the way out
       prepare: () => writeFileSync(standingGrantsPath(), '{not json'),
       reasons: ['one bad grant makes the whole file unreadable'],
     },
+    // WR-02: a scope no revoke record can carry fails the read, so revoke
+    // refuses here and never removes a grant it cannot put on the record.
+    'a scope that is not a plugin name': {
+      prepare: () => {
+        const store = JSON.parse(readFileSync(standingGrantsPath(), 'utf-8')) as gate.StandingStore
+        const grants = store.grants.map((g) => (g.id === cdId ? { ...g, scopes: ['p\x1b[2J'] } : g))
+        writeFileSync(standingGrantsPath(), JSON.stringify({ ...store, grants }))
+      },
+      reasons: ['one bad grant makes the whole file unreadable'],
+    },
+    'a period_start before issued_at': {
+      prepare: () => {
+        const store = JSON.parse(readFileSync(standingGrantsPath(), 'utf-8')) as gate.StandingStore
+        const grants = store.grants.map((g) =>
+          g.id === cdId ? { ...g, period_start: new Date(Date.parse(g.issued_at) - 1).toISOString() } : g,
+        )
+        writeFileSync(standingGrantsPath(), JSON.stringify({ ...store, grants }))
+      },
+      reasons: ['one bad grant makes the whole file unreadable'],
+    },
     'newer reader': {
       prepare: () => {
         const store = JSON.parse(readFileSync(standingGrantsPath(), 'utf-8')) as gate.StandingStore

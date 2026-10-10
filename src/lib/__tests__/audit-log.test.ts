@@ -1797,6 +1797,35 @@ describe('grant ids and records stored before attribution', () => {
     }
   })
 
+  // The gate holds a copy of the store's plugin-name rule, since it may not
+  // import this module. A scope the gate issues must be one a revoke can record.
+  test('every scope the gate issues is one the store records, and one the gate refuses the store refuses', async () => {
+    const issuedRecord = (scope: string) =>
+      audit.appendAudit(statePath, 'grant.issued', {
+        kind: 'standing',
+        id: 'aaaaaaaaaaaa',
+        holder: 'ci',
+        principal: 'ops',
+        scopes: [scope],
+        period_ms: DAY,
+        hard_max_ms: 30 * DAY,
+      })
+    const names = ['p', 'digest-sender', 'a b', 'é.v2', 'x'.repeat(255), 'a/b', 'a\\b', 'p\x1b[2J', 'p\nq', '\x7f', 'x'.repeat(256)]
+    for (const scope of names) {
+      const issued = gate.issueStanding(
+        { min_reader_version: gate.STANDING_READER_VERSION, grants: [] },
+        { id: 'aaaaaaaaaaaa', holder: 'ci', issuer: 'ops', scopes: [scope], hardMaxMs: 30 * DAY },
+        Date.now(),
+      )
+      const gateTakes = 'store' in issued
+      const storeTakes = await issuedRecord(scope).then(
+        () => true,
+        () => false,
+      )
+      expect({ scope, gateTakes }).toEqual({ scope, gateTakes: storeTakes })
+    }
+  })
+
   test('records stored before attribution still walk', async () => {
     await audit.appendAudit(statePath, 'preference.set', { key: 'review_gate', old: null, new: HEX_A })
     const seq = appendRelinked(auditDir, 'warpline.audit.fire.intent', {

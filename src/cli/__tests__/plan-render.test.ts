@@ -405,10 +405,11 @@ describe('renderPlan — standing grants', () => {
     return out.split('\n').find((l) => l.startsWith('Session grant:'))
   }
 
-  test('six grants print each lapse reason, in model order', () => {
+  test('seven grants print each lapse reason, in model order', () => {
     const reasons = [
       'hard max',
       'not renewed',
+      'future dated',
       'registry unreadable',
       'holder not registered',
       'holder not machine',
@@ -418,11 +419,11 @@ describe('renderPlan — standing grants', () => {
       ...reasons.map((reason, i) =>
         standing({ id: `aaaaaaaaaaa${i + 1}`, nextExpiry: NOW + (i + 1) * HOUR, state: 'lapsed', reason }),
       ),
-      standing({ id: 'aaaaaaaaaaa7', nextExpiry: NOW + 7 * HOUR }),
+      standing({ id: 'aaaaaaaaaaa8', nextExpiry: NOW + 8 * HOUR }),
     ]
     const out = renderPlan(makeModel({ standing: { readable: true, grants } }), NOW)
 
-    expect(out).toContain('Standing grants (7):')
+    expect(out).toContain('Standing grants (8):')
     const expected = grants.map(
       (g) =>
         `  ${g.id} — holder ci, issuer ops, scopes digest-sender, issue-render — next expiry ${new Date(g.nextExpiry).toISOString()} — ${g.state === 'live' ? 'live' : `lapsed (${g.reason})`}`,
@@ -432,12 +433,13 @@ describe('renderPlan — standing grants', () => {
     // The renderer prints the order it is given: the gate already sorted it.
     const at = expected.map((line) => out.indexOf(line))
     expect(at).toEqual([...at].sort((a, b) => a - b))
-    expect(out.indexOf('Standing grants (7):')).toBeGreaterThan(out.indexOf('Session grant:'))
-    expect(out.indexOf('Standing grants (7):')).toBeLessThan(out.indexOf('Plugins:'))
+    expect(out.indexOf('Standing grants (8):')).toBeGreaterThan(out.indexOf('Session grant:'))
+    expect(out.indexOf('Standing grants (8):')).toBeLessThan(out.indexOf('Plugins:'))
   })
 
-  // The gate reads any non-empty scope from a hand-edited file, so a scope can
-  // carry bytes a terminal acts on. They print as visible escapes.
+  // The gate's read refuses a scope that is not a plugin name, so none reaches
+  // here from the file. Escaping stays as defence in depth: bytes a terminal
+  // acts on print as visible escapes.
   test('a scope holding control bytes prints them escaped, on its one line', () => {
     const grant = standing({ scopes: ['p\x1b[2J', 'q\nforged — live', 'r\\x1b', 's\x9b'] })
     const out = renderPlan(makeModel({ standing: { readable: true, grants: [grant] } }), NOW)

@@ -239,6 +239,13 @@ const ROWS: Row[] = [
     ],
   },
   {
+    // WR-01: a clock set back behind period_start leaves a period that has not started.
+    name: 'before period_start, after the clock went back',
+    at: T0 - 1,
+    argv: () => ['renew', id, '--principal', 'carol'],
+    reasons: [`the grant has lapsed (future dated). It clears when the clock reaches ${iso(T0)}, and is final after ${iso(T0 + DAY)}`],
+  },
+  {
     name: 'the holder gone from principals.json',
     prepare: async () => {
       await editRegistry((ps) => ps.filter((p) => p.id !== 'ci'))

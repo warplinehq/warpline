@@ -39,6 +39,7 @@ const C = 'cccccccccccc'
 const REASONS = [
   'hard max',
   'not renewed',
+  'future dated',
   'registry unreadable',
   'holder not registered',
   'holder not machine',
@@ -142,6 +143,13 @@ describe('caps', () => {
     expect(store.grants[0]?.period_ms).toBe(24 * HOUR)
   })
 
+  test('a 255-character scope and one with a space are plugin names, issued and read back', async () => {
+    const names = ['x'.repeat(255), 'digest sender']
+    await gate.writeStandingStore(storeWith({ scopes: names }), standingPath)
+    const read = await gate.readStandingStore(standingPath)
+    expect(read.readable && read.store.grants[0]?.scopes).toEqual([...names].sort())
+  })
+
   test('scopes are stored deduplicated and sorted', () => {
     const store = storeOf(gate.issueStanding(EMPTY, { ...TERMS, scopes: ['q', 'p', 'p'] }, T0))
     expect(store.grants[0]?.scopes).toEqual(['p', 'q'])
@@ -158,6 +166,10 @@ describe('caps', () => {
     ['an 11-character id', { id: 'abcdef12345' }, 'bad-id'],
     ['a malformed holder', { holder: 'Bad Id' }, 'bad-principal-id'],
     ['a holder equal to the issuer', { holder: 'ops', issuer: 'ops' }, 'holder-is-issuer'],
+    ['a scope holding a control byte', { scopes: ['p\x1b[2J'] }, 'bad-scope'],
+    ['a scope holding a slash', { scopes: ['a/b'] }, 'bad-scope'],
+    ['a scope holding a backslash', { scopes: ['a\\b'] }, 'bad-scope'],
+    ['a 256-character scope', { scopes: ['x'.repeat(256)] }, 'bad-scope'],
   ]
   for (const [what, terms, code] of refusals) {
     test(`${what} refuses ${code}`, () => {
@@ -232,6 +244,23 @@ describe('lapse', () => {
     expect([omitted.state, omitted.reason, omitted.final]).toEqual(['lapsed', 'registry unreadable', false])
   })
 
+  // WR-01: a period that has not started yet would carry the clock's lead as
+  // extra life past both caps, so it covers nothing until the clock reaches it.
+  test('a period_start after now reads future dated, not final, and live once the clock reaches it', async () => {
+    const early = await statusAt(issued(), T0 - 1)
+    expect([early.state, early.reason, early.final]).toEqual(['lapsed', 'future dated', false])
+    const at = await statusAt(issued(), T0)
+    expect([at.state, at.reason, at.final]).toEqual(['live', null, false])
+  })
+
+  test('a grant dated 2099 covers nothing today', async () => {
+    const future = iso(Date.UTC(2099, 0, 1))
+    writeRaw({ min_reader_version: 1, grants: [{ ...RAW_GRANT, scopes: ['p'], issued_at: future, period_start: future }] })
+    expect(await gate.grantsCovering('p', { now: T0, approvalPath, standingPath, registry: ACTIVE })).toEqual([])
+    const listing = await gate.listStandingGrants({ now: T0, registry: ACTIVE, standingPath })
+    expect(listing.readable && listing.grants.map((g) => [g.state, g.reason])).toEqual([['lapsed', 'future dated']])
+  })
+
   test('the first applicable reason wins', async () => {
     const disabled = registry({ ci: { type: 'machine', status: 'disabled' } })
     const hardMax = await statusAt(renewed(), T0 + 3 * DAY + 1, { registry: disabled })
@@ -299,6 +328,12 @@ describe('renew', () => {
     })
   })
 
+  test('before period_start refuses lapsed, future dated, not final', () => {
+    expect(gate.renewStanding(two(), A, 'ops', T0 - 1, ACTIVE)).toMatchObject({
+      refused: { code: 'lapsed', reason: 'future dated', final: false },
+    })
+  })
+
   test('the holder renewing its own grant refuses holder-renews', () => {
     expect(refusedOf(gate.renewStanding(two(), A, 'ci', T0, ACTIVE)).code).toBe('holder-renews')
   })
@@ -331,6 +366,7 @@ describe('the gate refuses with codes, never sentences', () => {
   const CODES = [
     'no-scope',
     'all-scopes',
+    'bad-scope',
     'bad-period',
     'period-over-cap',
     'hard-max-over-cap',
@@ -351,6 +387,7 @@ describe('the gate refuses with codes, never sentences', () => {
     const results: Array<{ store: gate.StandingStore } | { refused: unknown }> = [
       issue({ scopes: [] }),
       issue({ scopes: ['*'] }),
+      issue({ scopes: ['a/b'] }),
       issue({ periodMs: 0 }),
       issue({ periodMs: 7 * DAY + 1, hardMaxMs: 90 * DAY }),
       issue({ hardMaxMs: 90 * DAY + 1 }),
@@ -435,6 +472,13 @@ describe('fail closed', () => {
     ['a hard max below the period', { min_reader_version: 1, grants: [{ ...ok, period_ms: 2 * DAY, hard_max_ms: DAY }] }],
     ['two grants with one id', { min_reader_version: 1, grants: [ok, { ...ok, scopes: ['q'] }] }],
     ['the all-scopes scope', { min_reader_version: 1, grants: [{ ...ok, scopes: ['*'] }] }],
+    ['a scope holding a control byte', { min_reader_version: 1, grants: [{ ...ok, scopes: ['p', 'q\x1b[2J'] }] }],
+    ['a scope holding a newline', { min_reader_version: 1, grants: [{ ...ok, scopes: ['p', 'q\nforged'] }] }],
+    ['a scope holding a slash', { min_reader_version: 1, grants: [{ ...ok, scopes: ['p', '../q'] }] }],
+    ['a scope holding a backslash', { min_reader_version: 1, grants: [{ ...ok, scopes: ['p', 'a\\b'] }] }],
+    ['a 256-character scope', { min_reader_version: 1, grants: [{ ...ok, scopes: ['p', 'x'.repeat(256)] }] }],
+    ['a period_start before issued_at', { min_reader_version: 1, grants: [{ ...ok, period_start: iso(T0 - 1) }] }],
+    ['a period_start past the hard maximum', { min_reader_version: 1, grants: [{ ...ok, period_start: iso(T0 + 3 * DAY + 1) }] }],
   ]
 
   for (const [what, value] of bad) {

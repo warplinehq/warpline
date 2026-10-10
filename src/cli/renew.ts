@@ -66,6 +66,10 @@ function renewRefusalText(refusal: RenewRefusal, grant?: StandingGrant): string 
       // The next expiry: after a late renewal pushed the renewal deadline past
       // the hard maximum, the hard maximum is the moment the lapse can clear by.
       const end = Math.min(Date.parse(g.period_start) + g.period_ms, Date.parse(g.issued_at) + g.hard_max_ms)
+      // The read keeps period_start at or before the hard maximum, so this moment comes first.
+      if (refusal.reason === 'future dated') {
+        return `the grant has lapsed (future dated). It clears when the clock reaches ${g.period_start}, and is final after ${iso(end)}`
+      }
       const clears = 'It clears if principals.json names its holder an active machine before'
       return `the grant has lapsed (${refusal.reason}). ${clears} ${iso(end)}, and is final after that`
     }

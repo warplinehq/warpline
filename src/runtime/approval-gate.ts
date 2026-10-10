@@ -23,7 +23,9 @@
  *      gone from the registry (whose id never comes back), cannot clear and
  *      reads `final`. A lapse on an unreadable registry, a holder that is not a
  *      machine, or a disabled holder clears once the holder reads as an active
- *      machine again.
+ *      machine again. A grant whose period has not started yet, because its
+ *      `period_start` is later than now, covers nothing until the clock
+ *      reaches it, so no clock that ran ahead buys it life past the caps.
  *
  * Both file formats are specified in docs/runtime-spec.md § 9.
  *
@@ -54,6 +56,17 @@ const STANDING_ID = /^[0-9a-f]{12}$/
 
 function isPrincipalId(v: unknown): v is string {
   return typeof v === 'string' && PRINCIPAL_ID.test(v)
+}
+
+/**
+ * A plugin name, the audit store's rule: 1 to 255 characters, none of them a
+ * C0 control character, DEL, `/` or `\`. Copied: the gate may not import the
+ * store. A scope the gate takes must be one a `grant.revoked` record can carry.
+ */
+const PLUGIN_NAME = /^[^\x00-\x1f\x7f/\\]+$/
+
+function isPluginName(v: unknown): v is string {
+  return typeof v === 'string' && v.length <= 255 && PLUGIN_NAME.test(v)
 }
 
 /**
@@ -592,6 +605,7 @@ export interface StandingStore {
 export type LapseReason =
   | 'hard max'
   | 'not renewed'
+  | 'future dated'
   | 'registry unreadable'
   | 'holder not registered'
   | 'holder not machine'
@@ -600,8 +614,9 @@ export type LapseReason =
 /**
  * A standing grant as read at one instant. `final` is true when the lapse can
  * never clear and only a new grant fixes it: a time lapse, or a holder gone
- * from the registry, whose id is never added again. The other three reasons
- * clear once the holder reads as an active machine.
+ * from the registry, whose id is never added again. A `future dated` lapse
+ * clears when the clock reaches `period_start`, and the other three once the
+ * holder reads as an active machine.
  */
 export interface StandingStatus extends StandingGrant {
   renewal_deadline: number
@@ -625,13 +640,15 @@ export type StandingListing =
 
 /**
  * Why {@link issueStanding} refused. `no-scope` also covers a scope that is
- * not a non-empty string, and `bad-period` a period, or a hard maximum, that
- * is not a whole number of milliseconds.
+ * not a non-empty string, `bad-scope` one that is not a plugin name, and
+ * `bad-period` a period, or a hard maximum, that is not a whole number of
+ * milliseconds.
  */
 export type IssueRefusal = {
   code:
     | 'no-scope'
     | 'all-scopes'
+    | 'bad-scope'
     | 'bad-period'
     | 'period-over-cap'
     | 'hard-max-over-cap'
@@ -677,14 +694,19 @@ function parseGrant(value: unknown): StandingGrant | null {
   if (typeof id !== 'string' || !STANDING_ID.test(id)) return null
   if (!isPrincipalId(holder) || !isPrincipalId(issuer)) return null
   if (!Array.isArray(scopes) || scopes.length === 0) return null
-  if (!scopes.every((s): s is string => typeof s === 'string' && s.length > 0 && s !== '*')) return null
+  if (!scopes.every((s): s is string => isPluginName(s) && s !== '*')) return null
   if (new Set(scopes).size !== scopes.length) return null
-  if (typeof issued_at !== 'string' || parseTimestamp(issued_at) === null) return null
-  if (typeof period_start !== 'string' || parseTimestamp(period_start) === null) return null
+  if (typeof issued_at !== 'string' || typeof period_start !== 'string') return null
+  const issued = parseTimestamp(issued_at)
+  const start = parseTimestamp(period_start)
+  if (issued === null || start === null) return null
   if (typeof period_ms !== 'number' || !Number.isInteger(period_ms) || period_ms <= 0) return null
   if (period_ms > MAX_STANDING_PERIOD_MS) return null
   if (typeof hard_max_ms !== 'number' || !Number.isInteger(hard_max_ms)) return null
   if (hard_max_ms < period_ms || hard_max_ms > MAX_STANDING_HARD_MAX_MS) return null
+  // Issue sets period_start to issued_at and renew moves it only forward, and
+  // only while the grant is live, so no verb writes one outside this range.
+  if (start < issued || start > issued + hard_max_ms) return null
   return { id, holder, issuer, scopes: [...scopes], issued_at, period_start, period_ms, hard_max_ms }
 }
 
@@ -745,9 +767,12 @@ export async function readStandingStore(
  * A grant's status at `now`. Both instants are inclusive (strict `>`), like a
  * session window's expiry. A timestamp that will not parse reads as already
  * past, so a malformed grant handed in by a caller lapses rather than lives.
+ * A period that starts after `now` covers nothing yet: otherwise a grant dated
+ * ahead of the clock would stay live past both caps by the clock's lead.
  */
 function statusOf(grant: StandingGrant, now: number, registry: RegistrySnapshot | null | undefined): StandingStatus {
-  const renewal_deadline = (parseTimestamp(grant.period_start) ?? Number.NEGATIVE_INFINITY) + grant.period_ms
+  const period_start = parseTimestamp(grant.period_start) ?? Number.NEGATIVE_INFINITY
+  const renewal_deadline = period_start + grant.period_ms
   const hard_max_at = (parseTimestamp(grant.issued_at) ?? Number.NEGATIVE_INFINITY) + grant.hard_max_ms
   const holder = registry?.get(grant.holder)
   const reason: LapseReason | null =
@@ -755,15 +780,17 @@ function statusOf(grant: StandingGrant, now: number, registry: RegistrySnapshot 
       ? 'hard max'
       : now > renewal_deadline
         ? 'not renewed'
-        : registry === null || registry === undefined
-          ? 'registry unreadable'
-          : holder === undefined
-            ? 'holder not registered'
-            : holder.type !== 'machine'
-              ? 'holder not machine'
-              : holder.status !== 'active'
-                ? 'holder disabled'
-                : null
+        : now < period_start
+          ? 'future dated'
+          : registry === null || registry === undefined
+            ? 'registry unreadable'
+            : holder === undefined
+              ? 'holder not registered'
+              : holder.type !== 'machine'
+                ? 'holder not machine'
+                : holder.status !== 'active'
+                  ? 'holder disabled'
+                  : null
   return {
     ...grant,
     renewal_deadline,
@@ -836,6 +863,7 @@ export function issueStanding(
 
   if (scopes.length === 0 || !scopes.every((s) => typeof s === 'string' && s.length > 0)) return refuse('no-scope')
   if (scopes.includes('*')) return refuse('all-scopes')
+  if (!scopes.every(isPluginName)) return refuse('bad-scope')
   if (!Number.isInteger(period) || period <= 0 || !Number.isInteger(hardMax)) return refuse('bad-period')
   if (period > MAX_STANDING_PERIOD_MS) return refuse('period-over-cap')
   if (hardMax > MAX_STANDING_HARD_MAX_MS) return refuse('hard-max-over-cap')

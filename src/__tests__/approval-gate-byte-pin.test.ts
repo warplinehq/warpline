@@ -1,5 +1,5 @@
 /**
- * FREEZE-10, as amended 2026-10-09 for standing grants. This header is the canonical text. The planning requirements carry a pointer to it, never a copy.
+ * FREEZE-10, as amended 2026-10-09 for standing grants and 2026-10-10 for the phase 26 review's WR-01 and WR-02. This header is the canonical text. The planning requirements carry a pointer to it, never a copy.
  *
  *   1. `src/runtime/approval-gate.ts` stays byte-identical to
  *      `APPROVAL_GATE_SHA256` for the rest of the v0.4 milestone. Guarded by
@@ -46,9 +46,18 @@
  * by line numbers, which move.
  *
  * **Provenance.** The file digest was the `v0.2` content's until FREEZE-10 was
- * amended on 2026-09-30 for #27, and the per-scope-window gate's until it was
- * amended on 2026-10-09 for standing grants; it now pins the gate with both
- * grant kinds. The block digest was the `v0.2`
+ * amended on 2026-09-30 for #27, the per-scope-window gate's until it was
+ * amended on 2026-10-09 for standing grants, and the first standing-grant
+ * gate's until it was amended on 2026-10-10 for the phase 26 review's WR-01
+ * and WR-02. Both 2026-10-10 changes make the gate stricter and loosen no
+ * check. WR-01: a stored grant dated ahead of the clock stayed live past the
+ * 7-day and 90-day caps by the clock's lead, so the read now refuses a
+ * `period_start` before `issued_at` or after the hard maximum, and a period
+ * that has not started reads lapsed, `future dated`. WR-02: the read and issue
+ * took any non-empty scope, so a revoke of a scope no audit record can carry
+ * removed the grant with nothing on the record, and the read and issue now
+ * refuse a scope that is not a plugin name. It now pins the gate with both
+ * grant kinds and those checks. The block digest was the `v0.2`
  * content's too until FREEZE-10 was amended on 2026-09-23. It now pins the
  * amended declaration, whose one changed line is `plugin_result`. Reproduce:
  *
@@ -83,15 +92,20 @@ const APPROVAL_GATE = join(REPO_ROOT, 'src', 'runtime', 'approval-gate.ts')
 const ENGINE_STATE = join(REPO_ROOT, 'src', 'schemas', 'engine-state.ts')
 
 /**
- * Re-pinned when FREEZE-10 was amended on 2026-10-09 for standing grants: the
- * standing grants file, its own reader version, lapse derived on read, the
- * covering list naming each grant that authorises a scope and its issuer, and
- * the session window's issuer. The #27 digest, pinned when FREEZE-10 was
- * amended on 2026-09-30 for per-scope windows, was
- * `b3918f0dd76abf3dd783c42b30738246293d246c0da02c70b2229a6fd87ed766`, and the
- * `v0.2` digest `d286a53f2b55b19ddbabeae64ce3bc0423912d376860cd5d73c23e6d48ffb72d`.
+ * Re-pinned when FREEZE-10 was amended on 2026-10-10 for the phase 26 review's
+ * WR-01 and WR-02: the standing read refuses a scope that is not a plugin name
+ * and a `period_start` outside `issued_at` and the hard maximum, a period that
+ * has not started reads lapsed (`future dated`), and issue refuses a scope that
+ * is not a plugin name (`bad-scope`). The 2026-10-09 digest, pinned when
+ * FREEZE-10 was amended for standing grants (the standing grants file, its own
+ * reader version, lapse derived on read, the covering list naming each grant
+ * that authorises a scope and its issuer, and the session window's issuer), was
+ * `c374cd307d29b666c62007af6a6f265ffc15ba9d1b307db0092a4d8a114180a5`. The #27
+ * digest, pinned when FREEZE-10 was amended on 2026-09-30 for per-scope
+ * windows, was `b3918f0dd76abf3dd783c42b30738246293d246c0da02c70b2229a6fd87ed766`,
+ * and the `v0.2` digest `d286a53f2b55b19ddbabeae64ce3bc0423912d376860cd5d73c23e6d48ffb72d`.
  */
-const APPROVAL_GATE_SHA256 = 'c374cd307d29b666c62007af6a6f265ffc15ba9d1b307db0092a4d8a114180a5'
+const APPROVAL_GATE_SHA256 = '20225e4dfde222bf1185d444bfeaf7b2ddba0fd291196bebb2e220badd6ba396'
 
 /** The guard file each clause in the header cites, repo-relative. */
 const CLAUSE_GUARDS = [
