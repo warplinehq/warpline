@@ -24,14 +24,14 @@
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { createHash } from 'node:crypto'
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { parseArgs } from 'node:util'
-import { z } from 'zod'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
-import { appendAudit, AuditAppendError, observeAuthorityFile } from '../lib/audit-log.js'
+import { appendAudit, AuditAppendError } from '../lib/audit-log.js'
 import { atomicWriteJson } from '../lib/fs-atomic.js'
 import { engineStatePath, principalsPath } from '../lib/paths.js'
+import { entryDigest, EntrySchema, loadRegistry, PRINCIPAL_ID, type Entry, type Registry } from '../lib/principals.js'
 
 export const USAGE = `Usage: warpline principal add <id> --type human|machine [--key <key>]
        warpline principal disable <id>
@@ -61,48 +61,7 @@ function auditFailed(err: unknown): string {
     : AUDIT_FAILED
 }
 
-const ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
-
-const EntrySchema = z.strictObject({
-  id: z.string().regex(ID),
-  type: z.enum(['human', 'machine']),
-  status: z.enum(['active', 'disabled']),
-  key: z
-    .string()
-    .regex(/^[^\x00-\x1f\x7f]*$/)
-    .min(1)
-    .max(8192)
-    .optional(),
-})
-
-const RegistrySchema = z
-  .strictObject({ principals: z.array(EntrySchema) })
-  .superRefine((registry, ctx) => {
-    const seen = new Set<string>()
-    registry.principals.forEach((entry, i) => {
-      if (seen.has(entry.id)) ctx.addIssue({ code: 'custom', path: ['principals', i, 'id'], message: 'a duplicate id' })
-      seen.add(entry.id)
-    })
-  })
-
-type Entry = z.infer<typeof EntrySchema>
-type Registry = z.infer<typeof RegistrySchema>
-
 const sha256 = (data: Buffer | string): string => createHash('sha256').update(data).digest('hex')
-
-/** One entry's digest: `{ id, type, status }` plus `key` when set, in that order. */
-function entryDigest(entry: Entry): string {
-  const shape: Record<string, string> = { id: entry.id, type: entry.type, status: entry.status }
-  if (entry.key !== undefined) shape.key = entry.key
-  return sha256(JSON.stringify(shape))
-}
-
-/** Each id mapped to its entry digest. */
-function entries(registry: Registry): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const entry of registry.principals) out[entry.id] = entryDigest(entry)
-  return out
-}
 
 /**
  * The registry as the file holds it, after the store has seen the file. A
@@ -110,42 +69,14 @@ function entries(registry: Registry): Record<string, string> {
  * the file is unusable or the store could not record a change to it.
  */
 async function load(): Promise<{ bytes: Buffer | null; registry: Registry } | string> {
-  let bytes: Buffer | null
   try {
-    bytes = await readFile(principalsPath())
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
-    bytes = null
-  }
-
-  let registry: Registry = { principals: [] }
-  if (bytes !== null) {
-    let json: unknown
-    try {
-      json = JSON.parse(bytes.toString('utf-8'))
-    } catch {
-      return 'principals.json is not JSON. Nothing was written.\n'
-    }
-    const parsed = RegistrySchema.safeParse(json)
-    if (!parsed.success) {
-      const where = new Set(
-        parsed.error.issues.map(
-          (issue) => `${issue.path.join('.') || '(top level)'} (${issue.code === 'custom' ? issue.message : issue.code})`,
-        ),
-      )
-      return `principals.json is not a usable registry: ${[...where].join(', ')}. Nothing was written.\n`
-    }
-    registry = parsed.data
-  }
-
-  try {
-    await observeAuthorityFile(engineStatePath(), 'principal_registry.observed', bytes, entries(registry))
+    const loaded = await loadRegistry()
+    return 'refused' in loaded ? `${loaded.refused}. Nothing was written.\n` : loaded
   } catch (err) {
     // The typed reason, so a reworded one fails typecheck here.
     if (err instanceof AuditAppendError && err.reason === 'line over 16384 bytes') return EDIT_TOO_LARGE
     return auditFailed(err)
   }
-  return { bytes, registry }
 }
 
 /** Write `next` at 0600 after its record. Returns the exit code. */
@@ -175,7 +106,7 @@ async function add(rest: string[]): Promise<number> {
     process.stderr.write(USAGE)
     return 1
   }
-  if (!ID.test(id)) {
+  if (!PRINCIPAL_ID.test(id)) {
     process.stderr.write(`principal add: that id is not allowed.\n\n${USAGE}`)
     return 1
   }

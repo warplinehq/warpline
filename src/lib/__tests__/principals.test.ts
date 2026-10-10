@@ -129,7 +129,7 @@ describe('requirePrincipal', () => {
         if (want === 'accept') {
           expect({ rule, id, got }).toEqual({ rule, id, got: { id } })
         } else {
-          expect({ rule, id, got }).toEqual({ rule, id, got: { refused: phrase[want]!, cause: want } })
+          expect<unknown>({ rule, id, got }).toEqual({ rule, id, got: { refused: phrase[want]!, cause: want } })
           phrases.push((got as Refusal).refused)
         }
       }
@@ -252,7 +252,7 @@ describe('loadRegistry and readRegistry', () => {
 
     const read = await principals.readRegistry()
 
-    expect(read).toEqual({ bytes: readFileSync(file()), registry: edited })
+    expect<unknown>(read).toEqual({ bytes: readFileSync(file()), registry: edited })
     expect(ofType(OBSERVED)).toHaveLength(1)
   })
 
