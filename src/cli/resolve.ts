@@ -111,6 +111,7 @@ import type { EngineState } from '../schemas/engine-state.js'
 import { deriveHost, isLockStale, isProcessAlive, readLock } from '../runtime/lock.js'
 import { engineStatePath, lockPath as runLockPath, pluginsDir } from '../lib/paths.js'
 import { AuditAppendError, appendAudit, openIntents, readCompleteLines, type OpenIntent } from '../lib/audit-log.js'
+import { requirePrincipal } from '../lib/principals.js'
 
 const USAGE = `Usage: warpline resolve <plugin> --shipped|--not-shipped <effect-id>
        warpline resolve --intent <seq> --shipped|--not-shipped
@@ -123,6 +124,10 @@ warpline approve <plugin> --content --not-after <when>.
 
 The second answers any fire intent the audit record still lists as open, after
 you checked whether its effect happened. It records your answer and nothing else.
+
+Options:
+  --principal <id>  Who is answering: a registered, active principal.
+                    Optional, never inferred.
 `
 
 /**
@@ -187,6 +192,12 @@ function refuseAppend(err: unknown): number {
   return 1
 }
 
+/** The refusal for a `--principal` the registry does not admit. */
+function refusePrincipal(refused: string): number {
+  process.stderr.write(`resolve: --principal: ${refused}. Nothing was written.\n`)
+  return 1
+}
+
 type Answer = 'shipped' | 'not_shipped'
 
 /**
@@ -231,14 +242,14 @@ async function stateOrRefuse(statePath: string): Promise<EngineState | null> {
 
 export async function run(argv: string[]): Promise<number> {
   if (argv.some((a) => a === '--intent' || a.startsWith('--intent='))) return runBySeq(argv)
-  let values: { shipped?: string; 'not-shipped'?: string }
+  let values: { shipped?: string; 'not-shipped'?: string; principal?: string }
   let positionals: string[]
   try {
     // strict: true, so any other flag is refused by the parser rather than
     // ignored. A flag that vanishes silently is a lie about what was answered.
     const parsed = parseArgs({
       args: argv,
-      options: { shipped: { type: 'string' }, 'not-shipped': { type: 'string' } },
+      options: { shipped: { type: 'string' }, 'not-shipped': { type: 'string' }, principal: { type: 'string' } },
       allowPositionals: true,
       strict: true,
     })
@@ -276,6 +287,9 @@ export async function run(argv: string[]): Promise<number> {
   const lockPath = pathsForStateFile(statePath).lockPath
 
   return await withStateLockAt(lockPath, async () => {
+    // Checked in the hold, so a principal disabled while this waited is refused.
+    const actor = await requirePrincipal(values.principal, 'active')
+    if ('refused' in actor) return refusePrincipal(actor.refused)
     if (await refusedByRunLock()) return 1
 
     // Read once the lock is held: the standing and the answer instant are
@@ -358,7 +372,7 @@ export async function run(argv: string[]): Promise<number> {
           effect_id: record.effect_id,
           intent_seq: answered?.seq ?? null,
           answer,
-          principal: null,
+          principal: actor.id,
         })
       } catch (err) {
         return refuseAppend(err)
@@ -408,12 +422,17 @@ function bySeqUsage(reason: string): number {
  * append, and the state document is never written.
  */
 async function runBySeq(argv: string[]): Promise<number> {
-  let values: { intent?: string; shipped?: boolean; 'not-shipped'?: boolean }
+  let values: { intent?: string; shipped?: boolean; 'not-shipped'?: boolean; principal?: string }
   let positionals: string[]
   try {
     const parsed = parseArgs({
       args: argv,
-      options: { intent: { type: 'string' }, shipped: { type: 'boolean' }, 'not-shipped': { type: 'boolean' } },
+      options: {
+        intent: { type: 'string' },
+        shipped: { type: 'boolean' },
+        'not-shipped': { type: 'boolean' },
+        principal: { type: 'string' },
+      },
       allowPositionals: true,
       strict: true,
     })
@@ -445,6 +464,8 @@ async function runBySeq(argv: string[]): Promise<number> {
   const lockPath = pathsForStateFile(statePath).lockPath
 
   return await withStateLockAt(lockPath, async () => {
+    const actor = await requirePrincipal(values.principal, 'active')
+    if ('refused' in actor) return refusePrincipal(actor.refused)
     if (await refusedByRunLock()) return 1
 
     const open = await openIntentsOrRefuse(statePath)
@@ -488,7 +509,7 @@ async function runBySeq(argv: string[]): Promise<number> {
         effect_id: intent.effect_id,
         intent_seq: intent.seq,
         answer: shipped ? 'shipped' : 'not_shipped',
-        principal: null,
+        principal: actor.id,
       })
     } catch (err) {
       return refuseAppend(err)

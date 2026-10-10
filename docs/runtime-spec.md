@@ -2275,6 +2275,10 @@ Both directions are on the audit record (§ 14) before this table changes.
 and `warpline deny --remove` appends one `denial.lifted` per plugin, in the
 order named, with the stored fingerprint (null when it is not a hex sha256).
 Either refuses with the state document unchanged when an append fails.
+Either takes an optional `--principal <id>`, which must name an active
+registered principal. It is checked under the state lock, recorded as
+`principal` on the record, and never inferred. `warpline deny --list` refuses
+it, because listing records nothing.
 
 ### `approvals`
 
@@ -2740,6 +2744,9 @@ marked and never confirmed, after the operator checked the sink with its effect
 id: shipped when the bytes reached it, not shipped when nothing did. It is its
 own verb and not a mode of
 `approve`, because it answers a claim about a past fire and grants nothing.
+This form and the `--intent` form below take an optional `--principal <id>`,
+which must name an active registered principal. It is checked under the state
+lock, recorded as `principal` on `fire.resolved`, and never inferred.
 
 - It answers only a record whose standing (`approvalStanding`) is
   `indeterminate`, and only when the typed effect id equals the record's
@@ -4055,6 +4062,10 @@ before the state write (§ 10). `warpline deny --remove` appends one
 `denial.lifted` per plugin before the state write. Each of these refuses with
 exit `1` and nothing changed when its append fails.
 
+When `--principal` names who acts, `approve`, `deny` and `resolve` check it
+inside the state lock, before the append. So a principal disabled while the
+verb waited for the lock is refused, and nothing is written.
+
 `warpline revoke` is the one exception. It appends `grant.revoked` before it
 removes the grant file, but a revoke only narrows authority, and a failing
 store must never leave authority wider than the operator chose. So when that
@@ -4291,6 +4302,10 @@ record it, put part of the change back, run `warpline principal list`, then
 make the rest. A file that will not parse, or that
 fails the schema, is refused with a message naming key paths and schema facts,
 never a value from the file.
+
+`warpline approve`, `warpline deny` and `warpline resolve` read this file when
+`--principal` is given, and record a hand edit first, as `warpline principal`
+does. Without the flag they do not read it.
 
 An advance reads this file only when the standing grants file holds a grant
 (§ 9), and records a hand edit first, as `warpline principal` does. A record it

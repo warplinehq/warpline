@@ -47,6 +47,7 @@
  */
 import { parseArgs } from 'node:util'
 import { appendAudit } from '../lib/audit-log.js'
+import { requirePrincipal } from '../lib/principals.js'
 import { findPendingGate, loadPluginManifests, proposalFingerprint } from '../runtime/engine.js'
 import { emitDenialRecorded, emitGateInvalidated } from '../board/engine-events.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
@@ -75,6 +76,8 @@ Options:
   --list          Show the live denials and exit.
   --remove        Take the denial back for each named plugin.
   --note <text>   Record why, in your own words.
+  --principal <id>  Who is denying: a registered, active principal.
+                    Optional, never inferred.
 `
 
 /**
@@ -115,7 +118,7 @@ function describe(denial: Denial): string {
 }
 
 export async function run(argv: string[]): Promise<number> {
-  let values: { list?: boolean; remove?: boolean; note?: string }
+  let values: { list?: boolean; remove?: boolean; note?: string; principal?: string }
   let positionals: string[]
   try {
     // strict: true rejects an undeclared flag — an all-plugins wildcard among
@@ -127,6 +130,7 @@ export async function run(argv: string[]): Promise<number> {
         list: { type: 'boolean' },
         remove: { type: 'boolean' },
         note: { type: 'string' },
+        principal: { type: 'string' },
       },
       allowPositionals: true,
       strict: true,
@@ -138,6 +142,14 @@ export async function run(argv: string[]): Promise<number> {
     return 1
   }
 
+  // Refused first and by name: a flag that vanished would let the operator
+  // believe their name went on a record that does not exist (D-19).
+  if (values.list && values.principal !== undefined) {
+    process.stderr.write(
+      'deny: --list records nothing, so there is no act for --principal to name. Nothing was written.\n',
+    )
+    return 1
+  }
   if (values.list && (values.remove || positionals.length > 0)) {
     process.stderr.write('--list shows the denials and changes nothing; do not combine it.\n')
     return 1
@@ -176,6 +188,12 @@ export async function run(argv: string[]): Promise<number> {
     // document, so an advance completing between the read and the write would
     // be erased by a command that only meant to forget a denial.
     return await withStateLockAt(lockPath, async () => {
+      // Checked in the hold, so a principal disabled while this waited is refused.
+      const actor = await requirePrincipal(values.principal, 'active')
+      if ('refused' in actor) {
+        process.stderr.write(`deny: --principal: ${actor.refused}. Nothing was removed.\n`)
+        return 1
+      }
       const state = await loadState(statePath)
       if (state === null) return 1
 
@@ -202,7 +220,7 @@ export async function run(argv: string[]): Promise<number> {
           await appendAudit(statePath, 'denial.lifted', {
             plugin,
             fingerprint: /^[0-9a-f]{64}$/.test(stored) ? stored : null,
-            principal: null,
+            principal: actor.id,
           })
         } catch {
           process.stderr.write(
@@ -259,6 +277,11 @@ export async function run(argv: string[]): Promise<number> {
   // Nothing that waits on a human is in here. The loop decides and prints; the
   // board events go out after the lock is released, below.
   const early = await withStateLockAt(lockPath, async (): Promise<number | null> => {
+    const actor = await requirePrincipal(values.principal, 'active')
+    if ('refused' in actor) {
+      process.stderr.write(`deny: --principal: ${actor.refused}. Nothing was denied.\n`)
+      return 1
+    }
 const state = await loadState(statePath)
 if (state === null) return 1
 
@@ -352,7 +375,7 @@ if (recorded.length === 0) return 0
           plugin: denial.plugin,
           fingerprint: denial.fingerprint,
           discarded_gate_run_id: gone?.runId ?? null,
-          principal: null,
+          principal: actor.id,
         })
       } catch {
         process.stderr.write(
