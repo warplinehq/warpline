@@ -17,10 +17,11 @@
  * is seeded before any snapshot, so the audit head moves only for what a case
  * does (P10).
  */
-import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setSystemTime, spyOn, test } from 'bun:test'
 import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import * as gate from '../../runtime/approval-gate.js'
 import { pathsForStateFile, withStateLockAt } from '../../board/state-manager.js'
+import * as principals from '../../lib/principals.js'
 import { loadRegistry } from '../../lib/principals.js'
 import { principalsPath, sessionApprovalPath, standingGrantsPath } from '../../lib/paths.js'
 import {
@@ -167,6 +168,31 @@ describe('renew restarts the period', () => {
     const r = await capture(['renew', id, '--principal', 'carol'])
     expect(r.code).toBe(0)
     expect(r.stdout).toContain(`next expiry ${iso(T0 + 2 * DAY)}`)
+  })
+
+  // Hand edits take no lock, so a second read of principals.json can see an
+  // edit the check never recorded. The spy lands one on any second read.
+  test('renew judges the holder by the registry its check recorded, read once', async () => {
+    const original = principals.readRegistry
+    let reads = 0
+    const spy = spyOn(principals, 'readRegistry').mockImplementation(async (path?: string) => {
+      reads += 1
+      if (reads === 2) {
+        const registry = JSON.parse(readFileSync(principalsPath(), 'utf-8')) as { principals: Entry[] }
+        for (const p of registry.principals) if (p.id === 'ci') p.status = 'disabled'
+        writeFileSync(principalsPath(), JSON.stringify(registry))
+      }
+      return original(path)
+    })
+    try {
+      setSystemTime(new Date(T0 + DAY))
+      const r = await capture(['renew', id, '--principal', 'carol'])
+      expect(r.stderr).toBe('')
+      expect(r.code).toBe(0)
+      expect(reads).toBe(1)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   test('renew by the issuer is allowed', async () => {

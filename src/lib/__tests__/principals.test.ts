@@ -127,7 +127,8 @@ describe('requirePrincipal', () => {
       for (const [id, want] of Object.entries(table[rule])) {
         const got = await principals.requirePrincipal(id, rule, statePath)
         if (want === 'accept') {
-          expect({ rule, id, got }).toEqual({ rule, id, got: { id } })
+          // An admitted id comes with the registry its check read and recorded.
+          expect<unknown>({ rule, id, got }).toEqual({ rule, id, got: { id, loaded: expect.objectContaining({ bytes: expect.any(Buffer) }) } })
         } else {
           expect<unknown>({ rule, id, got }).toEqual({ rule, id, got: { refused: phrase[want]!, cause: want } })
           phrases.push((got as Refusal).refused)

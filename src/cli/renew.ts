@@ -28,7 +28,7 @@ import { parseArgs } from 'node:util'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { appendAudit } from '../lib/audit-log.js'
 import { engineStatePath } from '../lib/paths.js'
-import { readRegistry, requirePrincipal, standingRegistry } from '../lib/principals.js'
+import { requirePrincipal, standingRegistry } from '../lib/principals.js'
 import {
   readStandingStore,
   renewStanding,
@@ -115,16 +115,16 @@ export async function run(argv: string[]): Promise<number> {
     // Checked in the hold, so a principal disabled while this waited is refused.
     const actor = await requirePrincipal(values.principal, 'active-human')
     if ('refused' in actor) return refuse(`--principal: ${actor.refused}.`)
-    // The check above has already recorded any hand edit of the registry.
-    const registry = await readRegistry()
-    const view = standingRegistry(registry)
+    // The flag was present above, so the check resolved an id.
+    if (actor.id === null) throw new Error('unreachable: --principal resolved no id')
+    // The registry the check recorded. A second read could see a hand edit the store never did.
+    const view = standingRegistry(actor.loaded)
 
     const read = await readStandingStore()
     if (!read.readable) return refuse('the standing grants file cannot be read.')
 
     const now = Date.now()
-    // The flag was present above, so the check resolved an id.
-    const change = renewStanding(read.store, id, actor.id!, now, view)
+    const change = renewStanding(read.store, id, actor.id, now, view)
     if ('refused' in change) {
       return refuse(`${renewRefusalText(change.refused, read.store.grants.find((g) => g.id === id))}.`)
     }
@@ -139,7 +139,7 @@ export async function run(argv: string[]): Promise<number> {
       await appendAudit(statePath, 'grant.renewed', {
         id,
         holder: grant.holder,
-        principal: actor.id!,
+        principal: actor.id,
         renewal_deadline: renewalDeadline,
       })
     } catch {

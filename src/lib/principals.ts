@@ -176,13 +176,16 @@ export async function loadRegistry(
 
 /**
  * Whether `flag` names a principal `rule` admits. An absent flag resolves no
- * principal and reads nothing. Ids match byte for byte.
+ * principal and reads nothing. Ids match byte for byte. An admitted id comes
+ * with the registry the check recorded, so a caller that judges anything else
+ * by the registry uses that read, never a second one a hand edit could land
+ * between.
  */
 export async function requirePrincipal(
   flag: string | undefined,
   rule: PrincipalRule,
   statePath: string = engineStatePath(),
-): Promise<{ id: string | null } | { refused: string; cause: PrincipalRefusalCause }> {
+): Promise<{ id: null } | { id: string; loaded: Loaded } | { refused: string; cause: PrincipalRefusalCause }> {
   if (flag === undefined) return { id: null }
   if (flag === '') return { refused: 'an empty id names no principal', cause: 'empty' }
 
@@ -206,5 +209,5 @@ export async function requirePrincipal(
   if (rule !== 'registered' && entry.status === 'disabled') {
     return { refused: 'that principal is disabled', cause: 'disabled' }
   }
-  return { id: entry.id }
+  return { id: entry.id, loaded }
 }
