@@ -60,6 +60,7 @@ import { existsSync, lstatSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { parseArgs } from 'node:util'
 import { pluginsDir, warplineHome } from '../lib/paths.js'
+import { PLUGIN_NAME } from '../schemas/plugin-name.js'
 
 export interface ScaffoldResult {
   created: boolean
@@ -73,11 +74,11 @@ export interface ScaffoldOptions {
 }
 
 /**
- * One guard for both the plugin name and the `--from` value: lowercase
- * letters, digits, hyphens, leading letter. Forward slashes, dots, spaces and
- * an empty string are all rejected, so neither value can traverse anywhere.
+ * One guard for both the plugin name and the `--from` value: the plugin-name
+ * rule the loader admits by. Forward slashes, dots, spaces and an empty string
+ * are all rejected, so neither value can traverse anywhere.
  */
-export const IDENT = /^[a-z][a-z0-9-]*$/
+export const IDENT = PLUGIN_NAME
 
 const USAGE = 'Usage: warpline scaffold <plugin-name> [--from <example>]\n'
 
@@ -229,7 +230,7 @@ export async function scaffoldPlugin(name: string, options: ScaffoldOptions = {}
     return {
       created: false,
       path: '',
-      message: `Invalid plugin name '${name}'. Use lowercase letters, numbers, hyphens. Must start with a letter.`,
+      message: `Invalid plugin name '${name}'. Use lowercase letters, numbers, hyphens, at most 64. Must start with a letter.`,
     }
   }
 

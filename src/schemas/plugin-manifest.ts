@@ -1,4 +1,7 @@
 import { z } from 'zod'
+import { isPluginName } from './plugin-name.js'
+
+const PLUGIN_NAME_MESSAGE = 'not a plugin name: lowercase letters, digits and hyphens, a leading letter, at most 64'
 
 /**
  * Side effect types that a plugin may produce.
@@ -81,10 +84,15 @@ export const PluginManifestSchema = z.object({
    * against a future addition. `prototype` itself is not on it and is not
    * refused: it is not a member of `Object.prototype`, so it reads as absent
    * like any other unused key.
+   *
+   * It also follows the plugin-name rule (`./plugin-name.ts`), and the loader
+   * refuses a manifest whose name is not its directory's. `constructor` passes
+   * that rule, so the prototype refusal stays.
    */
   name: z
     .string()
     .min(1)
+    .refine(isPluginName, { message: PLUGIN_NAME_MESSAGE })
     .refine((n) => !(n in Object.prototype), {
       message: 'name collides with an Object.prototype member and cannot be a record key',
     }),
@@ -239,8 +247,8 @@ export const PluginManifestSchema = z.object({
    */
   ttl_hours: z.number().positive(),
 
-  /** Plugin keys that must complete successfully before this plugin runs */
-  dependencies: z.array(z.string()).default([]),
+  /** Plugin keys that must complete successfully before this plugin runs. Each follows the plugin-name rule. */
+  dependencies: z.array(z.string().refine(isPluginName, { message: PLUGIN_NAME_MESSAGE })).default([]),
 
   /** Maximum execution time in milliseconds before the engine cancels the run */
   timeout_ms: z.number().int().positive().default(60_000),

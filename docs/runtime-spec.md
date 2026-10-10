@@ -88,10 +88,13 @@ drift from the code. Edit the schema, not the table.
 <!-- /generated -->
 
 Every field with a default is optional in a manifest file, so adding one never
-invalidates an existing plugin. `name` may not be a member of
-`Object.prototype` — `__proto__`, `constructor`, `toString`, `valueOf` and the
-rest are refused. The set is derived from the prototype, not listed, so it
-cannot go stale.
+invalidates an existing plugin. `name` and each `dependencies` entry follow the
+plugin-name rule, `^[a-z][a-z0-9-]{0,63}$`, published as `PLUGIN_NAME` and
+`isPluginName` from `warpline/schemas/plugin-name`. `name` may also not be a
+member of `Object.prototype` — `__proto__`, `constructor`, `toString`, `valueOf`
+and the rest are refused. `constructor` passes the plugin-name rule, so this
+refusal is not redundant. The set is derived from the prototype, not listed, so
+it cannot go stale.
 
 `llm_handoff` declares that the handler MAY return a `[needs-llm]` handoff. It
 is permission, not a promise: a declaring plugin that returns `success` records
@@ -101,18 +104,21 @@ free-text `capabilities` array never counts as this declaration, whatever it
 holds.
 
 **The key in the plain-object `plugin_runs` and `denials` records is the plugin
-DIRECTORY name, not `manifest.name`,** and it carries the same refusal at the
-loader — a directory named after a prototype member is a load failure with the
-plugin absent from `manifests`. That is where the constraint has to bite:
-`loadPluginManifests` keys its map by the directory entry, every downstream key
-comes out of that map, and it casts the imported module rather than parsing it
-through `PluginManifestSchema`, so the schema refinement above never runs on a
-load. A `__proto__` key would invoke the prototype setter and drop the record on
-write — no `plugin_runs` entry after a gated run, which is the re-firing defect
-that record exists to close — and the others answer a lookup with an inherited
-member rather than the absence that is the truth. The two refusals are
-independent on purpose: the strings are not the same string, and `manifest.name`
-is not today a record key anywhere. `ttl_hours` must be positive —
+DIRECTORY name,** and the loader holds the directory to the same rules before it
+imports anything: a directory named after a prototype member, or one outside the
+plugin-name rule, is a load failure with the plugin absent from `manifests`, and
+the message names the directory and says to rename it. A manifest whose `name`
+is not its directory's name is a load failure too, so the two strings are one
+string for every loaded plugin. That is where the constraint has to bite:
+`loadPluginManifests` keys its map by the directory entry and every downstream
+key comes out of that map. A `__proto__` key would invoke the prototype setter
+and drop the record on write — no `plugin_runs` entry after a gated run, which
+is the re-firing defect that record exists to close — and the others answer a
+lookup with an inherited member rather than the absence that is the truth. The
+plugin-name rule closes the rest: `*` would merge into a session grant as the
+wildcard, a control byte would reach the audit store, and two names differing
+only in case would share one `config/<name>.json` on a case-insensitive
+filesystem. `ttl_hours` must be positive —
 zero or negative would disable caching rather than mean "always fresh". `max_retries` is capped
 at 10 and `retry_delay_ms` at 60s; the backoff that uses them is described in
 §2. `actions` is an optional registry that only surfaces in a host UI when
@@ -1581,7 +1587,7 @@ is written as `"grants": []`.
 | `id` | string | 12 random lowercase hex characters. Issue refuses an id already in the file. |
 | `holder` | principal id | The principal the grant authorises. It must be an active machine in `principals.json` (§ 15) for the grant to be live. |
 | `issuer` | principal id | Always the active human who issued it. Never the holder. |
-| `scopes` | `string[]` | The plugin directory names it covers, sorted, without duplicates. Never `"*"`: a standing grant names every plugin it covers. Each is a plugin name as the audit store's records take one: 1 to 255 characters, none of them a C0 control character, DEL, `/` or `\`. |
+| `scopes` | `string[]` | The plugin directory names it covers, sorted, without duplicates. Never `"*"`: a standing grant names every plugin it covers. Each is a plugin name as the audit store's records take one: 1 to 255 characters, none of them a C0 control character, DEL, `/` or `\`. That carriage rule is looser than the admission rule a plugin's own name follows (§ 1), on purpose: a grant or record written under a name the loader no longer admits stays readable. |
 | `issued_at` | ISO 8601 string | When it was issued. The hard maximum is measured from here. |
 | `period_start` | ISO 8601 string | Set at issue, and moved only by a renewal. The renewal deadline is measured from here. Never before `issued_at`, and never after the hard maximum. |
 | `period_ms` | integer | The renewal period in milliseconds. At most 7 days, and 24 hours when the issuer names none. |
@@ -1677,9 +1683,10 @@ The next expiry is the earlier of the renewal deadline and the hard maximum. A
 lapsed grant's line ends `lapsed (<reason>)`, with one of the seven reasons
 above. The lines come in the gate's order, by next expiry and then by id, and
 no line shows a principal's key. The read refuses a scope that is not a plugin
-name, so no scope holds a C0 control byte or DEL. A plugin name can hold a C1
-one, so `plan` escapes every control byte, C1 included, as `\xNN`, and a
-backslash doubles. No scope reaches the terminal as bytes it acts on. With no
+name, so no scope holds a C0 control byte or DEL. A plugin name as the store
+carries one can hold a C1 byte (the loader admits none, but the store reads
+history written before that rule), so `plan` escapes every control byte, C1
+included, as `\xNN`, and a backslash doubles. No scope reaches the terminal as bytes it acts on. With no
 standing grant the section is absent.
 A standing grants file that cannot be read, for any cause, prints the one line
 `Standing grants: none live — the standing grants file cannot be read`, never

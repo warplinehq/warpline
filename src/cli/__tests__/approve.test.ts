@@ -276,6 +276,30 @@ describe('warpline approve', () => {
     expect(stdout).toMatch(/\b90m\b/)
     expect(stdout).not.toMatch(/\d+\.\d+m/)
   })
+
+  // `*` is the wildcard scope, reachable only through --all. A plugin directory
+  // named `*` used to load, pass the name check, and merge as the wildcard.
+  test('11: a plugin directory named * cannot turn a named approval into the wildcard', async () => {
+    const dir = join(root, 'plugins', '*')
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(makeManifest('*', ['sends_email']))}`)
+
+    const { code, stdout } = await capture('approve', ['*'])
+
+    expect(code).toBe(1)
+    expect(stdout).toBe('')
+    expect(existsSync(approvalPath)).toBe(false)
+    expect(await checkApproval('render-issue', approvalPath)).toBe(false)
+  })
+
+  test('11b: with no such plugin, approve * is an unknown name and writes nothing', async () => {
+    const { code, stdout, stderr } = await capture('approve', ['*'])
+
+    expect(code).toBe(1)
+    expect(stdout).toBe('')
+    expect(stderr).toContain('Nothing was granted')
+    expect(existsSync(approvalPath)).toBe(false)
+  })
 })
 
 describe('warpline revoke', () => {

@@ -140,7 +140,10 @@ my-plugin/
 The manifest declares what the plugin is allowed to do (side effects,
 schedule, TTL, timeout, retries, minimum degradation tier). The handler does
 the work and returns a structured `SkillResult`. Invalid manifests are a
-hard-stop at load, so a misconfigured plugin never silently runs.
+hard-stop at load, so a misconfigured plugin never silently runs. `<name>` is
+lowercase letters, digits and hyphens, starting with a letter, at most 64
+characters, and `manifest.name` equals it
+([the rule](docs/plugin-authoring.md#anatomy)).
 
 Worked examples in [examples/plugins/](examples/plugins/):
 

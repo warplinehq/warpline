@@ -22,6 +22,17 @@ plugin + `[needs-llm]` handoff, declared with `llm_handoff: true`
   handler.ts
 ```
 
+**The directory name is the plugin's name, and it follows one rule:**
+`^[a-z][a-z0-9-]{0,63}$` — lowercase ASCII letters, digits and hyphens, a
+leading letter, at most 64 characters. `manifest.name` must equal it, and each
+`dependencies` entry must follow the same rule. A directory outside the rule,
+or a manifest whose name differs from its directory, is a load failure: the
+plugin does not run, and `plan` names the directory. The one name is a
+directory, a state record key, the `config/<name>.json` file name and a grant
+scope, so it has to be safe as all four, on a case-insensitive filesystem too.
+The rule is published as `PLUGIN_NAME` and `isPluginName` from
+`warpline/schemas/plugin-name`.
+
 ### manifest.ts
 
 ```typescript
@@ -724,6 +735,7 @@ one case needs longer.
 ## Checklist before you ship one
 
 - [ ] Could any part be a pure function it isn't? (doctrine review)
+- [ ] Directory name follows the plugin-name rule, and `manifest.name` equals it?
 - [ ] Every external touch declared in `side_effects`?
 - [ ] Hands off to the LLM? Manifest declares `llm_handoff: true`.
 - [ ] Every environment variable you read declared in `secrets`?

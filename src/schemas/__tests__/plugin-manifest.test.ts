@@ -147,6 +147,22 @@ describe('outputs.temporality', () => {
     expect(PluginManifestSchema.parse({ ...validManifest, name: 'prototype' }).name).toBe('prototype')
   })
 
+  // The admission rule: the name is a directory, a record key, a config file
+  // name and a grant scope, so it is held to the one shape all four can carry.
+  test('a name or dependency outside the plugin-name rule is refused, naming the field', () => {
+    for (const bad of ['*', 'Mailer', 'a_b', '9a', '-a', 'a.b', '../x', 'a\x01', 'x'.repeat(65)]) {
+      const name = PluginManifestSchema.safeParse({ ...validManifest, name: bad })
+      expect({ bad, ok: name.success }).toEqual({ bad, ok: false })
+      if (!name.success) expect(name.error.issues[0]?.path).toEqual(['name'])
+      const dep = PluginManifestSchema.safeParse({ ...validManifest, dependencies: [bad] })
+      expect({ bad, ok: dep.success }).toEqual({ bad, ok: false })
+      if (!dep.success) expect(dep.error.issues[0]?.path).toEqual(['dependencies', 0])
+    }
+    expect(PluginManifestSchema.parse({ ...validManifest, name: 'x'.repeat(64), dependencies: ['a-0'] }).name).toBe(
+      'x'.repeat(64),
+    )
+  })
+
   // The load-bearing case. A misdeclared value must stop the plugin at import
   // rather than fall back to the default — a plugin running under a guessed
   // versioning policy is the failure this field exists to prevent.

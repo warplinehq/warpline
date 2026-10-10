@@ -45,6 +45,7 @@ import type { AdvanceOutcome } from './exit-codes.js'
 import { acquireLock, releaseLock, startHeartbeat } from './lock.js'
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
 import { PluginManifestSchema, type PluginManifest } from '../schemas/plugin-manifest.js'
+import { isPluginName } from '../schemas/plugin-name.js'
 import { invokePlugin, redirectPluginOutput, releasePluginOutput } from './invoke-plugin.js'
 import type { CapabilityGrantWitness, DependencyRun } from './capabilities.js'
 
@@ -4390,6 +4391,18 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
         })
         return
       }
+      // The admission rule. Checked before the import, so a `*`, a control
+      // byte or a name that clashes case-insensitively never reaches a record
+      // key, a config file name or a grant scope.
+      if (!isPluginName(entry)) {
+        failures.push({
+          plugin: entry,
+          error:
+            `directory name ${JSON.stringify(entry)} is not a plugin name (lowercase letters, digits and ` +
+            `hyphens, a leading letter, at most 64) — rename the directory`,
+        })
+        return
+      }
       const manifestPath = join(pluginsDir, entry, 'manifest.ts')
       try {
         // import() needs a file:// URL, not a bare absolute path.
@@ -4420,6 +4433,16 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
           const parsed = PluginManifestSchema.safeParse(mod.manifest)
           if (!parsed.success) {
             failures.push({ plugin: entry, error: describeManifestIssues(parsed.error) })
+            return
+          }
+          // The directory is the key everything is stored under, so a manifest
+          // naming another plugin would be read as one plugin and keyed as
+          // another.
+          if (parsed.data.name !== entry) {
+            failures.push({
+              plugin: entry,
+              error: `manifest name '${parsed.data.name}' is not its directory name '${entry}' — make them equal`,
+            })
             return
           }
           plugins.set(entry, parsed.data)

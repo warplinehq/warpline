@@ -2531,6 +2531,45 @@ describe('loadPluginManifests record-key guard', () => {
     expect(Object.keys(record)).toEqual([...manifests.keys()])
   })
 
+  // The admission rule, held at the directory: a name outside it would reach a
+  // record key, a config file name and a grant scope. `*` is the wildcard.
+  test('a directory name outside the plugin-name rule is a load failure that says to rename it', async () => {
+    const { loadPluginManifests } = await import('../engine.js')
+    const bad = ['*', 'Mailer', 'a_b', '9lead', 'ctl\x01x', 'x'.repeat(65)]
+    for (const dir of bad) await createNamedPlugin(dir, dir)
+    await createNamedPlugin('x'.repeat(64), 'x'.repeat(64))
+
+    const { manifests, failures } = await loadPluginManifests(ctx.pluginsDir)
+
+    expect([...manifests.keys()]).toEqual(['x'.repeat(64)])
+    expect(failures.map((f) => f.plugin).sort()).toEqual([...bad].sort())
+    for (const f of failures) {
+      expect(f.error).toContain('not a plugin name')
+      expect(f.error).toContain('rename the directory')
+    }
+  })
+
+  test('a manifest whose name differs from its directory is a load failure', async () => {
+    const { loadPluginManifests } = await import('../engine.js')
+    await createNamedPlugin('alpha', 'beta')
+
+    const { manifests, failures } = await loadPluginManifests(ctx.pluginsDir)
+
+    expect(manifests.size).toBe(0)
+    expect(failures).toHaveLength(1)
+    expect(failures[0]?.plugin).toBe('alpha')
+    expect(failures[0]?.error).toContain("'beta'")
+    expect(failures[0]?.error).toContain("'alpha'")
+  })
+
+  test('every shipped example loads', async () => {
+    const { loadPluginManifests } = await import('../engine.js')
+    const root = join(import.meta.dir, '..', '..', '..', 'examples', 'plugins')
+    const { manifests, failures } = await loadPluginManifests(root)
+    expect(failures).toEqual([])
+    expect(manifests.size).toBe(21)
+  })
+
   test('a directory named `prototype` loads, because it is not a member of the prototype', async () => {
     const { loadPluginManifests } = await import('../engine.js')
     await createNamedPlugin('prototype', 'prototype')

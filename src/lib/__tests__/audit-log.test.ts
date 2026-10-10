@@ -39,6 +39,7 @@ import * as gate from '../../runtime/approval-gate.js'
 import { deriveHost } from '../host-identity.js'
 import * as hostIdentity from '../host-identity.js'
 import { appendRelinked } from './helpers/audit-chain.js'
+import { isPluginName } from '../../schemas/plugin-name.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
 
@@ -1823,6 +1824,40 @@ describe('grant ids and records stored before attribution', () => {
         () => false,
       )
       expect({ scope, gateTakes }).toEqual({ scope, gateTakes: storeTakes })
+    }
+  })
+
+  // Admission (which names a plugin may have) is stricter than carriage (what
+  // the store and the gate take), on purpose: history written under a looser
+  // name stays readable. Every admitted name must still be carried.
+  test('every name admission takes is one the gate issues and the store records, and `*` is not admitted', async () => {
+    const examples = readdirSync(join(import.meta.dir, '..', '..', '..', 'examples', 'plugins'))
+    const admitted = ['a', 'p', 'digest-sender', 'a0-9', 'prototype', 'x'.repeat(64), ...examples]
+    for (const scope of admitted) {
+      expect({ scope, admitted: isPluginName(scope) }).toEqual({ scope, admitted: true })
+      const issued = gate.issueStanding(
+        { min_reader_version: gate.STANDING_READER_VERSION, grants: [] },
+        { id: 'aaaaaaaaaaaa', holder: 'ci', issuer: 'ops', scopes: [scope], hardMaxMs: 30 * DAY },
+        Date.now(),
+      )
+      const storeTakes = await audit
+        .appendAudit(statePath, 'grant.issued', {
+          kind: 'standing',
+          id: 'aaaaaaaaaaaa',
+          holder: 'ci',
+          principal: 'ops',
+          scopes: [scope],
+          period_ms: DAY,
+          hard_max_ms: 30 * DAY,
+        })
+        .then(
+          () => true,
+          () => false,
+        )
+      expect({ scope, gateTakes: 'store' in issued, storeTakes }).toEqual({ scope, gateTakes: true, storeTakes: true })
+    }
+    for (const name of ['*', '', 'A', 'Mailer', 'a_b', '9a', '-a', 'a b', 'é', 'a.b', 'a/b', '../x', 'a\x01', 'x'.repeat(65)]) {
+      expect({ name, admitted: isPluginName(name) }).toEqual({ name, admitted: false })
     }
   })
 

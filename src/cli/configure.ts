@@ -102,7 +102,7 @@ const secretNote = (key: string): string =>
 function assertPluginName(pluginName: string): void {
   if (!IDENT.test(pluginName)) {
     throw new ConfigureError([
-      `Invalid plugin name '${pluginName}'. Use lowercase letters, numbers, hyphens. Must start with a letter.`,
+      `Invalid plugin name '${pluginName}'. Use lowercase letters, numbers, hyphens, at most 64. Must start with a letter.`,
     ])
   }
 }
