@@ -11,9 +11,11 @@
  *
  * The home resolves as:
  *
- *   1. `WARPLINE_HOME` env var, when set (must exist or be creatable)
- *   2. the nearest ancestor of cwd containing a `.warpline/` directory
- *   3. `<cwd>/.warpline` (created on first write)
+ *   1. the `withHome` scope, inside one (`AdvanceOptions.home` opens it)
+ *   2. the `_setHome()` test seam, when set
+ *   3. `WARPLINE_HOME` env var, when set (must exist or be creatable)
+ *   4. the nearest ancestor of cwd containing a `.warpline/` directory
+ *   5. `<cwd>/.warpline` (created on first write)
  *
  * Paths are exposed as accessor FUNCTIONS, not module-load-time constants.
  * The source system this was extracted from froze paths at import time and
@@ -21,12 +23,34 @@
  * that forgot the preload silently wrote live operational state. Accessors +
  * the `_setHome()` seam make the re-root ordering-independent.
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 
 let homeOverride: string | null = null
 
+/**
+ * On `globalThis` under a registered symbol, never module-local: this module
+ * loads twice in one process, from src/ for the engine and from dist/ for an
+ * example handler importing `warpline/lib/paths`, and both copies must read
+ * the one scope.
+ */
+const HOME_SCOPE_KEY = Symbol.for('warpline.home')
+const homeScope: AsyncLocalStorage<string> = ((globalThis as Record<symbol, unknown>)[HOME_SCOPE_KEY] ??=
+  new AsyncLocalStorage<string>()) as AsyncLocalStorage<string>
+
+/**
+ * Run `fn` with every path in this module resolving under `home`, for `fn` and
+ * everything it awaits. A child process `fn` spawns inherits the environment,
+ * not this scope. Internal: not re-exported from `paths-public.ts`.
+ */
+export function withHome<T>(home: string, fn: () => Promise<T>): Promise<T> {
+  return homeScope.run(path.resolve(home), fn)
+}
+
 function resolveHome(): string {
+  const scoped = homeScope.getStore()
+  if (scoped !== undefined) return scoped
   if (homeOverride) return homeOverride
   const env = process.env.WARPLINE_HOME
   if (env) return path.resolve(env)

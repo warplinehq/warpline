@@ -31,6 +31,7 @@ import {
   lockPath as defaultLockPath,
   lastSuccessfulAdvancePath as defaultDeadManPath,
   warplineHome,
+  withHome,
 } from '../lib/paths.js'
 import { atomicWriteText } from '../lib/fs-atomic.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
@@ -250,7 +251,28 @@ export interface AdvanceOptions {
    * `warpline advance` CLI only, never here: a library host passes this.
    */
   trigger?: RunTrigger
-  /** Override state file path (for testing — full path to engine-state.json) */
+  /**
+   * The home this advance runs, in place of the process home. Everything
+   * home-derived moves with it for the whole advance, plugin handlers included:
+   * state, runs, the event log, the run lock, `logs/`, `preferences.json`, the
+   * session-approval grant, the standing grants file, `principals.json`, the
+   * audit store and `config/<plugin>.json`. The plugin root is
+   * `pluginsDir`, else `WARPLINE_PLUGINS_DIR`, else `<home>/plugins`.
+   *
+   * Scoped to this call's async work, so two advances on two homes may run
+   * concurrently in one process. A child process a handler spawns inherits the
+   * environment, not this scope: it resolves the process home unless the
+   * handler passes `WARPLINE_HOME` itself.
+   *
+   * Refused before any write when it is an empty string, or when it is given
+   * together with any of `stateDir`, `runsDir`, `logsDir`, `eventsPath`,
+   * `preferencesPath`, `approvalPath` or `lockPath`.
+   */
+  home?: string
+  /**
+   * Test seam: moves this one file (full path to engine-state.json). A host
+   * relocating a home passes `home`.
+   */
   stateDir?: string
   /**
    * The run lock this advance takes, so two advances cannot write one home.
@@ -264,9 +286,11 @@ export interface AdvanceOptions {
    * writers and by nothing at all for this one; and it does not guard the
    * session-approval grant, which the approve verb writes and this advance only
    * reads. It serialises advance against advance, and that is the whole of it.
+   *
+   * Test seam: moves this one file. A host relocating a home passes `home`.
    */
   lockPath?: string
-  /** Override runs directory (for testing) */
+  /** Test seam: moves this one directory. A host relocating a home passes `home`. */
   runsDir?: string
   /**
    * Directory the headless JSONL run log is written under. Defaults to
@@ -279,21 +303,16 @@ export interface AdvanceOptions {
    * daily JSONL straight into the directory `pruneRunLogs` and
    * `trimPluginHistory` scan for run artifacts, where a `.jsonl` file is not
    * one of the two shapes either of them expects to find.
+   *
+   * Test seam: moves this one directory. A host relocating a home passes `home`.
    */
   logsDir?: string
-  /** Override events.jsonl path (for test isolation) */
+  /** Test seam: moves this one file (events.jsonl). A host relocating a home passes `home`. */
   eventsPath?: string
-  /** Override preferences.json path (for test isolation) */
+  /** Test seam: moves this one file (preferences.json). A host relocating a home passes `home`. */
   preferencesPath?: string
-  /** Override session approval file path (for test isolation) */
+  /** Test seam: moves this one file (the session-approval grant). A host relocating a home passes `home`. */
   approvalPath?: string
-  /** Override the standing grants file path (for test isolation or another home). Defaults inside the gate. */
-  standingPath?: string
-  /**
-   * Override the `principals.json` path (for test isolation or another home).
-   * The registry read from it is recorded in the audit store beside `stateDir`.
-   */
-  principalsPath?: string
   /** Called before each plugin begins execution (for streaming CLI output) */
   onPluginStart?: (plugin: string) => void
   /**
@@ -964,8 +983,6 @@ export interface EvalContext {
    * observed.
    */
   registry?: RegistrySnapshot | null
-  /** The standing grants file this advance or preview reads. Undefined is the gate's default. */
-  standingPath?: string
 }
 
 /**
@@ -2339,12 +2356,7 @@ export async function evaluatePlugin(
   // Read at most once, and only if the approval entry asks for it.
   let read: Promise<CoveringGrant[]> | undefined
   const covering = (): Promise<CoveringGrant[]> =>
-    (read ??= grantsCovering(pluginName, {
-      now,
-      approvalPath: ctx.approvalPath,
-      standingPath: ctx.standingPath,
-      registry: ctx.registry ?? null,
-    }))
+    (read ??= grantsCovering(pluginName, { now, approvalPath: ctx.approvalPath, registry: ctx.registry ?? null }))
 
   /**
    * The cross-entry values, resolved before the scan starts.
@@ -2524,6 +2536,17 @@ export function topoSort(plugins: Map<string, PluginManifest>): string[][] {
 // runAdvance — engine loop
 // -----------------------------------------------------------------------
 
+/** The options `home` refuses beside it: each moves one home-derived file. */
+const HOME_DERIVED_OPTIONS = [
+  'stateDir',
+  'runsDir',
+  'logsDir',
+  'eventsPath',
+  'preferencesPath',
+  'approvalPath',
+  'lockPath',
+] as const satisfies readonly (keyof AdvanceOptions)[]
+
 /**
  * Execute all plugins in dependency order, tracking per-plugin FSM state.
  *
@@ -2543,6 +2566,29 @@ export function topoSort(plugins: Map<string, PluginManifest>): string[][] {
  *   After a level, if any plugin is 'gated' and !dryRun, engine stops (no further levels).
  */
 export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceResult> {
+  if (options.home !== undefined) {
+    const { home, ...rest } = options
+    // `resolve('')` is the working directory, which would quietly become the home.
+    if (home === '') {
+      throw new Error(
+        `warpline: home is an empty string\n` +
+          `      Cause: an empty path resolves to the current working directory.\n` +
+          `      Fix:   pass the home directory, or omit the option to use the process home`,
+      )
+    }
+    // Each of these moves one file of a home. Beside `home` it would split one
+    // advance across two homes, so the pair is refused rather than ranked.
+    const split = HOME_DERIVED_OPTIONS.filter((key) => rest[key] !== undefined)
+    if (split.length > 0) {
+      throw new Error(
+        `warpline: home cannot be combined with ${split.join(', ')}\n` +
+          `      Cause: ${split.length === 1 ? 'that option moves' : 'those options move'} one file of a home,\n` +
+          `             and beside home the advance would run across two homes.\n` +
+          `      Fix:   pass home alone, or the per-file options without it`,
+      )
+    }
+    return withHome(home, () => runAdvance(rest))
+  }
   const {
     dryRun = false,
     force = false,
@@ -2554,8 +2600,6 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     eventsPath,
     preferencesPath,
     approvalPath,
-    standingPath,
-    principalsPath,
     onPluginStart,
     onPluginEnd,
     onRunFailure,
@@ -2658,9 +2702,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // a principal disabled while this advance runs takes effect at the next one.
     // A failed record throws like the one above, and nothing fires.
     let registry: RegistrySnapshot | null = null
-    const standingListing = await listStandingGrants({ standingPath })
+    const standingListing = await listStandingGrants()
     if (standingListing.readable && standingListing.grants.length > 0) {
-      const loaded = await loadRegistry(stateDir, principalsPath)
+      const loaded = await loadRegistry(stateDir)
       registry = standingRegistry(loaded)
     }
 
@@ -3087,7 +3131,6 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       manifests: plugins,
       heldAtEarlierLevel: heldThisAdvance,
       registry,
-      standingPath,
     }
 
     // 7. Execute each level

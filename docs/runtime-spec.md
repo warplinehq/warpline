@@ -43,6 +43,19 @@ all stay under `warplineHome()` whatever plugin root an advance is given. A
 root that is absent, is not a directory, cannot be read, or is the empty string
 is refused before the advance writes anything.
 
+A library host runs another home with `AdvanceOptions.home`. For that advance,
+handlers included, everything the home derives moves with it: `state/`,
+`runs/`, `logs/`, `events.jsonl`, the run lock, `preferences.json`, the
+session-approval grant, `standing-grants.json`, `principals.json`, the audit
+store and `config/<plugin>.json`. The plugin root follows the rule above, with
+`<home>/plugins` as its last step. The scope is the advance's own async work,
+so two advances on two homes may run at once in one process. It does not reach
+a child process a handler spawns: that inherits the environment and resolves
+`WARPLINE_HOME` as usual. `home` is refused before any write when it is the
+empty string, or when it is passed with `stateDir`, `runsDir`, `logsDir`,
+`eventsPath`, `preferencesPath`, `approvalPath` or `lockPath`, each of which is
+a test seam that moves one file.
+
 The table below is generated from that schema — `bun run docs:generate` in a
 clone refreshes it, and CI regenerates and fails on a stale diff, so it cannot
 drift from the code. Edit the schema, not the table.
@@ -1245,9 +1258,10 @@ until a live grant covers it: a session grant (this file) or a standing grant
 (`### Standing grants` below). The session approval is a single JSON file;
 there is no daemon, no keyring and no server.
 
-**Path:** `<warplineHome>/.session-approval`, where `<warplineHome>` is
-`WARPLINE_HOME` if set, else the nearest ancestor directory containing a
-`.warpline/`, else `<cwd>/.warpline`.
+**Path:** `<warplineHome>/.session-approval`, where `<warplineHome>` is the
+advance's `AdvanceOptions.home` when one is given, else `WARPLINE_HOME` if set,
+else the nearest ancestor directory containing a `.warpline/`, else
+`<cwd>/.warpline`.
 
 ### Shape
 
@@ -1648,11 +1662,9 @@ takes effect at the next one. When the standing grants file held no grant at
 that check, a grant issued after it lapses as `registry unreadable`
 for that advance. A missing or unusable `principals.json` lapses every standing
 grant as `registry unreadable`. `warpline plan` reads the registry without recording
-it, so its `approved:` column agrees with the run. A library host that points
-`runAdvance` at another home passes that home's `standingPath` and
-`principalsPath` beside `stateDir` and `approvalPath`. The registry is then
-read from that home and recorded in its audit store. An option left unset
-reads the warpline home's file.
+it, so its `approved:` column agrees with the run. An advance given
+`AdvanceOptions.home` reads that home's standing grants file and
+`principals.json`, and records the registry in that home's audit store (§ 1).
 
 **What `warpline plan` shows.** Under the session grant line, `plan` prints a
 `Standing grants (<n>):` heading and one line per standing grant:

@@ -276,6 +276,9 @@ root:
 import { runAdvance } from 'warpline'
 
 const result = await runAdvance()
+
+// Another home, leaving the process home untouched:
+const other = await runAdvance({ home: '/srv/tenant-a/.warpline' })
 ```
 
 ## Where the LLM fits

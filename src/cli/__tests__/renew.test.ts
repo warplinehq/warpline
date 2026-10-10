@@ -175,14 +175,14 @@ describe('renew restarts the period', () => {
   test('renew judges the holder by the registry its check recorded, read once', async () => {
     const original = principals.readRegistry
     let reads = 0
-    const spy = spyOn(principals, 'readRegistry').mockImplementation(async (path?: string) => {
+    const spy = spyOn(principals, 'readRegistry').mockImplementation(async () => {
       reads += 1
       if (reads === 2) {
         const registry = JSON.parse(readFileSync(principalsPath(), 'utf-8')) as { principals: Entry[] }
         for (const p of registry.principals) if (p.id === 'ci') p.status = 'disabled'
         writeFileSync(principalsPath(), JSON.stringify(registry))
       }
-      return original(path)
+      return original()
     })
     try {
       setSystemTime(new Date(T0 + DAY))

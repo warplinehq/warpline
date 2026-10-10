@@ -18,7 +18,7 @@
  * is about the advance observing a hand edit.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
@@ -292,31 +292,60 @@ describe('a standing grant in a run', () => {
 })
 
 /**
- * A library host runs an isolated home by handing `runAdvance` its paths. The
- * standing grants file and `principals.json` are that home's too, never the
- * process home's, and the registry is recorded in that home's audit store.
+ * A library host runs another home by handing `runAdvance` that home. Every
+ * home-derived file is that home's, never the process home's: the standing
+ * grants file, `principals.json`, `preferences.json`, `config/<p>.json`, state,
+ * runs and the audit store. The process home is left byte-identical.
  */
-describe('an advance pointed at another home', () => {
+describe('an advance given another home', () => {
   let other: string
   beforeEach(() => {
     other = mkdtempSync(join(tmpdir(), 'warpline-standing-other-'))
-    mkdirSync(join(other, 'state'), { recursive: true })
-    writeFileSync(join(other, 'state', 'preferences.json'), JSON.stringify({ review_gate: false }))
+    writeFileSync(join(other, 'preferences.json'), JSON.stringify({ review_gate: false }))
   })
   afterEach(() => rmSync(other, { recursive: true, force: true }))
 
   const advanceOther = (now: number): ReturnType<typeof runAdvance> =>
-    runAdvance({
-      pluginsDir: join(home, 'plugins'),
-      stateDir: join(other, 'state', 'engine-state.json'),
-      runsDir: join(home, 'runs'),
-      eventsPath: eventsPath(),
-      preferencesPath: join(other, 'state', 'preferences.json'),
-      approvalPath: join(other, '.session-approval'),
-      standingPath: join(other, 'standing-grants.json'),
-      principalsPath: join(other, 'principals.json'),
-      now,
-    })
+    runAdvance({ home: other, pluginsDir: join(home, 'plugins'), now })
+
+  /** Every file and directory under `root`, with each file's bytes. */
+  function snapshot(root: string): Record<string, string | null> {
+    const out: Record<string, string | null> = {}
+    for (const rel of readdirSync(root, { recursive: true }) as string[]) {
+      const abs = join(root, rel)
+      out[rel] = statSync(abs).isDirectory() ? null : readFileSync(abs, 'base64')
+    }
+    return out
+  }
+
+  /** A standing grant held by `ci` over `scopes`, written into `root`'s own file. */
+  async function issueGrantAt(root: string, scopes: string[], issuedAt: number): Promise<void> {
+    const next = gate.issueStanding(
+      { min_reader_version: gate.STANDING_READER_VERSION, grants: [] },
+      { id: gate.newStandingId(), holder: 'ci', issuer: 'ops', scopes, periodMs: DAY, hardMaxMs: 30 * DAY },
+      issuedAt,
+    )
+    if ('refused' in next) throw new Error(`issue refused: ${next.refused.code}`)
+    await gate.writeStandingStore(next.store, join(root, 'standing-grants.json'))
+  }
+
+  /** A side-effecting plugin under `root/plugins` whose handler marks `root`. */
+  function writePluginAt(root: string, name: string): void {
+    const dir = join(root, 'plugins', name)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(sideEffectManifest(name))}`)
+    writeFileSync(
+      join(dir, 'handler.ts'),
+      `import { writeFileSync } from 'node:fs'
+export async function handler() {
+  await new Promise((r) => setTimeout(r, 20))
+  writeFileSync(${JSON.stringify(join(root, 'fired-' + name))}, 'x')
+  return { status: 'success', phases_completed: [], phases_failed: [], errors: [], data_freshness: {},
+    summary: 'fixture ok', artifacts_produced: [], schema_version: 1 }
+}
+`,
+    )
+  }
 
   test("the process home's live standing grant does not authorise it", async () => {
     const now = Date.now()
@@ -329,16 +358,10 @@ describe('an advance pointed at another home', () => {
     expect(existsSync(marker('p'))).toBe(false)
   })
 
-  test("its own standing grant and registry authorise it, and its own store records the registry", async () => {
+  test('its own standing grant and registry authorise it, and its own store records the registry', async () => {
     const now = Date.now()
     writeFileSync(join(other, 'principals.json'), JSON.stringify({ principals: [OPS, CI] }))
-    const next = gate.issueStanding(
-      { min_reader_version: gate.STANDING_READER_VERSION, grants: [] },
-      { id: gate.newStandingId(), holder: 'ci', issuer: 'ops', scopes: ['p'], periodMs: DAY, hardMaxMs: 30 * DAY },
-      now - DAY / 2,
-    )
-    if ('refused' in next) throw new Error(`issue refused: ${next.refused.code}`)
-    await gate.writeStandingStore(next.store, join(other, 'standing-grants.json'))
+    await issueGrantAt(other, ['p'], now - DAY / 2)
 
     const result = await advanceOther(now)
 
@@ -349,6 +372,98 @@ describe('an advance pointed at another home', () => {
       .flatMap((f) => readFileSync(join(other, 'audit', f), 'utf-8').split('\n').filter((l) => l.length > 0))
       .map((l) => (JSON.parse(l) as { type: string }).type)
     expect(otherTypes).toContain(REGISTRY_OBSERVED)
+  })
+
+  test("it leaves the process home byte-identical and reads the other home's config and preferences", async () => {
+    const dir = join(other, 'plugins', 'cfg')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify({
+        ...sideEffectManifest('cfg'),
+        side_effects: [],
+        approval_class: undefined,
+        inputs: { token: { type: 'string', required: true } },
+      })}`,
+    )
+    writeFileSync(
+      join(dir, 'handler.ts'),
+      `import { writeFileSync } from 'node:fs'
+export async function handler(_m, args) {
+  if (args.token !== 'other-home') throw new Error('wrong config')
+  writeFileSync(${JSON.stringify(join(other, 'fired-cfg'))}, 'x')
+  return { status: 'success', phases_completed: [], phases_failed: [], errors: [], data_freshness: {},
+    summary: 'fixture ok', artifacts_produced: [], schema_version: 1 }
+}
+`,
+    )
+    mkdirSync(join(other, 'config'), { recursive: true })
+    writeFileSync(join(other, 'config', 'cfg.json'), JSON.stringify({ token: 'other-home' }))
+    const before = snapshot(home)
+
+    const result = await runAdvance({ home: other, now: Date.now() })
+
+    expect(result.plugin_states.get('cfg')).toBe('completed')
+    expect(existsSync(join(other, 'fired-cfg'))).toBe(true)
+    expect(existsSync(join(other, 'state', 'engine-state.json'))).toBe(true)
+    expect(snapshot(home)).toEqual(before)
+
+    // The other home's preferences.json is the one read: a broken one refuses.
+    writeFileSync(join(other, 'preferences.json'), '{not json')
+    const refusedBefore = snapshot(home)
+    await expect(runAdvance({ home: other, now: Date.now() })).rejects.toThrow()
+    expect(snapshot(home)).toEqual(refusedBefore)
+  })
+
+  test('home with a home-derived override refuses before any write', async () => {
+    const before = snapshot(home)
+    const otherBefore = snapshot(other)
+    for (const key of ['stateDir', 'runsDir', 'logsDir', 'eventsPath', 'preferencesPath', 'approvalPath', 'lockPath']) {
+      await expect(
+        runAdvance({
+          home: other,
+          pluginsDir: join(home, 'plugins'),
+          [key]: join(other, 'x'),
+          now: Date.now(),
+        } as Parameters<typeof runAdvance>[0]),
+      ).rejects.toThrow(key)
+    }
+    expect(snapshot(home)).toEqual(before)
+    expect(snapshot(other)).toEqual(otherBefore)
+  })
+
+  test("an empty home refuses before any write", async () => {
+    const before = snapshot(home)
+    await expect(runAdvance({ home: '', pluginsDir: join(home, 'plugins'), now: Date.now() })).rejects.toThrow(
+      'home is an empty string',
+    )
+    expect(snapshot(home)).toEqual(before)
+  })
+
+  test('two concurrent advances on two homes are each authorised only by their own standing grant', async () => {
+    const now = Date.now()
+    const second = mkdtempSync(join(tmpdir(), 'warpline-standing-second-'))
+    try {
+      for (const root of [other, second]) {
+        writeFileSync(join(root, 'preferences.json'), JSON.stringify({ review_gate: false }))
+        writeFileSync(join(root, 'principals.json'), JSON.stringify({ principals: [OPS, CI] }))
+        writePluginAt(root, 'p')
+        writePluginAt(root, 'q')
+      }
+      await issueGrantAt(other, ['p'], now - DAY / 2)
+      await issueGrantAt(second, ['q'], now - DAY / 2)
+
+      const [a, b] = await Promise.all([runAdvance({ home: other, now }), runAdvance({ home: second, now })])
+
+      expect([a.plugin_states.get('p'), a.plugin_states.get('q')]).toEqual(['completed', 'skipped'])
+      expect([b.plugin_states.get('p'), b.plugin_states.get('q')]).toEqual(['skipped', 'completed'])
+      expect(existsSync(join(other, 'fired-p'))).toBe(true)
+      expect(existsSync(join(other, 'fired-q'))).toBe(false)
+      expect(existsSync(join(second, 'fired-p'))).toBe(false)
+      expect(existsSync(join(second, 'fired-q'))).toBe(true)
+    } finally {
+      rmSync(second, { recursive: true, force: true })
+    }
   })
 })
 
