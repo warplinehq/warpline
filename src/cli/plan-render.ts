@@ -172,6 +172,16 @@ function grantLine(grant: GrantState | undefined, now: number, standingListed: b
   return `Session grant: ${scopes} — ${minutes}m remaining${soon}`
 }
 
+/**
+ * A scope as visible text. The gate reads any non-empty scope from a
+ * hand-edited file, so a control byte, C1 included, prints as `\xNN` and a
+ * backslash doubles, never reaching the terminal as itself.
+ */
+const visible = (scope: string): string =>
+  scope.replace(/[\\\x00-\x1f\x7f-\x9f]/g, (ch) =>
+    ch === '\\' ? '\\\\' : `\\x${ch.charCodeAt(0).toString(16).padStart(2, '0')}`,
+  )
+
 /** The standing section, in the order the model gives it. No cause is shown for an unreadable file. */
 function standingLines(view: StandingView | undefined): string[] {
   if (view === undefined) return []
@@ -181,7 +191,7 @@ function standingLines(view: StandingView | undefined): string[] {
     `Standing grants (${view.grants.length}):`,
     ...view.grants.map(
       (g) =>
-        `${INDENT}${g.id} — holder ${g.holder}, issuer ${g.issuer}, scopes ${g.scopes.join(', ')} — next expiry ${new Date(g.nextExpiry).toISOString()} — ${g.state === 'live' ? 'live' : `lapsed (${g.reason})`}`,
+        `${INDENT}${g.id} — holder ${g.holder}, issuer ${g.issuer}, scopes ${g.scopes.map(visible).join(', ')} — next expiry ${new Date(g.nextExpiry).toISOString()} — ${g.state === 'live' ? 'live' : `lapsed (${g.reason})`}`,
     ),
   ]
 }

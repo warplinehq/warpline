@@ -436,6 +436,17 @@ describe('renderPlan — standing grants', () => {
     expect(out.indexOf('Standing grants (7):')).toBeLessThan(out.indexOf('Plugins:'))
   })
 
+  // The gate reads any non-empty scope from a hand-edited file, so a scope can
+  // carry bytes a terminal acts on. They print as visible escapes.
+  test('a scope holding control bytes prints them escaped, on its one line', () => {
+    const grant = standing({ scopes: ['p\x1b[2J', 'q\nforged — live', 'r\\x1b', 's\x9b'] })
+    const out = renderPlan(makeModel({ standing: { readable: true, grants: [grant] } }), NOW)
+
+    expect(out).not.toMatch(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/)
+    const line = out.split('\n').find((l) => l.startsWith(`  ${grant.id} — `))
+    expect(line).toContain('scopes p\\x1b[2J, q\\x0aforged — live, r\\\\x1b, s\\x9b — next expiry ')
+  })
+
   test('no standing grant prints no section', () => {
     const empty = renderPlan(makeModel({ standing: { readable: true, grants: [] } }), NOW)
     const absent = renderPlan(makeModel(), NOW)

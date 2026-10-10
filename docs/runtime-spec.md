@@ -1649,7 +1649,10 @@ reads the warpline home's file.
 The next expiry is the earlier of the renewal deadline and the hard maximum. A
 lapsed grant's line ends `lapsed (<reason>)`, with one of the six reasons
 above. The lines come in the gate's order, by next expiry and then by id, and
-no line shows a principal's key. With no standing grant the section is absent.
+no line shows a principal's key. The read takes any non-empty scope but `*`, so
+a hand-edited file can hold one that is not a plugin name. Its control bytes,
+C1 included, print as `\xNN` and a backslash doubles, so no scope reaches the
+terminal as bytes it acts on. With no standing grant the section is absent.
 A standing grants file that cannot be read, for any cause, prints the one line
 `Standing grants: none live — the standing grants file cannot be read`, never
 an absent section, and shows no cause.
