@@ -1523,11 +1523,13 @@ The engine reaches both only through the gate's readers, `grantsCovering` and
 `writeStandingStore` for the standing grants file) have no caller inside
 `runAdvance`. That is a property of the call graph, and tests pin it: a
 file-graph guard walks every module `warpline advance` and `warpline run`
-reach, dynamic imports included, and finds no call to a standing writer or to
-the accessor that names the standing grants file; a full advance over
-side-effecting plugins leaves this file byte- and mtime-identical; and a full
-advance that fires a plugin under a standing grant leaves the standing grants
-file byte- and mtime-identical.
+reach, dynamic imports and every quote style included, and finds no mention of
+a standing writer or of the accessor that names the standing grants file, so
+an aliased import or a reference held for later is caught too; a full advance
+over side-effecting plugins leaves this file byte- and mtime-identical; and a
+full advance that fires a plugin under a standing grant leaves the standing
+grants file byte- and mtime-identical. A name built from pieces at run time is
+beyond the file-graph guard, and only that last check covers it.
 
 ### Standing grants
 

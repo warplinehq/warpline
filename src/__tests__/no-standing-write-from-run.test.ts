@@ -4,8 +4,9 @@
  * A standing grant is authority a human issued for a machine principal. If code
  * a run reaches could write the file that holds it, a run could grant itself
  * the authority it is checked against. So every module reachable from
- * `warpline advance` and `warpline run` is scanned for a call to any standing
- * writer, or to the accessor that names the file. The gate module that defines
+ * `warpline advance` and `warpline run` is scanned for any mention of a standing
+ * writer, or of the accessor that names the file: a call, an aliased import, a
+ * destructure, a held reference or a quoted bracket key. The gate module that defines
  * the writers is skipped: being reachable is not the defect, being called is,
  * and the byte pin holds that module still. The accessor's own declaration in
  * the paths module is skipped for the same reason.
@@ -18,8 +19,10 @@
  * the way test 14 in `src/cli/__tests__/deny.test.ts` does.
  *
  * A second scan is a plain line scan: no non-test source file but the paths
- * module spells the file's name, so a module cannot reach the file by building
- * the path itself.
+ * module spells the file's name. A name built from pieces at run time, such as
+ * `'standing-' + 'grants.json'` or a computed key, is beyond a static scan; the
+ * backstop below, a store byte- and mtime-identical across a real advance, is
+ * what covers it.
  *
  * Every enumeration throws or asserts a size rather than returning empty.
  * "Could not look" is not "looked and it was fine". The scanners are pure over
@@ -50,8 +53,10 @@ const LITERAL = 'standing-grants'
 const COMMENT = /^\s*(\*|\/\/)/
 
 // Both edge shapes: `from '…'` and `import('…')`, the latter covering the bare
-// side-effect `import '…'` too.
-const RELATIVE_EDGE = /(?:from|import)\s*\(?\s*'(\.[^']+)'/g
+// side-effect `import '…'` too, under any of the three quotes. A template
+// specifier with an interpolation resolves to no file, so the walk throws on it
+// rather than skipping a subtree.
+const RELATIVE_EDGE = /(?:from|import)\s*\(?\s*(['"`])(\.[^'"`]+)\1/g
 
 /** Every file reachable from `entry` by relative import, with its source. */
 async function walk(entry: string): Promise<Map<string, string>> {
@@ -61,7 +66,7 @@ async function walk(entry: string): Promise<Map<string, string>> {
     const source = await readFile(file, 'utf-8')
     seen.set(file, source)
     for (const m of source.matchAll(RELATIVE_EDGE)) {
-      await visit(resolve(dirname(file), (m[1] as string).replace(/\.js$/, '.ts')))
+      await visit(resolve(dirname(file), (m[2] as string).replace(/\.js$/, '.ts')))
     }
   }
   await visit(entry)
@@ -74,16 +79,18 @@ const codeLines = (source: string): Array<[number, string]> =>
     .map((text, i): [number, string] => [i + 1, text])
     .filter(([, text]) => !COMMENT.test(text))
 
-const CALLS = FORBIDDEN.map((name) => new RegExp(`\\b${name}\\s*\\(`))
+// Any mention, not only a call: an aliased import, a destructure, a reference
+// held for later and a quoted bracket key all spell the name somewhere.
+const MENTIONS = FORBIDDEN.map((name) => new RegExp(`\\b${name}\\b`))
 
-/** `<path>:<line>: <text>` for every code line in the closure that calls a forbidden name. */
+/** `<path>:<line>: <text>` for every code line in the closure that names a forbidden export. */
 function offenders(closure: ReadonlyMap<string, string>, root: string): string[] {
   const out: string[] = []
   for (const [file, source] of closure) {
     if (file.endsWith(DEFINER)) continue
     for (const [n, text] of codeLines(source)) {
       if (file.endsWith(PATHS_MODULE) && DECLARATION.test(text)) continue
-      if (CALLS.some((re) => re.test(text))) out.push(`${relative(root, file)}:${n}: ${text.trim()}`)
+      if (MENTIONS.some((re) => re.test(text))) out.push(`${relative(root, file)}:${n}: ${text.trim()}`)
     }
   }
   return out
@@ -180,6 +187,40 @@ describe('the scanners report what they are built to catch', () => {
     try {
       const found = offenders(await walk(join(dir, 'root.ts')), dir)
       expect(found.map((line) => line.split(':')[0])).toEqual(['b.ts', 'c.ts'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Each shape reaches a writer without spelling `writeStandingStore(` on one
+  // line, or hides its module behind an import the single-quote walk skipped.
+  test('the scanner reports an aliased import, a reference, a bracket access, and modules behind double-quoted and template imports', async () => {
+    const dir = fixture({
+      'root.ts': [
+        "import { a } from './alias.js'",
+        "import { r } from './ref.js'",
+        "import { k } from './bracket.js'",
+        "import { s } from './destructure.js'",
+        'import { q } from "./double.js"',
+        'export async function root(): Promise<void> {',
+        '  await import(`./template.js`)',
+        '  a(); r(); k(); s(); q()',
+        '}',
+        '',
+      ].join('\n'),
+      'alias.ts': "import { writeStandingStore as persist } from './gate.js'\nexport const a = () => persist(x)\n",
+      'ref.ts': "import * as g from './gate.js'\nconst w = g.writeStandingStore\nexport const r = () => w(x)\n",
+      'bracket.ts': "import * as g from './gate.js'\nexport const k = () => g['writeStandingStore'](x)\n",
+      'destructure.ts': "import * as g from './gate.js'\nconst { writeStandingStore: w } = g\nexport const s = () => w(x)\n",
+      'double.ts': 'export const q = () => writeStandingStore(x)\n',
+      'template.ts': 'export const t = standingGrantsPath()\n',
+      'gate.ts': 'export const nothing = 1\n',
+    })
+    try {
+      const found = offenders(await walk(join(dir, 'root.ts')), dir)
+      expect([...new Set(found.map((line) => line.split(':')[0]))].sort()).toEqual(
+        ['alias.ts', 'bracket.ts', 'destructure.ts', 'double.ts', 'ref.ts', 'template.ts'],
+      )
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

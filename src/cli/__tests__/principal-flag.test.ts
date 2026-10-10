@@ -405,7 +405,9 @@ test('approve p --principal ops: a principal disabled while approve waits on the
 })
 
 describe('no verb reads the account running it', () => {
-  const OS_USER = /process\.env\.(USER|LOGNAME|USERNAME)|userInfo\(|os\.userInfo/
+  // Any read of the environment at all, any OS-account call, and either module
+  // imported, so a bracket key, a destructure or an imported `env` is caught.
+  const OS_USER = /\bprocess\.env\b|\bBun\.env\b|\buserInfo\b|['"](node:)?(os|process)['"]|WARPLINE_PRINCIPAL/
 
   /** The code lines of a source file, comment lines dropped, that match `re`. */
   const offending = (path: string, re: RegExp): string[] =>
@@ -414,19 +416,33 @@ describe('no verb reads the account running it', () => {
       .filter((text) => !/^\s*(\*|\/\/|\/\*)/.test(text))
       .filter((text) => re.test(text))
 
-  test('approve.ts, deny.ts and resolve.ts hold no code line that reads the OS user', () => {
-    for (const verb of ['approve', 'deny', 'resolve']) {
-      expect(offending(join(import.meta.dir, '..', `${verb}.ts`), OS_USER)).toEqual([])
+  test('no verb taking --principal or --holder, nor the registry module, holds a code line that reads the OS user or the environment', () => {
+    const files = [
+      ...['approve', 'deny', 'resolve', 'renew', 'revoke', 'principal'].map((verb) => join(import.meta.dir, '..', `${verb}.ts`)),
+      join(import.meta.dir, '..', '..', 'lib', 'principals.ts'),
+    ]
+    for (const path of files) {
+      expect(readFileSync(path, 'utf-8').split('\n').length).toBeGreaterThan(20)
+      expect(offending(path, OS_USER)).toEqual([])
     }
   })
 
-  test('the scan finds a planted read', () => {
+  test('the scan finds a planted read in every shape', () => {
     const dir = mkdtempSync(join(tmpdir(), 'warpline-principal-flag-fixture-'))
     const path = join(dir, 'verb.ts')
-    writeFileSync(path, '/**\n * A planted offender.\n */\nconst who = process.env.USER ?? null\n')
+    const planted = [
+      'const who = process.env.USER ?? null',
+      "const who = process.env['USER'] ?? null",
+      'const { USER } = process.env',
+      'const who = process.env.WARPLINE_PRINCIPAL',
+      'const who = Bun.env.LOGNAME',
+      "import { userInfo } from 'node:os'",
+      "import { env } from 'node:process'",
+    ]
+    writeFileSync(path, `/**\n * A planted offender.\n */\n${planted.join('\n')}\n`)
 
     try {
-      expect(offending(path, OS_USER)).toEqual(['const who = process.env.USER ?? null'])
+      expect(offending(path, OS_USER)).toEqual(planted)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
