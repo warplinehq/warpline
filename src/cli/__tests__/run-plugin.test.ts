@@ -100,6 +100,31 @@ describe('runPlugin — payload and exit code', () => {
     expect(existsSync(marker)).toBe(false)
   })
 
+  // The loader's rule, applied by invokePlugin: `run` admits what `advance` and `plan` do.
+  test('a manifest that names another plugin is refused by run, and its handler never runs', async () => {
+    const other = mkdtempSync(join(tmpdir(), 'warpline-run-plugin-name-'))
+    const marker = join(other, 'ran')
+    mkdirSync(join(other, 'plugins', 'foo'), { recursive: true })
+    writeFileSync(
+      join(other, 'plugins', 'foo', 'manifest.ts'),
+      `export const manifest = ${JSON.stringify({ name: 'bar', version: '1.0.0', description: 'renamed', schedule: 'manual', autonomy_level: 'autonomous', min_tier: 'normal', ttl_hours: 1, side_effects: [] })}\n`,
+    )
+    writeFileSync(
+      join(other, 'plugins', 'foo', 'handler.ts'),
+      `import { writeFileSync } from 'node:fs'\nexport async function handler() { writeFileSync(${JSON.stringify(marker)}, 'x') }\n`,
+    )
+    _setHome(other)
+    try {
+      const r = await runPlugin(['foo', 'run'])
+      expect(r.payload.ok).toBe(false)
+      expect(r.payload.error).toBe("Failed to load plugin 'foo': manifest name 'bar' is not its directory name 'foo' — make them equal")
+      expect(existsSync(marker)).toBe(false)
+    } finally {
+      _setHome(home)
+      rmSync(other, { recursive: true, force: true })
+    }
+  })
+
   test('--retries is bounded to the inclusive range 0 through 10', async () => {
     expect((await runPlugin(['success-plugin', 'run', '--retries=0'])).code).toBe(0)
     expect((await runPlugin(['success-plugin', 'run', '--retries=10'])).code).toBe(0)

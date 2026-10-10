@@ -21,7 +21,13 @@
  *     is likewise always fatal.
  *
  * Security:
- *   - Plugin path is constructed from pluginsDir() + a validated plugin name.
+ *   - Plugin path is constructed from the plugin root + a plugin name this
+ *     function checks against the admission rule (`isPluginName`) before it
+ *     reads anything, so `../x` imports nothing. Every caller is covered,
+ *     `warpline/unstable-runtime` hosts included, not only the CLI.
+ *   - The manifest is admitted by the loader's own rule (`admitManifest`): it
+ *     parses as a manifest and names its directory. A manifest `advance` and
+ *     `plan` would refuse is refused here too, and nothing runs.
  *   - Handler output is validated by Zod (SkillResultSchema.safeParse).
  */
 import { join } from 'node:path'
@@ -33,12 +39,52 @@ import { loadPluginConfig, PluginConfigError } from '../lib/plugin-config.js'
 import { resolvePluginArgs } from '../schemas/plugin-config.js'
 import { SkillResultSchema, makeSkillError } from '../schemas/skill-result.js'
 import type { SkillResult, SkillResultInput } from '../schemas/skill-result.js'
-import type { PluginManifest } from '../schemas/plugin-manifest.js'
+import { PluginManifestSchema, type PluginManifest } from '../schemas/plugin-manifest.js'
+import { isPluginName } from '../schemas/plugin-name.js'
 import { emitAttemptFailed } from '../board/engine-events.js'
 import { writeRunArtifact, trimPluginHistory, type RunArtifact } from './run-artifacts.js'
 import { resolveSecrets, scrubSecrets } from './secrets.js'
 import { mintContext } from './capabilities.js'
 import type { CapabilityContext, CapabilityGrantWitness, DependencyRun } from './capabilities.js'
+
+/**
+ * Manifest validation issues, as a path and a code.
+ *
+ * Zod's own `issue.message` is deliberately NOT passed through, for the same
+ * reason `lib/plugin-config.ts` refuses it: it is upstream prose that can begin
+ * quoting the received value in any minor release, and this string is rendered
+ * by `warpline plan`, which operators read and paste. A manifest is
+ * hand-written, so the value it received is author input.
+ */
+function describeManifestIssues(error: { issues: readonly { code: string; path: PropertyKey[] }[] }): string {
+  const seen = new Set<string>()
+  for (const issue of error.issues) {
+    const key = issue.path.map(String).join('.')
+    seen.add(
+      key
+        ? `manifest field '${key}' is not valid (${issue.code})`
+        : `manifest is not a valid plugin manifest object (${issue.code})`,
+    )
+  }
+  return [...seen].join('; ')
+}
+
+/**
+ * The loader's rule for what a plugin directory's `manifest` export must be:
+ * a valid manifest whose name is the directory's. The directory is the key
+ * every record is stored under, so a manifest naming another plugin would be
+ * read as one plugin and keyed as another. `loadPluginManifests` and
+ * `invokePlugin` both call this, so `advance`, `plan` and `run` admit the same
+ * manifests.
+ */
+export function admitManifest(dirName: string, exported: unknown): { manifest: PluginManifest } | { error: string } {
+  const parsed = PluginManifestSchema.safeParse(exported)
+  if (!parsed.success) return { error: describeManifestIssues(parsed.error) }
+  if (parsed.data.name !== dirName) {
+    return { error: `manifest name '${parsed.data.name}' is not its directory name '${dirName}' — make them equal` }
+  }
+  return { manifest: parsed.data }
+}
 
 /**
  * Resolve the default plugins directory via canonical paths.ts.
@@ -411,6 +457,45 @@ export async function invokePlugin(
   // the artifact minted its own.
   const runId = options.runId ?? crypto.randomUUID()
 
+  /** A plugin that could not be loaded: one failed attempt, nothing invoked. */
+  const loadFailure = (error: string): PluginInvocationResult => {
+    const failedAttempt: AttemptRecord = {
+      attempt: 1,
+      started_at: startedAt,
+      elapsed_ms: Date.now() - start,
+      status: 'failed',
+      error,
+    }
+    return {
+      plugin: pluginName,
+      result: {
+        status: 'failed',
+        phases_completed: [],
+        phases_failed: [pluginName],
+        errors: [makeSkillError('dependency_unavailable', `Failed to load plugin '${pluginName}': ${error}`)],
+        data_freshness: {},
+        summary: `${pluginName}: failed to load handler`,
+        artifacts_produced: [],
+        schema_version: 1,
+      },
+      duration_ms: Date.now() - start,
+      attempt_count: 1,
+      attempts: [failedAttempt],
+      final_error: error,
+      retried: false,
+      cancelled: false,
+      timed_out: false,
+    }
+  }
+
+  // The name is joined under the plugin root below, so it is checked first:
+  // `../x` must import nothing.
+  if (!isPluginName(pluginName)) {
+    return loadFailure(
+      `${JSON.stringify(pluginName)} is not a plugin name (lowercase letters, digits and hyphens, a leading letter, at most 64)`,
+    )
+  }
+
   // -- Load handler and manifest modules --
   // import() needs file:// URLs, not bare absolute paths.
   const handlerPath = pathToFileURL(join(dir, pluginName, 'handler.ts')).href
@@ -434,40 +519,11 @@ export async function invokePlugin(
       releasePluginOutput()
     }
     handlerFn = handlerMod.handler
-    manifest = manifestMod.manifest
+    const admitted = admitManifest(pluginName, (manifestMod as { manifest?: unknown }).manifest)
+    if ('error' in admitted) return loadFailure(admitted.error)
+    manifest = admitted.manifest
   } catch (err) {
-    const failedAttempt: AttemptRecord = {
-      attempt: 1,
-      started_at: new Date(start).toISOString(),
-      elapsed_ms: Date.now() - start,
-      status: 'failed',
-      error: err instanceof Error ? err.message : String(err),
-    }
-    return {
-      plugin: pluginName,
-      result: {
-        status: 'failed',
-        phases_completed: [],
-        phases_failed: [pluginName],
-        errors: [
-          makeSkillError(
-            'dependency_unavailable',
-            `Failed to load plugin '${pluginName}': ${err instanceof Error ? err.message : String(err)}`,
-          ),
-        ],
-        data_freshness: {},
-        summary: `${pluginName}: failed to load handler`,
-        artifacts_produced: [],
-        schema_version: 1,
-      },
-      duration_ms: Date.now() - start,
-      attempt_count: 1,
-      attempts: [failedAttempt],
-      final_error: failedAttempt.error,
-      retried: false,
-      cancelled: false,
-      timed_out: false,
-    }
+    return loadFailure(err instanceof Error ? err.message : String(err))
   }
 
   // -------------------------------------------------------------------

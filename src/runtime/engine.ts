@@ -44,9 +44,9 @@ import { advanceCounts } from './exit-codes.js'
 import type { AdvanceOutcome } from './exit-codes.js'
 import { acquireLock, releaseLock, startHeartbeat } from './lock.js'
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
-import { PluginManifestSchema, type PluginManifest } from '../schemas/plugin-manifest.js'
+import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { isPluginName } from '../schemas/plugin-name.js'
-import { invokePlugin, redirectPluginOutput, releasePluginOutput } from './invoke-plugin.js'
+import { admitManifest, invokePlugin, redirectPluginOutput, releasePluginOutput } from './invoke-plugin.js'
 import type { CapabilityGrantWitness, DependencyRun } from './capabilities.js'
 
 /**
@@ -4252,30 +4252,6 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
  * broken, so the unit is tested against the message and the end-to-end path is
  * proven under real Node in scripts/verify-tarball.sh.
  */
-/**
- * Manifest validation issues, as a path and a code.
- *
- * Zod's own `issue.message` is deliberately NOT passed through, for the same
- * reason `lib/plugin-config.ts` refuses it: it is upstream prose that can begin
- * quoting the received value in any minor release, and this string is rendered
- * by `warpline plan`, which operators read and paste. A manifest is
- * hand-written, so the value it received is author input.
- */
-function describeManifestIssues(error: {
-  issues: readonly { code: string; path: PropertyKey[] }[]
-}): string {
-  const seen = new Set<string>()
-  for (const issue of error.issues) {
-    const key = issue.path.map(String).join('.')
-    seen.add(
-      key
-        ? `manifest field '${key}' is not valid (${issue.code})`
-        : `manifest is not a valid plugin manifest object (${issue.code})`,
-    )
-  }
-  return [...seen].join('; ')
-}
-
 export function explainLoadFailure(message: string, pluginsDir: string): string {
   if (!message.includes('Cannot use import statement outside a module')) return message
 
@@ -4433,22 +4409,16 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
           // An invalid manifest is a LOAD FAILURE, which is the fail-closed
           // outcome: the plugin never enters the map, so nothing runs it and
           // `plan` exits 1 naming the directory.
-          const parsed = PluginManifestSchema.safeParse(mod.manifest)
-          if (!parsed.success) {
-            failures.push({ plugin: entry, error: describeManifestIssues(parsed.error) })
+          //
+          // `admitManifest` is the rule, shared with `invokePlugin` so `run`
+          // admits exactly what `advance` and `plan` do: a valid manifest whose
+          // name is its directory's.
+          const admitted = admitManifest(entry, mod.manifest)
+          if ('error' in admitted) {
+            failures.push({ plugin: entry, error: admitted.error })
             return
           }
-          // The directory is the key everything is stored under, so a manifest
-          // naming another plugin would be read as one plugin and keyed as
-          // another.
-          if (parsed.data.name !== entry) {
-            failures.push({
-              plugin: entry,
-              error: `manifest name '${parsed.data.name}' is not its directory name '${entry}' — make them equal`,
-            })
-            return
-          }
-          plugins.set(entry, parsed.data)
+          plugins.set(entry, admitted.manifest)
         } else {
           // For a module with no `manifest` export at all (a misnamed export,
           // a half-finished scaffold), which used to vanish here with no

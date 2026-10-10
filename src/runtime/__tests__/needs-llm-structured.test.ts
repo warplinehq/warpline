@@ -16,6 +16,7 @@
  * `eventsPath` is redirected so no fixture event reaches live state.
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -303,7 +304,7 @@ describe('an undeclared handoff is refused', () => {
     const undeclared = { llm_handoff: false, max_retries: 3 }
     await writeHandoffPlugin('undeclared-field-only', FIELD_ONLY, undeclared)
     await writeHandoffPlugin('undeclared-prefix-only', PREFIX_ONLY, undeclared)
-    // The manifest is used as exported, so a string is not the boolean.
+    // A string is not the boolean: the manifest is admitted by the loader's rule, so this one never loads.
     await writeHandoffPlugin('undeclared-string-true', FIELD_ONLY, {
       llm_handoff: 'true' as unknown as boolean,
       max_retries: 3,
@@ -314,7 +315,26 @@ describe('an undeclared handoff is refused', () => {
     emitAttemptFailedSpy.mockRestore()
   })
 
-  for (const name of ['undeclared-field-only', 'undeclared-prefix-only', 'undeclared-string-true']) {
+  test('undeclared-string-true is refused at load, by the same rule advance applies, and its handler never runs', async () => {
+    const runsDir = join(tmpDir, 'runs')
+    const runId = crypto.randomUUID()
+    const inv = await invokePlugin(
+      'undeclared-string-true',
+      {},
+      { pluginsDir: tmpDir, eventsPath, runsDir, persistArtifact: true, runId },
+      { granted: false, reason: 'manual-run' },
+    )
+
+    expect(inv.result.status).toBe('failed')
+    expect(inv.attempts).toHaveLength(1)
+    expect(inv.result.errors[0]?.code).toBe('dependency_unavailable')
+    expect(inv.final_error).toContain("manifest field 'llm_handoff' is not valid")
+    expect(inv.result.needs_llm).toBeUndefined()
+    expect(existsSync(join(runsDir, `${runId}.json`))).toBe(false)
+    expect(emitAttemptFailedSpy).not.toHaveBeenCalled()
+  })
+
+  for (const name of ['undeclared-field-only', 'undeclared-prefix-only']) {
     test(`${name} fails once, is not retried, and publishes nothing`, async () => {
       const runsDir = join(tmpDir, 'runs')
       const runId = crypto.randomUUID()

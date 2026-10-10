@@ -327,6 +327,56 @@ const OVERLAP_HANDLER = `
   }
 `
 
+/**
+ * `invokePlugin` is the guarantee, not the CLI in front of it: a
+ * `warpline/unstable-runtime` host calls it directly. A name outside the
+ * admission rule imports nothing, and a manifest the loader would refuse
+ * (invalid, or naming another directory) runs nothing.
+ */
+describe('invokePlugin: admission', () => {
+  const witness = { granted: false, reason: 'manual-run' } as const
+  const loads = (name: string, marker: string) => `import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(marker)}, ${JSON.stringify(name)})
+export async function handler() {
+  writeFileSync(${JSON.stringify(marker)}, 'ran')
+  return { status: 'success', phases_completed: [], phases_failed: [], errors: [], data_freshness: {}, summary: 'ran', artifacts_produced: [], schema_version: 1 }
+}
+`
+
+  test('a name outside the plugin-name rule imports nothing, called directly', async () => {
+    const root = join(tmpDir, 'root')
+    const marker = join(tmpDir, 'imported-outside')
+    await mkdir(root, { recursive: true })
+    // A valid plugin one level above the root, which `../x` would reach.
+    await writePlugin(tmpDir, 'x', loads('x', marker))
+
+    for (const name of ['../x', 'X', '*', '']) {
+      const inv = await invokePlugin(name, {}, { pluginsDir: root, eventsPath: EVENTS_PATH }, witness)
+      expect(inv.result.status).toBe('failed')
+      expect(inv.final_error).toContain('is not a plugin name')
+      expect(inv.attempt_count).toBe(1)
+    }
+    expect(await readFile(marker, 'utf-8').catch(() => 'never')).toBe('never')
+  })
+
+  test('a manifest naming another plugin, or an invalid one, is refused and its handler never runs', async () => {
+    const marker = join(tmpDir, 'ran')
+    await writePlugin(tmpDir, 'foo', loads('foo', marker), { name: 'bar' })
+    await writePlugin(tmpDir, 'bad', loads('bad', marker), { timeout_ms: 'soon' as unknown as number })
+
+    const foo = await invokePlugin('foo', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, witness)
+    expect(foo.result.status).toBe('failed')
+    expect(foo.final_error).toBe("manifest name 'bar' is not its directory name 'foo' — make them equal")
+
+    const bad = await invokePlugin('bad', {}, { pluginsDir: tmpDir, eventsPath: EVENTS_PATH }, witness)
+    expect(bad.result.status).toBe('failed')
+    expect(bad.final_error).toContain("manifest field 'timeout_ms' is not valid")
+
+    // The module loaded (its top level wrote its name), the handler did not run.
+    expect(await readFile(marker, 'utf-8')).not.toBe('ran')
+  })
+})
+
 describe('invokePlugin: a name declared in both inputs and secrets', () => {
   test('an undefaulted required overlapping input resolves from the environment', async () => {
     await withOverlapCanary(async () => {

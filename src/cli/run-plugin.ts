@@ -198,8 +198,9 @@ export async function runPlugin(
 
   const [plugin, action] = positionals
   if (!plugin || !action) return usage(USAGE)
-  // Joined under the plugin root by invokePlugin, so `../x` would import a
-  // handler from outside it. Refused before anything is read or written.
+  // invokePlugin refuses it too, and that is the guarantee for every caller.
+  // Refused here first so a usage error comes with exit 1, before the
+  // preferences read and its audit observation below.
   if (!isPluginName(plugin)) return usage(NAME_ERROR)
 
   try {
