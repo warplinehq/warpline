@@ -1631,7 +1631,11 @@ takes effect at the next one. When the standing grants file held no grant at
 that check, a grant issued after it lapses as `registry unreadable`
 for that advance. A missing or unusable `principals.json` lapses every standing
 grant as `registry unreadable`. `warpline plan` reads the registry without recording
-it, so its `approved:` column agrees with the run.
+it, so its `approved:` column agrees with the run. A library host that points
+`runAdvance` at another home passes that home's `standingPath` and
+`principalsPath` beside `stateDir` and `approvalPath`. The registry is then
+read from that home and recorded in its audit store. An option left unset
+reads the warpline home's file.
 
 **What `warpline plan` shows.** Under the session grant line, `plan` prints a
 `Standing grants (<n>):` heading and one line per standing grant:

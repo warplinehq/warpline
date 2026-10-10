@@ -287,6 +287,13 @@ export interface AdvanceOptions {
   preferencesPath?: string
   /** Override session approval file path (for test isolation) */
   approvalPath?: string
+  /** Override the standing grants file path (for test isolation or another home). Defaults inside the gate. */
+  standingPath?: string
+  /**
+   * Override the `principals.json` path (for test isolation or another home).
+   * The registry read from it is recorded in the audit store beside `stateDir`.
+   */
+  principalsPath?: string
   /** Called before each plugin begins execution (for streaming CLI output) */
   onPluginStart?: (plugin: string) => void
   /**
@@ -957,6 +964,8 @@ export interface EvalContext {
    * observed.
    */
   registry?: RegistrySnapshot | null
+  /** The standing grants file this advance or preview reads. Undefined is the gate's default. */
+  standingPath?: string
 }
 
 /**
@@ -2330,7 +2339,12 @@ export async function evaluatePlugin(
   // Read at most once, and only if the approval entry asks for it.
   let read: Promise<CoveringGrant[]> | undefined
   const covering = (): Promise<CoveringGrant[]> =>
-    (read ??= grantsCovering(pluginName, { now, approvalPath: ctx.approvalPath, registry: ctx.registry ?? null }))
+    (read ??= grantsCovering(pluginName, {
+      now,
+      approvalPath: ctx.approvalPath,
+      standingPath: ctx.standingPath,
+      registry: ctx.registry ?? null,
+    }))
 
   /**
    * The cross-entry values, resolved before the scan starts.
@@ -2540,6 +2554,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     eventsPath,
     preferencesPath,
     approvalPath,
+    standingPath,
+    principalsPath,
     onPluginStart,
     onPluginEnd,
     onRunFailure,
@@ -2642,9 +2658,9 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // a principal disabled while this advance runs takes effect at the next one.
     // A failed record throws like the one above, and nothing fires.
     let registry: RegistrySnapshot | null = null
-    const standingListing = await listStandingGrants()
+    const standingListing = await listStandingGrants({ standingPath })
     if (standingListing.readable && standingListing.grants.length > 0) {
-      const loaded = await loadRegistry(stateDir)
+      const loaded = await loadRegistry(stateDir, principalsPath)
       registry = standingRegistry(loaded)
     }
 
@@ -3071,6 +3087,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       manifests: plugins,
       heldAtEarlierLevel: heldThisAdvance,
       registry,
+      standingPath,
     }
 
     // 7. Execute each level

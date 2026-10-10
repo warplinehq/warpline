@@ -120,9 +120,9 @@ export async function idsEverRecorded(statePath: string = engineStatePath()): Pr
 }
 
 /** The file's bytes, null when it is missing, or a refusal when it cannot be read. */
-async function readFileOrNull(): Promise<Buffer | null | { refused: string }> {
+async function readFileOrNull(path: string): Promise<Buffer | null | { refused: string }> {
   try {
-    return await readFile(principalsPath())
+    return await readFile(path)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
     return { refused: 'principals.json could not be read' }
@@ -151,8 +151,8 @@ function parse(bytes: Buffer | null): Loaded | { refused: string } {
 }
 
 /** The registry as the file holds it, for a reader that writes nothing. Never observes. */
-export async function readRegistry(): Promise<Loaded | { refused: string }> {
-  const bytes = await readFileOrNull()
+export async function readRegistry(path: string = principalsPath()): Promise<Loaded | { refused: string }> {
+  const bytes = await readFileOrNull(path)
   if (bytes !== null && 'refused' in bytes) return bytes
   return parse(bytes)
 }
@@ -163,8 +163,11 @@ export async function readRegistry(): Promise<Loaded | { refused: string }> {
  * resolves. Rejects with the store's `AuditAppendError` when that record
  * cannot be written, and the caller must then not use the registry.
  */
-export async function loadRegistry(statePath: string = engineStatePath()): Promise<Loaded | { refused: string }> {
-  const loaded = await readRegistry()
+export async function loadRegistry(
+  statePath: string = engineStatePath(),
+  path: string = principalsPath(),
+): Promise<Loaded | { refused: string }> {
+  const loaded = await readRegistry(path)
   if ('refused' in loaded) return loaded
   const { bytes, registry } = loaded
   await observeAuthorityFile(statePath, 'principal_registry.observed', bytes, registryEntries(registry))

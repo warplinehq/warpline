@@ -291,6 +291,67 @@ describe('a standing grant in a run', () => {
   })
 })
 
+/**
+ * A library host runs an isolated home by handing `runAdvance` its paths. The
+ * standing grants file and `principals.json` are that home's too, never the
+ * process home's, and the registry is recorded in that home's audit store.
+ */
+describe('an advance pointed at another home', () => {
+  let other: string
+  beforeEach(() => {
+    other = mkdtempSync(join(tmpdir(), 'warpline-standing-other-'))
+    mkdirSync(join(other, 'state'), { recursive: true })
+    writeFileSync(join(other, 'state', 'preferences.json'), JSON.stringify({ review_gate: false }))
+  })
+  afterEach(() => rmSync(other, { recursive: true, force: true }))
+
+  const advanceOther = (now: number): ReturnType<typeof runAdvance> =>
+    runAdvance({
+      pluginsDir: join(home, 'plugins'),
+      stateDir: join(other, 'state', 'engine-state.json'),
+      runsDir: join(home, 'runs'),
+      eventsPath: eventsPath(),
+      preferencesPath: join(other, 'state', 'preferences.json'),
+      approvalPath: join(other, '.session-approval'),
+      standingPath: join(other, 'standing-grants.json'),
+      principalsPath: join(other, 'principals.json'),
+      now,
+    })
+
+  test("the process home's live standing grant does not authorise it", async () => {
+    const now = Date.now()
+    await seedRegistry()
+    await issueGrant(now - DAY / 2)
+
+    const result = await advanceOther(now)
+
+    expect(result.plugin_states.get('p')).toBe('skipped')
+    expect(existsSync(marker('p'))).toBe(false)
+  })
+
+  test("its own standing grant and registry authorise it, and its own store records the registry", async () => {
+    const now = Date.now()
+    writeFileSync(join(other, 'principals.json'), JSON.stringify({ principals: [OPS, CI] }))
+    const next = gate.issueStanding(
+      { min_reader_version: gate.STANDING_READER_VERSION, grants: [] },
+      { id: gate.newStandingId(), holder: 'ci', issuer: 'ops', scopes: ['p'], periodMs: DAY, hardMaxMs: 30 * DAY },
+      now - DAY / 2,
+    )
+    if ('refused' in next) throw new Error(`issue refused: ${next.refused.code}`)
+    await gate.writeStandingStore(next.store, join(other, 'standing-grants.json'))
+
+    const result = await advanceOther(now)
+
+    expect(result.plugin_states.get('p')).toBe('completed')
+    expect(existsSync(join(home, 'standing-grants.json'))).toBe(false)
+    expect(registryRecords()).toBe(0)
+    const otherTypes = readdirSync(join(other, 'audit'))
+      .flatMap((f) => readFileSync(join(other, 'audit', f), 'utf-8').split('\n').filter((l) => l.length > 0))
+      .map((l) => (JSON.parse(l) as { type: string }).type)
+    expect(otherTypes).toContain(REGISTRY_OBSERVED)
+  })
+})
+
 describe('the registry is read once an advance, and only when a standing grant exists', () => {
   test('a home with no standing grant gains no registry record', async () => {
     writeRegistry([OPS, CI])
