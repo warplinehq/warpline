@@ -259,11 +259,14 @@ npx warpline audit export --after 0
 # Check the record against a head you kept off this box: tamper-evident relative to the last exported Checkpoint
 npx warpline audit verify --checkpoint anchor.txt
 
+# Restart a standing grant's period before it lapses; a named human renews it, never the machine that holds it
+npx warpline renew <grant-id> --principal ops
+
 # Clear the session approval
 npx warpline revoke
 ```
 
-Those thirteen subcommands are the whole CLI surface. `advance` is the one a
+Those fourteen subcommands are the whole CLI surface. `advance` is the one a
 scheduler calls, and its exit codes are contract surface —
 [the exit code table](docs/runtime-spec.md#11-exit-codes) is what a monitor
 keys on. The same work is also a library call, `runAdvance()` from the package

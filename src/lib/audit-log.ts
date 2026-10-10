@@ -154,7 +154,12 @@ const DATA = {
       hard_max_ms: z.number().int().positive(),
     }),
   ]),
-  'grant.renewed': z.never(),
+  'grant.renewed': z.strictObject({
+    id: GrantId,
+    holder: PrincipalId,
+    principal: PrincipalId,
+    renewal_deadline: Iso,
+  }),
   'grant.revoked': z.strictObject({
     kind: z.literal('session'),
     scopes: z.array(Scope),

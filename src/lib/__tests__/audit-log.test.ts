@@ -157,11 +157,29 @@ describe('audit store: what it refuses writes nothing and echoes nothing', () =>
     })
   }
 
-  for (const kind of ['grant.renewed', 'ask.raised', 'ask.answered', 'handoff.tried']) {
+  for (const kind of ['ask.raised', 'ask.answered', 'handoff.tried']) {
     test(`the pending kind ${kind}, whose schema admits nothing yet`, async () => {
       await refuses(() => anyAppend(statePath, kind, {}))
     })
   }
+
+  const renewed = { id: 'a1b2c3d4e5f6', holder: 'ci', principal: 'ops', renewal_deadline: '2030-01-02T00:00:00.000Z' }
+
+  test('grant.renewed appends with its four fields', async () => {
+    await lift()
+    await anyAppend(statePath, 'grant.renewed', renewed)
+    const last = JSON.parse(segmentLines().at(-1)!) as { type: string; data: unknown }
+    expect(last.type).toBe('warpline.audit.grant.renewed')
+    expect(last.data).toEqual(renewed)
+  })
+
+  test('grant.renewed with a key it does not declare', async () => {
+    await refuses(() => anyAppend(statePath, 'grant.renewed', { ...renewed, extra: 1 }))
+  })
+
+  test('grant.renewed with a 13-character id', async () => {
+    await refuses(() => anyAppend(statePath, 'grant.renewed', { ...renewed, id: 'a1b2c3d4e5f60' }))
+  })
 
   test('data with a key its kind does not declare', async () => {
     await refuses(() => anyAppend(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A, principal: null, extra: 1 }))

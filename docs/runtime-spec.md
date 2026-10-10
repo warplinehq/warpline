@@ -1654,6 +1654,30 @@ failed append issues nothing: it says so on stderr and exits 1. It never
 applies a parked result. On success it prints the grant's id, its renewal
 deadline and hard maximum, and the standing grants file's path.
 
+**Renewal.** `warpline renew <grant-id> --principal <human-id>` restarts one
+standing grant's renewal period from now.
+
+- The renewer must be an active human (§ 15), and never the holder. It is
+  checked under the state lock, so a principal disabled while the verb waited
+  for the lock is refused. It is never taken from the environment or the
+  account running the command.
+- Renewal moves only `period_start`. The hard maximum is measured from
+  `issued_at`, so no number of renewals moves it.
+- No lapsed grant is renewed, final or not, and the refusal says which. A final
+  lapse (`not renewed`, `hard max`, or `holder not registered`, since an id
+  gone from `principals.json` never comes back, § 15) cannot clear:
+  `approve --standing` issues a new grant with a new id; the lapsed one stays until revoked.
+  After a `registry unreadable`, `holder not machine` or `holder disabled`
+  lapse the grant clears, with no renewal, if `principals.json` names the
+  holder an active machine before the grant's next expiry, and the refusal
+  prints that moment.
+- An unknown id, and a standing grants file that cannot be read, are refused.
+
+Every refusal exits 1 and writes nothing. The command appends `grant.renewed`
+(§ 14) before it writes the standing grants file, so a failed append renews
+nothing: it says so on stderr and exits 1. On success it prints the new
+renewal deadline and the hard maximum. Renewal never touches the session file.
+
 **A grant written by hand.** A standing grant written into the standing grants
 file by hand carries no `grant.issued` record. The file is not compared with
 the audit store the way `principals.json` and `preferences.json` are.
@@ -3761,7 +3785,7 @@ The set is closed. A kind outside it cannot be written.
 | Kind | What it records |
 |------|-----------------|
 | `grant.issued` | `warpline approve` is about to write a grant. A session grant (`kind: session`) carries the scopes, duration and flags asked for. A standing grant (`kind: standing`) carries its id, holder, scopes, renewal period and hard maximum. Both carry the acting `principal`. |
-| `grant.renewed` | A session grant renewed. |
+| `grant.renewed` | `warpline renew` is about to restart a standing grant's period: the grant id, its holder, the renewing `principal` and the new renewal deadline. |
 | `grant.revoked` | `warpline revoke` is about to clear the session grant. |
 | `content_approval.issued` | A content approval is about to be bound to an Output's fingerprint. |
 | `content_approval.withdrawn` | A content approval is about to be removed. |
@@ -3783,8 +3807,8 @@ The set is closed. A kind outside it cannot be written.
 | `segment.sealed` | The last line of a segment file that is full or old. |
 | `checkpoint.recorded` | The head as it stood, so it can be exported and checked later. |
 
-Nothing writes `grant.renewed`, `ask.raised`, `ask.answered` or `handoff.tried`
-yet. Their schema admits nothing, so an append under any of them is refused
+Nothing writes `ask.raised`, `ask.answered` or `handoff.tried` yet. Their
+schema admits nothing, so an append under any of them is refused
 until the work that writes them lands and defines their fields. The last three
 kinds in the table are written by the store itself, never by a caller.
 
@@ -4083,14 +4107,15 @@ when a later one cannot be written: it records what was about to happen, and
 the store never takes a line back.
 
 The same rule covers every other authority change a verb makes. `warpline
-approve` appends `grant.issued` before it merges a grant (§ 9), and
-`content_approval.issued` or `content_approval.withdrawn` inside the state lock
-before the state write (§ 10). `warpline deny --remove` appends one
+approve` appends `grant.issued` before it merges a grant, and `warpline renew`
+appends `grant.renewed` before it writes the standing grants file (§ 9).
+`approve` appends `content_approval.issued` or `content_approval.withdrawn`
+inside the state lock before the state write (§ 10). `warpline deny --remove` appends one
 `denial.lifted` per plugin before the state write. Each of these refuses with
 exit `1` and nothing changed when its append fails.
 
-When `--principal` names who acts, `approve`, `deny` and `resolve` check it
-inside the state lock, before the append. So a principal disabled while the
+When `--principal` names who acts, `approve`, `renew`, `deny` and `resolve`
+check it inside the state lock, before the append. So a principal disabled while the
 verb waited for the lock is refused, and nothing is written.
 
 `warpline revoke` is the one exception. It appends `grant.revoked` before it

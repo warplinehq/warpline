@@ -286,6 +286,30 @@ const ROWS: Row[] = [
   { argv: ['prefs', 'set', 'max_sends_per_day', '20'], code: 0 },
   { argv: ['principal', 'add', 'ops', '--type', 'human'], code: 0 },
   {
+    argv: ['renew', 'aaaaaaaaaaaa', '--principal', 'ops'],
+    code: 0,
+    // A live standing grant held by a machine, for ops, added just above, to renew.
+    before: (runtime, home) => {
+      const { code } = launch(runtime, home, ['principal', 'add', 'ci', '--type', 'machine'], 'control')
+      if (code !== 0) return [`setup principal add ci: rc ${code}, expected 0`]
+      const now = new Date().toISOString()
+      const grant = {
+        id: 'aaaaaaaaaaaa',
+        holder: 'ci',
+        issuer: 'ops',
+        scopes: ['mailer'],
+        issued_at: now,
+        period_start: now,
+        period_ms: 24 * 60 * 60 * 1000,
+        hard_max_ms: 2 * 24 * 60 * 60 * 1000,
+      }
+      writeFileSync(join(home, 'standing-grants.json'), JSON.stringify({ min_reader_version: 1, grants: [grant] }), {
+        mode: 0o600,
+      })
+      return []
+    },
+  },
+  {
     argv: ['audit', 'export', '--after', '0'],
     code: 0,
     // A store over 64 KiB, so the export fills the pipe and has to wait on a
