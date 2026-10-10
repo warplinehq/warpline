@@ -25,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
+import * as fsAtomic from '../../lib/fs-atomic.js'
 import * as gate from '../../runtime/approval-gate.js'
 import { pathsForStateFile, withStateLockAt } from '../../board/state-manager.js'
 import { principalsPath, sessionApprovalPath, standingGrantsPath } from '../../lib/paths.js'
@@ -143,6 +144,44 @@ describe('revoke takes exactly what it names', () => {
     expect(second.stderr).toContain('no standing grant has that id')
     expect(second.code).toBe(1)
     expect(await snapshotHome(vh.home)).toEqual(before)
+  })
+
+  // A revoke lost to a power loss would hand the authority back, so the
+  // write is synced to disk before the revoke reports success.
+  test('revoke --standing syncs the written standing grants file and its directory before it succeeds', async () => {
+    const id = ciIds[0]!
+    const synced: Array<{ path: string; stillHeld: boolean }> = []
+    const sync = spyOn(fsAtomic, 'syncInstalled').mockImplementation(async (path: string) => {
+      synced.push({ path, stillHeld: grantOf(id) !== undefined })
+    })
+    try {
+      const r = await capture(['revoke', '--standing', id])
+      expect(r.code).toBe(0)
+      expect(synced).toEqual([{ path: standingGrantsPath(), stillHeld: false }])
+    } finally {
+      sync.mockRestore()
+    }
+  })
+
+  test('syncInstalled resolves on a real file and rejects on a missing one', async () => {
+    await fsAtomic.syncInstalled(standingGrantsPath())
+    await expect(fsAtomic.syncInstalled(join(vh.home, 'missing.json'))).rejects.toThrow()
+  })
+
+  test('a standing revoke whose sync fails says the revoke may not survive a power loss, and exits 1', async () => {
+    const id = ciIds[0]!
+    const sync = spyOn(fsAtomic, 'syncInstalled').mockImplementation(async () => {
+      throw new Error('EIO')
+    })
+    try {
+      const r = await capture(['revoke', '--standing', id])
+      expect(r.stderr).toContain('could not be synced to disk')
+      expect(r.code).toBe(1)
+      expect(grantOf(id)).toBeUndefined()
+      expect(revoked().at(-1)).toMatchObject({ kind: 'standing', ids: [id] })
+    } finally {
+      sync.mockRestore()
+    }
   })
 
   test('bare revoke leaves standing grants byte-identical', async () => {

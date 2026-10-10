@@ -17,7 +17,7 @@
  * and the rename installs the temp inode, so the target ends up with exactly
  * that mode whatever the old file had.
  */
-import { writeFile, rename, mkdir, readFile, unlink, chmod } from 'node:fs/promises'
+import { writeFile, rename, mkdir, readFile, unlink, chmod, open } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 function tmpSuffix(): string {
@@ -58,6 +58,26 @@ export async function atomicWriteJson<T>(path: string, value: T, opts: { mode?: 
   } catch (err) {
     await bestEffortUnlink(tmp)
     throw err
+  }
+}
+
+/**
+ * Flush a file an atomic write above installed, then its directory, so the
+ * new bytes and the rename both survive a power loss. The writes above stop at
+ * rename atomicity. A caller whose lost write would hand back authority, such
+ * as a revoke, calls this after the write resolves.
+ *
+ * ponytail: Bun's sync() on macOS skips F_FULLFSYNC, the limit runtime-spec
+ * § 14 states for the audit store. The upgrade path is the same one.
+ */
+export async function syncInstalled(path: string): Promise<void> {
+  for (const p of [path, dirname(path)]) {
+    const fh = await open(p, 'r')
+    try {
+      await fh.sync()
+    } finally {
+      await fh.close()
+    }
   }
 }
 

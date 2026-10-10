@@ -41,7 +41,8 @@ import {
   type StandingUnreadableCause,
 } from '../runtime/approval-gate.js'
 import { EXIT_AUDIT_FAILED } from '../runtime/exit-codes.js'
-import { engineStatePath, sessionApprovalPath } from '../lib/paths.js'
+import { syncInstalled } from '../lib/fs-atomic.js'
+import { engineStatePath, sessionApprovalPath, standingGrantsPath } from '../lib/paths.js'
 
 export const USAGE = `Usage: warpline revoke [--principal <id>]
        warpline revoke --holder <principal-id> [--principal <id>]
@@ -224,6 +225,17 @@ export async function run(argv: string[]): Promise<number> {
       if (data.kind === 'session') throw err
       process.stderr.write('revoke: the standing grants file could not be written, so the grant still stands.\n')
       return 1
+    }
+    // A revoke lost to a power loss would hand the authority back.
+    if (data.kind === 'standing') {
+      try {
+        await syncInstalled(standingGrantsPath())
+      } catch {
+        process.stderr.write(
+          'revoke: the standing grants file was written but could not be synced to disk, so a power loss can bring the grant back.\n',
+        )
+        return 1
+      }
     }
 
     process.stdout.write(done)
