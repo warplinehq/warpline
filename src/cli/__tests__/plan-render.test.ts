@@ -7,7 +7,7 @@
  */
 import { describe, test, expect } from 'bun:test'
 import { renderPlan } from '../plan-render.js'
-import type { PlanModel, PlanEntry, NotDueEntry } from '../plan-render.js'
+import type { PlanModel, PlanEntry, NotDueEntry, StandingLine } from '../plan-render.js'
 
 /** Fixed clock for every case — the renderer must never read the real one. */
 const NOW = Date.UTC(2026, 7, 20, 12, 0, 0)
@@ -245,23 +245,23 @@ describe('renderPlan', () => {
       }),
       NOW,
     )
-    expect(scoped).toContain('Grant: feed-monitor, github-poll — 37m remaining')
+    expect(scoped).toContain('Session grant: feed-monitor, github-poll — 37m remaining')
 
     const wildcard = renderPlan(
       makeModel({ grant: { scopes: '*', expiresAt: NOW + 2 * 60_000 } }),
       NOW,
     )
-    expect(wildcard).toContain('Grant: all plugins (*) — 2m remaining ⚠ expires soon')
+    expect(wildcard).toContain('Session grant: all plugins (*) — 2m remaining ⚠ expires soon')
 
     const expired = renderPlan(
       makeModel({ grant: { scopes: '*', expiresAt: NOW - 1 } }),
       NOW,
     )
-    expect(expired).toContain('Grant: all plugins (*) — expired')
+    expect(expired).toContain('Session grant: all plugins (*) — expired')
 
     const none = renderPlan(makeModel({ grant: undefined }), NOW)
     expect(none).toContain(
-      'Grant: none — plugins with side effects would be SKIPPED this run',
+      'Session grant: none — plugins with side effects would be SKIPPED this run',
     )
   })
 
@@ -377,5 +377,99 @@ describe('renderPlan — the declared handoff line', () => {
     expect(renderPlan(model, NOW)).toBe(first)
     expect(first).toContain(HANDOFF)
     expect(first).not.toContain('\x1b')
+  })
+})
+
+describe('renderPlan — standing grants', () => {
+  const HOUR = 60 * 60_000
+  const PLAIN_NONE = 'Session grant: none — plugins with side effects would be SKIPPED this run'
+  const STANDING_NONE = `${PLAIN_NONE} unless a live standing grant covers them`
+  const UNREADABLE = 'Standing grants: none live — the standing grants file cannot be read'
+
+  function standing(overrides: Partial<StandingLine> = {}): StandingLine {
+    return {
+      id: 'aaaaaaaaaaa1',
+      holder: 'ci',
+      issuer: 'ops',
+      scopes: ['digest-sender', 'issue-render'],
+      nextExpiry: NOW + HOUR,
+      state: 'live',
+      reason: null,
+      ...overrides,
+    }
+  }
+
+  /** The one header line, whole, so an appended clause cannot hide behind `toContain`. */
+  function header(out: string): string | undefined {
+    return out.split('\n').find((l) => l.startsWith('Session grant:'))
+  }
+
+  test('six grants print each lapse reason, in model order', () => {
+    const reasons = [
+      'hard max',
+      'not renewed',
+      'registry unreadable',
+      'holder not registered',
+      'holder not machine',
+      'holder disabled',
+    ]
+    const grants: StandingLine[] = [
+      ...reasons.map((reason, i) =>
+        standing({ id: `aaaaaaaaaaa${i + 1}`, nextExpiry: NOW + (i + 1) * HOUR, state: 'lapsed', reason }),
+      ),
+      standing({ id: 'aaaaaaaaaaa7', nextExpiry: NOW + 7 * HOUR }),
+    ]
+    const out = renderPlan(makeModel({ standing: { readable: true, grants } }), NOW)
+
+    expect(out).toContain('Standing grants (7):')
+    const expected = grants.map(
+      (g) =>
+        `  ${g.id} — holder ci, issuer ops, scopes digest-sender, issue-render — next expiry ${new Date(g.nextExpiry).toISOString()} — ${g.state === 'live' ? 'live' : `lapsed (${g.reason})`}`,
+    )
+    const lines = out.split('\n')
+    for (const line of expected) expect(lines).toContain(line)
+    // The renderer prints the order it is given: the gate already sorted it.
+    const at = expected.map((line) => out.indexOf(line))
+    expect(at).toEqual([...at].sort((a, b) => a - b))
+    expect(out.indexOf('Standing grants (7):')).toBeGreaterThan(out.indexOf('Session grant:'))
+    expect(out.indexOf('Standing grants (7):')).toBeLessThan(out.indexOf('Plugins:'))
+  })
+
+  test('no standing grant prints no section', () => {
+    const empty = renderPlan(makeModel({ standing: { readable: true, grants: [] } }), NOW)
+    const absent = renderPlan(makeModel(), NOW)
+    expect(empty).not.toContain('Standing grants')
+    expect(absent).not.toContain('Standing grants')
+    expect(empty).toBe(absent)
+  })
+
+  test('an unreadable standing grants file prints one fixed line', () => {
+    const out = renderPlan(makeModel({ standing: { readable: false } }), NOW)
+    const section = out.split('\n').filter((l) => l.startsWith('Standing grants'))
+    expect(section).toEqual([UNREADABLE])
+  })
+
+  test('the none header adds the standing clause exactly when the file lists a grant', () => {
+    const live = renderPlan(makeModel({ grant: undefined, standing: { readable: true, grants: [standing()] } }), NOW)
+    expect(header(live)).toBe(STANDING_NONE)
+
+    const lapsedOnly = renderPlan(
+      makeModel({
+        grant: undefined,
+        standing: { readable: true, grants: [standing({ state: 'lapsed', reason: 'not renewed' })] },
+      }),
+      NOW,
+    )
+    expect(header(lapsedOnly)).toBe(STANDING_NONE)
+
+    const unreadable = renderPlan(makeModel({ grant: undefined, standing: { readable: false } }), NOW)
+    expect(header(unreadable)).toBe(PLAIN_NONE)
+    expect(unreadable.split('\n')).toContain(UNREADABLE)
+
+    const absent = renderPlan(makeModel({ grant: undefined }), NOW)
+    expect(header(absent)).toBe(PLAIN_NONE)
+
+    const empty = renderPlan(makeModel({ grant: undefined, standing: { readable: true, grants: [] } }), NOW)
+    expect(header(empty)).toBe(PLAIN_NONE)
   })
 })

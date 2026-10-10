@@ -19,7 +19,8 @@ import { _setHome } from '../../lib/paths.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
 import { denialFingerprint, proposalFingerprint, runAdvance } from '../../runtime/engine.js'
 import type { AdvanceResult } from '../../runtime/engine.js'
-import { grantApproval } from '../../runtime/approval-gate.js'
+import { grantApproval, issueStanding, newStandingId, readStandingStore, writeStandingStore } from '../../runtime/approval-gate.js'
+import { loadRegistry } from '../../lib/principals.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { PluginManifestSchema } from '../../schemas/plugin-manifest.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
@@ -397,7 +398,7 @@ describe('main([plan]) end to end', () => {
 
     expect(code).toBe(0)
     expect(stderr).toBe('')
-    expect(stdout).toContain('Grant: gated-one — 90m remaining')
+    expect(stdout).toContain('Session grant: gated-one — 90m remaining')
     expect(stdout).toContain('  gated-one (level 0)')
     // Manifest declaration order, each effect carrying its own marker.
     expect(stdout).toContain('    sends_email: ✓ approved')
@@ -468,7 +469,7 @@ describe('main([plan]) end to end', () => {
       expect(first.code).toBe(0)
       expect(first.stdout).toBe(second.stdout)
       // Rounded down, never up: 37m59s of grant left reads 37m.
-      expect(first.stdout).toContain('Grant: all plugins (*) — 37m remaining')
+      expect(first.stdout).toContain('Session grant: all plugins (*) — 37m remaining')
       expect(first.stdout).toContain('last run 12m ago')
       expect(first.stdout.includes(String.fromCharCode(0x1b))).toBe(false)
     } finally {
@@ -1468,5 +1469,86 @@ describe('plan renders the approved column from the authorising mechanism', () =
     // branch that still consults it answers true. Without this, "the content
     // plugin reads false" would also pass over a grant file that never loaded.
     expect(columnOf(model, SESSION)).toBe(true)
+  })
+})
+
+/**
+ * `plan` lists each standing grant with its holder, issuer, scopes, next expiry
+ * and state, reading the registry as a run would and never printing a key.
+ */
+describe('main([plan]) standing grants', () => {
+  const DAY = 24 * 60 * 60_000
+  const KEY = 'WARPLINE_KEY_SENTINEL_51d0'
+  const UNREADABLE = 'Standing grants: none live — the standing grants file cannot be read'
+
+  /** The registry written and observed once, as `principal` would leave it. */
+  async function seedRegistry(): Promise<void> {
+    await writeFile(
+      join(home.root, 'principals.json'),
+      JSON.stringify({
+        principals: [
+          { id: 'ops', type: 'human', status: 'active', key: KEY },
+          { id: 'ci', type: 'machine', status: 'active' },
+        ],
+      }),
+    )
+    const loaded = await loadRegistry(join(home.stateDir, 'engine-state.json'))
+    expect('refused' in loaded).toBe(false)
+  }
+
+  /** One grant held by `ci`, issued by `ops`, written through the gate's own writer. */
+  async function issue(issuedAt: number, periodMs: number): Promise<void> {
+    const read = await readStandingStore()
+    if (!read.readable) throw new Error(`standing grants file unreadable: ${read.cause}`)
+    const next = issueStanding(
+      read.store,
+      { id: newStandingId(), holder: 'ci', issuer: 'ops', scopes: ['p'], periodMs, hardMaxMs: 30 * DAY },
+      issuedAt,
+    )
+    if ('refused' in next) throw new Error(`issue refused: ${next.refused.code}`)
+    await writeStandingStore(next.store)
+  }
+
+  const grantLines = (stdout: string): string[] =>
+    stdout.split('\n').filter((l) => /^ {2}[0-9a-f]{12} — holder /.test(l))
+
+  test("plan prints a home's standing grants, with no key", async () => {
+    await seedRegistry()
+    await issue(Date.now() - 60_000, DAY)
+    await issue(Date.now() - 7 * DAY, DAY)
+
+    const { code, stdout } = await capture(() => run([]))
+
+    expect(code).toBe(0)
+    expect(stdout).toContain('Standing grants (2):')
+    const lines = grantLines(stdout)
+    expect(lines).toHaveLength(2)
+    expect(lines.filter((l) => l.endsWith('— live'))).toHaveLength(1)
+    expect(lines.filter((l) => l.endsWith('— lapsed (not renewed)'))).toHaveLength(1)
+    for (const line of lines) expect(line).toContain('holder ci, issuer ops, scopes p — next expiry ')
+    expect(stdout).not.toContain(KEY)
+  })
+
+  test('an unusable registry lists every standing grant as registry unreadable', async () => {
+    await writeFile(join(home.root, 'principals.json'), '{not json')
+    await issue(Date.now() - 60_000, DAY)
+
+    const { code, stdout } = await capture(() => run([]))
+
+    expect(code).toBe(0)
+    const lines = grantLines(stdout)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toEndWith('— lapsed (registry unreadable)')
+  })
+
+  test('a corrupt standing grants file prints the fixed line', async () => {
+    await writeFile(join(home.root, 'standing-grants.json'), '{not json')
+
+    const { code, stdout } = await capture(() => run([]))
+
+    expect(code).toBe(0)
+    expect(stdout.split('\n')).toContain(UNREADABLE)
+    expect(stdout.split('\n')).toContain('Session grant: none — plugins with side effects would be SKIPPED this run')
+    expect(stdout).not.toContain('unless a live standing grant covers them')
   })
 })
