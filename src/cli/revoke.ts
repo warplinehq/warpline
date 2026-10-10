@@ -5,7 +5,8 @@
  * - bare `revoke` clears the session grant and never reads or writes the
  *   standing grants file;
  * - `revoke --holder <principal-id>` revokes every standing grant that one
- *   principal holds, and no other;
+ *   principal holds, and no other. The holder must be known
+ *   (`knownPrincipal`), and one the standing grants file names always is;
  * - `revoke --standing <grant-id>` revokes one standing grant by its id.
  *
  * Every form takes an optional `--principal`, who is revoking. It is checked
@@ -30,7 +31,7 @@ import { dirname } from 'node:path'
 import { parseArgs } from 'node:util'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { appendAudit, type AuditData } from '../lib/audit-log.js'
-import { PRINCIPAL_ID, readRegistry, requirePrincipal } from '../lib/principals.js'
+import { loadRegistry, PRINCIPAL_ID, requirePrincipal } from '../lib/principals.js'
 import {
   liveGrantScopes,
   readStandingStore,
@@ -42,6 +43,7 @@ import {
 } from '../runtime/approval-gate.js'
 import { EXIT_AUDIT_FAILED } from '../runtime/exit-codes.js'
 import { syncInstalled, syncRemoved } from '../lib/fs-atomic.js'
+import { knownPrincipal, listSources } from './known-principal.js'
 import { engineStatePath, sessionApprovalPath, standingGrantsPath } from '../lib/paths.js'
 
 export const USAGE = `Usage: warpline revoke [--principal <id>]
@@ -157,24 +159,6 @@ export async function run(argv: string[]): Promise<number> {
       write = () => revokeApproval(approvalPath)
       done = `Session approval cleared (${approvalPath}).\n`
     } else {
-      // Whether the holder is registered; undefined means decide from the standing grants file.
-      let registered: boolean | undefined
-      const holder = values.holder
-      if (holder !== undefined) {
-        const check = await requirePrincipal(values.holder, 'registered')
-        if (!('refused' in check)) registered = true
-        else if (check.cause === 'empty') {
-          process.stderr.write(USAGE)
-          return 1
-        } else if (check.cause === 'audit') {
-          unrecorded.add(NOT_OBSERVED)
-          const registry = await readRegistry()
-          if (!('refused' in registry)) registered = registry.registry.principals.some((p) => p.id === holder)
-        } else if (check.cause !== 'registry') {
-          return refuse('--holder: no principal has that id.')
-        }
-      }
-
       const read = await readStandingStore()
       if (!read.readable) {
         process.stderr.write(
@@ -185,13 +169,29 @@ export async function run(argv: string[]): Promise<number> {
       }
 
       let ids: string[]
+      const holder = values.holder
       if (holder !== undefined) {
+        if (holder === '') {
+          process.stderr.write(USAGE)
+          return 1
+        }
+        // A hand edit is on the record before the holder is judged. Its failure never blocks a revoke.
+        try {
+          await loadRegistry(statePath)
+        } catch {
+          unrecorded.add(NOT_OBSERVED)
+        }
+        // A holder whose grants are in the file is known by that file, so a
+        // revoke with anything to remove is never refused here.
+        const known = await knownPrincipal(holder, statePath)
+        if (known.answer === 'unknown') return refuse('--holder: no principal has that id.')
+        if (known.answer === 'cannot tell') {
+          return refuse(`--holder: ${listSources(known.unreadable)} could not be read, and nothing else names that id.`)
+        }
         ids = read.store.grants
           .filter((g) => g.holder === holder)
           .map((g) => g.id)
           .sort()
-        // With the registry unreadable, a holder the standing grants file names counts as registered.
-        if (!(registered ?? ids.length > 0)) return refuse('--holder: no principal has that id.')
         if (ids.length === 0) {
           process.stdout.write(`${holder} holds no standing grant. Nothing was revoked.\n`)
           return finish()

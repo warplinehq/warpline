@@ -20,7 +20,7 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
-import { AuditAppendError, observeAuthorityFile, readCompleteLines } from './audit-log.js'
+import { AuditAppendError, observeAuthorityFile } from './audit-log.js'
 import { engineStatePath, principalsPath } from './paths.js'
 
 export const PRINCIPAL_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
@@ -89,34 +89,6 @@ export function registryView(registry: Registry): RegistryView {
  */
 export function standingRegistry(loaded: Loaded | { refused: string }): RegistryView | null {
   return 'refused' in loaded || loaded.bytes === null ? null : registryView(loaded.registry)
-}
-
-const PRINCIPAL_RECORDS = new Set([
-  'warpline.audit.principal.added',
-  'warpline.audit.principal.disabled',
-  'warpline.audit.principal_registry.observed',
-])
-
-const keysOf = (v: unknown): string[] => (typeof v === 'object' && v !== null && !Array.isArray(v) ? Object.keys(v) : [])
-
-/**
- * Every principal id the audit store has named, from its first line: on a
- * principal record, or in the registry a `segment.opened` carries. An id that
- * later left the file, by a hand edit or with the whole file, is still here.
- * No store names none. Rejects when the store cannot be read.
- */
-export async function idsEverRecorded(statePath: string = engineStatePath()): Promise<Set<string>> {
-  const ids = new Set<string>()
-  for await (const { record } of readCompleteLines(statePath, 0)) {
-    if (record === undefined) continue
-    let d = record.data
-    if (record.type === 'warpline.audit.segment.opened') d = d?.authority?.principals
-    else if (!PRINCIPAL_RECORDS.has(record.type)) continue
-    if (typeof d !== 'object' || d === null) continue
-    const named = [d.id, ...(Array.isArray(d.changed_ids) ? d.changed_ids : []), ...keysOf(d.entries), ...keysOf(d.changed_entries)]
-    for (const id of named) if (typeof id === 'string') ids.add(id)
-  }
-  return ids
 }
 
 /** The file's bytes, null when it is missing, or a refusal when it cannot be read. */

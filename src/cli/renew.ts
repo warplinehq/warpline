@@ -11,7 +11,9 @@
  *
  * No lapsed grant is renewed, final or not. The gate's renew transform refuses
  * with a code, and this file owns the words for each code. A lapse the gate
- * marks final cannot clear, and the refusal says how a new grant is issued.
+ * marks final is one no verb clears, and the refusal says how a new grant is
+ * issued. (A hand edit that writes a holder back into principals.json does
+ * clear `holder not registered`, so the refusal never says "cannot".)
  * Any other lapse clears, with no renewal, if principals.json names the holder
  * an active machine before the grant's next expiry, and the refusal prints
  * that moment.
@@ -60,7 +62,7 @@ function renewRefusalText(refusal: RenewRefusal, grant?: StandingGrant): string 
     case 'holder-renews':
       return 'the holder cannot renew its own grant'
     case 'lapsed': {
-      if (refusal.final) return `the grant has lapsed (${refusal.reason}), and the lapse cannot clear. ${REISSUE}`
+      if (refusal.final) return `the grant has lapsed (${refusal.reason}), and no verb clears the lapse. ${REISSUE}`
       // A lapse is only ever read from a stored grant, so the grant is here.
       const g = grant!
       // The next expiry: after a late renewal pushed the renewal deadline past

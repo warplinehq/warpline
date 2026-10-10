@@ -8,7 +8,7 @@
  *
  * Every refusal exits 1 with the whole home unchanged, no record, and its
  * reason on stderr, so a row can only pass for the reason it names. A lapse
- * is worded from the gate's `final` alone: it cannot clear, or it clears only
+ * is worded from the gate's `final` alone: no verb clears it, or it clears only
  * before a printed moment, the grant's next expiry.
  *
  * The clock is mocked: `T0` is when the grant was issued, with a one-day
@@ -221,14 +221,14 @@ const ROWS: Row[] = [
     name: 'one millisecond after the deadline',
     at: T0 + DAY + 1,
     argv: () => ['renew', id, '--principal', 'carol'],
-    reasons: ['the grant has lapsed (not renewed), and the lapse cannot clear.', REISSUE],
+    reasons: ['the grant has lapsed (not renewed), and no verb clears the lapse.', REISSUE],
   },
   {
     name: 'past the hard maximum, which renewals never move',
     prepare: async () => [await renewAt(T0 + DAY), await renewAt(T0 + 2 * DAY)],
     at: T0 + 3 * DAY + 1,
     argv: () => ['renew', id, '--principal', 'carol'],
-    reasons: ['the grant has lapsed (hard max), and the lapse cannot clear.', REISSUE],
+    reasons: ['the grant has lapsed (hard max), and no verb clears the lapse.', REISSUE],
   },
   {
     name: 'the holder disabled',
@@ -252,7 +252,7 @@ const ROWS: Row[] = [
       return []
     },
     argv: () => ['renew', id, '--principal', 'carol'],
-    reasons: ['the grant has lapsed (holder not registered), and the lapse cannot clear.', REISSUE],
+    reasons: ['the grant has lapsed (holder not registered), and no verb clears the lapse.', REISSUE],
   },
   {
     name: 'a holder lapse after a late renewal names the hard maximum, the earlier end',

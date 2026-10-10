@@ -1621,12 +1621,14 @@ the first in this order is the one reported:
 6. `holder not machine`: the holder is a human.
 7. `holder disabled`: the holder is a disabled machine.
 
-`hard max`, `not renewed` and `holder not registered` are final: the lapse
-cannot clear, and only a new grant fixes it. A holder missing from
-`principals.json` does not come back through § 15's verbs, which never delete
-an id, and `principal add` refuses any id the audit store has ever named. Only
-a hand edit can write it back, and the store records that edit as
-`principal_registry.observed` (§ 15). `registry unreadable`, `holder not machine` and `holder disabled` are
+`hard max`, `not renewed` and `holder not registered` are final: no verb
+clears the lapse, and only a new grant fixes it. A holder missing from
+`principals.json` does not come back through § 15's verbs: they never delete
+an id, and `principal add` refuses every known id, which takes in every id a
+standing grant names, and refuses every add while it cannot tell. A hand edit
+that writes the holder back into `principals.json` does clear the lapse. The
+store records that edit as `principal_registry.observed` (§ 15) before an
+advance or a verb acts on the file. `registry unreadable`, `holder not machine` and `holder disabled` are
 not final. Such a lapse clears, with no renewal, if `principals.json` names the
 holder an active machine before the grant's next expiry, the earlier of its
 renewal deadline and its hard maximum. After that expiry the lapse is final.
@@ -1742,9 +1744,10 @@ standing grant's renewal period from now.
   account running the command.
 - Renewal moves only `period_start`. The hard maximum is measured from
   `issued_at`, so no number of renewals moves it.
-- No lapsed grant is renewed, final or not, and the refusal says which. A final
-  lapse (`not renewed`, `hard max`, or `holder not registered`, since no verb
-  brings back an id gone from `principals.json`, § 15) cannot clear:
+- No lapsed grant is renewed, final or not, and the refusal says which. No
+  verb clears a final lapse (`not renewed`, `hard max`, or `holder not
+  registered`, since no verb brings back an id gone from `principals.json`,
+  § 15), and the refusal says so:
   `approve --standing` issues a new grant with a new id; the lapsed one stays until revoked.
   After a `registry unreadable`, `holder not machine` or `holder disabled`
   lapse the grant clears, with no renewal, if `principals.json` names the
@@ -1769,12 +1772,17 @@ revokes one standing grant by its id. Here `--standing` takes a grant id; on
 `approve` it names the kind of grant. `--holder` and `--standing` together are
 refused.
 
-- `--holder` names a registered principal, active or disabled, so a disabled
-  machine's grants can still be revoked. When `principals.json` cannot be read,
-  a holder the standing grants file names counts as registered.
-- A registered holder that holds no standing grant exits 0, says so, and writes
-  no record. An unknown grant id, or a holder that is not registered, exits 1
-  with nothing written.
+- `--holder` names a known principal: one `principals.json` names, active or
+  disabled, one the audit store has ever named, or one the standing grants file
+  names as a holder or an issuer (§ 15 says how an id is known). So a disabled
+  machine's grants can still be revoked, and a holder whose grants are in the
+  file can always be revoked, whether `principals.json` is missing, cannot be
+  read, or no longer names it.
+- A known holder that holds no standing grant exits 0, says so, and writes no
+  record. An unknown grant id, or a holder no source names, exits 1 with
+  nothing written. When a source cannot be read and no other names the holder,
+  the standing grants file holds no grant of it, so there is nothing to revoke:
+  the command exits 1, names the source it could not read, and writes nothing.
 - `--principal <id>` is optional on every form. It names who is revoking, an
   active registered principal of either type, is checked under the state lock,
   and is recorded as `principal` on `grant.revoked`. It is never taken from the
@@ -4471,12 +4479,21 @@ so two adds of one id at once register it once, and two adds of different ids
 keep both.
 
 Ids are never deleted or reused. Disable is the only way out of the registry.
-Adding an id that is already in the file, active or disabled, is refused with
-exit `1` and no record. So is adding an id the audit store has ever named, on a
-principal record or in the registry a `segment.opened` carries, even after a
-hand edit or a lost file took it out of `principals.json`: a standing grant it
-held would otherwise read live again for whoever got the id. A store that
-cannot be read refuses every add. Disabling an entry that is already disabled,
+Adding a known id is refused with exit `1` and no record. An id is known when
+any of three sources names it:
+
+- `principals.json`, active or disabled;
+- the audit store, on any line it holds: a principal record, the ids a hand
+  edit changed, or the registry a `segment.opened` carries, so an id only an
+  older segment named counts, even after that segment was moved aside;
+- the standing grants file, as a grant's holder or its issuer.
+
+So an id stays known after a hand edit, a lost file or a home restored without
+`audit/` took it out of `principals.json`: a standing grant it held would
+otherwise read live again for whoever got the id. A source that names the id
+settles it. Otherwise, when any source cannot be read, `principal add` cannot
+tell, and refuses every add, naming the source. `revoke --holder` asks the same
+question (§ 9). Disabling an entry that is already disabled,
 or an id that is not there, is refused too. No principal is ever inferred from the account running
 the command. An id comes from the operator's argument and from nowhere else, and
 `add` with no id is a usage error.

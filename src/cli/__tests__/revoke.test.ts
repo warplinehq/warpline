@@ -448,7 +448,8 @@ describe('revoke and a failing store or registry', () => {
 
     const before = await snapshotHome(vh.home)
     const zz = await capture(['revoke', '--holder', 'zz'])
-    expect(zz.stderr).toContain('--holder: no principal has that id')
+    // The registry might name zz, so the refusal says what it could not read, never "no principal".
+    expect(zz.stderr).toBe('revoke: --holder: principals.json could not be read, and nothing else names that id. Nothing was revoked.\n')
     expect(zz.code).toBe(1)
     expect(await snapshotHome(vh.home)).toEqual(before)
   })

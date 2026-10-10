@@ -10,8 +10,10 @@
  *      through fs-atomic at 0600. A failed append writes nothing. A key is
  *      recorded as its digest only.
  *   2. Ids are never deleted or reused. Disable is the only way out of the
- *      registry, and adding an id that exists, active or disabled, or that
- *      the audit store has ever named, is refused.
+ *      registry, and adding an id that is known is refused: one the registry
+ *      holds, active or disabled, one the audit store has ever named, or one a
+ *      standing grant names (`knownPrincipal`). When any of those cannot be
+ *      read, every add is refused.
  *      Later records name principals by id, so an id that came back would make
  *      them name someone else.
  *   3. No principal is ever inferred from the account running the command. An
@@ -32,7 +34,8 @@ import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { appendAudit, AuditAppendError } from '../lib/audit-log.js'
 import { atomicWriteJson } from '../lib/fs-atomic.js'
 import { engineStatePath, principalsPath } from '../lib/paths.js'
-import { entryDigest, EntrySchema, idsEverRecorded, loadRegistry, PRINCIPAL_ID, type Entry, type Registry } from '../lib/principals.js'
+import { entryDigest, EntrySchema, loadRegistry, PRINCIPAL_ID, type Entry, type Registry } from '../lib/principals.js'
+import { knownPrincipal, listSources, type IdSource } from './known-principal.js'
 
 export const USAGE = `Usage: warpline principal add <id> --type human|machine [--key <key>]
        warpline principal disable <id>
@@ -60,6 +63,13 @@ function auditFailed(err: unknown): string {
   return err instanceof AuditAppendError
     ? `The audit store could not record this change: ${err.reason}. Nothing was written.\n`
     : AUDIT_FAILED
+}
+
+/** Why an id is in use, by the source that names it. */
+const IN_USE: Record<IdSource, string> = {
+  'principals.json': 'is already in the registry',
+  'the audit store': 'was registered before',
+  'the standing grants file': 'is named by a standing grant',
 }
 
 const sha256 = (data: Buffer | string): string => createHash('sha256').update(data).digest('hex')
@@ -127,20 +137,16 @@ async function add(rest: string[]): Promise<number> {
     process.stderr.write(loaded)
     return 1
   }
-  if (loaded.registry.principals.some((p) => p.id === id)) {
-    process.stderr.write(`principal add: ${id} is already in the registry, and ids are never reused. Nothing was written.\n`)
+  // An id any source names is in use: a standing grant it held would read live again.
+  const known = await knownPrincipal(id)
+  if (known.answer === 'cannot tell') {
+    process.stderr.write(
+      `principal add: ${listSources(known.unreadable)} could not be read, so no id can be checked unused. Nothing was written.\n`,
+    )
     return 1
   }
-  // An id gone from the file is still used: a standing grant it held would read live again.
-  let used: Set<string>
-  try {
-    used = await idsEverRecorded()
-  } catch {
-    process.stderr.write('principal add: the audit store could not be read, so no id can be checked unused. Nothing was written.\n')
-    return 1
-  }
-  if (used.has(id)) {
-    process.stderr.write(`principal add: ${id} was registered before, and ids are never reused. Nothing was written.\n`)
+  if (known.answer === 'known') {
+    process.stderr.write(`principal add: ${id} ${IN_USE[known.by]}, and ids are never reused. Nothing was written.\n`)
     return 1
   }
 
