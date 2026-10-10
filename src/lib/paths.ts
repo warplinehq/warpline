@@ -107,6 +107,16 @@ export function principalsPath(): string {
 }
 
 /**
+ * The standing grants file: authority a human issued for a machine principal,
+ * read by the approval gate and written by it alone. Owner-only.
+ *
+ * Internal. This is NOT re-exported from `paths-public.ts`.
+ */
+export function standingGrantsPath(): string {
+  return path.join(warplineHome(), 'standing-grants.json')
+}
+
+/**
  * Operator-authored configuration for one plugin.
  *
  * Home-level rather than inside the plugin directory: a plugin directory is

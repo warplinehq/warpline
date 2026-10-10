@@ -1,13 +1,34 @@
 /**
- * FREEZE-10's byte-identity half, pinned to a digest.
+ * FREEZE-10, as amended 2026-10-09 for standing grants. This header is the canonical text. The planning requirements carry a pointer to it, never a copy.
  *
- * The guarantee FREEZE-10 states has two separable clauses, and they are true
- * of different subsets. `no-approval-gate-from-content.test.ts` beside this file
- * proves the REACHABILITY clause over all three named artifacts. This file
- * proves the BYTE clause over the two it actually holds for:
- * `src/runtime/approval-gate.ts` and the `PendingGateSchema` declaration.
+ *   1. `src/runtime/approval-gate.ts` stays byte-identical to
+ *      `APPROVAL_GATE_SHA256` for the rest of the v0.4 milestone. Guarded by
+ *      this file.
+ *   2. The `PendingGateSchema` declaration in `src/schemas/engine-state.ts`
+ *      stays byte-identical to `PENDING_GATE_BLOCK_SHA256`. Guarded by this
+ *      file.
+ *   3. No content-approval path reaches any export of the gate,
+ *      `applyPendingGate` or `PendingGateSchema`. Guarded by
+ *      `src/__tests__/no-approval-gate-from-content.test.ts`, whose forbidden
+ *      set is enumerated from the gate's exports, so a new export joins it
+ *      without anyone extending a list.
+ *   4. Nothing reachable from `warpline advance` or `warpline run` writes the
+ *      standing grants file. Guarded by
+ *      `src/__tests__/no-standing-write-from-run.test.ts`.
+ *   5. The capability layer never reads a grant of either kind. Guarded by
+ *      `src/__tests__/no-grant-recheck.test.ts`.
+ *   6. `warpline deny` calls no grant writer. Guarded by test 14 in
+ *      `src/cli/__tests__/deny.test.ts`, whose hand-kept writer list is
+ *      checked against the gate's live exports.
+ *   7. A run leaves the session grant file byte- and mtime-identical. Guarded
+ *      by test 8 in `src/runtime/__tests__/approval-gate.test.ts`.
  *
- * `applyPendingGate` is deliberately absent. It gained a required
+ * Clauses 1 and 2 are the BYTE half and live here; the rest are the reach and
+ * write half and live in the guards each names. `CLAUSE_GUARDS` below asserts
+ * every guard file cited above still exists, so a clause cannot outlive the
+ * test that holds it.
+ *
+ * `applyPendingGate` is deliberately absent from the byte half. It gained a required
  * `opts.manifests` and an approval carve-out on purpose, so that a pending-gate
  * discard cannot destroy the `last_output` a live approval's fingerprint is
  * bound to. Pinning it would assert something the milestone knowingly
@@ -25,21 +46,23 @@
  * by line numbers, which move.
  *
  * **Provenance.** The file digest was the `v0.2` content's until FREEZE-10 was
- * amended on 2026-09-30 for #27; it now pins the per-scope-window gate. The block digest was the `v0.2`
+ * amended on 2026-09-30 for #27, and the per-scope-window gate's until it was
+ * amended on 2026-10-09 for standing grants; it now pins the gate with both
+ * grant kinds. The block digest was the `v0.2`
  * content's too until FREEZE-10 was amended on 2026-09-23. It now pins the
  * amended declaration, whose one changed line is `plugin_result`. Reproduce:
  *
  *   git show v0.2:src/runtime/approval-gate.ts | shasum -a 256
+ *   shasum -a 256 src/runtime/approval-gate.ts
  *   awk '/^export const PendingGateSchema = z\.object\(\{$/,/^export type PendingGate = /' \
  *     src/schemas/engine-state.ts | shasum -a 256
  *
- * **When one of these is legitimately changed.** Amend the FREEZE-10 contract
- * text FIRST — its requirement entry and the matching roadmap success criterion
- * — so the written guarantee stops claiming a byte identity that no longer
- * holds, then update the constant here in the same commit with the reason.
- * Updating the constant alone re-creates the exact defect this pin closes: a
- * requirement marked complete against a sentence the code falsifies. Deleting
- * the test is the same defect with the evidence removed.
+ * **When one of these is legitimately changed.** Amend the clause list above
+ * FIRST, in the same commit as the constant, with the reason, so the written
+ * guarantee stops claiming a byte identity that no longer holds. Updating the
+ * constant alone re-creates the exact defect this pin closes: a requirement
+ * marked complete against a sentence the code falsifies. Deleting the test is
+ * the same defect with the evidence removed.
  *
  * **Every enumeration throws rather than returning empty**, the discipline
  * `no-approval-gate-from-content.test.ts:34-40` states in its own words. A slice
@@ -52,7 +75,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
@@ -60,14 +83,24 @@ const APPROVAL_GATE = join(REPO_ROOT, 'src', 'runtime', 'approval-gate.ts')
 const ENGINE_STATE = join(REPO_ROOT, 'src', 'schemas', 'engine-state.ts')
 
 /**
- * Re-pinned when FREEZE-10 was amended on 2026-09-30 for issue #27. The grant
- * file gains per-scope windows (`scope_windows`), so a later short approve
- * neither borrows nor shortens another scope's standing `--long` window, and a
- * reader-side `min_reader_version` refusal. The reachability clause is
- * unchanged: no content-approval path reaches this module. The `v0.2` digest
- * was `d286a53f2b55b19ddbabeae64ce3bc0423912d376860cd5d73c23e6d48ffb72d`.
+ * Re-pinned when FREEZE-10 was amended on 2026-10-09 for standing grants: the
+ * standing grants file, its own reader version, lapse derived on read, the
+ * covering list naming each grant that authorises a scope and its issuer, and
+ * the session window's issuer. The #27 digest, pinned when FREEZE-10 was
+ * amended on 2026-09-30 for per-scope windows, was
+ * `b3918f0dd76abf3dd783c42b30738246293d246c0da02c70b2229a6fd87ed766`, and the
+ * `v0.2` digest `d286a53f2b55b19ddbabeae64ce3bc0423912d376860cd5d73c23e6d48ffb72d`.
  */
-const APPROVAL_GATE_SHA256 = 'b3918f0dd76abf3dd783c42b30738246293d246c0da02c70b2229a6fd87ed766'
+const APPROVAL_GATE_SHA256 = 'c374cd307d29b666c62007af6a6f265ffc15ba9d1b307db0092a4d8a114180a5'
+
+/** The guard file each clause in the header cites, repo-relative. */
+const CLAUSE_GUARDS = [
+  'src/__tests__/no-approval-gate-from-content.test.ts',
+  'src/__tests__/no-standing-write-from-run.test.ts',
+  'src/__tests__/no-grant-recheck.test.ts',
+  'src/cli/__tests__/deny.test.ts',
+  'src/runtime/__tests__/approval-gate.test.ts',
+]
 /**
  * Re-pinned when FREEZE-10 was amended on 2026-09-23. `plugin_result` takes
  * `StoredSkillResultSchema`, so an applied gate can hold an erased Output: once
@@ -121,6 +154,11 @@ describe('the two artifacts FREEZE-10 holds byte-identical still are', () => {
 
   test('the PendingGateSchema declaration is byte-unchanged', () => {
     expect(digest(pendingGateBlock(REAL_STATE))).toBe(PENDING_GATE_BLOCK_SHA256)
+  })
+
+  test('every guard a FREEZE-10 clause cites exists', () => {
+    if (CLAUSE_GUARDS.length === 0) throw new Error('blind: no clause guard listed')
+    for (const path of CLAUSE_GUARDS) expect(existsSync(join(REPO_ROOT, path))).toBe(true)
   })
 
   /**

@@ -1,28 +1,69 @@
 /**
- * Session approval gate for plugins that declare side effects.
+ * Approval gate for plugins that declare side effects.
  *
- * Its only non-test consumer is the engine, which consults it once per plugin,
- * immediately before invocation:
+ * A plugin needs approval when its manifest's `side_effects` array is
+ * non-empty. The engine consults this module once per plugin, immediately
+ * before invocation. With no live grant covering the plugin it records the
+ * plugin `skipped` and the run continues: the gate withholds execution, it does
+ * not abort the run. Two kinds of grant can cover a plugin.
  *
- *   1. A plugin needs approval when its manifest's `side_effects` array is
- *      non-empty; the engine calls checkApproval() with the plugin's name
- *   2. Approval is a JSON file at sessionApprovalPath()
- *      (<warplineHome>/.session-approval) carrying a `scopes` value of either
- *      '*' or a list of plugin names, and an expiry per scope (#27)
- *   3. grantApproval() writes that file — 4-hour TTL by default, overridable
- *      per call; mergeGrant() is the additive variant behind
- *      `warpline approve`; revokeApproval() deletes it. The file format is
- *      specified in docs/runtime-spec.md § 9
- *   4. With no live approval the engine records the plugin `skipped` and the
- *      run continues; the gate withholds execution, it does not abort the run
+ *   1. A session window. The session file at sessionApprovalPath()
+ *      (<warplineHome>/.session-approval) carries a `scopes` value of either
+ *      '*' or a list of plugin names, and one window per scope, each with its
+ *      own expiry (#27). grantApproval() writes that file, 4-hour TTL by
+ *      default; mergeGrant() is the additive variant behind
+ *      `warpline approve`, and records the principal who issued each window;
+ *      revokeApproval() deletes it.
+ *   2. A standing grant. Standing grants live in their own file, so no reader
+ *      of the session file ever sees one. A standing grant is held by a
+ *      machine principal and issued and renewed by a human one. It runs for a
+ *      renewal period and lapses unless renewed, and it lapses for good at a
+ *      hard maximum fixed at issue. Nothing marks a grant lapsed: the lapse is
+ *      derived each time the grant is read. A lapse on time, or on a holder
+ *      gone from the registry (whose id never comes back), cannot clear and
+ *      reads `final`. A lapse on an unreadable registry, a holder that is not a
+ *      machine, or a disabled holder clears once the holder reads as an active
+ *      machine again.
+ *
+ * Both file formats are specified in docs/runtime-spec.md § 9.
+ *
+ * The principal registry is never read here. A caller that wants standing
+ * grants considered passes a snapshot of it, and with no snapshot every
+ * standing grant reads lapsed.
  *
  * Reads are fail-closed and never throw: a missing, expired, corrupt or
  * unreadable token is treated as unapproved. An exception here would surface as
  * an error a caller could catch and mistake for a recoverable condition, which
  * is the one failure mode a gate must not have.
+ *
+ * Refusals leave this module as codes. Every sentence an operator reads about
+ * one belongs to the verb that printed it. This file is held byte-identical
+ * between amendments, and a sentence frozen in it could turn false with no way
+ * to correct it short of another amendment.
  */
+import { randomBytes } from 'node:crypto'
 import { readFile, writeFile, unlink, chmod } from 'node:fs/promises'
-import { sessionApprovalPath } from '../lib/paths.js'
+import { atomicWriteJson } from '../lib/fs-atomic.js'
+import { sessionApprovalPath, standingGrantsPath } from '../lib/paths.js'
+
+/** A principal id, the registry's rule. Copied: the gate may not import the registry module. */
+const PRINCIPAL_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
+
+/** A standing grant id: 12 lowercase hex characters. */
+const STANDING_ID = /^[0-9a-f]{12}$/
+
+function isPrincipalId(v: unknown): v is string {
+  return typeof v === 'string' && PRINCIPAL_ID.test(v)
+}
+
+/**
+ * An issuer as attribution, or null. A field that grants nothing must not be
+ * able to block a fire, so a malformed one reads as no issuer rather than
+ * reaching a strict record schema downstream.
+ */
+function attributed(v: unknown): string | null {
+  return isPrincipalId(v) ? v : null
+}
 
 /** Default TTL: 4 hours in milliseconds */
 export const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000
@@ -73,8 +114,13 @@ interface ApprovalFile {
    * `expires_at` and `first_granted_at` are then written as the EARLIEST
    * window's, so an older build that ignores this key expires every scope
    * early and never late: a rollback narrows authority, it cannot widen it.
+   *
+   * A window's optional `issuer` is the principal whose grant last named the
+   * scope. It is attribution only and grants nothing, so a reader that ignores
+   * it reads the same authority, and a rewrite that drops it narrows only who
+   * the record names.
    */
-  scope_windows?: Record<string, { first_granted_at: string; expires_at: string }>
+  scope_windows?: Record<string, { first_granted_at: string; expires_at: string; issuer?: string }>
   /**
    * The oldest reader that may interpret this file. A reader whose
    * {@link GRANT_READER_VERSION} is lower refuses the file outright: fail
@@ -89,10 +135,14 @@ interface ApprovalFile {
 /** The grant-file format this build reads. See `ApprovalFile.min_reader_version`. */
 export const GRANT_READER_VERSION = 1
 
-/** A scope's live window, parsed. `first` is null when the anchor is unusable. */
+/**
+ * A scope's live window, parsed. `first` is null when the anchor is unusable,
+ * and `issuer` when the window names no valid principal.
+ */
 interface Window {
   first: number | null
   expires: number
+  issuer: string | null
 }
 
 /**
@@ -123,7 +173,7 @@ function liveWindows(raw: ApprovalFile, now: number): Map<string, Window> {
       if (!listed(key) || w === null || typeof w !== 'object') continue
       const expires = parseTimestamp(w.expires_at)
       if (expires === null || now > expires) continue
-      out.set(key, { first: parseTimestamp(w.first_granted_at), expires })
+      out.set(key, { first: parseTimestamp(w.first_granted_at), expires, issuer: attributed(w.issuer) })
     }
     return out
   }
@@ -131,7 +181,7 @@ function liveWindows(raw: ApprovalFile, now: number): Map<string, Window> {
   // A file with no per-scope windows: one window over every listed scope.
   if (now > fileExpires) return out
   const keys = raw.scopes === '*' ? ['*'] : Array.isArray(raw.scopes) ? raw.scopes : []
-  for (const key of keys) out.set(key, { first: fileFirst, expires: fileExpires })
+  for (const key of keys) out.set(key, { first: fileFirst, expires: fileExpires, issuer: null })
   return out
 }
 
@@ -170,10 +220,74 @@ function parseTimestamp(iso: unknown): number | null {
 }
 
 /**
+ * One grant that covers a scope. A session entry is one live window, the
+ * scope's own or '*'. A standing entry is one live standing grant. Both name
+ * the principal who issued them; a session window may name none.
+ */
+export type CoveringGrant =
+  | { kind: 'session'; scope: string; issuer: string | null }
+  | { kind: 'standing'; id: string; holder: string; issuer: string }
+
+/**
+ * Every live grant covering `scope`: session entries first ('*', then the
+ * scope's own window), then standing grants by id. `[]` means unapproved.
+ *
+ * Never throws. Each half is read on its own, and a half that cannot be read
+ * contributes nothing.
+ *
+ * Standing grants are considered only when `registry` is passed. Without a
+ * registry snapshot no standing grant can be live, so the standing grants file
+ * is not opened at all, which also keeps every registry-less caller off it.
+ */
+export async function grantsCovering(
+  scope: string,
+  {
+    now = Date.now(),
+    approvalPath = sessionApprovalPath(),
+    standingPath = standingGrantsPath(),
+    registry,
+  }: { now?: number; approvalPath?: string; standingPath?: string; registry?: RegistrySnapshot | null } = {},
+): Promise<CoveringGrant[]> {
+  const out: CoveringGrant[] = []
+  try {
+    const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
+
+    // Expiry is strict `>`, so a window is live up to and including its expiry
+    // millisecond — the edge `engine-loader.test.ts:218` pins. An expiry that
+    // will not parse is no expiry at all, so it is not live. A scope is
+    // approved by its own window or by a live '*' window, never by another
+    // scope's.
+    const windows = liveWindows(raw, now)
+    for (const key of scope === '*' ? ['*'] : ['*', scope]) {
+      const w = windows.get(key)
+      if (w !== undefined) out.push({ kind: 'session', scope: key, issuer: w.issuer })
+    }
+  } catch {
+    // File doesn't exist, is corrupt, or is unreadable — no session entry
+  }
+
+  if (registry === null || registry === undefined) return out
+  try {
+    const listing = await listStandingGrants({ now, registry, standingPath })
+    if (listing.readable) {
+      const live = listing.grants.filter((g) => g.state === 'live' && g.scopes.includes(scope)).sort(byId)
+      for (const g of live) out.push({ kind: 'standing', id: g.id, holder: g.holder, issuer: g.issuer })
+    }
+  } catch {
+    // Unreachable by construction; a standing half that fails contributes nothing
+  }
+  return out
+}
+
+/**
  * Check if a valid, non-expired approval exists for the given scope.
  *
  * Returns true if approved, false otherwise. Never throws — a missing or
  * corrupt approval file is treated as unapproved.
+ *
+ * This is the boolean view of {@link grantsCovering}'s session half. It passes
+ * no registry, so it reads session windows only. A caller that needs standing
+ * grants considered calls `grantsCovering` with a registry snapshot.
  *
  * `opts.now` is the clock seam. It is appended rather than slotted before
  * `approvalPath` because both the engine and the tests already pass the path
@@ -187,21 +301,7 @@ export async function checkApproval(
   approvalPath: string = sessionApprovalPath(),
   opts: { now?: number } = {},
 ): Promise<boolean> {
-  const now = opts.now ?? Date.now()
-  try {
-    const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
-
-    // Expiry is strict `>`, so a window is live up to and including its expiry
-    // millisecond — the edge `engine-loader.test.ts:218` pins. An expiry that
-    // will not parse is no expiry at all, so it is not live. A scope is
-    // approved by its own window or by a live '*' window, never by another
-    // scope's.
-    const windows = liveWindows(raw, now)
-    return windows.has(scope) || windows.has('*')
-  } catch {
-    // File doesn't exist, is corrupt, or is unreadable — treat as unapproved
-    return false
-  }
+  return (await grantsCovering(scope, { now: opts.now, approvalPath })).length > 0
 }
 
 /**
@@ -262,6 +362,11 @@ export interface MergeGrantOptions {
   long?: boolean
   /** Injected clock, so a caller can print exactly what it wrote. */
   now?: number
+  /**
+   * The principal issuing this grant; each requested scope's window records it
+   * as `issuer`, and a null or absent one records none.
+   */
+  principal?: string | null
 }
 
 /** What {@link mergeGrant} actually wrote, so the caller can print it. */
@@ -319,17 +424,20 @@ export async function mergeGrant(
   // too: the anchor is what the ceiling is measured from, so honouring it
   // would hand out time nobody authorised. Either costs the operator a scope
   // they re-grant in one command.
-  let live = new Map<string, { first: number; expires: number }>()
+  let live = new Map<string, { first: number; expires: number; issuer: string | null }>()
   try {
     const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
     for (const [key, w] of liveWindows(raw, now)) {
-      if (w.first !== null) live.set(key, { first: w.first, expires: w.expires })
+      if (w.first !== null) live.set(key, { first: w.first, expires: w.expires, issuer: w.issuer })
     }
   } catch {
     live = new Map()
   }
 
   const requested: string[] = scopes === '*' ? ['*'] : Array.isArray(scopes) ? scopes : [scopes]
+  // The last grant that names a scope sets its issuer, an unattributed one
+  // included. A window this call does not name keeps the issuer it was read with.
+  const issuer = attributed(opts.principal)
 
   // `--replace` drops every other scope and restarts the requested expiries,
   // but it never restarts a live scope's ceiling, or `approve --replace`
@@ -337,7 +445,7 @@ export async function mergeGrant(
   // borrowing another scope's would hand a new scope a ceiling already in the
   // past, a window expired on arrival. A scope with no live window starts
   // fresh, as it would on any approve (Kerberos: a new `kinit`, a new anchor).
-  const next = opts.replace ? new Map<string, { first: number; expires: number }>() : new Map(live)
+  const next = opts.replace ? new Map<string, { first: number; expires: number; issuer: string | null }>() : new Map(live)
   const windows: MergeGrantResult['windows'] = []
 
   for (const key of requested) {
@@ -367,7 +475,7 @@ export async function mergeGrant(
       }
     }
 
-    next.set(key, { first, expires: expiry })
+    next.set(key, { first, expires: expiry, issuer })
     windows.push({
       scope: key,
       expires_at: new Date(expiry).toISOString(),
@@ -390,10 +498,13 @@ export async function mergeGrant(
     first_granted_at: new Date(fileFirst).toISOString(),
     expires_at: new Date(fileExpiry).toISOString(),
     scopes: finalScopes,
+    // `issuer` is written only when there is one, so an unattributed grant's
+    // file is byte-identical to one written before the field existed.
     scope_windows: Object.fromEntries(
       keys.map((k) => {
         const w = next.get(k)!
-        return [k, { first_granted_at: new Date(w.first).toISOString(), expires_at: new Date(w.expires).toISOString() }]
+        const window = { first_granted_at: new Date(w.first).toISOString(), expires_at: new Date(w.expires).toISOString() }
+        return [k, w.issuer === null ? window : { ...window, issuer: w.issuer }]
       }),
     ),
   }
@@ -422,4 +533,356 @@ export async function revokeApproval(
     // ENOENT means file already gone — that's fine
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
   }
+}
+
+// ---------------------------------------------------------------------------
+// Standing grants
+// ---------------------------------------------------------------------------
+
+/**
+ * The standing grants file format this build reads. A file asking for more is
+ * refused whole, so an older build reads no standing grant rather than a wider
+ * one. Separate from {@link GRANT_READER_VERSION}: the two files move apart.
+ */
+export const STANDING_READER_VERSION = 1
+
+// The caps live in code, never in preferences: a ceiling a file could raise
+// would let a file widen authority.
+
+/** Renewal period when the issuer names none: 24 hours. */
+export const DEFAULT_STANDING_PERIOD_MS = 24 * 60 * 60 * 1000
+/** The longest renewal period a standing grant may have: 7 days. */
+export const MAX_STANDING_PERIOD_MS = 7 * 24 * 60 * 60 * 1000
+/** The longest hard maximum a standing grant may have, from issue: 90 days. */
+export const MAX_STANDING_HARD_MAX_MS = 90 * 24 * 60 * 60 * 1000
+
+/**
+ * What the caller read from the principal registry: each principal's type and
+ * status, by id. The gate never reads the registry itself. No principal's key
+ * is in the snapshot, because nothing here needs it.
+ */
+export type RegistrySnapshot = ReadonlyMap<string, { type: 'human' | 'machine'; status: 'active' | 'disabled' }>
+
+/**
+ * One standing grant as stored. `period_start` is set at issue and moved only
+ * by renew, so the hard maximum, measured from `issued_at`, cannot move.
+ * Deadlines are derived, never stored.
+ */
+export interface StandingGrant {
+  id: string
+  holder: string
+  issuer: string
+  scopes: string[]
+  issued_at: string
+  period_start: string
+  period_ms: number
+  hard_max_ms: number
+}
+
+/** The standing grants file. Grants are written sorted by id. */
+export interface StandingStore {
+  min_reader_version: number
+  grants: StandingGrant[]
+}
+
+/**
+ * Why a standing grant is not live. When several apply, the first in this
+ * order is the one reported.
+ */
+export type LapseReason =
+  | 'hard max'
+  | 'not renewed'
+  | 'registry unreadable'
+  | 'holder not registered'
+  | 'holder not machine'
+  | 'holder disabled'
+
+/**
+ * A standing grant as read at one instant. `final` is true when the lapse can
+ * never clear and only a new grant fixes it: a time lapse, or a holder gone
+ * from the registry, whose id is never added again. The other three reasons
+ * clear once the holder reads as an active machine.
+ */
+export interface StandingStatus extends StandingGrant {
+  renewal_deadline: number
+  hard_max_at: number
+  next_expiry: number
+  state: 'live' | 'lapsed'
+  reason: LapseReason | null
+  final: boolean
+}
+
+/**
+ * Why the standing grants file could not be read: its bytes or shape are
+ * wrong, it was written for a newer reader, or the read itself failed.
+ */
+export type StandingUnreadableCause = 'corrupt' | 'newer reader' | 'io'
+
+/** Every standing grant with its status, or why none could be read. */
+export type StandingListing =
+  | { readable: true; grants: StandingStatus[] }
+  | { readable: false; cause: StandingUnreadableCause }
+
+/**
+ * Why {@link issueStanding} refused. `no-scope` also covers a scope that is
+ * not a non-empty string, and `bad-period` a period, or a hard maximum, that
+ * is not a whole number of milliseconds.
+ */
+export type IssueRefusal = {
+  code:
+    | 'no-scope'
+    | 'all-scopes'
+    | 'bad-period'
+    | 'period-over-cap'
+    | 'hard-max-over-cap'
+    | 'hard-max-below-period'
+    | 'bad-id'
+    | 'duplicate-id'
+    | 'bad-principal-id'
+    | 'holder-is-issuer'
+}
+
+/** Why {@link renewStanding} refused. No lapsed grant can be renewed, final or not. */
+export type RenewRefusal = { code: 'unknown-id' | 'holder-renews' } | { code: 'lapsed'; reason: LapseReason; final: boolean }
+
+/** Why {@link revokeStanding} refused. */
+export type RevokeRefusal = { code: 'unknown-id' | 'no-ids' }
+
+/** Every refusal a standing transform can return: codes, never sentences. */
+export type StandingRefusal = IssueRefusal | RenewRefusal | RevokeRefusal
+
+/** A transform's result: the next store, or a refusal and no store. */
+export type StandingChange<R extends StandingRefusal = StandingRefusal> = { store: StandingStore } | { refused: R }
+
+/** The lapses that cannot clear. */
+const FINAL: ReadonlySet<LapseReason> = new Set<LapseReason>(['hard max', 'not renewed', 'holder not registered'])
+
+const iso = (ms: number): string => new Date(ms).toISOString()
+
+/** Codepoint order on ids, the same on every host. */
+function byId(a: { id: string }, b: { id: string }): number {
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0
+}
+
+/** A fresh standing grant id: 12 lowercase hex characters. Issue refuses one already in the file. */
+export function newStandingId(): string {
+  return randomBytes(6).toString('hex')
+}
+
+/** One stored grant's known fields in their fixed order, or null when any is malformed. */
+function parseGrant(value: unknown): StandingGrant | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null
+  const g = value as Record<string, unknown>
+  const { id, holder, issuer, scopes, issued_at, period_start, period_ms, hard_max_ms } = g
+  if (typeof id !== 'string' || !STANDING_ID.test(id)) return null
+  if (!isPrincipalId(holder) || !isPrincipalId(issuer)) return null
+  if (!Array.isArray(scopes) || scopes.length === 0) return null
+  if (!scopes.every((s): s is string => typeof s === 'string' && s.length > 0 && s !== '*')) return null
+  if (new Set(scopes).size !== scopes.length) return null
+  if (typeof issued_at !== 'string' || parseTimestamp(issued_at) === null) return null
+  if (typeof period_start !== 'string' || parseTimestamp(period_start) === null) return null
+  if (typeof period_ms !== 'number' || !Number.isInteger(period_ms) || period_ms <= 0) return null
+  if (period_ms > MAX_STANDING_PERIOD_MS) return null
+  if (typeof hard_max_ms !== 'number' || !Number.isInteger(hard_max_ms)) return null
+  if (hard_max_ms < period_ms || hard_max_ms > MAX_STANDING_HARD_MAX_MS) return null
+  return { id, holder, issuer, scopes: [...scopes], issued_at, period_start, period_ms, hard_max_ms }
+}
+
+/**
+ * The whole file or nothing. The reader version is read before any other
+ * field: a newer format may shape its grants differently, so a grant this
+ * build cannot parse in a newer file says `newer reader`, never `corrupt`.
+ * Unknown keys are ignored; a field that narrows authority comes with a
+ * reader-version bump.
+ */
+function parseStore(raw: unknown): { store: StandingStore } | { cause: 'corrupt' | 'newer reader' } {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return { cause: 'corrupt' }
+  const file = raw as Record<string, unknown>
+
+  const version = file.min_reader_version
+  if (typeof version === 'number' && Number.isInteger(version) && version > STANDING_READER_VERSION) {
+    return { cause: 'newer reader' }
+  }
+  if (typeof version !== 'number' || !Number.isInteger(version) || version < 1) return { cause: 'corrupt' }
+
+  if (!Array.isArray(file.grants)) return { cause: 'corrupt' }
+  const grants: StandingGrant[] = []
+  const seen = new Set<string>()
+  for (const value of file.grants) {
+    const grant = parseGrant(value)
+    if (grant === null || seen.has(grant.id)) return { cause: 'corrupt' }
+    seen.add(grant.id)
+    grants.push(grant)
+  }
+  return { store: { min_reader_version: version, grants } }
+}
+
+/**
+ * The standing grants file, parsed. Never throws. A missing file is an empty,
+ * readable store; anything else that cannot be read reports its cause.
+ */
+export async function readStandingStore(
+  standingPath: string = standingGrantsPath(),
+): Promise<{ readable: true; store: StandingStore } | { readable: false; cause: StandingUnreadableCause }> {
+  let text: string
+  try {
+    text = await readFile(standingPath, 'utf-8')
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
+      return { readable: true, store: { min_reader_version: STANDING_READER_VERSION, grants: [] } }
+    }
+    return { readable: false, cause: 'io' }
+  }
+  try {
+    const parsed = parseStore(JSON.parse(text))
+    return 'cause' in parsed ? { readable: false, cause: parsed.cause } : { readable: true, store: parsed.store }
+  } catch {
+    return { readable: false, cause: 'corrupt' }
+  }
+}
+
+/**
+ * A grant's status at `now`. Both instants are inclusive (strict `>`), like a
+ * session window's expiry. A timestamp that will not parse reads as already
+ * past, so a malformed grant handed in by a caller lapses rather than lives.
+ */
+function statusOf(grant: StandingGrant, now: number, registry: RegistrySnapshot | null | undefined): StandingStatus {
+  const renewal_deadline = (parseTimestamp(grant.period_start) ?? Number.NEGATIVE_INFINITY) + grant.period_ms
+  const hard_max_at = (parseTimestamp(grant.issued_at) ?? Number.NEGATIVE_INFINITY) + grant.hard_max_ms
+  const holder = registry?.get(grant.holder)
+  const reason: LapseReason | null =
+    now > hard_max_at
+      ? 'hard max'
+      : now > renewal_deadline
+        ? 'not renewed'
+        : registry === null || registry === undefined
+          ? 'registry unreadable'
+          : holder === undefined
+            ? 'holder not registered'
+            : holder.type !== 'machine'
+              ? 'holder not machine'
+              : holder.status !== 'active'
+                ? 'holder disabled'
+                : null
+  return {
+    ...grant,
+    renewal_deadline,
+    hard_max_at,
+    next_expiry: Math.min(renewal_deadline, hard_max_at),
+    state: reason === null ? 'live' : 'lapsed',
+    reason,
+    final: reason !== null && FINAL.has(reason),
+  }
+}
+
+/**
+ * Every standing grant with its status at `now`, sorted by next expiry and
+ * then by id. Never throws. With no registry snapshot every grant reads
+ * lapsed, `registry unreadable`.
+ */
+export async function listStandingGrants({
+  now = Date.now(),
+  registry,
+  standingPath = standingGrantsPath(),
+}: { now?: number; registry?: RegistrySnapshot | null; standingPath?: string } = {}): Promise<StandingListing> {
+  const read = await readStandingStore(standingPath)
+  if (!read.readable) return { readable: false, cause: read.cause }
+  const grants = read.store.grants
+    .map((g) => statusOf(g, now, registry))
+    .sort((a, b) => a.next_expiry - b.next_expiry || byId(a, b))
+  return { readable: true, grants }
+}
+
+/**
+ * The one writer of the standing grants file, owner-only and atomic. Grants
+ * are written sorted by id, each with its scopes sorted, under this build's
+ * reader version. It never deletes the file: a store with no grants is
+ * written as an empty list. Rejects when the write fails; callers report it.
+ */
+export async function writeStandingStore(
+  store: StandingStore,
+  standingPath: string = standingGrantsPath(),
+): Promise<void> {
+  const grants = store.grants
+    .map((g) => ({
+      id: g.id,
+      holder: g.holder,
+      issuer: g.issuer,
+      scopes: [...g.scopes].sort(),
+      issued_at: g.issued_at,
+      period_start: g.period_start,
+      period_ms: g.period_ms,
+      hard_max_ms: g.hard_max_ms,
+    }))
+    .sort(byId)
+  await atomicWriteJson(standingPath, { min_reader_version: STANDING_READER_VERSION, grants }, { mode: GRANT_FILE_MODE })
+}
+
+/**
+ * Issue a standing grant. Pure: returns the next store, or a refusal and no
+ * store. The checks run in a fixed order and the first that fails is the one
+ * refused. Holder and issuer are checked only as ids here; who may hold or
+ * issue is the caller's check against the registry.
+ */
+export function issueStanding(
+  store: StandingStore,
+  terms: { id: string; holder: string; issuer: string; scopes: string[]; periodMs?: number; hardMaxMs: number },
+  now: number,
+): StandingChange<IssueRefusal> {
+  const refuse = (code: IssueRefusal['code']): StandingChange<IssueRefusal> => ({ refused: { code } })
+  const scopes = [...new Set(terms.scopes)].sort()
+  const period = terms.periodMs ?? DEFAULT_STANDING_PERIOD_MS
+  const hardMax = terms.hardMaxMs
+
+  if (scopes.length === 0 || !scopes.every((s) => typeof s === 'string' && s.length > 0)) return refuse('no-scope')
+  if (scopes.includes('*')) return refuse('all-scopes')
+  if (!Number.isInteger(period) || period <= 0 || !Number.isInteger(hardMax)) return refuse('bad-period')
+  if (period > MAX_STANDING_PERIOD_MS) return refuse('period-over-cap')
+  if (hardMax > MAX_STANDING_HARD_MAX_MS) return refuse('hard-max-over-cap')
+  if (hardMax < period) return refuse('hard-max-below-period')
+  if (typeof terms.id !== 'string' || !STANDING_ID.test(terms.id)) return refuse('bad-id')
+  if (store.grants.some((g) => g.id === terms.id)) return refuse('duplicate-id')
+  if (!isPrincipalId(terms.holder) || !isPrincipalId(terms.issuer)) return refuse('bad-principal-id')
+  if (terms.holder === terms.issuer) return refuse('holder-is-issuer')
+
+  const grant: StandingGrant = {
+    id: terms.id,
+    holder: terms.holder,
+    issuer: terms.issuer,
+    scopes,
+    issued_at: iso(now),
+    period_start: iso(now),
+    period_ms: period,
+    hard_max_ms: hardMax,
+  }
+  return { store: { ...store, grants: [...store.grants, grant].sort(byId) } }
+}
+
+/**
+ * Renew a live standing grant. Pure. Only `period_start` moves, to `now`, so
+ * the hard maximum stays where issue fixed it. A lapsed grant is refused with
+ * the reason and finality it read with; the holder may never renew its own.
+ */
+export function renewStanding(
+  store: StandingStore,
+  id: string,
+  renewer: string,
+  now: number,
+  registry: RegistrySnapshot | null | undefined,
+): StandingChange<RenewRefusal> {
+  const grant = store.grants.find((g) => g.id === id)
+  if (grant === undefined) return { refused: { code: 'unknown-id' } }
+  if (renewer === grant.holder) return { refused: { code: 'holder-renews' } }
+  const status = statusOf(grant, now, registry)
+  if (status.reason !== null) return { refused: { code: 'lapsed', reason: status.reason, final: status.final } }
+  return { store: { ...store, grants: store.grants.map((g) => (g.id === id ? { ...g, period_start: iso(now) } : g)) } }
+}
+
+/** Revoke standing grants by id. Pure. Every id must be in the store. */
+export function revokeStanding(store: StandingStore, ids: string[]): StandingChange<RevokeRefusal> {
+  if (ids.length === 0) return { refused: { code: 'no-ids' } }
+  const held = new Set(store.grants.map((g) => g.id))
+  if (ids.some((id) => !held.has(id))) return { refused: { code: 'unknown-id' } }
+  const dropped = new Set(ids)
+  return { store: { ...store, grants: store.grants.filter((g) => !dropped.has(g.id)) } }
 }

@@ -41,8 +41,15 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 const FIND = '/usr/bin/find'
 const GREP = '/usr/bin/grep'
 
-/** The module that reads the grant file, and the function that performs the read. */
-const FORBIDDEN = ['approval-gate', 'checkApproval']
+/** The grant module, its boolean reader, and both grant files by accessor or name. */
+const FORBIDDEN = [
+  'approval-gate',
+  'checkApproval',
+  'standingGrantsPath',
+  'standing-grants',
+  'sessionApprovalPath',
+  '.session-approval',
+]
 
 /**
  * The non-test source files the capability layer owns.
@@ -111,6 +118,29 @@ describe('the capability layer never re-reads the approval grant', () => {
       const found = grantReaders([offending, clean]).map((line) => line.slice(dir.length + 1))
       expect(found).toEqual([
         "capabilities.ts:1:import { checkApproval } from './approval-gate.js'",
+      ])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  /**
+   * A capability file can reach a grant without importing the gate: by the
+   * accessor that names a grant file, or by the file's own name. The same
+   * helper must report both.
+   */
+  test('the same helper reports a file that names the standing grants file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'warpline-grant-recheck-'))
+    try {
+      const byAccessor = join(dir, 'capabilities.ts')
+      writeFileSync(byAccessor, 'const p = standingGrantsPath()\n')
+      const byName = join(dir, 'capability-store.ts')
+      writeFileSync(byName, "export const s = 1\nreadFile('standing-grants.json')\n")
+
+      const found = grantReaders([byAccessor, byName]).map((line) => line.slice(dir.length + 1))
+      expect(found).toEqual([
+        'capabilities.ts:1:const p = standingGrantsPath()',
+        "capability-store.ts:2:readFile('standing-grants.json')",
       ])
     } finally {
       rmSync(dir, { recursive: true, force: true })

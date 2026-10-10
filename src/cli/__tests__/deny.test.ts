@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { _setHome, engineStatePath, sessionApprovalPath } from '../../lib/paths.js'
 import { mergeGrant } from '../../runtime/approval-gate.js'
+import * as gate from '../../runtime/approval-gate.js'
 import { denialFingerprint } from '../../runtime/engine.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
@@ -512,9 +513,24 @@ describe('warpline deny', () => {
    * writer in a comment explaining why it exists, and a comment is not a call.
    * The module that DEFINES the writers is skipped for the same reason it is in
    * the closure at all — being reachable is not the defect, being called is.
+   *
+   * The writer list is kept by hand, so every name on it is asserted a live
+   * export of the gate: a renamed writer fails here instead of leaving the list
+   * blind to it.
    */
   test('14: no module on the denial path calls anything that writes the grant file', async () => {
-    const GRANT_WRITERS = ['mergeGrant', 'grantApproval', 'revokeApproval']
+    const GRANT_WRITERS = [
+      'mergeGrant',
+      'grantApproval',
+      'revokeApproval',
+      'issueStanding',
+      'renewStanding',
+      'revokeStanding',
+      'writeStandingStore',
+    ]
+    for (const name of GRANT_WRITERS) {
+      expect(typeof (gate as Record<string, unknown>)[name]).toBe('function')
+    }
     const DEFINER = join('runtime', 'approval-gate.ts')
     const srcRoot = fileURLToPath(new URL('../../', import.meta.url))
 

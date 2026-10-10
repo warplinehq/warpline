@@ -147,7 +147,7 @@ describe('caps', () => {
     expect(store.grants[0]?.scopes).toEqual(['p', 'q'])
   })
 
-  const refusals: Array<[string, Partial<Terms>, string]> = [
+  const refusals: Array<[string, Partial<Terms>, gate.IssueRefusal['code']]> = [
     ['a period 1 ms over the 7-day cap', { periodMs: 7 * DAY + 1, hardMaxMs: 90 * DAY }, 'period-over-cap'],
     ['a hard max 1 ms over the 90-day cap', { periodMs: DAY, hardMaxMs: 90 * DAY + 1 }, 'hard-max-over-cap'],
     ['a hard max below the period', { periodMs: 2 * DAY, hardMaxMs: DAY }, 'hard-max-below-period'],
