@@ -833,7 +833,6 @@ export async function run(argv: string[]): Promise<number> {
   // Name validation, all of it, before any write.
   if (!values.all && refuseUnknownNames(positionals, manifests, failures)) return 1
 
-  const now = Date.now()
   const approvalPath = sessionApprovalPath()
 
   // -- Content approval: a standing yes to bytes that already exist ---------
@@ -867,7 +866,7 @@ export async function run(argv: string[]): Promise<number> {
   // alone: the principal check, the record and the write.
   if (values.all) {
     return await withStateLockAt(lockPath, () =>
-      writeSessionGrant(values, positionals, ttlMs, manifests, statePath, approvalPath, now),
+      writeSessionGrant(values, positionals, ttlMs, manifests, statePath, approvalPath),
     )
   }
 
@@ -896,6 +895,8 @@ export async function run(argv: string[]): Promise<number> {
   return await withStateLockAt(
     lockPath,
     async (): Promise<number> => {
+    // Read in the hold: the lock wait can outlast a window or a gate's age.
+    const now = Date.now()
     let state
     try {
       state = await readEngineState(statePath)
@@ -1136,7 +1137,7 @@ export async function run(argv: string[]): Promise<number> {
     // way. The principal check, the record and the grant write share this
     // hold, which serialises concurrent approves: each one reads the grant
     // file after the last one wrote it, so both land.
-    return await writeSessionGrant(values, positionals, ttlMs, manifests, statePath, approvalPath, now)
+    return await writeSessionGrant(values, positionals, ttlMs, manifests, statePath, approvalPath)
     },
   )
 }
@@ -1154,8 +1155,9 @@ async function writeSessionGrant(
   manifests: Map<string, PluginManifest>,
   statePath: string,
   approvalPath: string,
-  now: number,
 ): Promise<number> {
+  // Read in the hold, so a window that closed while this waited is judged closed.
+  const now = Date.now()
   // Checked in the hold, so a principal disabled while this waited is refused.
   const actor = await requirePrincipal(values.principal, 'active')
   if ('refused' in actor) {

@@ -241,6 +241,35 @@ describe('warpline approve', () => {
     expect(stdout.indexOf('db-writer')).toBeLessThan(stdout.indexOf('render-issue'))
   })
 
+  test('10b: a window that closes while approve waits on the state lock is replaced, never kept with its past expiry', async () => {
+    const { setSystemTime } = await import('bun:test')
+    const { engineStatePath } = await import('../../lib/paths.js')
+    const { pathsForStateFile, withStateLockAt } = await import('../../board/state-manager.js')
+    const T0 = Date.parse('2030-01-01T00:00:00.000Z')
+    const MIN = 60 * 1000
+    setSystemTime(new Date(T0))
+    try {
+      expect((await capture('approve', ['render-issue', '--ttl', '30m'])).code).toBe(0)
+      const lock = pathsForStateFile(engineStatePath()).lockPath
+      await mkdir(join(lock, '..'), { recursive: true })
+      setSystemTime(new Date(T0 + 29 * MIN))
+      let pending: ReturnType<typeof capture> | undefined
+      await withStateLockAt(lock, async () => {
+        pending = capture('approve', ['render-issue'])
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        // Two minutes on: the 30m window closed while approve waited.
+        setSystemTime(new Date(T0 + 31 * MIN))
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      })
+      const result = await (pending as NonNullable<typeof pending>)
+      expect(result.code).toBe(0)
+      expect(result.stdout).not.toContain(new Date(T0 + 30 * MIN).toISOString())
+      expect(await checkApproval('render-issue', approvalPath)).toBe(true)
+    } finally {
+      setSystemTime()
+    }
+  })
+
   test('10: printed remaining time is rounded down to whole minutes', async () => {
     const { stdout } = await capture('approve', ['render-issue', '--ttl', '90m'])
 
