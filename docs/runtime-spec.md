@@ -1681,7 +1681,11 @@ grant. On `approve`, `--standing` names the kind of grant. On `revoke`,
 - The renewal period, `--period`, is at most 7 days (default 24 hours). The
   hard maximum, `--hard-max`, is required, at most 90 days, and never shorter
   than the period. The caps are constants in code, never preferences, so no
-  file can raise them.
+  preference can raise them. The read checks each stored grant's `period_ms`
+  and `hard_max_ms` against the caps, but not `issued_at` and `period_start`
+  against each other or the clock. A hand-edited file, or a grant issued while
+  the clock ran ahead, can date a grant in the future, and it then stays live
+  past the caps by that much.
 - `--all`, `--ttl`, `--long`, `--replace` and the content flags (`--content`,
   `--remove`, `--not-after`, `--not-before`, `--zone`) are refused beside
   `--standing`. `--holder`, `--period` and `--hard-max` are refused without it.
