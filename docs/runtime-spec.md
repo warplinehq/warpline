@@ -1627,6 +1627,33 @@ for that advance. An unusable `principals.json` lapses every standing grant as
 `registry unreadable`. `warpline plan` reads the registry without recording
 it, so its `approved:` column agrees with the run.
 
+**Issuing.** `warpline approve <plugin>... --standing --holder <machine-id>
+--principal <human-id> --hard-max <dur> [--period <dur>]` issues one standing
+grant. On `approve`, `--standing` names the kind of grant. On `revoke`,
+`--standing <grant-id>` names one grant.
+
+- `--holder` names the holder, which must be an active machine. `--principal`
+  names the issuer, which must be an active human (§ 15). Both are required,
+  both are checked under the state lock, and neither is ever taken from the
+  environment or the account running the command.
+- The scopes are the plugins named. A standing grant never covers `*`, and
+  `--all` is refused beside `--standing`.
+- The renewal period, `--period`, is at most 7 days (default 24 hours). The
+  hard maximum, `--hard-max`, is required, at most 90 days, and never shorter
+  than the period. The caps are constants in code, never preferences, so no
+  file can raise them.
+- `--all`, `--ttl`, `--long`, `--replace` and the content flags (`--content`,
+  `--remove`, `--not-after`, `--not-before`, `--zone`) are refused beside
+  `--standing`. `--holder`, `--period` and `--hard-max` are refused without it.
+- A new id already in the standing grants file is refused, and so is an issue
+  over a standing grants file that cannot be read.
+
+Every refusal exits 1 and writes nothing. The command appends `grant.issued`
+with `kind: standing` (§ 14) before it writes the standing grants file, so a
+failed append issues nothing: it says so on stderr and exits 1. It never
+applies a parked result. On success it prints the grant's id, its renewal
+deadline and hard maximum, and the standing grants file's path.
+
 **A grant written by hand.** A standing grant written into the standing grants
 file by hand carries no `grant.issued` record. The file is not compared with
 the audit store the way `principals.json` and `preferences.json` are.
@@ -3733,7 +3760,7 @@ The set is closed. A kind outside it cannot be written.
 
 | Kind | What it records |
 |------|-----------------|
-| `grant.issued` | `warpline approve` is about to write a session grant: the scopes, duration and flags asked for. |
+| `grant.issued` | `warpline approve` is about to write a grant. A session grant (`kind: session`) carries the scopes, duration and flags asked for. A standing grant (`kind: standing`) carries its id, holder, scopes, renewal period and hard maximum. Both carry the acting `principal`. |
 | `grant.renewed` | A session grant renewed. |
 | `grant.revoked` | `warpline revoke` is about to clear the session grant. |
 | `content_approval.issued` | A content approval is about to be bound to an Output's fingerprint. |

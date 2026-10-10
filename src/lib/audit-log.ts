@@ -134,14 +134,26 @@ const DATA = {
     bytes: z.number().int().nonnegative(),
   }),
   'checkpoint.recorded': z.strictObject({ origin: Urn, size: Seq, root: Hex }),
-  'grant.issued': z.strictObject({
-    kind: z.literal('session'),
-    scopes: z.array(Scope).min(1),
-    ttl_ms: z.number().int().positive().nullable(),
-    replace: z.boolean(),
-    long: z.boolean(),
-    principal: PrincipalId.nullable(),
-  }),
+  // A standing issue always has a named issuer, so its principal is never null.
+  'grant.issued': z.discriminatedUnion('kind', [
+    z.strictObject({
+      kind: z.literal('session'),
+      scopes: z.array(Scope).min(1),
+      ttl_ms: z.number().int().positive().nullable(),
+      replace: z.boolean(),
+      long: z.boolean(),
+      principal: PrincipalId.nullable(),
+    }),
+    z.strictObject({
+      kind: z.literal('standing'),
+      id: GrantId,
+      holder: PrincipalId,
+      principal: PrincipalId,
+      scopes: z.array(PluginName).min(1),
+      period_ms: z.number().int().positive(),
+      hard_max_ms: z.number().int().positive(),
+    }),
+  ]),
   'grant.renewed': z.never(),
   'grant.revoked': z.strictObject({
     kind: z.literal('session'),

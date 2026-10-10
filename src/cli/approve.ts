@@ -60,8 +60,13 @@
  * widen a grant past what the operator typed. `--all` is unambiguously a Grant
  * gesture and never applies a parked result.
  *
- * Each of the three record-writing gestures (a Grant, a content approval and its
- * withdrawal) is on the audit record before it takes effect, and the records
+ * `--standing` issues a standing grant to a named machine from a named human.
+ * It is answered before every other mode and refused whole beside any session
+ * or content flag, so it never applies a parked result.
+ *
+ * Each of the four record-writing gestures (a session Grant, a standing grant,
+ * a content approval and its withdrawal) is on the audit record before it takes
+ * effect, and the records
  * are written here, around the grant module's calls, never inside it.
  *
  * Never terminates the process — it returns a code to the dispatcher.
@@ -79,7 +84,20 @@ import {
   loadPluginManifests,
   proposalFingerprint,
 } from '../runtime/engine.js'
-import { DEFAULT_TTL_MS, liveGrantScopes, mergeGrant, MAX_GRANT_WINDOW_MS } from '../runtime/approval-gate.js'
+import {
+  DEFAULT_STANDING_PERIOD_MS,
+  DEFAULT_TTL_MS,
+  issueStanding,
+  liveGrantScopes,
+  MAX_GRANT_WINDOW_MS,
+  MAX_STANDING_HARD_MAX_MS,
+  MAX_STANDING_PERIOD_MS,
+  mergeGrant,
+  newStandingId,
+  readStandingStore,
+  writeStandingStore,
+  type IssueRefusal,
+} from '../runtime/approval-gate.js'
 import { appendAudit } from '../lib/audit-log.js'
 import { requirePrincipal } from '../lib/principals.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
@@ -92,7 +110,7 @@ import {
 } from '../runtime/engine-state-store.js'
 import type { Approval, EngineState } from '../schemas/engine-state.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
-import { engineStatePath, pluginsDir, sessionApprovalPath } from '../lib/paths.js'
+import { engineStatePath, pluginsDir, sessionApprovalPath, standingGrantsPath } from '../lib/paths.js'
 import { suggest } from './suggest.js'
 
 // Both hour figures are derived, not typed. The `--long` line read a literal
@@ -101,6 +119,10 @@ import { suggest } from './suggest.js'
 // actually reads. Same lesson as the dispatcher's command list.
 const CEILING_H = MAX_GRANT_WINDOW_MS / (60 * 60 * 1000)
 const DEFAULT_TTL_H = DEFAULT_TTL_MS / (60 * 60 * 1000)
+// The standing caps the same way, from the gate's constants.
+const STANDING_DEFAULT_H = DEFAULT_STANDING_PERIOD_MS / (60 * 60 * 1000)
+const STANDING_PERIOD_CAP_D = MAX_STANDING_PERIOD_MS / (24 * 60 * 60 * 1000)
+const STANDING_HARD_MAX_CAP_D = MAX_STANDING_HARD_MAX_MS / (24 * 60 * 60 * 1000)
 
 /** A stored fingerprint goes into a record only when it is a sha256 digest. */
 const HEX64 = /^[0-9a-f]{64}$/
@@ -108,6 +130,7 @@ const HEX64 = /^[0-9a-f]{64}$/
 const USAGE = `Usage: warpline approve <plugin>... [options]
        warpline approve --all [options]
        warpline approve <plugin> --content --not-after <wall> [options]
+       warpline approve <plugin>... --standing --holder <machine-id> --principal <human-id> --hard-max <dur> [--period <dur>]
 
 Answers whichever gate is waiting. If the plugin has a parked result awaiting
 review, that result is recorded — nothing is re-run and no grant is written.
@@ -133,6 +156,18 @@ Content approval (one plugin, declaring approval_class: 'content'):
                     session grant is withdrawn with 'warpline revoke'.
   --principal <id>  Who is approving: a registered, active principal.
                     Optional, never inferred.
+
+Standing grant (held by a machine, issued by a human, over named plugins):
+  --standing         Issue a standing grant, not a session one. Here --standing names the kind; on revoke, --standing <grant-id> names one grant.
+  --holder <id>      REQUIRED. The active machine principal that holds it.
+  --principal <id>   REQUIRED. The active human principal who issues it. Never
+                     inferred.
+  --hard-max <dur>   REQUIRED. How long after issue it can stay live, however
+                     often it is renewed. At most ${STANDING_HARD_MAX_CAP_D}d.
+  --period <dur>     How long it stays live without a renewal. At most
+                     ${STANDING_PERIOD_CAP_D}d. Default ${STANDING_DEFAULT_H}h.
+  Its scopes are the plugins named, never --all or *. Renewal and revoke are
+  separate verbs.
 `
 
 const MINUTE = 60 * 1000
@@ -654,6 +689,10 @@ export async function run(argv: string[]): Promise<number> {
     zone?: string
     remove?: boolean
     principal?: string
+    standing?: boolean
+    holder?: string
+    period?: string
+    'hard-max'?: string
   }
   let positionals: string[]
   try {
@@ -672,6 +711,10 @@ export async function run(argv: string[]): Promise<number> {
         zone: { type: 'string' },
         remove: { type: 'boolean' },
         principal: { type: 'string' },
+        standing: { type: 'boolean' },
+        holder: { type: 'string' },
+        period: { type: 'string' },
+        'hard-max': { type: 'string' },
       },
       allowPositionals: true,
       strict: true,
@@ -685,6 +728,14 @@ export async function run(argv: string[]): Promise<number> {
     positionals = [...new Set(parsed.positionals)]
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`)
+    return 1
+  }
+
+  // A standing grant is its own gesture, answered before every other mode, so
+  // it never reaches the gate-first dispatch and never applies a parked result.
+  if (values.standing) return await issueStandingGrant(positionals, values)
+  if (values.holder !== undefined || values.period !== undefined || values['hard-max'] !== undefined) {
+    process.stderr.write('--holder, --period and --hard-max only go with --standing. Nothing was written.\n')
     return 1
   }
 
@@ -780,29 +831,7 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   // Name validation, all of it, before any write.
-  if (!values.all) {
-    const known = [...manifests.keys()]
-    const unknown = positionals.filter((name) => !manifests.has(name))
-    if (unknown.length > 0) {
-      for (const name of unknown) {
-        const broken = failures.find((f) => f.plugin === name)
-        if (broken) {
-          process.stderr.write(
-            `Plugin '${name}' exists but its manifest failed to load: ${broken.error}\n`,
-          )
-          continue
-        }
-        const hint = suggest(name, known)
-        process.stderr.write(
-          hint
-            ? `Unknown plugin: ${name} — did you mean '${hint}'?\n`
-            : `Unknown plugin: ${name}. Known plugins: ${known.sort().join(', ') || '(none)'}\n`,
-        )
-      }
-      process.stderr.write('Nothing was granted.\n')
-      return 1
-    }
-  }
+  if (!values.all && refuseUnknownNames(positionals, manifests, failures)) return 1
 
   const now = Date.now()
   const approvalPath = sessionApprovalPath()
@@ -1236,4 +1265,195 @@ async function writeSessionGrant(
   process.stdout.write(`Grant file: ${approvalPath}\n`)
 
   return 0
+}
+
+/**
+ * Report every name with no loaded manifest, then refuse once. Returns true
+ * when it refused, so the caller writes nothing.
+ */
+function refuseUnknownNames(
+  names: string[],
+  manifests: Map<string, PluginManifest>,
+  failures: Awaited<ReturnType<typeof loadPluginManifests>>['failures'],
+): boolean {
+  const known = [...manifests.keys()]
+  const unknown = names.filter((name) => !manifests.has(name))
+  if (unknown.length === 0) return false
+  for (const name of unknown) {
+    const broken = failures.find((f) => f.plugin === name)
+    if (broken) {
+      process.stderr.write(`Plugin '${name}' exists but its manifest failed to load: ${broken.error}\n`)
+      continue
+    }
+    const hint = suggest(name, known)
+    process.stderr.write(
+      hint
+        ? `Unknown plugin: ${name} — did you mean '${hint}'?\n`
+        : `Unknown plugin: ${name}. Known plugins: ${known.sort().join(', ') || '(none)'}\n`,
+    )
+  }
+  process.stderr.write('Nothing was granted.\n')
+  return true
+}
+
+/**
+ * The sentence for each code the gate's issue transform can refuse with. The
+ * gate returns codes and this file owns the words. No sentence echoes a value.
+ */
+function issueRefusalText(refusal: IssueRefusal): string {
+  switch (refusal.code) {
+    case 'no-scope':
+      return 'a standing grant names at least one plugin'
+    case 'all-scopes':
+      return 'a standing grant never covers every plugin'
+    case 'bad-period':
+      return 'the renewal period is not a positive whole number of milliseconds'
+    case 'period-over-cap':
+      return `the renewal period is over the ${STANDING_PERIOD_CAP_D}-day cap`
+    case 'hard-max-over-cap':
+      return `the hard maximum is over the ${STANDING_HARD_MAX_CAP_D}-day cap`
+    case 'hard-max-below-period':
+      return 'the hard maximum is shorter than the renewal period'
+    case 'bad-id':
+      return 'the new grant id is not 12 lowercase hex characters'
+    case 'duplicate-id':
+      return 'that grant id is already in the standing grants file'
+    case 'bad-principal-id':
+      return 'the holder or the issuer is not a principal id'
+    case 'holder-is-issuer':
+      return 'the holder and the issuer are one principal'
+    default: {
+      // A code added to the union without a sentence fails typecheck here.
+      const unmapped: never = refusal.code
+      return unmapped
+    }
+  }
+}
+
+/**
+ * `approve --standing`: issue a standing grant to a named machine, from a
+ * named human. Every flag check runs before the lock. Inside one state-lock
+ * hold it checks both principals, reads the standing grants file, runs the
+ * gate's issue transform under its fixed caps, records `grant.issued`, and
+ * only then writes the file, so a failed record issues nothing. It never
+ * reaches the gate-first dispatch, so it can never apply a parked result.
+ */
+async function issueStandingGrant(
+  positionals: string[],
+  values: {
+    all?: boolean
+    ttl?: string
+    replace?: boolean
+    long?: boolean
+    content?: boolean
+    'not-after'?: string
+    'not-before'?: string
+    zone?: string
+    remove?: boolean
+    principal?: string
+    holder?: string
+    period?: string
+    'hard-max'?: string
+  },
+): Promise<number> {
+  const refuse = (sentence: string): number => {
+    process.stderr.write(`approve --standing: ${sentence} Nothing was written.\n`)
+    return 1
+  }
+
+  const mixed = [
+    values.all ? '--all' : null,
+    values.ttl !== undefined ? '--ttl' : null,
+    values.long ? '--long' : null,
+    values.replace ? '--replace' : null,
+    values.content ? '--content' : null,
+    values.remove ? '--remove' : null,
+    values['not-after'] !== undefined ? '--not-after' : null,
+    values['not-before'] !== undefined ? '--not-before' : null,
+    values.zone !== undefined ? '--zone' : null,
+  ].filter((f): f is string => f !== null)
+  if (mixed.length > 0) {
+    return refuse(`${mixed.join(', ')} cannot go with --standing: a standing grant has its own scopes and terms.`)
+  }
+  if (values.principal === undefined) {
+    return refuse('--principal is required: a named human issues a standing grant, and one is never inferred.')
+  }
+  if (values.holder === undefined) {
+    return refuse('--holder is required: a standing grant is held by a named machine.')
+  }
+  if (values['hard-max'] === undefined) {
+    return refuse('--hard-max is required: a standing grant always has an end.')
+  }
+  let periodMs: number | undefined
+  if (values.period !== undefined) {
+    const parsed = parseDuration(values.period)
+    if (parsed === null) return refuse('--period expects a positive duration like 12h or 7d.')
+    periodMs = parsed
+  }
+  const hardMaxMs = parseDuration(values['hard-max'])
+  if (hardMaxMs === null) return refuse('--hard-max expects a positive duration like 30d or 90d.')
+
+  // A `*` is left to the transform, which says why it is refused.
+  const { manifests, failures } = await loadPluginManifests(pluginsDir())
+  if (refuseUnknownNames(positionals.filter((name) => name !== '*'), manifests, failures)) return 1
+
+  const statePath = engineStatePath()
+  const lockPath = pathsForStateFile(statePath).lockPath
+  await mkdir(dirname(lockPath), { recursive: true })
+
+  return await withStateLockAt(lockPath, async (): Promise<number> => {
+    // Checked in the hold, so a principal disabled while this waited is refused.
+    const issuer = await requirePrincipal(values.principal, 'active-human')
+    if ('refused' in issuer) return refuse(`--principal: ${issuer.refused}.`)
+    const holder = await requirePrincipal(values.holder, 'active-machine')
+    if ('refused' in holder) return refuse(`--holder: ${holder.refused}.`)
+
+    const read = await readStandingStore()
+    if (!read.readable) return refuse('the standing grants file cannot be read.')
+
+    const now = Date.now()
+    const id = newStandingId()
+    const change = issueStanding(
+      read.store,
+      // Both flags were present above, so both checks resolved an id.
+      { id, holder: holder.id!, issuer: issuer.id!, scopes: positionals, periodMs, hardMaxMs },
+      now,
+    )
+    if ('refused' in change) return refuse(`${issueRefusalText(change.refused)}.`)
+    const grant = change.store.grants.find((g) => g.id === id)!
+
+    try {
+      await appendAudit(statePath, 'grant.issued', {
+        kind: 'standing',
+        id: grant.id,
+        holder: grant.holder,
+        principal: grant.issuer,
+        scopes: grant.scopes,
+        period_ms: grant.period_ms,
+        hard_max_ms: grant.hard_max_ms,
+      })
+    } catch {
+      process.stderr.write('The audit store could not record this grant, so nothing was granted.\n')
+      return 1
+    }
+
+    try {
+      await writeStandingStore(change.store)
+    } catch {
+      process.stderr.write(
+        'approve: the standing grants file could not be written. The audit record names a grant ' +
+          'that was not issued, and nothing grants it.\n',
+      )
+      return 1
+    }
+
+    process.stdout.write(
+      'Answering the Grant gate: issuing a standing grant.\n' +
+        `Standing grant ${grant.id}: holder ${grant.holder}, issuer ${grant.issuer}, scopes ${grant.scopes.join(', ')}.\n` +
+        `Renewal deadline ${new Date(now + grant.period_ms).toISOString()}, ` +
+        `hard maximum ${new Date(now + grant.hard_max_ms).toISOString()}.\n` +
+        `Standing grants file: ${standingGrantsPath()}\n`,
+    )
+    return 0
+  })
 }
