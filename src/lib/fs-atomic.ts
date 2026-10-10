@@ -71,13 +71,21 @@ export async function atomicWriteJson<T>(path: string, value: T, opts: { mode?: 
  * § 14 states for the audit store. The upgrade path is the same one.
  */
 export async function syncInstalled(path: string): Promise<void> {
-  for (const p of [path, dirname(path)]) {
-    const fh = await open(p, 'r')
-    try {
-      await fh.sync()
-    } finally {
-      await fh.close()
-    }
+  await syncPath(path)
+  await syncPath(dirname(path))
+}
+
+/** Flush the directory that held a file just unlinked, so the removal survives a power loss. */
+export async function syncRemoved(path: string): Promise<void> {
+  await syncPath(dirname(path))
+}
+
+async function syncPath(p: string): Promise<void> {
+  const fh = await open(p, 'r')
+  try {
+    await fh.sync()
+  } finally {
+    await fh.close()
   }
 }
 

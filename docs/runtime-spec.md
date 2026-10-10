@@ -1775,9 +1775,11 @@ refused.
   `"grants": []`.
 - A standing revoke syncs the standing grants file and its directory to disk
   before it reports success, so a power loss cannot bring a revoked grant
-  back. A sync that fails exits 1 and says so, with the grant already gone
-  from the file. Issue and renew do not sync: losing either one only takes
-  authority away. On macOS under Bun the sync has the limit § 14 states.
+  back. A bare revoke deletes the session grant file, then syncs the
+  directory that held it, for the same reason. A sync that fails exits 1 and
+  says so, with the grant already gone from the file. Issue and renew do not
+  sync: losing either one only takes authority away. On macOS under Bun the
+  sync has the limit § 14 states.
 
 The standing grants file is read whole, so one malformed grant makes every
 standing grant in it unreadable, and then both standing forms refuse with

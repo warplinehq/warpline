@@ -163,6 +163,43 @@ describe('revoke takes exactly what it names', () => {
     }
   })
 
+  // The session grant is revoked by deleting its file, so the directory that
+  // held it is what must reach the disk.
+  test('bare revoke syncs the session grant directory after the file is gone', async () => {
+    const synced: Array<{ path: string; stillHeld: boolean }> = []
+    const sync = spyOn(fsAtomic, 'syncRemoved').mockImplementation(async (path: string) => {
+      synced.push({ path, stillHeld: existsSync(sessionApprovalPath()) })
+    })
+    try {
+      const r = await capture(['revoke'])
+      expect(r.code).toBe(0)
+      expect(synced).toEqual([{ path: sessionApprovalPath(), stillHeld: false }])
+    } finally {
+      sync.mockRestore()
+    }
+  })
+
+  test('a bare revoke whose sync fails says the revoke may not survive a power loss, and exits 1', async () => {
+    const sync = spyOn(fsAtomic, 'syncRemoved').mockImplementation(async () => {
+      throw new Error('EIO')
+    })
+    try {
+      const r = await capture(['revoke'])
+      expect(r.code).toBe(1)
+      expect(r.stderr).toContain('power loss')
+      expect(existsSync(sessionApprovalPath())).toBe(false)
+    } finally {
+      sync.mockRestore()
+    }
+  })
+
+  test('syncRemoved resolves once the file is gone', async () => {
+    const gone = join(vh.home, 'gone.json')
+    writeFileSync(gone, '{}')
+    rmSync(gone)
+    await fsAtomic.syncRemoved(gone)
+  })
+
   test('syncInstalled resolves on a real file and rejects on a missing one', async () => {
     await fsAtomic.syncInstalled(standingGrantsPath())
     await expect(fsAtomic.syncInstalled(join(vh.home, 'missing.json'))).rejects.toThrow()
