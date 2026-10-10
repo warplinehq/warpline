@@ -726,12 +726,13 @@ process home for every advance after it:
 
 ```typescript
 import { join } from 'node:path'
+import type { CapabilityHandlerFn } from 'warpline/unstable-capabilities'
 import { warplineHome } from 'warpline/lib/paths'
 
 // Wrong: module scope reads the process home, once per process.
 // const dir = join(warplineHome(), 'state')
 
-export const handler: CapabilityHandlerFn = async (manifest, args, signal) => {
+export const handler: CapabilityHandlerFn = async (manifest, args, signal, capabilities) => {
   // Right: resolved inside the call, so it is the advance's home.
   const dir = join(warplineHome(), 'state')
   // ...
