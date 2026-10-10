@@ -24,7 +24,8 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, wr
 import { join, relative } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
 import * as store from '../engine-state-store.js'
-import { mergeGrant } from '../approval-gate.js'
+import { issueStanding, mergeGrant, newStandingId, readStandingStore, revokeStanding, writeStandingStore } from '../approval-gate.js'
+import { loadRegistry } from '../../lib/principals.js'
 import { runAdvance } from '../engine.js'
 import { _setHome } from '../../lib/paths.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
@@ -736,5 +737,118 @@ describe('content', () => {
     }
     // The rotated store really did rotate, so the answer crossed a segment.
     expect(readdirSync(join(home.root, 'rotated', 'audit')).filter((f) => f.endsWith('.jsonl')).length).toBeGreaterThan(1)
+  })
+})
+
+// -- Attribution: the grants that covered a fire (26-04) ---------------------
+
+const DAY = 24 * 60 * 60 * 1000
+
+/** `ops` an active human and `ci` an active machine, written and observed once (P10). */
+async function seedPrincipals(): Promise<void> {
+  writeFileSync(
+    join(home.root, 'principals.json'),
+    JSON.stringify({
+      principals: [
+        { id: 'ops', type: 'human', status: 'active' },
+        { id: 'ci', type: 'machine', status: 'active' },
+      ],
+    }),
+  )
+  const loaded = await loadRegistry(statePath())
+  expect('refused' in loaded).toBe(false)
+}
+
+/** Standing grants held by `ci`, issued by `ops`, over `mailer`, through the gate's own writer. */
+async function issueStandingGrants(ids: string[], issuedAt = Date.now(), periodMs = DAY): Promise<void> {
+  const read = await readStandingStore()
+  if (!read.readable) throw new Error(`standing grants file unreadable: ${read.cause}`)
+  let next = read.store
+  for (const id of ids) {
+    const issued = issueStanding(
+      next,
+      { id, holder: 'ci', issuer: 'ops', scopes: ['mailer'], periodMs, hardMaxMs: 30 * DAY },
+      issuedAt,
+    )
+    if ('refused' in issued) throw new Error(`issue refused: ${issued.refused.code}`)
+    next = issued.store
+  }
+  await writeStandingStore(next)
+}
+
+describe('a fire names the grants that covered it', () => {
+  test('a session window and two standing grants are all named on the intent, sorted', async () => {
+    writePlugin('mailer')
+    await seedPrincipals()
+    await mergeGrant(['mailer'], { principal: 'ops' }, join(home.root, '.session-approval'))
+    await issueStandingGrants(['222222222222', '111111111111'])
+
+    const r = await advance()
+
+    expect(r.plugin_states.get('mailer')).toBe('completed')
+    const intents = linesOf('fire.intent').filter((l) => l.data.plugin === 'mailer')
+    expect(intents).toHaveLength(1)
+    expect(intents[0]!.data.grants).toEqual([
+      { kind: 'session', scope: 'mailer', issuer: 'ops' },
+      { kind: 'standing', id: '111111111111', holder: 'ci', issuer: 'ops' },
+      { kind: 'standing', id: '222222222222', holder: 'ci', issuer: 'ops' },
+    ])
+  })
+
+  test('with one standing grant revoked first, the intent names two', async () => {
+    writePlugin('mailer')
+    await seedPrincipals()
+    await mergeGrant(['mailer'], { principal: 'ops' }, join(home.root, '.session-approval'))
+    await issueStandingGrants(['111111111111', '222222222222'])
+    const read = await readStandingStore()
+    if (!read.readable) throw new Error(`standing grants file unreadable: ${read.cause}`)
+    const revoked = revokeStanding(read.store, ['111111111111'])
+    if ('refused' in revoked) throw new Error(`revoke refused: ${revoked.refused.code}`)
+    await writeStandingStore(revoked.store)
+
+    await advance()
+
+    const intents = linesOf('fire.intent').filter((l) => l.data.plugin === 'mailer')
+    expect(intents).toHaveLength(1)
+    expect(intents[0]!.data.grants).toEqual([
+      { kind: 'session', scope: 'mailer', issuer: 'ops' },
+      { kind: 'standing', id: '222222222222', holder: 'ci', issuer: 'ops' },
+    ])
+  })
+
+  test('under a lapsed standing grant only, nothing fires and no intent is written', async () => {
+    writePlugin('mailer')
+    await seedPrincipals()
+    await issueStandingGrants([newStandingId()], Date.now() - 3 * DAY, DAY)
+
+    const r = await advance()
+
+    expect(r.plugin_states.get('mailer')).toBe('skipped')
+    expect(mark('mailer', 'invoked')).toBeNull()
+    expect(linesOf('fire.intent').filter((l) => l.data.plugin === 'mailer')).toEqual([])
+  })
+
+  test('a content fire names no grant', async () => {
+    await seedContentApproval()
+
+    await advance()
+
+    expect(mark('sender', 'invoked')).toBe('yes')
+    const intents = linesOf('fire.intent').filter((l) => l.data.plugin === 'sender')
+    expect(intents).toHaveLength(1)
+    expect(intents[0]!.data.grants).toEqual([])
+  })
+
+  test('four hundred standing grants push the intent past one record and nothing fires', async () => {
+    writePlugin('mailer')
+    await seedPrincipals()
+    await issueStandingGrants(Array.from({ length: 400 }, () => newStandingId()))
+
+    const r = await advance()
+
+    expect(r.audit_failures).toContainEqual({ plugin: 'mailer', kind: 'fire.intent' })
+    expect(mark('mailer', 'invoked')).toBeNull()
+    expect(r.plugin_states.get('mailer')).toBe('failed')
+    expect(linesOf('fire.intent').filter((l) => l.data.plugin === 'mailer')).toEqual([])
   })
 })

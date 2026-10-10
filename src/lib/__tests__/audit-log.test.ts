@@ -35,6 +35,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as audit from '../audit-log.js'
+import * as gate from '../../runtime/approval-gate.js'
 import { deriveHost } from '../host-identity.js'
 import * as hostIdentity from '../host-identity.js'
 import { appendRelinked } from './helpers/audit-chain.js'
@@ -1737,5 +1738,65 @@ describe('a Checkpoint the walk cannot summarise', () => {
       indeterminate: null,
     })
     expect(JSON.stringify(summary)).not.toContain('CHECKPOINT_SENTINEL_2e4')
+  })
+})
+
+describe('grant ids and records stored before attribution', () => {
+  const DAY = 24 * 60 * 60 * 1000
+  const standingIntent = (id: string) =>
+    audit.appendAudit(statePath, 'fire.intent', {
+      plugin: 'mailer',
+      run_id: 'run-1',
+      class: 'session',
+      effect_id: null,
+      fingerprint: null,
+      grants: [{ kind: 'standing', id, holder: 'ci', issuer: 'ops' }],
+    })
+
+  test('every id the gate makes is one the store accepts, and a malformed one is refused by both', async () => {
+    for (let i = 0; i < 50; i++) {
+      const id = gate.newStandingId()
+      const refused = await standingIntent(id).then(
+        () => false,
+        () => true,
+      )
+      expect({ id, refused }).toEqual({ id, refused: false })
+    }
+    for (const id of ['1111111111111', 'ABCDEF123456']) {
+      const err = await standingIntent(id).then(
+        () => null,
+        (e: unknown) => e,
+      )
+      expect(err).toBeInstanceOf(audit.AuditAppendError)
+      const issued = gate.issueStanding(
+        { min_reader_version: gate.STANDING_READER_VERSION, grants: [] },
+        { id, holder: 'ci', issuer: 'ops', scopes: ['mailer'], hardMaxMs: 30 * DAY },
+        Date.now(),
+      )
+      expect(issued).toEqual({ refused: { code: 'bad-id' } })
+    }
+  })
+
+  test('records stored before attribution still walk', async () => {
+    await audit.appendAudit(statePath, 'preference.set', { key: 'review_gate', old: null, new: HEX_A })
+    const seq = appendRelinked(auditDir, 'warpline.audit.fire.intent', {
+      plugin: 'mailer',
+      run_id: 'run-old',
+      class: 'session',
+      effect_id: null,
+      fingerprint: null,
+    })
+    appendRelinked(auditDir, 'warpline.audit.denial.lifted', { plugin: 'p', fingerprint: HEX_A })
+    appendRelinked(auditDir, 'warpline.audit.grant.issued', { scopes: ['p'], ttl_ms: null, replace: false, long: false })
+    const open = [{ seq, plugin: 'mailer', run_id: 'run-old', effect_id: null }]
+
+    expect(await audit.openIntents(statePath)).toStrictEqual(open)
+    const head = await audit.readHead(statePath)
+    expect(await audit.verifyStore(statePath, { seq: head.seq, hex: head.head }, Date.now())).toMatchObject({
+      verdict: 'clean',
+      reason: null,
+      open_intents: open,
+      intents_unreadable: null,
+    })
   })
 })
