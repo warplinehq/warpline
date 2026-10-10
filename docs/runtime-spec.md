@@ -44,14 +44,19 @@ root that is absent, is not a directory, cannot be read, or is the empty string
 is refused before the advance writes anything.
 
 A library host runs another home with `AdvanceOptions.home`. For that advance,
-handlers included, everything the home derives moves with it: `state/`,
+handler calls included, everything the home derives moves with it: `state/`,
 `runs/`, `logs/`, `events.jsonl`, the run lock, `preferences.json`, the
 session-approval grant, `standing-grants.json`, `principals.json`, the audit
 store and `config/<plugin>.json`. The plugin root follows the rule above, with
 `<home>/plugins` as its last step. The scope is the advance's own async work,
 so two advances on two homes may run at once in one process. It does not reach
 a child process a handler spawns: that inherits the environment and resolves
-`WARPLINE_HOME` as usual. `home` is refused before any write when it is the
+`WARPLINE_HOME` as usual. Nor does it reach code a plugin runs at module scope.
+A plugin's modules are evaluated once per process, outside the advance's
+scope, so `const dir = join(warplineHome(), 'state')` at a handler's top level
+holds the process home, for that advance and for every advance after it in the
+process. A handler resolves `warplineHome()`, and any path built from it,
+inside its handler function. `home` is refused before any write when it is the
 empty string, or when it is passed with `stateDir`, `runsDir`, `logsDir`,
 `eventsPath`, `preferencesPath`, `approvalPath` or `lockPath`, each of which is
 a test seam that moves one file.

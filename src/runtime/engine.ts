@@ -254,7 +254,7 @@ export interface AdvanceOptions {
   trigger?: RunTrigger
   /**
    * The home this advance runs, in place of the process home. Everything
-   * home-derived moves with it for the whole advance, plugin handlers included:
+   * home-derived moves with it for the whole advance, handler calls included:
    * state, runs, the event log, the run lock, `logs/`, `preferences.json`, the
    * session-approval grant, the standing grants file, `principals.json`, the
    * audit store and `config/<plugin>.json`. The plugin root is
@@ -263,7 +263,10 @@ export interface AdvanceOptions {
    * Scoped to this call's async work, so two advances on two homes may run
    * concurrently in one process. A child process a handler spawns inherits the
    * environment, not this scope: it resolves the process home unless the
-   * handler passes `WARPLINE_HOME` itself.
+   * handler passes `WARPLINE_HOME` itself. Nor does the scope reach a plugin's
+   * module scope. Modules are evaluated once per process, outside this scope,
+   * so a home resolved at a handler's top level is the process home for every
+   * advance. A handler resolves `warplineHome()` inside its call.
    *
    * Refused before any write when it is an empty string, or when it is given
    * together with any of `stateDir`, `runsDir`, `logsDir`, `eventsPath`,

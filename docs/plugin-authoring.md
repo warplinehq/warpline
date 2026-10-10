@@ -716,6 +716,32 @@ rather than a plugin one. Runtime-spec § 11 carries the same fact for the peopl
 reading the other end of it, including the three writes the redirect does not
 reach.
 
+### 5. Resolve the home inside the handler
+
+A library host can run an advance on another home (`AdvanceOptions.home`, see
+[the runtime spec](runtime-spec.md) § 1). `warplineHome()` returns that home
+only while your handler is being called. Your module is evaluated once per
+process, outside any advance, so a value computed at its top level holds the
+process home for every advance after it:
+
+```typescript
+import { join } from 'node:path'
+import { warplineHome } from 'warpline/lib/paths'
+
+// Wrong: module scope reads the process home, once per process.
+// const dir = join(warplineHome(), 'state')
+
+export const handler: CapabilityHandlerFn = async (manifest, args, signal) => {
+  // Right: resolved inside the call, so it is the advance's home.
+  const dir = join(warplineHome(), 'state')
+  // ...
+}
+```
+
+The suite pins both halves with a fixture handler that reads the home at
+module scope and again inside its call, and holds every shipped example
+handler to the rule.
+
 ## Testing
 
 Follow the example plugins: export the pure decision logic (the filter, the
@@ -741,5 +767,6 @@ one case needs longer.
 - [ ] Every environment variable you read declared in `secrets`?
 - [ ] Args validated, failures returned as typed errors?
 - [ ] `signal` forwarded to real I/O?
+- [ ] `warplineHome()` resolved inside the handler, never at module scope?
 - [ ] Decision logic exported and unit-tested?
 - [ ] `ttl_hours` set to how stale is genuinely acceptable, not a guess?

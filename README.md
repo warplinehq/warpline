@@ -284,6 +284,11 @@ const result = await runAdvance()
 const other = await runAdvance({ home: '/srv/tenant-a/.warpline' })
 ```
 
+A plugin sees that home only where it resolves it inside its handler call.
+A module is evaluated once per process, outside any advance, so a path built
+from `warplineHome()` at a handler's top level holds the process home for
+every tenant ([plugin authoring](docs/plugin-authoring.md#5-resolve-the-home-inside-the-handler)).
+
 ## Where the LLM fits
 
 > If you can write an `if/else` for it, it's code.

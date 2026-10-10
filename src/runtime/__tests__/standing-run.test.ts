@@ -440,6 +440,47 @@ export async function handler(_m, args) {
     expect(snapshot(home)).toEqual(before)
   })
 
+  /**
+   * The limit of `home`, pinned. A handler that resolves the home inside its
+   * call sees the advance's home. One that resolves it at module scope sees the
+   * process home: module evaluation under `import()` does not see the advance's
+   * scope (Bun 1.4.2), and a module is evaluated once per process anyway, so
+   * even a runtime that carried the scope would pin the first advance's home.
+   * § 1, the `home` doc comment and docs/plugin-authoring.md say so. If the
+   * module-scope half goes red, the runtime changed: re-read those three before
+   * relaxing it, because the once-per-process half still holds.
+   */
+  test("a handler sees the advance's home inside its call, and the process home at module scope", async () => {
+    const dir = join(other, 'plugins', 'where')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, 'manifest.ts'),
+      `export const manifest = ${JSON.stringify({ ...sideEffectManifest('where'), side_effects: [], approval_class: undefined })}`,
+    )
+    const published = join(import.meta.dir, '..', '..', '..', 'dist', 'lib', 'paths-public.js')
+    writeFileSync(
+      join(dir, 'handler.ts'),
+      `import { writeFileSync } from 'node:fs'
+import { warplineHome } from ${JSON.stringify(published)}
+const atLoad = warplineHome()
+export async function handler() {
+  writeFileSync(${JSON.stringify(join(other, 'where.json'))}, JSON.stringify({ atLoad, atCall: warplineHome() }))
+  return { status: 'success', phases_completed: [], phases_failed: [], errors: [], data_freshness: {},
+    summary: 'fixture ok', artifacts_produced: [], schema_version: 1 }
+}
+`,
+    )
+
+    const result = await runAdvance({ home: other, now: Date.now() })
+
+    expect(result.plugin_states.get('where')).toBe('completed')
+    const seen = JSON.parse(readFileSync(join(other, 'where.json'), 'utf-8')) as { atLoad: string; atCall: string }
+    // The process home as the published module resolves it outside any advance.
+    const { warplineHome: processHome } = (await import(published)) as { warplineHome: () => string }
+    expect(seen).toEqual({ atLoad: processHome(), atCall: other })
+    expect(seen.atLoad).not.toBe(other)
+  })
+
   test('two concurrent advances on two homes are each authorised only by their own standing grant', async () => {
     const now = Date.now()
     const second = mkdtempSync(join(tmpdir(), 'warpline-standing-second-'))
