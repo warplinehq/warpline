@@ -4451,9 +4451,15 @@ make the rest. A file that will not parse, or that
 fails the schema, is refused with a message naming key paths and schema facts,
 never a value from the file.
 
-`warpline approve`, `warpline deny` and `warpline resolve` read this file when
-`--principal` is given, and record a hand edit first, as `warpline principal`
-does. Without the flag they do not read it.
+`warpline approve`, `warpline deny`, `warpline resolve` and `warpline revoke`
+read this file when `--principal` is given, and record a hand edit first, as
+`warpline principal` does. Without the flag they do not read it, with two
+exceptions. `warpline approve --standing` always reads it, since it requires
+`--principal` and checks `--holder` against it too. `warpline revoke --holder`
+reads it to check the holder, with or without `--principal` (§ 9).
+`warpline renew` always reads it, since it requires `--principal`. Each
+records a hand edit first. A revoke goes through even when that record cannot
+be written (§ 9).
 
 An advance reads this file only when the standing grants file holds a grant
 (§ 9), and records a hand edit first, as `warpline principal` does. A record it
