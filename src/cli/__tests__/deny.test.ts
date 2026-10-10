@@ -12,7 +12,7 @@
  * than the plugins the operator named.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
-import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -499,6 +499,61 @@ describe('warpline deny', () => {
     expect(await readFile(sessionApprovalPath(), 'utf-8')).toBe(grantBefore)
   })
 
+  const GRANT_WRITERS = [
+    'mergeGrant',
+    'grantApproval',
+    'revokeApproval',
+    'issueStanding',
+    'renewStanding',
+    'revokeStanding',
+    'writeStandingStore',
+  ]
+  const GRANT_DEFINER = join('runtime', 'approval-gate.ts')
+
+  // Both edge shapes: `from '…'` and `import('…')`, the latter covering the
+  // bare side-effect `import '…'` too, under any of the three quotes. Matching
+  // only the static form left a hole a grant writer could hide in —
+  // `engine-state-store.ts` already uses `await import('../board/engine-events.js')`,
+  // so the shape the walker could not see was in the closure it was walking. A
+  // template specifier with an interpolation resolves to no file, so the walk
+  // throws on it rather than skipping a subtree.
+  const RELATIVE_EDGE = /(?:from|import)\s*\(?\s*(['"`])(\.[^'"`]+)\1/g
+
+  /** Every file reachable from `entry` by relative import, with its source. */
+  async function walkImports(entry: string): Promise<Map<string, string>> {
+    const seen = new Map<string, string>()
+    async function visit(file: string): Promise<void> {
+      if (seen.has(file)) return
+      const source = await readFile(file, 'utf-8')
+      seen.set(file, source)
+      for (const m of source.matchAll(RELATIVE_EDGE)) {
+        await visit(resolve(dirname(file), (m[2] as string).replace(/\.js$/, '.ts')))
+      }
+    }
+    await visit(entry)
+    return seen
+  }
+
+  // A comment line is skipped: naming a writer to explain why it is not called is not a call.
+  const COMMENT = /^\s*(\*|\/\/|\/\*)/
+  // Any mention, not only a call: an aliased import, a destructure, a reference
+  // held for later and a quoted bracket key all spell the name somewhere.
+  const MENTIONS = GRANT_WRITERS.map((w) => new RegExp(`\\b${w}\\b`))
+
+  /** `<path>:<line>: <text>` for every code line in the closure that names a grant writer. */
+  function grantWriterCallers(closure: ReadonlyMap<string, string>, root: string): string[] {
+    const out: string[] = []
+    for (const [file, source] of closure) {
+      if (file.endsWith(GRANT_DEFINER)) continue
+      source.split('\n').forEach((text, i) => {
+        if (!COMMENT.test(text) && MENTIONS.some((re) => re.test(text))) {
+          out.push(`${relative(root, file)}:${i + 1}: ${text.trim()}`)
+        }
+      })
+    }
+    return out
+  }
+
   /**
    * The transitive version of the prohibition, replacing a grep of `deny.ts`
    * alone.
@@ -509,8 +564,11 @@ describe('warpline deny', () => {
    * that matters — a grant write added to a helper inside `engine.ts` would
    * have broken the prohibition with this test still green.
    *
-   * What is scanned is CALL shape, not mere mention: `suggest.ts` names a
-   * writer in a comment explaining why it exists, and a comment is not a call.
+   * What is scanned is any mention on a code line, not only a call shape: an
+   * aliased import, a held reference, a destructure and a quoted bracket key
+   * reach a writer without spelling `mergeGrant(` (14b). Comment lines are
+   * skipped, since `suggest.ts` names a writer in a comment explaining why it
+   * exists. A name built from pieces at run time is beyond any static scan.
    * The module that DEFINES the writers is skipped for the same reason it is in
    * the closure at all — being reachable is not the defect, being called is.
    *
@@ -519,49 +577,17 @@ describe('warpline deny', () => {
    * blind to it.
    */
   test('14: no module on the denial path calls anything that writes the grant file', async () => {
-    const GRANT_WRITERS = [
-      'mergeGrant',
-      'grantApproval',
-      'revokeApproval',
-      'issueStanding',
-      'renewStanding',
-      'revokeStanding',
-      'writeStandingStore',
-    ]
     for (const name of GRANT_WRITERS) {
       expect(typeof (gate as Record<string, unknown>)[name]).toBe('function')
     }
-    const DEFINER = join('runtime', 'approval-gate.ts')
     const srcRoot = fileURLToPath(new URL('../../', import.meta.url))
-
-    // Both edge shapes: `from '…'` and `import('…')`, the latter covering the
-    // bare side-effect `import '…'` too. Matching only the static form left a
-    // hole a grant writer could hide in — `engine-state-store.ts` already uses
-    // `await import('../board/engine-events.js')`, so the shape the walker
-    // could not see was in the closure it was walking.
-    const RELATIVE_EDGE = /(?:from|import)\s*\(?\s*'(\.[^']+)'/g
-
-    async function walk(entry: string): Promise<Map<string, string>> {
-      const seen = new Map<string, string>()
-      async function visit(file: string): Promise<void> {
-        if (seen.has(file)) return
-        const source = await readFile(file, 'utf-8')
-        seen.set(file, source)
-        for (const m of source.matchAll(RELATIVE_EDGE)) {
-          await visit(resolve(dirname(file), (m[1] as string).replace(/\.js$/, '.ts')))
-        }
-      }
-      await visit(entry)
-      return seen
-    }
-
-    const closure = await walk(fileURLToPath(new URL('../deny.ts', import.meta.url)))
+    const closure = await walkImports(fileURLToPath(new URL('../deny.ts', import.meta.url)))
 
     // Vacuity guards. Without them a walker that resolved nothing would pass,
     // and so would one that never reached the module which made the original
     // claim false.
     expect(closure.size).toBeGreaterThan(5)
-    expect([...closure.keys()].some((f) => f.endsWith(DEFINER))).toBe(true)
+    expect([...closure.keys()].some((f) => f.endsWith(GRANT_DEFINER))).toBe(true)
 
     // …and the widening is load-bearing rather than cosmetic.
     // `engine-state-store.ts` reaches `engine-events.ts` ONLY through a dynamic
@@ -570,22 +596,52 @@ describe('warpline deny', () => {
     // state store. Rooted there, the old pattern found nothing. The root moved
     // out of `src/schemas/` with the store itself, and the claim got stronger
     // for it: the store is not a published subpath at all.
-    const dynamicOnly = await walk(
+    const dynamicOnly = await walkImports(
       fileURLToPath(new URL('../../runtime/engine-state-store.ts', import.meta.url)),
     )
     expect(
       [...dynamicOnly.keys()].some((f) => f.endsWith(join('board', 'engine-events.ts'))),
     ).toBe(true)
 
-    const callers = [...closure.entries()]
-      .filter(
-        ([file, source]) =>
-          !file.endsWith(DEFINER) &&
-          GRANT_WRITERS.some((w) => new RegExp(`\\b${w}\\s*\\(`).test(source)),
-      )
-      .map(([file]) => relative(srcRoot, file))
+    expect(grantWriterCallers(closure, srcRoot)).toEqual([])
+  })
 
-    expect(callers).toEqual([])
+  // Each shape reaches a writer without spelling `mergeGrant(` on one line, or
+  // hides its module behind an import a single-quote walk skips.
+  test('14b: the scan reports an aliased import, a reference, a bracket access, a destructure, and modules behind double-quoted and template imports', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'warpline-deny-guard-'))
+    const files: Record<string, string> = {
+      'root.ts': [
+        "import { a } from './alias.js'",
+        "import { r } from './ref.js'",
+        "import { k } from './bracket.js'",
+        "import { s } from './destructure.js'",
+        'import { q } from "./double.js"',
+        "import { c } from './comment.js'",
+        'export async function root(): Promise<void> {',
+        '  await import(`./template.js`)',
+        '  a(); r(); k(); s(); q(); c()',
+        '}',
+        '',
+      ].join('\n'),
+      'alias.ts': "import { mergeGrant as grant } from './gate.js'\nexport const a = () => grant('p')\n",
+      'ref.ts': "import * as g from './gate.js'\nconst w = g.revokeApproval\nexport const r = () => w()\n",
+      'bracket.ts': "import * as g from './gate.js'\nexport const k = () => g[\"grantApproval\"]('p')\n",
+      'destructure.ts': "import * as g from './gate.js'\nconst { writeStandingStore: w } = g\nexport const s = () => w(x)\n",
+      'double.ts': "export const q = () => mergeGrant('p')\n",
+      'template.ts': "export const t = () => issueStanding(x)\n",
+      'comment.ts': '// mergeGrant( is named here in a comment only\nexport const c = () => 1\n',
+      'gate.ts': 'export const nothing = 1\n',
+    }
+    try {
+      for (const [name, body] of Object.entries(files)) await writeFile(join(dir, name), body)
+      const found = grantWriterCallers(await walkImports(join(dir, 'root.ts')), dir)
+      expect([...new Set(found.map((line) => line.split(':')[0]))].sort()).toEqual(
+        ['alias.ts', 'bracket.ts', 'destructure.ts', 'double.ts', 'ref.ts', 'template.ts'],
+      )
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 
