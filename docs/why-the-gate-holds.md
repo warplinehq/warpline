@@ -62,9 +62,9 @@ reason a two-line change to a scheduled job stays a two-line change.
 A claim about a safety property is worth nothing without its source. So here's
 this one, with line numbers attached.
 
-Blanket approval exists. `approval-gate.ts:261` is the wildcard short-circuit. If
-a grant holds a live wildcard window, the check returns true without consulting
-the plugin's name at all. Read it at
+Blanket approval exists. `approval-gate.ts:261` is the loop that finds it. The
+check looks up the wildcard window first, then the plugin's own. A live wildcard
+window covers every plugin, whatever it's called. Read it at
 [approval-gate.ts](https://github.com/warplinehq/warpline/blob/main/src/runtime/approval-gate.ts).
 I'd rather write that sentence myself than have somebody find it.
 
