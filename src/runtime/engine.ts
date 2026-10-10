@@ -845,8 +845,13 @@ export type EvalResult =
    * content approval rather than on a session grant. It is built from the one
    * standing the scan already computed, never from a second read, and it is
    * what the invocation hands to `witnessAfterGrantRead`.
+   *
+   * `grants` is present exactly when the plugin declares side effects and is
+   * session-class: every live grant that covered it, as the `unapproved`
+   * entry read them. It comes from the same memo that entry awaited, never
+   * from a second read, and it is what the session `fire.intent` records.
    */
-  | { due: true; content?: ContentAuthority }
+  | { due: true; content?: ContentAuthority; grants?: CoveringGrant[] }
   /**
    * `refusal` is present exactly when a content approval EXISTS and does not
    * authorise this fire — never on a session-class plugin, and never on the
@@ -1821,6 +1826,7 @@ async function markContentApprovalSpent(
         class: 'content',
         effect_id: authority.effect_id,
         fingerprint: authority.fingerprint,
+        grants: [],
       })
       intent.seq = intentRecord.seq
 
@@ -2411,6 +2417,13 @@ export async function evaluatePlugin(
         fire_instant: fireInstant,
       },
     }
+  }
+
+  // The `unapproved` entry above already awaited this memo for a
+  // side-effecting session-class plugin, so this is the same read, not a
+  // second one. The intent names what authorised the fire.
+  if (manifest.side_effects.length > 0 && manifest.approval_class !== 'content') {
+    return { due: true, grants: await input.covering() }
   }
 
   return { due: true }
@@ -3506,12 +3519,19 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // declared side effects is not a fire and gets no record.
             if (witness.granted && !('via' in witness)) {
               try {
+                // Never defaulted to `[]`: an empty list on a session fire
+                // would say nothing authorised it. Thrown here, it is an
+                // unrecorded intent and the plugin does not fire.
+                if (ev.grants === undefined) {
+                  throw new Error('a session-class fire reached its intent without the grants that authorised it')
+                }
                 const intent = await appendAudit(stateDir, 'fire.intent', {
                   plugin: pluginName,
                   run_id,
                   class: 'session',
                   effect_id: null,
                   fingerprint: null,
+                  grants: ev.grants,
                 })
                 intentSeq = intent.seq
               } catch (err) {

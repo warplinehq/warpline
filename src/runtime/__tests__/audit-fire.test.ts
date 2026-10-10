@@ -293,6 +293,7 @@ describe('a session fire is written ahead', () => {
       class: 'session',
       effect_id: null,
       fingerprint: null,
+      grants: [{ kind: 'session', scope: 'mailer', issuer: null }],
     })
     expect(fires[1]!.data).toEqual({
       plugin: 'mailer',
@@ -604,6 +605,7 @@ describe('content', () => {
         class: 'content',
         effect_id: approval.effect_id,
         fingerprint: approval.fingerprint,
+        grants: [],
       },
     ])
     expect(linesOf('fire.outcome').map((l) => l.data)).toEqual([
@@ -710,7 +712,7 @@ describe('content', () => {
         audit.appendAudit(
           path,
           'fire.intent',
-          { plugin, run_id, class: 'content', effect_id: hex(`${plugin} effect`), fingerprint: hex(`${plugin} bytes`) },
+          { plugin, run_id, class: 'content', effect_id: hex(`${plugin} effect`), fingerprint: hex(`${plugin} bytes`), grants: [] },
           opts,
         )
       const done = await intent('done', 'run-1')
@@ -727,7 +729,7 @@ describe('content', () => {
       await audit.appendAudit(
         path,
         'fire.resolved',
-        { plugin: 'answered', effect_id: hex('answered effect'), intent_seq: answered.seq, answer: 'not_shipped' },
+        { plugin: 'answered', effect_id: hex('answered effect'), intent_seq: answered.seq, answer: 'not_shipped', principal: null },
         opts,
       )
 

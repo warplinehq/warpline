@@ -466,7 +466,7 @@ describe('a registry past the size one record could carry', () => {
 
   /** A store with one record in it, so a test can plant a line after it. */
   async function seededStore(): Promise<void> {
-    await audit.appendAudit(engineStatePath(), 'denial.lifted', { plugin: 'p', fingerprint: 'a'.repeat(64) })
+    await audit.appendAudit(engineStatePath(), 'denial.lifted', { plugin: 'p', fingerprint: 'a'.repeat(64), principal: null })
   }
 
   test('160 principals with 64-character ids are each added on the record, and no record grows with the registry', async () => {
@@ -528,7 +528,7 @@ describe('a registry past the size one record could carry', () => {
     expect((await principal(['list'])).code).toBe(0)
     expect(ofType(OBSERVED)).toHaveLength(0)
 
-    await audit.appendAudit(engineStatePath(), 'denial.lifted', { plugin: 'p', fingerprint: 'a'.repeat(64) }, { maxSegmentBytes: 1 })
+    await audit.appendAudit(engineStatePath(), 'denial.lifted', { plugin: 'p', fingerprint: 'a'.repeat(64), principal: null }, { maxSegmentBytes: 1 })
     const opened = ofType('warpline.audit.segment.opened').at(-1)!.data as {
       authority: { principals: { sha256: string; entries: Record<string, string> } }
     }

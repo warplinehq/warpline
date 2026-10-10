@@ -202,6 +202,7 @@ export async function run(argv: string[]): Promise<number> {
           await appendAudit(statePath, 'denial.lifted', {
             plugin,
             fingerprint: /^[0-9a-f]{64}$/.test(stored) ? stored : null,
+            principal: null,
           })
         } catch {
           process.stderr.write(
@@ -351,6 +352,7 @@ if (recorded.length === 0) return 0
           plugin: denial.plugin,
           fingerprint: denial.fingerprint,
           discarded_gate_run_id: gone?.runId ?? null,
+          principal: null,
         })
       } catch {
         process.stderr.write(

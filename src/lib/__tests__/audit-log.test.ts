@@ -73,7 +73,7 @@ function segmentLines(): string[] {
   return text.slice(0, -1).split('\n')
 }
 
-const lift = () => audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A })
+const lift = () => audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A, principal: null })
 
 describe('audit store: genesis and the chain', () => {
   test('readHead on a home with no store is seq 0 and 64 zeros, and creates nothing', async () => {
@@ -121,7 +121,7 @@ describe('audit store: genesis and the chain', () => {
     expect(record.source).toBe(genesis.source)
     expect(record.warplineprev).toBe(sha256(lines[0]!))
     expect(Number.isNaN(Date.parse(record.time))).toBe(false)
-    expect(record.data).toEqual({ plugin: 'p', fingerprint: HEX_A })
+    expect(record.data).toEqual({ plugin: 'p', fingerprint: HEX_A, principal: null })
 
     expect(result).toEqual({ seq: 2, head: sha256(lines[1]!) })
     expect(await audit.readHead(statePath)).toEqual(result)
@@ -164,12 +164,12 @@ describe('audit store: what it refuses writes nothing and echoes nothing', () =>
   }
 
   test('data with a key its kind does not declare', async () => {
-    await refuses(() => anyAppend(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A, extra: 1 }))
+    await refuses(() => anyAppend(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A, principal: null, extra: 1 }))
   })
 
   test('a digest that is not hex, without echoing it', async () => {
     const err = await refuses(() =>
-      anyAppend(statePath, 'denial.lifted', { plugin: 'p', fingerprint: 'NOT-HEX-SENTINEL-1234' }),
+      anyAppend(statePath, 'denial.lifted', { plugin: 'p', fingerprint: 'NOT-HEX-SENTINEL-1234', principal: null }),
     )
     expect(err.message).not.toContain('NOT-HEX-SENTINEL-1234')
   })
@@ -177,7 +177,7 @@ describe('audit store: what it refuses writes nothing and echoes nothing', () =>
   test('a line over 16384 bytes', async () => {
     const scopes = Array.from({ length: 200 }, (_, i) => `${String(i).padStart(3, '0')}${'s'.repeat(97)}`)
     await refuses(() =>
-      anyAppend(statePath, 'grant.issued', { scopes, ttl_ms: null, replace: false, long: false }),
+      anyAppend(statePath, 'grant.issued', { kind: 'session', scopes, ttl_ms: null, replace: false, long: false, principal: null }),
     )
   })
 })
@@ -231,7 +231,7 @@ type Settled = { settled: 'resolved'; value: { seq: number } } | { settled: 'rej
 
 /** The append with a 300 ms lock timeout, raced against 3000 ms, so a spin fails the case instead of hanging the suite. */
 function oddAppend(): { append: Promise<{ seq: number }>; settled: Promise<Settled> } {
-  const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 300 })
+  const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null, principal: null }, { lockTimeoutMs: 300 })
   let timer: ReturnType<typeof setTimeout> | undefined
   const settled = Promise.race<Settled>([
     append.then(
@@ -269,7 +269,7 @@ describe('audit store: the lock', () => {
     const started = Date.now()
     let caught: unknown
     try {
-      await audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 200 })
+      await audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null, principal: null }, { lockTimeoutMs: 200 })
     } catch (err) {
       caught = err
     }
@@ -570,7 +570,7 @@ if (mode === 'unlink-EACCES') {
 }
 const { appendAudit } = await import(${JSON.stringify(STORE)})
 try {
-  await appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, {
+  await appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null, principal: null }, {
     ...(timeout !== undefined ? { lockTimeoutMs: Number(timeout) } : failsLinks ? { lockTimeoutMs: 300 } : {}),
     now: () => {
       if (mode === 'exit') process.exit(130)
@@ -600,7 +600,7 @@ describe('the lock names its holder', () => {
     await audit.appendAudit(
       statePath,
       'denial.lifted',
-      { plugin: 'p', fingerprint: null },
+      { plugin: 'p', fingerprint: null, principal: null },
       {
         now: () => {
           linked = lstatSync(lockPath()).isSymbolicLink()
@@ -622,7 +622,7 @@ describe('the lock names its holder', () => {
     await lift()
     plantLock(lockPath(), { token: 'gone', pid: deadPid(), host: HOST, at: Date.now() })
     const started = Date.now()
-    const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 2000 })
+    const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null, principal: null }, { lockTimeoutMs: 2000 })
     try {
       const out = await append.then(
         (value) => ({ settled: 'resolved' as const, value }),
@@ -798,7 +798,7 @@ describe('the lock names its holder', () => {
     })
     try {
       plantLock(lockPath(), { token: 'gone', pid: dead, host: HOST, at: Date.now() })
-      const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null }, { lockTimeoutMs: 2000 })
+      const append = audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: null, principal: null }, { lockTimeoutMs: 2000 })
       try {
         const out = await append.then(
           () => 'resolved',
@@ -1179,7 +1179,7 @@ describe('segments', () => {
     return result
   }
 
-  const liftKept = (opts?: Opts) => kept('denial.lifted', { plugin: 'p', fingerprint: HEX_A }, opts)
+  const liftKept = (opts?: Opts) => kept('denial.lifted', { plugin: 'p', fingerprint: HEX_A, principal: null }, opts)
 
   /** Whole store: no partial line, contiguous seq, unbroken chain, name order is seq order. */
   function expectWholeChain(): Line[] {
@@ -1296,7 +1296,7 @@ describe('segments', () => {
 
     let caught: unknown
     try {
-      await append(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A })
+      await append(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A, principal: null })
     } catch (err) {
       caught = err
     }
@@ -1350,13 +1350,14 @@ describe('segments', () => {
       sha256: 'c'.repeat(64),
       entry_sha256: 'd'.repeat(64),
     })
-    const a = await kept('fire.intent', { plugin: 'a', run_id: 'r1', class: 'session', effect_id: null, fingerprint: null })
+    const a = await kept('fire.intent', { plugin: 'a', run_id: 'r1', class: 'session', effect_id: null, fingerprint: null, grants: [] })
     const b = await kept('fire.intent', {
       plugin: 'b',
       run_id: 'r1',
       class: 'content',
       effect_id: 'e'.repeat(64),
       fingerprint: HEX_A,
+      grants: [],
     })
     const authority = {
       preferences: 'b'.repeat(64),
@@ -1385,9 +1386,9 @@ describe('segments', () => {
   })
 
   test('carry: fire.resolved closes its intent, and a fire.refused with no intent_seq closes nothing', async () => {
-    const a = await kept('fire.intent', { plugin: 'a', run_id: 'r1', class: 'session', effect_id: null, fingerprint: null })
-    const b = await kept('fire.intent', { plugin: 'b', run_id: 'r2', class: 'session', effect_id: null, fingerprint: null })
-    await kept('fire.resolved', { plugin: 'a', effect_id: 'f'.repeat(64), intent_seq: a.seq, answer: 'not_shipped' })
+    const a = await kept('fire.intent', { plugin: 'a', run_id: 'r1', class: 'session', effect_id: null, fingerprint: null, grants: [] })
+    const b = await kept('fire.intent', { plugin: 'b', run_id: 'r2', class: 'session', effect_id: null, fingerprint: null, grants: [] })
+    await kept('fire.resolved', { plugin: 'a', effect_id: 'f'.repeat(64), intent_seq: a.seq, answer: 'not_shipped', principal: null })
     await kept('fire.refused', { plugin: 'b', run_id: 'r2', reason: 'outside_window', intent_seq: null })
 
     await rotate()
@@ -1499,7 +1500,7 @@ describe('authority files', () => {
     expect(await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesB, entriesB)).toBeNull()
     expect(observedLines()).toHaveLength(2)
 
-    await audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A }, { maxSegmentBytes: 1 })
+    await audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A, principal: null }, { maxSegmentBytes: 1 })
     expect(readdirSync(auditDir).filter((n) => /^\d{16}\.jsonl$/.test(n))).toHaveLength(2)
 
     expect(await audit.observeAuthorityFile(statePath, 'principal_registry.observed', bytesB, entriesB)).toBeNull()
@@ -1526,7 +1527,7 @@ describe('a segment.opened over 64 KiB', () => {
   const segmentNames = () => readdirSync(auditDir).filter((n) => /^\d{16}\.jsonl$/.test(n)).sort()
   const rawLines = (name: string) => readFileSync(join(auditDir, name), 'utf-8').split('\n').slice(0, -1)
   const liftWith = (opts?: { now?: () => number; maxSegmentBytes?: number }) =>
-    audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A }, opts)
+    audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A, principal: null }, opts)
 
   /**
    * 600 open intents, each carried at about 150 bytes, then a rotation, so the
@@ -1540,6 +1541,7 @@ describe('a segment.opened over 64 KiB', () => {
         class: 'session',
         effect_id: null,
         fingerprint: null,
+        grants: [],
       })
     }
     await liftWith({ maxSegmentBytes: 1 })
@@ -1583,7 +1585,7 @@ describe('the walk reads only what it carries', () => {
   const BAD = 'bad\u0007WALK_SENTINEL_5d1'
   const PREFS = 'b'.repeat(64)
   const intent = (plugin: string, run_id: string) =>
-    audit.appendAudit(statePath, 'fire.intent', { plugin, run_id, class: 'session', effect_id: null, fingerprint: null })
+    audit.appendAudit(statePath, 'fire.intent', { plugin, run_id, class: 'session', effect_id: null, fingerprint: null, grants: [] })
   const segmentNames = () => readdirSync(auditDir).filter((n) => /^\d{16}\.jsonl$/.test(n)).sort()
 
   /** The rejection of a promise, which must reject. */
@@ -1661,7 +1663,7 @@ describe('the walk reads only what it carries', () => {
   test('a rotation over a passed-over line carries the open intent and the authority, and copies no extra key', async () => {
     const { open } = await extraKeys()
 
-    await audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A }, { maxSegmentBytes: 1 })
+    await audit.appendAudit(statePath, 'denial.lifted', { plugin: 'p', fingerprint: HEX_A, principal: null }, { maxSegmentBytes: 1 })
 
     const names = segmentNames()
     expect(names).toHaveLength(2)

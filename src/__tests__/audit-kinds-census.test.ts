@@ -198,7 +198,7 @@ describe('the record kinds are a closed set', () => {
     try {
       const statePath = join(tmp, 'state', 'engine-state.json')
       for (const plugin of ['a', 'b', 'c']) {
-        await appendAudit(statePath, 'denial.lifted', { plugin, fingerprint: null }, { maxSegmentBytes: 1 })
+        await appendAudit(statePath, 'denial.lifted', { plugin, fingerprint: null, principal: null }, { maxSegmentBytes: 1 })
       }
       const dir = join(tmp, 'audit')
       const types = new Set<string>()

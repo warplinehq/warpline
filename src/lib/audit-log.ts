@@ -98,6 +98,17 @@ const Iso = z.iso.datetime()
 const Seq = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const SemVer = z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/)
 const Scope = z.union([z.literal('*'), PluginName])
+/** A standing grant id: 12 lowercase hex, the rule the gate's `newStandingId` makes. */
+const GrantId = z.string().regex(/^[0-9a-f]{12}$/)
+/**
+ * One live grant that covered a fire. A session entry is one window and names
+ * whoever last named its scope, or null; a standing entry always names the
+ * human who issued it.
+ */
+const Covering = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('session'), scope: Scope, issuer: PrincipalId.nullable() }),
+  z.strictObject({ kind: z.literal('standing'), id: GrantId, holder: PrincipalId, issuer: PrincipalId }),
+])
 const Entries = z.record(PrincipalId, Hex)
 /** Each changed id to its new entry digest, or null when it left the registry. */
 const ChangedEntries = z.record(PrincipalId, Hex.nullable())
@@ -124,13 +135,19 @@ const DATA = {
   }),
   'checkpoint.recorded': z.strictObject({ origin: Urn, size: Seq, root: Hex }),
   'grant.issued': z.strictObject({
+    kind: z.literal('session'),
     scopes: z.array(Scope).min(1),
     ttl_ms: z.number().int().positive().nullable(),
     replace: z.boolean(),
     long: z.boolean(),
+    principal: PrincipalId.nullable(),
   }),
   'grant.renewed': z.never(),
-  'grant.revoked': z.strictObject({ scopes: z.array(Scope) }),
+  'grant.revoked': z.strictObject({
+    kind: z.literal('session'),
+    scopes: z.array(Scope),
+    principal: PrincipalId.nullable(),
+  }),
   'content_approval.issued': z.strictObject({
     plugin: PluginName,
     producer: PluginName,
@@ -139,20 +156,27 @@ const DATA = {
     opens_at: Iso,
     closes_at: Iso,
     replaced_fingerprint: Hex.nullable(),
+    principal: PrincipalId.nullable(),
   }),
-  'content_approval.withdrawn': z.strictObject({ plugin: PluginName, fingerprint: Hex.nullable() }),
+  'content_approval.withdrawn': z.strictObject({
+    plugin: PluginName,
+    fingerprint: Hex.nullable(),
+    principal: PrincipalId.nullable(),
+  }),
   'denial.recorded': z.strictObject({
     plugin: PluginName,
     fingerprint: Hex,
     discarded_gate_run_id: RunId.nullable(),
+    principal: PrincipalId.nullable(),
   }),
-  'denial.lifted': z.strictObject({ plugin: PluginName, fingerprint: Hex.nullable() }),
+  'denial.lifted': z.strictObject({ plugin: PluginName, fingerprint: Hex.nullable(), principal: PrincipalId.nullable() }),
   'fire.intent': z.strictObject({
     plugin: PluginName,
     run_id: RunId,
     class: z.enum(['session', 'content']),
     effect_id: Hex.nullable(),
     fingerprint: Hex.nullable(),
+    grants: z.array(Covering),
   }),
   'fire.outcome': z.strictObject({
     plugin: PluginName,
@@ -171,6 +195,7 @@ const DATA = {
     effect_id: Hex.nullable(),
     intent_seq: Seq.nullable(),
     answer: z.enum(['shipped', 'not_shipped']),
+    principal: PrincipalId.nullable(),
   }),
   'principal.added': z.strictObject({
     id: PrincipalId,

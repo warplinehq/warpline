@@ -358,6 +358,7 @@ describe('a Checkpoint written before the store could be read back', () => {
     await audit.appendAudit(join(home.stateDir, 'engine-state.json'), 'denial.lifted', {
       plugin: 'p',
       fingerprint: 'a'.repeat(64),
+      principal: null,
     })
     // No side effects, so nothing else appends while the handler runs.
     writePlugin('alpha', { autonomy_level: 'autonomous', side_effects: [] })

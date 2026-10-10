@@ -3719,7 +3719,7 @@ The set is closed. A kind outside it cannot be written.
 | `content_approval.withdrawn` | A content approval is about to be removed. |
 | `denial.recorded` | `warpline deny` is about to record a denial: the plugin, the proposal's fingerprint, and the run id of any parked gate it discards. |
 | `denial.lifted` | `warpline deny --remove` is about to take a denial back. |
-| `fire.intent` | A plugin holding side-effect authority is about to be invoked. |
+| `fire.intent` | A plugin holding side-effect authority is about to be invoked. `grants` names every live grant that covered it: one entry per covering session window (`kind`, `scope`, and `issuer` or null), so a live `*` window and the plugin's own window are two entries, and one per live standing grant (`kind`, `id`, `holder`, `issuer`). Session windows come first, then standing grants by id. A content-class fire's list is empty: its authority is its content approval. |
 | `fire.outcome` | The invocation that intent announced returned or threw. |
 | `fire.refused` | A plugin holding a content approval was not fired, and why (§ 5). |
 | `fire.resolved` | `warpline resolve` recorded the operator's answer to an open fire intent: `shipped` or `not_shipped`. |
@@ -3739,6 +3739,18 @@ Nothing writes `grant.renewed`, `ask.raised`, `ask.answered` or `handoff.tried`
 yet. Their schema admits nothing, so an append under any of them is refused
 until the work that writes them lands and defines their fields. The last three
 kinds in the table are written by the store itself, never by a caller.
+
+Each `grants` entry on a `fire.intent` names its `issuer`. A session window's
+issuer is whichever active principal, human or machine, last named that scope
+with `--principal`, or null when the last grant of it named none. A standing
+grant's issuer is always the active human who issued it. The seven verb
+records, `grant.issued`, `grant.revoked`, `content_approval.issued`,
+`content_approval.withdrawn`, `denial.recorded`, `denial.lifted` and
+`fire.resolved`, carry `principal`: the registered id `--principal` named, or
+null when none was named. A principal is never taken from the environment or
+from the account running the command. `grant.issued` and `grant.revoked` carry
+`kind`, the kind of grant the record is about. Records written before these
+fields existed are read without them.
 
 The two observed kinds come from comparing an authority file's bytes with the
 last digest the store holds for it, never from a warpline command.
@@ -4039,7 +4051,10 @@ A fire is written ahead the same way. When `warpline advance` fires a
 session-class plugin that declares side effects, it appends `fire.intent`
 immediately before the handler runs, and `fire.outcome` naming that intent's
 seq once the handler returns, with the result's status, or `threw` when the
-invocation threw. An intent that cannot be written stops the fire. A
+invocation threw. An intent that cannot be written stops the fire. The intent
+must fit one record, so enough live standing grants on one scope push it past
+16384 bytes: the append refuses and the effect does not fire, which fails
+closed. Revoking grants on that scope brings it back under. A
 content-class fire's intent is written by its spend mark, inside the state lock
 after the re-check and before the mark (§ 10), and its outcome closes it the
 same way. A refused fire gets `fire.refused` with its closed-set reason and no

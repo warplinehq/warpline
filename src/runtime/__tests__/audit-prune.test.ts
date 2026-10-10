@@ -40,7 +40,7 @@ const segments = (dir: string) => readdirSync(dir).filter((n) => NAME.test(n)).s
 async function seedAudit(): Promise<void> {
   const statePath = join(home.stateDir, 'engine-state.json')
   for (let i = 0; i < 40 && (!existsSync(auditDir) || segments(auditDir).length < 2); i++) {
-    await appendAudit(statePath, 'denial.lifted', { plugin: `p${i}`, fingerprint: null }, { maxSegmentBytes: 2048 })
+    await appendAudit(statePath, 'denial.lifted', { plugin: `p${i}`, fingerprint: null, principal: null }, { maxSegmentBytes: 2048 })
   }
   expect(segments(auditDir).length).toBeGreaterThanOrEqual(2)
   for (const name of readdirSync(auditDir)) age(join(auditDir, name))

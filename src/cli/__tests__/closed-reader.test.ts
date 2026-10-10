@@ -300,7 +300,7 @@ const ROWS: Row[] = [
         [
           `import { appendAudit } from ${JSON.stringify(join(ROOT, 'src/lib/audit-log.ts'))}`,
           `const statePath = ${JSON.stringify(join(home, 'state', 'engine-state.json'))}`,
-          `for (let i = 0; i < 300; i++) await appendAudit(statePath, 'denial.lifted', { plugin: 'grow-' + i, fingerprint: null })`,
+          `for (let i = 0; i < 300; i++) await appendAudit(statePath, 'denial.lifted', { plugin: 'grow-' + i, fingerprint: null, principal: null })`,
           '',
         ].join('\n'),
       )

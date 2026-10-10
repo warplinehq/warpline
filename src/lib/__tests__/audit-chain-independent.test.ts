@@ -35,12 +35,12 @@ const segments = (dir: string) => readdirSync(dir).filter((n) => NAME.test(n)).s
 /** 30 records over 2048-byte segments, a torn tail, then 3 more: a rotated store with an acknowledged fragment. */
 async function rotatedTornStore(): Promise<void> {
   for (let i = 0; i < 30; i++) {
-    await appendAudit(statePath, 'denial.lifted', { plugin: `p${i}`, fingerprint: null }, { maxSegmentBytes: 2048 })
+    await appendAudit(statePath, 'denial.lifted', { plugin: `p${i}`, fingerprint: null, principal: null }, { maxSegmentBytes: 2048 })
   }
   const names = segments(auditDir)
   appendFileSync(join(auditDir, names[names.length - 1] as string), '{"specversion":"1.0","id":')
   for (let i = 30; i < 33; i++) {
-    await appendAudit(statePath, 'denial.lifted', { plugin: `p${i}`, fingerprint: null }, { maxSegmentBytes: 2048 })
+    await appendAudit(statePath, 'denial.lifted', { plugin: `p${i}`, fingerprint: null, principal: null }, { maxSegmentBytes: 2048 })
   }
 }
 
@@ -106,7 +106,7 @@ describe('the held-out chain walker', () => {
         `const [statePath, go, name] = process.argv.slice(2) as [string, string, string]`,
         `writeFileSync(go + '.' + name, '')`,
         `while (lstatSync(go, { throwIfNoEntry: false }) === undefined) await Bun.sleep(5)`,
-        `for (let i = 0; i < 40; i++) await appendAudit(statePath, 'denial.lifted', { plugin: name, fingerprint: null })`,
+        `for (let i = 0; i < 40; i++) await appendAudit(statePath, 'denial.lifted', { plugin: name, fingerprint: null, principal: null })`,
         '',
       ].join('\n'),
     )

@@ -475,6 +475,7 @@ async function approveContent(
         opens_at: new Date(opensAt).toISOString(),
         closes_at: new Date(closesAt).toISOString(),
         replaced_fingerprint: replaced !== undefined && HEX64.test(replaced.fingerprint) ? replaced.fingerprint : null,
+        principal: null,
       })
     } catch {
       process.stderr.write('The audit store could not record this content approval. Nothing was written.\n')
@@ -601,6 +602,7 @@ async function removeContentApproval(
       await appendAudit(statePath, 'content_approval.withdrawn', {
         plugin: consumer,
         fingerprint: HEX64.test(withdrawn.fingerprint) ? withdrawn.fingerprint : null,
+        principal: null,
       })
     } catch {
       process.stderr.write(
@@ -1078,10 +1080,12 @@ export async function run(argv: string[]): Promise<number> {
   // ahead of a refusal would be a success the command did not achieve.
   try {
     await appendAudit(statePath, 'grant.issued', {
+      kind: 'session',
       scopes: values.all ? ['*'] : positionals,
       ttl_ms: ttlMs ?? null,
       replace: values.replace === true,
       long: values.long === true,
+      principal: null,
     })
   } catch {
     process.stderr.write('The audit store could not record this grant, so nothing was granted.\n')

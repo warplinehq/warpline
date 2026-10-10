@@ -85,7 +85,7 @@ function writerScript(): string {
       `import { appendAudit } from ${JSON.stringify(STORE)}`,
       `const [statePath, name, timeout] = process.argv.slice(2)`,
       `try {`,
-      `  await appendAudit(statePath, 'denial.lifted', { plugin: name, fingerprint: null }, { lockTimeoutMs: Number(timeout) })`,
+      `  await appendAudit(statePath, 'denial.lifted', { plugin: name, fingerprint: null, principal: null }, { lockTimeoutMs: Number(timeout) })`,
       `} catch (err) {`,
       `  process.stderr.write(String(err instanceof Error ? err.message : err))`,
       `  process.exit(1)`,
@@ -114,7 +114,7 @@ async function seeded(name: string): Promise<{ statePath: string; auditDir: stri
   const home = join(tmp, name)
   const statePath = join(home, 'state', 'engine-state.json')
   const auditDir = join(home, 'audit')
-  await appendAudit(statePath, 'denial.lifted', { plugin: 'seed', fingerprint: null })
+  await appendAudit(statePath, 'denial.lifted', { plugin: 'seed', fingerprint: null, principal: null })
   return { statePath, auditDir, segment: join(auditDir, '0000000000000001.jsonl') }
 }
 

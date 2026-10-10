@@ -179,7 +179,7 @@ const seqOf = (line: string): number => (JSON.parse(line) as { warplineseq: numb
 /** `n` records through the real writer. Distinct plugin names, so a leak of one into stdout is findable. */
 async function grow(n: number, opts: { maxSegmentBytes?: number } = {}): Promise<void> {
   for (let i = 0; i < n; i++) {
-    await appendAudit(statePath(), 'denial.lifted', { plugin: `plugin-${i}-zq`, fingerprint: null }, opts)
+    await appendAudit(statePath(), 'denial.lifted', { plugin: `plugin-${i}-zq`, fingerprint: null, principal: null }, opts)
   }
 }
 
@@ -454,6 +454,7 @@ describe('audit verify', () => {
       class: 'session',
       effect_id: null,
       fingerprint: null,
+      grants: [],
     })
 
     const { code, stdout } = await verify(await anchorFile())
@@ -533,7 +534,7 @@ const BAD_PLUGIN = 'bad\u0007WALK_SENTINEL_5d1'
 
 /** The open intent the cases below look for. */
 const mailer = () =>
-  appendAudit(statePath(), 'fire.intent', { plugin: 'mailer', run_id: 'run-77', class: 'session', effect_id: null, fingerprint: null })
+  appendAudit(statePath(), 'fire.intent', { plugin: 'mailer', run_id: 'run-77', class: 'session', effect_id: null, fingerprint: null, grants: [] })
 
 /** A chain-valid `grant.issued` whose data is the writer's plus one key. */
 const grantWithExtraKey = (): number =>
@@ -720,6 +721,7 @@ describe('audit pass-over', () => {
       class: 'session',
       effect_id: null,
       fingerprint: null,
+      grants: [],
     })
     await appendAudit(statePath(), 'preference.set', { key: 'review_gate', old: null, new: prefs })
     await appendAudit(statePath(), 'principal.added', { id: 'ops', type: 'human', key_sha256: null, sha256: registry, entry_sha256: entry })
@@ -1023,7 +1025,7 @@ describe('a line that is not a record', () => {
 
     let reason: unknown
     try {
-      await appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null })
+      await appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null, principal: null })
     } catch (err) {
       reason = (err as { reason?: unknown }).reason
     }
@@ -1381,7 +1383,7 @@ describe('what a crash leaves before or at a new segment', () => {
 
   /** One append, as THROUGH with what it resolved, or as its refusal's reason. */
   const tryAppend = (due?: Due): Promise<{ said: string; kept?: { seq: number; head: string } }> =>
-    appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null }, due).then(
+    appendAudit(statePath(), 'denial.lifted', { plugin: 'plugin-x-zq', fingerprint: null, principal: null }, due).then(
       (kept) => ({ said: THROUGH, kept }),
       (err: unknown) => ({ said: String((err as { reason?: unknown }).reason) }),
     )
@@ -1682,7 +1684,7 @@ const { appendAudit } = await import(store)
 const { seq } = await appendAudit(
   statePath,
   'fire.intent',
-  { plugin: 'mailer', run_id: 'run-78', class: 'session', effect_id: null, fingerprint: null },
+  { plugin: 'mailer', run_id: 'run-78', class: 'session', effect_id: null, fingerprint: null, grants: [] },
   { maxSegmentBytes: 1 },
 )
 process.stdout.write(String(seq))

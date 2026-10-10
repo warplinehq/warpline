@@ -26,7 +26,9 @@ export async function run(_argv: string[]): Promise<number> {
     const scopes = (await liveGrantScopes(approvalPath)).map((w) => w.scope)
     try {
       await appendAudit(engineStatePath(), 'grant.revoked', {
+        kind: 'session',
         scopes,
+        principal: null,
       })
     } catch {
       recorded = false

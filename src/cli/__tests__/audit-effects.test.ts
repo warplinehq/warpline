@@ -217,6 +217,7 @@ describe('deny', () => {
       plugin: 'p',
       fingerprint: state.denials.p!.fingerprint,
       discarded_gate_run_id: null,
+      principal: null,
     })
   })
 
@@ -314,21 +315,21 @@ describe('grant issue and revoke', () => {
 
     expect(code).toBe(0)
     expect(seen()).toBe(true)
-    expect(recordsOf('grant.issued')).toEqual([{ scopes: ['mailer'], ttl_ms: null, replace: false, long: false }])
+    expect(recordsOf('grant.issued')).toEqual([{ kind: 'session', scopes: ['mailer'], ttl_ms: null, replace: false, long: false, principal: null }])
   })
 
   test('approve mailer --ttl 30m --replace records the requested ttl and the replace flag', async () => {
     const { code } = await capture(['approve', 'mailer', '--ttl', '30m', '--replace'])
 
     expect(code).toBe(0)
-    expect(recordsOf('grant.issued')).toEqual([{ scopes: ['mailer'], ttl_ms: 1_800_000, replace: true, long: false }])
+    expect(recordsOf('grant.issued')).toEqual([{ kind: 'session', scopes: ['mailer'], ttl_ms: 1_800_000, replace: true, long: false, principal: null }])
   })
 
   test('approve --all records the wildcard grant', async () => {
     const { code } = await capture(['approve', '--all'])
 
     expect(code).toBe(0)
-    expect(recordsOf('grant.issued')).toEqual([{ scopes: ['*'], ttl_ms: null, replace: false, long: false }])
+    expect(recordsOf('grant.issued')).toEqual([{ kind: 'session', scopes: ['*'], ttl_ms: null, replace: false, long: false, principal: null }])
   })
 
   test('a grant whose record cannot be written grants nothing', async () => {
@@ -366,7 +367,7 @@ describe('grant issue and revoke', () => {
 
     expect(code).toBe(0)
     expect(seen()).toBe(true)
-    expect(recordsOf('grant.revoked')).toEqual([{ scopes: ['mailer'] }])
+    expect(recordsOf('grant.revoked')).toEqual([{ kind: 'session', scopes: ['mailer'], principal: null }])
     expect(existsSync(grantPath())).toBe(false)
   })
 
@@ -464,6 +465,7 @@ describe('content approval issue and withdrawal', () => {
         opens_at: window![1]!,
         closes_at: window![2]!,
         replaced_fingerprint: null,
+        principal: null,
       },
     ])
     expect(records[0]!.fingerprint).toMatch(/^[0-9a-f]{64}$/)
@@ -508,7 +510,7 @@ describe('content approval issue and withdrawal', () => {
 
     expect(code).toBe(0)
     expect(seen()).toBe(true)
-    expect(recordsOf('content_approval.withdrawn')).toEqual([{ plugin: 'sender', fingerprint }])
+    expect(recordsOf('content_approval.withdrawn')).toEqual([{ plugin: 'sender', fingerprint, principal: null }])
   })
 
   test('a content withdrawal whose record cannot be written removes nothing', async () => {
@@ -553,8 +555,8 @@ describe('denial lift', () => {
     expect(code).toBe(0)
     expect(liftedAtWrite).toBe(2)
     expect(recordsOf('denial.lifted')).toEqual([
-      { plugin: 'a', fingerprint: stored.denials.a!.fingerprint },
-      { plugin: 'b', fingerprint: stored.denials.b!.fingerprint },
+      { plugin: 'a', fingerprint: stored.denials.a!.fingerprint, principal: null },
+      { plugin: 'b', fingerprint: stored.denials.b!.fingerprint, principal: null },
     ])
   })
 
@@ -684,7 +686,7 @@ describe('resolve', () => {
     expect(code).toBe(0)
     expect(seen()).toBe(true)
     expect(recordsOf('fire.resolved')).toEqual([
-      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'not_shipped' },
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'not_shipped', principal: null },
     ])
     expect((await audit.openIntents(statePathOf())).filter((i) => i.plugin === 'sender')).toEqual([])
   })
@@ -698,7 +700,7 @@ describe('resolve', () => {
     const { code } = await capture(['resolve', 'sender', '--not-shipped', effectId])
 
     expect(code).toBe(0)
-    expect(recordsOf('fire.resolved')).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: null, answer: 'not_shipped' }])
+    expect(recordsOf('fire.resolved')).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: null, answer: 'not_shipped', principal: null }])
   })
 
   test('a resolve whose record cannot be written answers nothing', async () => {
@@ -729,7 +731,7 @@ describe('resolve', () => {
     expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
     expect(seen()).toBe(true)
     expect(recordsOf('fire.resolved')).toEqual([
-      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped', principal: null },
     ])
     expect((await audit.openIntents(statePathOf())).filter((i) => i.plugin === 'sender')).toEqual([])
     expect(await senderStanding()).toBe('spent')
@@ -759,7 +761,7 @@ describe('resolve', () => {
       expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
       expect(await snapshotHome(home)).toEqual(before)
       expect(recordsOf('fire.resolved')).toEqual([
-        { plugin: 'sender', effect_id: effectId, intent_seq: null, answer: first === '--shipped' ? 'shipped' : 'not_shipped' },
+        { plugin: 'sender', effect_id: effectId, intent_seq: null, answer: first === '--shipped' ? 'shipped' : 'not_shipped', principal: null },
       ])
     })
   }
@@ -796,7 +798,7 @@ describe('resolve when its state write does not land', () => {
     expect(r!.stderr).not.toContain(SENTINEL)
     expect(spy.trips()).toBe(1)
     expect(recordsOf('fire.resolved')).toEqual([
-      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped', principal: null },
     ])
     expect(await senderStanding()).toBe('indeterminate')
   })
@@ -823,7 +825,7 @@ describe('resolve when its state write does not land', () => {
       expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
       expect(await snapshotHome(home)).toEqual(before)
       expect(recordsOf('fire.resolved')).toEqual([
-        { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: firstAnswer },
+        { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: firstAnswer, principal: null },
       ])
     })
   }
@@ -843,7 +845,7 @@ describe('resolve when its state write does not land', () => {
       expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
       expect(stdout).toContain('already on the audit record')
       expect(recordsOf('fire.resolved')).toEqual([
-        { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer },
+        { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer, principal: null },
       ])
       expect(await senderStanding()).toBe('spent')
       const record = (JSON.parse(readFileSync(statePathOf(), 'utf-8')) as {
@@ -918,7 +920,7 @@ describe('resolve and lines that hold no answer', () => {
       auditLines(home)
         .filter((l) => l.type === 'warpline.audit.fire.resolved' && typeof l.warplineseq === 'number')
         .map((l) => l.data),
-    ).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' }])
+    ).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped', principal: null }])
     expect(await senderStanding()).toBe('spent')
   })
 
@@ -942,7 +944,7 @@ describe('resolve and lines that hold no answer', () => {
       auditLines(home)
         .filter((l) => l.type === 'warpline.audit.fire.resolved' && l.warplineseq !== n)
         .map((l) => l.data),
-    ).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'not_shipped' }])
+    ).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'not_shipped', principal: null }])
     expect(await senderStanding()).toBe('spent')
   })
 })
@@ -1024,7 +1026,7 @@ describe('a passed-over line is the line at its position', () => {
       auditLines(home)
         .filter((l) => l.type === 'warpline.audit.fire.resolved' && l.warplineseq !== n + 1000)
         .map((l) => l.data),
-    ).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'not_shipped' }])
+    ).toEqual([{ plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'not_shipped', principal: null }])
     expect(await senderStanding()).toBe('spent')
   })
 
@@ -1039,7 +1041,7 @@ describe('a passed-over line is the line at its position', () => {
     expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
     expect(await snapshotHome(home)).toEqual(before)
     expect(numberedAnswers()).toEqual([
-      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped', principal: null },
     ])
   })
 
@@ -1076,7 +1078,7 @@ describe('a passed-over line is the line at its position', () => {
     expect(stderr.trimEnd().endsWith('Nothing was written.')).toBe(true)
     expect(await snapshotHome(home)).toEqual(before)
     expect(numberedAnswers()).toEqual([
-      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped', principal: null },
     ])
   })
 })
@@ -1140,7 +1142,7 @@ describe('resolve --intent', () => {
     expect(stdout).toContain(`fire intent ${seq} for mailer (run ${intent.data.run_id as string})`)
     const added = auditLines(home).slice(linesBefore)
     expect(added.map((l) => l.type)).toEqual(['warpline.audit.fire.resolved'])
-    expect(added[0]!.data).toEqual({ plugin: 'mailer', effect_id: null, intent_seq: seq, answer: 'shipped' })
+    expect(added[0]!.data).toEqual({ plugin: 'mailer', effect_id: null, intent_seq: seq, answer: 'shipped', principal: null })
     expect((await audit.openIntents(statePathOf())).map((i) => i.seq)).not.toContain(seq)
     expect(await snapshotOutsideStore()).toEqual(outside)
   })
@@ -1163,7 +1165,7 @@ describe('resolve --intent', () => {
 
     expect(code).toBe(0)
     expect(recordsOf('fire.resolved')).toEqual([
-      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped' },
+      { plugin: 'sender', effect_id: effectId, intent_seq: intent.warplineseq, answer: 'shipped', principal: null },
     ])
     expect((await audit.openIntents(statePathOf())).filter((i) => i.plugin === 'sender')).toEqual([])
     expect(readFileSync(statePathOf())).toEqual(stateBefore)

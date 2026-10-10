@@ -358,6 +358,7 @@ export async function run(argv: string[]): Promise<number> {
           effect_id: record.effect_id,
           intent_seq: answered?.seq ?? null,
           answer,
+          principal: null,
         })
       } catch (err) {
         return refuseAppend(err)
@@ -487,6 +488,7 @@ async function runBySeq(argv: string[]): Promise<number> {
         effect_id: intent.effect_id,
         intent_seq: intent.seq,
         answer: shipped ? 'shipped' : 'not_shipped',
+        principal: null,
       })
     } catch (err) {
       return refuseAppend(err)

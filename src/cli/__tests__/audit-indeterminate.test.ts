@@ -154,7 +154,7 @@ test('a fire killed between its intent and its outcome is answered by seq, and t
   expect(answered.status).toBe(0)
   const resolved = auditLines().filter((l) => l.type === 'warpline.audit.fire.resolved')
   expect(resolved.map((l) => l.data)).toEqual([
-    { plugin: 'killer', effect_id: null, intent_seq: intents[0]!.warplineseq, answer: 'not_shipped' },
+    { plugin: 'killer', effect_id: null, intent_seq: intents[0]!.warplineseq, answer: 'not_shipped', principal: null },
   ])
   const next = bin(['advance', '--json'])
   expect(next.status).toBe(0)
