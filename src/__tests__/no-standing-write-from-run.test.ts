@@ -28,12 +28,14 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import * as paths from '../lib/paths.js'
 import * as gate from '../runtime/approval-gate.js'
+import { runAdvance } from '../runtime/engine.js'
+import { loadRegistry } from '../lib/principals.js'
 
 const SRC = join(import.meta.dir, '..')
 const REPO_ROOT = join(SRC, '..')
@@ -207,6 +209,88 @@ describe('the scanners report what they are built to catch', () => {
       expect(found).toEqual(["names.ts:1: const f = 'standing-grants.json'"])
     } finally {
       rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('backstop', () => {
+  test('a full advance that fires under a standing grant leaves the store byte- and mtime-identical', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'warpline-standing-backstop-'))
+    paths._setHome(home)
+    try {
+      const stateDir = join(home, 'state')
+      const runsDir = join(home, 'runs')
+      mkdirSync(stateDir, { recursive: true })
+      mkdirSync(runsDir, { recursive: true })
+      const manifest = {
+        name: 'p',
+        version: '1.0.0',
+        description: 'p fixture plugin',
+        inputs: {},
+        outputs: {},
+        capabilities: [],
+        secrets: [],
+        schedule: 'on_run',
+        autonomy_level: 'autonomous',
+        approval_class: 'session',
+        llm_handoff: false,
+        side_effects: ['sends_email'],
+        ttl_hours: 24,
+        dependencies: [],
+        timeout_ms: 5000,
+        max_parallelism: 1,
+        min_tier: 'normal',
+        max_retries: 1,
+        retry_delay_ms: 2000,
+      }
+      const pluginDir = join(home, 'plugins', 'p')
+      mkdirSync(pluginDir, { recursive: true })
+      writeFileSync(join(pluginDir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+      writeFileSync(
+        join(pluginDir, 'handler.ts'),
+        "export async function handler() {\n  return { status: 'success', phases_completed: [], phases_failed: [], " +
+          "errors: [], data_freshness: {}, summary: 'fixture ok', artifacts_produced: [], schema_version: 1 }\n}\n",
+      )
+      writeFileSync(join(stateDir, 'preferences.json'), JSON.stringify({ review_gate: false }))
+      writeFileSync(
+        join(home, 'principals.json'),
+        JSON.stringify({
+          principals: [
+            { id: 'ops', type: 'human', status: 'active' },
+            { id: 'ci', type: 'machine', status: 'active' },
+          ],
+        }),
+      )
+      await loadRegistry(join(stateDir, 'engine-state.json'))
+
+      const now = Date.now()
+      const issued = gate.issueStanding(
+        { min_reader_version: gate.STANDING_READER_VERSION, grants: [] },
+        { id: gate.newStandingId(), holder: 'ci', issuer: 'ops', scopes: ['p'], hardMaxMs: 30 * 24 * 60 * 60 * 1000 },
+        now - 60 * 60 * 1000,
+      )
+      if ('refused' in issued) throw new Error(`issue refused: ${issued.refused.code}`)
+      await gate.writeStandingStore(issued.store)
+      const storePath = join(home, 'standing-grants.json')
+      const before = readFileSync(storePath)
+      const beforeMtime = statSync(storePath).mtimeMs
+
+      const result = await runAdvance({
+        pluginsDir: join(home, 'plugins'),
+        stateDir: join(stateDir, 'engine-state.json'),
+        runsDir,
+        eventsPath: join(runsDir, 'events.jsonl'),
+        preferencesPath: join(stateDir, 'preferences.json'),
+        now,
+      })
+
+      // The grant actually fired the plugin, or the identity below is vacuous.
+      expect(result.plugin_states.get('p')).toBe('completed')
+      expect(readFileSync(storePath).equals(before)).toBe(true)
+      expect(statSync(storePath).mtimeMs).toBe(beforeMtime)
+    } finally {
+      paths._setHome(null)
+      rmSync(home, { recursive: true, force: true })
     }
   })
 })
