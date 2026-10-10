@@ -28,7 +28,7 @@ import { parseArgs } from 'node:util'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { appendAudit } from '../lib/audit-log.js'
 import { engineStatePath } from '../lib/paths.js'
-import { readRegistry, registryView, requirePrincipal } from '../lib/principals.js'
+import { readRegistry, requirePrincipal, standingRegistry } from '../lib/principals.js'
 import {
   readStandingStore,
   renewStanding,
@@ -117,7 +117,7 @@ export async function run(argv: string[]): Promise<number> {
     if ('refused' in actor) return refuse(`--principal: ${actor.refused}.`)
     // The check above has already recorded any hand edit of the registry.
     const registry = await readRegistry()
-    const view = 'refused' in registry ? null : registryView(registry.registry)
+    const view = standingRegistry(registry)
 
     const read = await readStandingStore()
     if (!read.readable) return refuse('the standing grants file cannot be read.')

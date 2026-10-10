@@ -21,7 +21,7 @@ import { join, dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createHash, randomUUID } from 'node:crypto'
 import { grantsCovering, listStandingGrants, type CoveringGrant, type RegistrySnapshot } from './approval-gate.js'
-import { loadRegistry, registryView } from '../lib/principals.js'
+import { loadRegistry, standingRegistry } from '../lib/principals.js'
 import {
   sessionApprovalPath,
   preferencesPath as defaultPreferencesPath,
@@ -2645,7 +2645,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     const standingListing = await listStandingGrants()
     if (standingListing.readable && standingListing.grants.length > 0) {
       const loaded = await loadRegistry(stateDir)
-      registry = 'refused' in loaded ? null : registryView(loaded.registry)
+      registry = standingRegistry(loaded)
     }
 
     // A readable root that produced no manifests is its own outcome, not a

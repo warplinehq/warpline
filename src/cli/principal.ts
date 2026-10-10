@@ -10,7 +10,8 @@
  *      through fs-atomic at 0600. A failed append writes nothing. A key is
  *      recorded as its digest only.
  *   2. Ids are never deleted or reused. Disable is the only way out of the
- *      registry, and adding an id that exists, active or disabled, is refused.
+ *      registry, and adding an id that exists, active or disabled, or that
+ *      the audit store has ever named, is refused.
  *      Later records name principals by id, so an id that came back would make
  *      them name someone else.
  *   3. No principal is ever inferred from the account running the command. An
@@ -31,7 +32,7 @@ import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { appendAudit, AuditAppendError } from '../lib/audit-log.js'
 import { atomicWriteJson } from '../lib/fs-atomic.js'
 import { engineStatePath, principalsPath } from '../lib/paths.js'
-import { entryDigest, EntrySchema, loadRegistry, PRINCIPAL_ID, type Entry, type Registry } from '../lib/principals.js'
+import { entryDigest, EntrySchema, idsEverRecorded, loadRegistry, PRINCIPAL_ID, type Entry, type Registry } from '../lib/principals.js'
 
 export const USAGE = `Usage: warpline principal add <id> --type human|machine [--key <key>]
        warpline principal disable <id>
@@ -128,6 +129,18 @@ async function add(rest: string[]): Promise<number> {
   }
   if (loaded.registry.principals.some((p) => p.id === id)) {
     process.stderr.write(`principal add: ${id} is already in the registry, and ids are never reused. Nothing was written.\n`)
+    return 1
+  }
+  // An id gone from the file is still used: a standing grant it held would read live again.
+  let used: Set<string>
+  try {
+    used = await idsEverRecorded()
+  } catch {
+    process.stderr.write('principal add: the audit store could not be read, so no id can be checked unused. Nothing was written.\n')
+    return 1
+  }
+  if (used.has(id)) {
+    process.stderr.write(`principal add: ${id} was registered before, and ids are never reused. Nothing was written.\n`)
     return 1
   }
 

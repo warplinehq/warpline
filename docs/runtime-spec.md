@@ -1588,15 +1588,18 @@ the first in this order is the one reported:
 
 1. `hard max`: past the hard maximum.
 2. `not renewed`: past the renewal deadline.
-3. `registry unreadable`: no usable registry was read (below).
+3. `registry unreadable`: no usable registry was read (below). A missing
+   `principals.json` is one: it says nothing about any holder.
 4. `holder not registered`: the registry was read and does not name the holder.
 5. `holder not machine`: the holder is a human.
 6. `holder disabled`: the holder is a disabled machine.
 
 `hard max`, `not renewed` and `holder not registered` are final: the lapse
 cannot clear, and only a new grant fixes it. A holder missing from
-`principals.json` does not come back, since § 15's verbs never delete or reuse
-an id. `registry unreadable`, `holder not machine` and `holder disabled` are
+`principals.json` does not come back through § 15's verbs, which never delete
+an id, and `principal add` refuses any id the audit store has ever named. Only
+a hand edit can write it back, and the store records that edit as
+`principal_registry.observed` (§ 15). `registry unreadable`, `holder not machine` and `holder disabled` are
 not final. Such a lapse clears, with no renewal, if `principals.json` names the
 holder an active machine before the grant's next expiry, the earlier of its
 renewal deadline and its hard maximum. After that expiry the lapse is final.
@@ -1626,8 +1629,8 @@ store cannot take ends the advance with `75` (§ 11) before anything fires. The
 snapshot holds for the whole advance, so a principal disabled during an advance
 takes effect at the next one. When the standing grants file held no grant at
 that check, a grant issued after it lapses as `registry unreadable`
-for that advance. An unusable `principals.json` lapses every standing grant as
-`registry unreadable`. `warpline plan` reads the registry without recording
+for that advance. A missing or unusable `principals.json` lapses every standing
+grant as `registry unreadable`. `warpline plan` reads the registry without recording
 it, so its `approved:` column agrees with the run.
 
 **What `warpline plan` shows.** Under the session grant line, `plan` prints a
@@ -1689,8 +1692,8 @@ standing grant's renewal period from now.
 - Renewal moves only `period_start`. The hard maximum is measured from
   `issued_at`, so no number of renewals moves it.
 - No lapsed grant is renewed, final or not, and the refusal says which. A final
-  lapse (`not renewed`, `hard max`, or `holder not registered`, since an id
-  gone from `principals.json` never comes back, § 15) cannot clear:
+  lapse (`not renewed`, `hard max`, or `holder not registered`, since no verb
+  brings back an id gone from `principals.json`, § 15) cannot clear:
   `approve --standing` issues a new grant with a new id; the lapsed one stays until revoked.
   After a `registry unreadable`, `holder not machine` or `holder disabled`
   lapse the grant clears, with no renewal, if `principals.json` names the
@@ -4362,7 +4365,8 @@ does not repeat them.
 
 `<home>/principals.json` names who may act. It is owner-only: mode `0600`
 after every write, a file that was looser beforehand included. A missing file
-is an empty registry.
+is an empty registry, except to a standing grant: there it reads as
+`registry unreadable` (§ 9).
 
 ```json
 {
@@ -4406,8 +4410,12 @@ keep both.
 
 Ids are never deleted or reused. Disable is the only way out of the registry.
 Adding an id that is already in the file, active or disabled, is refused with
-exit `1` and no record, and so is disabling an entry that is already disabled or
-an id that is not there. No principal is ever inferred from the account running
+exit `1` and no record. So is adding an id the audit store has ever named, on a
+principal record or in the registry a `segment.opened` carries, even after a
+hand edit or a lost file took it out of `principals.json`: a standing grant it
+held would otherwise read live again for whoever got the id. A store that
+cannot be read refuses every add. Disabling an entry that is already disabled,
+or an id that is not there, is refused too. No principal is ever inferred from the account running
 the command. An id comes from the operator's argument and from nowhere else, and
 `add` with no id is a usage error.
 

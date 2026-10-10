@@ -56,7 +56,7 @@ import type { EvalContext, RunProfile } from '../runtime/engine.js'
 import type { RegistrySnapshot } from '../runtime/approval-gate.js'
 import { computeTier } from '../runtime/tier.js'
 import { grantsCovering, listStandingGrants, liveGrantScopes } from '../runtime/approval-gate.js'
-import { readRegistry, registryView } from '../lib/principals.js'
+import { readRegistry, standingRegistry } from '../lib/principals.js'
 import { readEngineStateReadOnly, withoutStateBackups } from '../runtime/engine-state-store.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../board/state-manager.js'
 import { renderPlan } from './plan-render.js'
@@ -158,7 +158,7 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
   const grant = await readGrant(approvalPath, now)
   // Read as a run reads it, and never recorded: a preview writes nothing.
   const read = await readRegistry()
-  const registry = 'refused' in read ? null : registryView(read.registry)
+  const registry = standingRegistry(read)
   const shell = { pluginsDir: resolvedPluginsDir, grant, standing: await readStanding(now, registry), failures }
 
   let levels: string[][]

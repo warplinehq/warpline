@@ -260,6 +260,45 @@ describe('warpline principal', () => {
     }
   })
 
+  // A standing grant held by an id reads live again once the id is back, so an
+  // id that left the file, by a hand edit or with the whole file, stays used.
+  test('an id that left principals.json, by hand or with the whole file, is refused and nothing is written', async () => {
+    expect((await principal(['add', 'ops', '--type', 'human'])).code).toBe(0)
+    expect((await principal(['add', 'ci', '--type', 'machine'])).code).toBe(0)
+    expect((await principal(['add', 'bot', '--type', 'machine'])).code).toBe(0)
+
+    writeFileSync(file(), JSON.stringify({ principals: registry().principals.filter((p) => p.id !== 'ci') }))
+    expect((await principal(['list'])).code).toBe(0)
+    let bytes = readFileSync(file())
+    let count = lines().length
+
+    const handEdit = await principal(['add', 'ci', '--type', 'machine'])
+
+    expect(handEdit.code).toBe(1)
+    expect(handEdit.stdout).toBe('')
+    expect(handEdit.stderr).toBe('principal add: ci was registered before, and ids are never reused. Nothing was written.\n')
+    expect(lines()).toHaveLength(count)
+    expect(readFileSync(file()).equals(bytes)).toBe(true)
+
+    rmSync(file())
+    count = lines().length
+
+    const wholeFile = await principal(['add', 'bot', '--type', 'machine'])
+
+    expect(wholeFile.code).toBe(1)
+    expect(wholeFile.stderr).toBe('principal add: bot was registered before, and ids are never reused. Nothing was written.\n')
+    expect(existsSync(file())).toBe(false)
+    // The missing file is on the record; no add is.
+    expect(ofType(ADDED)).toHaveLength(3)
+    expect(lines()).toHaveLength(count + 1)
+    expect(lines().at(-1)!.type).toBe(OBSERVED)
+
+    // An id the store never named is still added.
+    expect((await principal(['add', 'ci2', '--type', 'machine'])).code).toBe(0)
+    bytes = readFileSync(file())
+    expect(JSON.parse(bytes.toString('utf-8'))).toEqual({ principals: [{ id: 'ci2', type: 'machine', status: 'active' }] })
+  })
+
   test('with no registry file, list prints nothing, exits 0 and creates nothing', async () => {
     const before = await snapshotHome(home)
 

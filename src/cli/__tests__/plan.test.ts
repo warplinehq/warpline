@@ -1541,6 +1541,21 @@ describe('main([plan]) standing grants', () => {
     expect(lines[0]).toEndWith('— lapsed (registry unreadable)')
   })
 
+  // A lost file is a lost registry, never one that removed every holder: the
+  // lapse clears when the file is put back, so it must not read as final.
+  test('a missing principals.json lists every standing grant as registry unreadable', async () => {
+    await seedRegistry()
+    await issue(Date.now() - 60_000, DAY)
+    await rm(join(home.root, 'principals.json'))
+
+    const { code, stdout } = await capture(() => run([]))
+
+    expect(code).toBe(0)
+    const lines = grantLines(stdout)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toEndWith('— lapsed (registry unreadable)')
+  })
+
   test('a corrupt standing grants file prints the fixed line', async () => {
     await writeFile(join(home.root, 'standing-grants.json'), '{not json')
 
