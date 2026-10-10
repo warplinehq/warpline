@@ -118,7 +118,9 @@ lookup with an inherited member rather than the absence that is the truth. The
 plugin-name rule closes the rest: `*` would merge into a session grant as the
 wildcard, a control byte would reach the audit store, and two names differing
 only in case would share one `config/<name>.json` on a case-insensitive
-filesystem. `ttl_hours` must be positive —
+filesystem. `warpline run` joins its plugin positional under the plugin root,
+so it applies the rule to that positional before anything is read: `../x` is
+refused with exit 1 and nothing imported or run. `ttl_hours` must be positive —
 zero or negative would disable caching rather than mean "always fresh". `max_retries` is capped
 at 10 and `retry_delay_ms` at 60s; the backoff that uses them is described in
 §2. `actions` is an optional registry that only surfaces in a host UI when

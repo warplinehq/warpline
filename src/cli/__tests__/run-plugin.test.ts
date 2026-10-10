@@ -81,6 +81,25 @@ describe('runPlugin — payload and exit code', () => {
     expect(missing.payload.error).toBeTruthy()
   })
 
+  // The name is joined under the plugin root, so a name that is not a plugin
+  // name could import a handler from anywhere. Refused before anything runs.
+  test('a name outside the plugin-name rule is refused with exit 1 and nothing imported', async () => {
+    const outside = join(home, 'x')
+    const marker = join(home, 'imported-outside')
+    mkdirSync(outside, { recursive: true })
+    writeFileSync(join(outside, 'manifest.ts'), `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(marker)}, 'm')\nexport const manifest = {}\n`)
+    writeFileSync(join(outside, 'handler.ts'), `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(marker)}, 'h')\nexport async function handler() {}\n`)
+
+    for (const name of ['../x', 'Success-Plugin', '*']) {
+      const rejected = await runPlugin([name, 'run'])
+      expect(rejected.code).toBe(1)
+      expect(rejected.stdout).toBe('')
+      expect(rejected.usageError).toContain('not a plugin name')
+      expect(rejected.payload.duration_ms).toBeUndefined()
+    }
+    expect(existsSync(marker)).toBe(false)
+  })
+
   test('--retries is bounded to the inclusive range 0 through 10', async () => {
     expect((await runPlugin(['success-plugin', 'run', '--retries=0'])).code).toBe(0)
     expect((await runPlugin(['success-plugin', 'run', '--retries=10'])).code).toBe(0)

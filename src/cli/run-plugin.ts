@@ -41,6 +41,7 @@
  */
 import * as util from 'node:util'
 import { invokePlugin } from '../runtime/invoke-plugin.js'
+import { isPluginName } from '../schemas/plugin-name.js'
 import { readPreferencesFile } from '../lib/preferences.js'
 import { engineStatePath, preferencesPath } from '../lib/paths.js'
 import { observeAuthorityFile } from '../lib/audit-log.js'
@@ -54,6 +55,8 @@ const USAGE =
 const RETRIES_ERROR = 'Invalid --retries value; expected integer in [0, 10]'
 const INPUT_ERROR = 'Invalid --input value; expected key=value'
 const INPUT_KEY_ERROR = 'Invalid --input key; a key may not be an Object.prototype member'
+const NAME_ERROR =
+  'Invalid plugin name; not a plugin name (lowercase letters, digits and hyphens, a leading letter, at most 64)'
 
 /**
  * The stdout contract. Key ORDER is part of it, so build this only
@@ -195,6 +198,9 @@ export async function runPlugin(
 
   const [plugin, action] = positionals
   if (!plugin || !action) return usage(USAGE)
+  // Joined under the plugin root by invokePlugin, so `../x` would import a
+  // handler from outside it. Refused before anything is read or written.
+  if (!isPluginName(plugin)) return usage(NAME_ERROR)
 
   try {
     // The one live path to the per-plugin artifact trim, so the one place the
