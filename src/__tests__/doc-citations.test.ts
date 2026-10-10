@@ -9,7 +9,7 @@
  * So the docs cite code as `` `symbol` in `file.ts` `` and this file holds both
  * halves:
  * - no `file.ts:NN` or `file.md:NN` in `docs/*.md`, nor in a non-test source
- *   file under `src/`, outside one pinned exemption in the frozen gate;
+ *   file under `src/`, the frozen gate included;
  * - every `` `symbol` in `file.ts` `` resolves to one file that declares that
  *   symbol. A file named by its base name must be the only one of that name.
  *
@@ -26,12 +26,6 @@ const REPO_ROOT = join(import.meta.dir, '..', '..')
 const LINE_CITATION = /\b[\w.-]+\.(?:ts|md):\d+/g
 // `\s+`, not a space: a citation wrapped across a line break is still a citation.
 const SYMBOL_CITATION = /`([A-Za-z_$][\w$]*)`\s+in\s+`([\w./-]+\.ts)`/g
-
-/**
- * The frozen gate keeps a line citation until its next FREEZE-10 amendment,
- * pinned here whole so a second one fails.
- */
-const EXEMPT = ['src/runtime/approval-gate.ts: engine-loader.test.ts:218']
 
 function find(args: string[]): string[] {
   const files = execFileSync(FIND, args, { encoding: 'utf8' }).split('\n').filter(Boolean).sort()
@@ -80,7 +74,7 @@ const docs = (): string[] => find([join(REPO_ROOT, 'docs'), '-maxdepth', '1', '-
 describe('docs cite code by symbol', () => {
   test('no line-number citation in docs or in non-test source', () => {
     const source = find([join(REPO_ROOT, 'src'), '-name', '*.ts', '-not', '-path', '*__tests__*', '-not', '-name', '*.test.ts'])
-    expect([...lineCitations(docs(), REPO_ROOT), ...lineCitations(source, REPO_ROOT)]).toEqual(EXEMPT)
+    expect([...lineCitations(docs(), REPO_ROOT), ...lineCitations(source, REPO_ROOT)]).toEqual([])
   })
 
   test('every `symbol` in `file.ts` citation names a file that declares it', () => {

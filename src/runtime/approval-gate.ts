@@ -20,12 +20,18 @@
  *      renewal period and lapses unless renewed, and it lapses for good at a
  *      hard maximum fixed at issue. Nothing marks a grant lapsed: the lapse is
  *      derived each time the grant is read. A lapse on time, or on a holder
- *      gone from the registry (whose id never comes back), cannot clear and
- *      reads `final`. A lapse on an unreadable registry, a holder that is not a
- *      machine, or a disabled holder clears once the holder reads as an active
- *      machine again. A grant whose period has not started yet, because its
- *      `period_start` is later than now, covers nothing until the clock
- *      reaches it, so no clock that ran ahead buys it life past the caps.
+ *      gone from the registry, reads `final`: no verb clears it, and only a
+ *      new grant fixes it. A recorded hand edit that writes the holder back
+ *      into principals.json does clear a `holder not registered` lapse. No
+ *      verb can: `principal add` refuses any id the audit store, the registry
+ *      or the standing grants file has named (src/cli/known-principal.ts). A
+ *      lapse on an unreadable registry, a holder that is not a machine, or a
+ *      disabled holder clears if the holder reads as an active machine again
+ *      before the grant's next expiry. A stored `period_start` before `issued_at` or past
+ *      the hard maximum makes the whole file read corrupt. One that is merely
+ *      later than now reads `future dated`, which is not final: the grant
+ *      covers nothing until the clock reaches it, then goes live by itself,
+ *      and its deadlines carry the lead of the clock that wrote them.
  *
  * Both file formats are specified in docs/runtime-spec.md § 9.
  *
@@ -59,14 +65,16 @@ function isPrincipalId(v: unknown): v is string {
 }
 
 /**
- * A plugin name, the audit store's rule: 1 to 255 characters, none of them a
- * C0 control character, DEL, `/` or `\`. Copied: the gate may not import the
- * store. A scope the gate takes must be one a `grant.revoked` record can carry.
+ * The carriage rule, the audit store's `CarriedPluginName`: 1 to 255
+ * characters, none of them a C0 control character, DEL, `/` or `\`. Not the
+ * stricter admission rule in schemas/plugin-name.ts. Copied: the gate may not
+ * import the store. A scope the gate takes must be one a `grant.revoked`
+ * record can carry.
  */
-const PLUGIN_NAME = /^[^\x00-\x1f\x7f/\\]+$/
+const CARRIED_PLUGIN_NAME = /^[^\x00-\x1f\x7f/\\]+$/
 
-function isPluginName(v: unknown): v is string {
-  return typeof v === 'string' && v.length <= 255 && PLUGIN_NAME.test(v)
+function isCarriedPluginName(v: unknown): v is string {
+  return typeof v === 'string' && v.length <= 255 && CARRIED_PLUGIN_NAME.test(v)
 }
 
 /**
@@ -82,7 +90,9 @@ function attributed(v: unknown): string | null {
 export const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000
 
 /**
- * Absolute ceiling on a grant's lifetime, measured from `first_granted_at`.
+ * The ceiling `mergeGrant` holds each window's expiry to, measured from that
+ * window's `first_granted_at`, unless `long` is passed. `grantApproval` does
+ * not apply it, and the read does not check it.
  *
  * Anchored at FIRST issue, not at the latest grant. Anchored at the latter,
  * repeated `approve --ttl 4h` calls would walk the window forward indefinitely
@@ -201,7 +211,7 @@ function liveWindows(raw: ApprovalFile, now: number): Map<string, Window> {
 /**
  * The live scopes of a grant file with their expiries, for display. Never
  * throws; a missing or corrupt file reads as none. Decisions go through
- * {@link checkApproval}, never through this.
+ * {@link grantsCovering}, never through this.
  */
 export async function liveGrantScopes(
   approvalPath: string = sessionApprovalPath(),
@@ -266,7 +276,8 @@ export async function grantsCovering(
     const raw = JSON.parse(await readFile(approvalPath, 'utf-8')) as ApprovalFile
 
     // Expiry is strict `>`, so a window is live up to and including its expiry
-    // millisecond — the edge `engine-loader.test.ts:218` pins. An expiry that
+    // millisecond — the edge `evaluatePlugin`'s "Test 5 (adjacency)" in
+    // src/runtime/__tests__/engine-loader.test.ts pins. An expiry that
     // will not parse is no expiry at all, so it is not live. A scope is
     // approved by its own window or by a live '*' window, never by another
     // scope's.
@@ -303,8 +314,8 @@ export async function grantsCovering(
  * grants considered calls `grantsCovering` with a registry snapshot.
  *
  * `opts.now` is the clock seam. It is appended rather than slotted before
- * `approvalPath` because both the engine and the tests already pass the path
- * positionally. Callers that hold an injected clock MUST pass it: a caller
+ * `approvalPath` because callers pass the path positionally. Callers that hold
+ * an injected clock MUST pass it: a caller
  * that threads `now` into some of its reads and lets the rest hit the wall
  * clock renders a view that disagrees with itself, which is the bug this
  * parameter closes, not a style preference.
@@ -410,7 +421,8 @@ export interface MergeGrantResult {
  * Grant approval additively, one window per scope: a requested scope that
  * holds a live window keeps its expiry (an explicit TTL may extend it), a new
  * one opens its own, and every other live scope is left exactly as it was.
- * Each window's extension is capped at its own first-grant ceiling.
+ * Each window's extension is capped at its own first-grant ceiling, unless
+ * `long` is passed.
  *
  * This is the write path behind `warpline approve`. `grantApproval` above is
  * the unconditional overwrite it always was — programmatic pre-grants want that
@@ -421,9 +433,10 @@ export interface MergeGrantResult {
  * gets one hour, and a standing `--long` window on `a` is neither shortened
  * nor lent.
  *
- * `checkApproval` is deliberately untouched by any of this: the run path reads
- * the grant and never writes it, and keeping that provable by inspection rather
- * than by test is worth more than any sharing between the two.
+ * `grantsCovering`, the run path's read, is deliberately untouched by any of
+ * this: the run path reads the grant and never writes it, and the two share
+ * only `liveWindows`, so that stays checkable by inspection as well as by
+ * FREEZE-10 clause 7's test.
  */
 export async function mergeGrant(
   scopes: '*' | string | string[],
@@ -612,11 +625,15 @@ export type LapseReason =
   | 'holder disabled'
 
 /**
- * A standing grant as read at one instant. `final` is true when the lapse can
- * never clear and only a new grant fixes it: a time lapse, or a holder gone
- * from the registry, whose id is never added again. A `future dated` lapse
- * clears when the clock reaches `period_start`, and the other three once the
- * holder reads as an active machine.
+ * A standing grant as read at one instant. `final` is true when no verb clears
+ * the lapse and only a new grant fixes it: a time lapse, or a holder gone from
+ * the registry. A recorded hand edit that writes the holder back into
+ * principals.json does clear a `holder not registered` lapse; no verb can,
+ * since `principal add` refuses any id the audit store, the registry or the
+ * standing grants file has named (src/cli/known-principal.ts,
+ * docs/runtime-spec.md § 9). A `future dated` lapse clears by itself when the
+ * clock reaches `period_start`, and the other three if the holder reads as an
+ * active machine before the grant's next expiry.
  */
 export interface StandingStatus extends StandingGrant {
   renewal_deadline: number
@@ -671,7 +688,7 @@ export type StandingRefusal = IssueRefusal | RenewRefusal | RevokeRefusal
 /** A transform's result: the next store, or a refusal and no store. */
 export type StandingChange<R extends StandingRefusal = StandingRefusal> = { store: StandingStore } | { refused: R }
 
-/** The lapses that cannot clear. */
+/** The lapses no verb clears. */
 const FINAL: ReadonlySet<LapseReason> = new Set<LapseReason>(['hard max', 'not renewed', 'holder not registered'])
 
 const iso = (ms: number): string => new Date(ms).toISOString()
@@ -694,7 +711,7 @@ function parseGrant(value: unknown): StandingGrant | null {
   if (typeof id !== 'string' || !STANDING_ID.test(id)) return null
   if (!isPrincipalId(holder) || !isPrincipalId(issuer)) return null
   if (!Array.isArray(scopes) || scopes.length === 0) return null
-  if (!scopes.every((s): s is string => isPluginName(s) && s !== '*')) return null
+  if (!scopes.every((s): s is string => isCarriedPluginName(s) && s !== '*')) return null
   if (new Set(scopes).size !== scopes.length) return null
   if (typeof issued_at !== 'string' || typeof period_start !== 'string') return null
   const issued = parseTimestamp(issued_at)
@@ -767,8 +784,12 @@ export async function readStandingStore(
  * A grant's status at `now`. Both instants are inclusive (strict `>`), like a
  * session window's expiry. A timestamp that will not parse reads as already
  * past, so a malformed grant handed in by a caller lapses rather than lives.
- * A period that starts after `now` covers nothing yet: otherwise a grant dated
- * ahead of the clock would stay live past both caps by the clock's lead.
+ * A period that starts after `now` reads `future dated` and covers nothing
+ * yet, so no grant is live for longer than its period. It goes live by itself
+ * when the clock reaches `period_start`, and its deadlines still carry the
+ * lead of the clock that wrote them. A stored `period_start` before
+ * `issued_at` or past the hard maximum never reaches here from the file:
+ * `parseGrant` refuses it and the file reads corrupt.
  */
 function statusOf(grant: StandingGrant, now: number, registry: RegistrySnapshot | null | undefined): StandingStatus {
   const period_start = parseTimestamp(grant.period_start) ?? Number.NEGATIVE_INFINITY
@@ -805,7 +826,8 @@ function statusOf(grant: StandingGrant, now: number, registry: RegistrySnapshot 
 /**
  * Every standing grant with its status at `now`, sorted by next expiry and
  * then by id. Never throws. With no registry snapshot every grant reads
- * lapsed, `registry unreadable`.
+ * lapsed: `registry unreadable`, unless a time lapse comes first in
+ * `LapseReason` order.
  */
 export async function listStandingGrants({
   now = Date.now(),
@@ -863,7 +885,7 @@ export function issueStanding(
 
   if (scopes.length === 0 || !scopes.every((s) => typeof s === 'string' && s.length > 0)) return refuse('no-scope')
   if (scopes.includes('*')) return refuse('all-scopes')
-  if (!scopes.every(isPluginName)) return refuse('bad-scope')
+  if (!scopes.every(isCarriedPluginName)) return refuse('bad-scope')
   if (!Number.isInteger(period) || period <= 0 || !Number.isInteger(hardMax)) return refuse('bad-period')
   if (period > MAX_STANDING_PERIOD_MS) return refuse('period-over-cap')
   if (hardMax > MAX_STANDING_HARD_MAX_MS) return refuse('hard-max-over-cap')

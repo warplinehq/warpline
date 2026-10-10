@@ -1,5 +1,5 @@
 /**
- * FREEZE-10, as amended 2026-10-09 for standing grants and 2026-10-10 for the phase 26 review's WR-01 and WR-02. This header is the canonical text. The planning requirements carry a pointer to it, never a copy.
+ * FREEZE-10, as amended 2026-10-09 for standing grants and 2026-10-10 for the phase 26 review's WR-01 and WR-02, and 2026-10-10 again: comments and a private identifier only, no behaviour change. This header is the canonical text. The planning requirements carry a pointer to it, never a copy.
  *
  *   1. `src/runtime/approval-gate.ts` stays byte-identical to
  *      `APPROVAL_GATE_SHA256` for the rest of the v0.4 milestone. Guarded by
@@ -49,16 +49,26 @@
  * amended on 2026-09-30 for #27, the per-scope-window gate's until it was
  * amended on 2026-10-09 for standing grants, and the first standing-grant
  * gate's until it was amended on 2026-10-10 for the phase 26 review's WR-01
- * and WR-02. Both 2026-10-10 changes make the gate stricter and loosen no
- * check. WR-01: a stored grant dated ahead of the clock stayed live past the
- * 7-day and 90-day caps by the clock's lead, so the read now refuses a
+ * and WR-02, and that gate's until it was amended again on 2026-10-10 for
+ * comments and a private identifier only, with no behaviour change. The WR-01
+ * and WR-02 changes make the gate stricter and loosen no check. WR-01: a
+ * stored grant dated ahead of the clock stayed live past the 7-day and 90-day
+ * caps by the clock's lead, so the read now refuses a
  * `period_start` before `issued_at` or after the hard maximum, and a period
  * that has not started reads lapsed, `future dated`. WR-02: the read and issue
  * took any non-empty scope, so a revoke of a scope no audit record can carry
  * removed the grant with nothing on the record, and the read and issue now
  * refuse a scope that is not a plugin name. It now pins the gate with both
- * grant kinds and those checks. The block digest was the `v0.2`
- * content's too until FREEZE-10 was amended on 2026-09-23. It now pins the
+ * grant kinds and those checks, its comments saying what the code does. The
+ * comment-only amendment rewrote every comment that overclaimed (a
+ * `holder not registered` lapse is final to every verb, yet a recorded hand
+ * edit of principals.json clears it; an out-of-range `period_start` reads
+ * corrupt, a future one `future dated`, live by itself later), replaced its
+ * one line citation with a test name, and renamed the private carriage rule
+ * `CARRIED_PLUGIN_NAME` / `isCarriedPluginName`. With comments stripped and
+ * that name normalised, the old and new gate print identically. The block
+ * digest was the `v0.2` content's too until FREEZE-10 was amended on
+ * 2026-09-23. It now pins the
  * amended declaration, whose one changed line is `plugin_result`. Reproduce:
  *
  *   git show v0.2:src/runtime/approval-gate.ts | shasum -a 256
@@ -74,7 +84,8 @@
  * the same defect with the evidence removed.
  *
  * **Every enumeration throws rather than returning empty**, the discipline
- * `no-approval-gate-from-content.test.ts:34-40` states in its own words. A slice
+ * the header of `no-approval-gate-from-content.test.ts` states in its own
+ * words ("Every enumeration here throws rather than returning empty"). A slice
  * whose anchor vanished must fail closed: "could not look" is not "looked and it
  * was fine".
  *
@@ -92,7 +103,13 @@ const APPROVAL_GATE = join(REPO_ROOT, 'src', 'runtime', 'approval-gate.ts')
 const ENGINE_STATE = join(REPO_ROOT, 'src', 'schemas', 'engine-state.ts')
 
 /**
- * Re-pinned when FREEZE-10 was amended on 2026-10-10 for the phase 26 review's
+ * Re-pinned when FREEZE-10 was amended again on 2026-10-10, for comments and a
+ * private identifier only, with no behaviour change: the gate's comments say
+ * what its code does, cite a test by name rather than by line, and its private
+ * copy of the carriage rule is `CARRIED_PLUGIN_NAME` / `isCarriedPluginName`.
+ * The previous digest was
+ * `20225e4dfde222bf1185d444bfeaf7b2ddba0fd291196bebb2e220badd6ba396`, pinned
+ * when FREEZE-10 was amended on 2026-10-10 for the phase 26 review's
  * WR-01 and WR-02: the standing read refuses a scope that is not a plugin name
  * and a `period_start` outside `issued_at` and the hard maximum, a period that
  * has not started reads lapsed (`future dated`), and issue refuses a scope that
@@ -105,7 +122,7 @@ const ENGINE_STATE = join(REPO_ROOT, 'src', 'schemas', 'engine-state.ts')
  * windows, was `b3918f0dd76abf3dd783c42b30738246293d246c0da02c70b2229a6fd87ed766`,
  * and the `v0.2` digest `d286a53f2b55b19ddbabeae64ce3bc0423912d376860cd5d73c23e6d48ffb72d`.
  */
-const APPROVAL_GATE_SHA256 = '20225e4dfde222bf1185d444bfeaf7b2ddba0fd291196bebb2e220badd6ba396'
+const APPROVAL_GATE_SHA256 = 'f83ca790a4a0a2b74d5b996682a24080aeaa7b362b4fc36ac1771c6378c7023e'
 
 /** The guard file each clause in the header cites, repo-relative. */
 const CLAUSE_GUARDS = [

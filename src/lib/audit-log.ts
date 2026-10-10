@@ -94,9 +94,9 @@ const Urn = z.string().regex(/^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
  * The CARRIAGE rule: what a record may carry as a plugin name, so history
  * written under a name the loader no longer admits stays readable. Not the
  * ADMISSION rule (`PLUGIN_NAME` / `isPluginName` in schemas/plugin-name.ts),
- * which is stricter. The gate keeps its own copy of this one, still named
- * `PLUGIN_NAME` / `isPluginName` inside approval-gate.ts until the next FREEZE-10
- * amendment can rename it; audit-log.test.ts holds the two copies in agreement.
+ * which is stricter. The gate keeps its own copy of this one,
+ * `CARRIED_PLUGIN_NAME` / `isCarriedPluginName` inside approval-gate.ts;
+ * audit-log.test.ts holds the two copies in agreement.
  */
 const CarriedPluginName = z.string().min(1).max(255).regex(/^[^\x00-\x1f\x7f/\\]+$/)
 const RunId = z.string().regex(/^[0-9A-Za-z][0-9A-Za-z._:-]{0,127}$/)
