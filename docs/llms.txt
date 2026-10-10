@@ -11,6 +11,7 @@
 - [needs-llm-contract.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.5.1/docs/needs-llm-contract.md): the LLM handoff protocol
 - [plugin-authoring.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.5.1/docs/plugin-authoring.md): writing and testing plugins
 - [scheduler-recipe.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.5.1/docs/scheduler-recipe.md): running `advance` on a fifteen-minute tick under systemd, launchd or cron, with every scheduler fact cited to the page it came from
+- [upgrading.md](https://raw.githubusercontent.com/warplinehq/warpline/v0.5.1/docs/upgrading.md): what to change when you move between published versions, starting with the 0.6.0 plugin-name rule
 
 ## Optional
 

@@ -352,6 +352,7 @@ handoff up, the deterministic work carries on running without it.
 - [docs/needs-llm-contract.md](docs/needs-llm-contract.md) — the LLM handoff protocol
 - [docs/plugin-authoring.md](docs/plugin-authoring.md) — writing and testing plugins
 - [docs/scheduler-recipe.md](docs/scheduler-recipe.md) — running `advance` on a fifteen-minute tick under systemd, launchd or cron, with every scheduler fact cited to the page it came from
+- [docs/upgrading.md](docs/upgrading.md) — what to change when you move between published versions; **0.6.0 breaks plugin names that 0.5.x loaded**
 - [docs/why-the-gate-holds.md](docs/why-the-gate-holds.md) — the long argument: why the gate holds, and the objections it has to survive
 
 ## From source

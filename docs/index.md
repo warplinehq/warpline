@@ -15,6 +15,7 @@ plugin, start at the top and work down.
 - [needs-llm-contract.md](needs-llm-contract.md) — the LLM handoff protocol
 - [plugin-authoring.md](plugin-authoring.md) — writing and testing plugins
 - [scheduler-recipe.md](scheduler-recipe.md) — running `advance` on a fifteen-minute tick under systemd, launchd or cron, with every scheduler fact cited to the page it came from
+- [upgrading.md](upgrading.md) — what to change when you move between published versions, starting with the 0.6.0 plugin-name rule
 
 ## Background
 
