@@ -1720,7 +1720,9 @@ standing grant's renewal period from now.
 Every refusal exits 1 and writes nothing. The command appends `grant.renewed`
 (§ 14) before it writes the standing grants file, so a failed append renews
 nothing: it says so on stderr and exits 1. On success it prints the new
-renewal deadline and the hard maximum. Renewal never touches the session file.
+renewal deadline, the hard maximum and the next expiry, the earlier of the two.
+A renewal close to the hard maximum sets a renewal deadline past it, and the
+grant still lapses at the hard maximum. Renewal never touches the session file.
 
 **Revoking.** `warpline revoke` has three forms. Bare, it clears the session
 grant and never reads or writes the standing grants file (above).
@@ -3872,7 +3874,7 @@ The set is closed. A kind outside it cannot be written.
 | Kind | What it records |
 |------|-----------------|
 | `grant.issued` | `warpline approve` is about to write a grant. A session grant (`kind: session`) carries the scopes, duration and flags asked for. A standing grant (`kind: standing`) carries its id, holder, scopes, renewal period and hard maximum. Both carry the acting `principal`. |
-| `grant.renewed` | `warpline renew` is about to restart a standing grant's period: the grant id, its holder, the renewing `principal` and the new renewal deadline. |
+| `grant.renewed` | `warpline renew` is about to restart a standing grant's period: the grant id, its holder, the renewing `principal` and the new renewal deadline. That deadline can fall after the grant's hard maximum, and the grant lapses at the earlier of the two (§ 9). |
 | `grant.revoked` | `warpline revoke` is about to remove a grant. A session revoke (`kind: session`) carries the live scopes it clears. A standing revoke (`kind: standing`) carries the grant ids, sorted, their holder and the union of their scopes. Both carry `principal`, the registered id `--principal` named and the registry confirmed, or null, and `principal_unchecked`, the id `--principal` named when the registry could not confirm it, or null. |
 | `content_approval.issued` | A content approval is about to be bound to an Output's fingerprint. |
 | `content_approval.withdrawn` | A content approval is about to be removed. |

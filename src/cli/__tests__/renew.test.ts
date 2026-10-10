@@ -148,6 +148,27 @@ describe('renew restarts the period', () => {
     expect(seen()).toBe(true)
   })
 
+  // The record keeps the renewal deadline, a defined term, and the hard maximum
+  // is derivable from `issued_at`. The line the operator reads names the moment
+  // the grant actually lapses.
+  test('a renewal past the hard maximum prints the hard maximum as the next expiry', async () => {
+    const steps = [await renewAt(T0 + DAY), await renewAt(T0 + 2 * DAY)]
+    setSystemTime(new Date(T0 + 2.5 * DAY))
+    const r = await capture(['renew', id, '--principal', 'carol'])
+    expect(r.code).toBe(0)
+    expect(r.stdout).toContain(`renewal deadline ${iso(T0 + 3.5 * DAY)}`)
+    expect(r.stdout).toContain(`next expiry ${iso(T0 + 3 * DAY)}`)
+    expect(auditRecords(vh.home, 'grant.renewed').at(-1)!.renewal_deadline).toBe(iso(T0 + 3.5 * DAY))
+    expect(steps).toEqual([0, 0])
+  })
+
+  test('a renewal inside the hard maximum prints the renewal deadline as the next expiry', async () => {
+    setSystemTime(new Date(T0 + DAY))
+    const r = await capture(['renew', id, '--principal', 'carol'])
+    expect(r.code).toBe(0)
+    expect(r.stdout).toContain(`next expiry ${iso(T0 + 2 * DAY)}`)
+  })
+
   test('renew by the issuer is allowed', async () => {
     setSystemTime(new Date(T0 + DAY))
     const r = await capture(['renew', id, '--principal', 'ops'])

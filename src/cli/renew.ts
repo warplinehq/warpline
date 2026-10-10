@@ -130,7 +130,10 @@ export async function run(argv: string[]): Promise<number> {
     }
     const grant = change.store.grants.find((g) => g.id === id)!
     const renewalDeadline = iso(now + grant.period_ms)
-    const hardMax = iso(Date.parse(grant.issued_at) + grant.hard_max_ms)
+    const hardMaxAt = Date.parse(grant.issued_at) + grant.hard_max_ms
+    const hardMax = iso(hardMaxAt)
+    // A renewal near the hard maximum sets a deadline past it, and the grant lapses at the earlier.
+    const nextExpiry = iso(Math.min(now + grant.period_ms, hardMaxAt))
 
     try {
       await appendAudit(statePath, 'grant.renewed', {
@@ -153,7 +156,9 @@ export async function run(argv: string[]): Promise<number> {
       return 1
     }
 
-    process.stdout.write(`Renewed ${id}, held by ${grant.holder}: renewal deadline ${renewalDeadline}, hard maximum ${hardMax}.\n`)
+    process.stdout.write(
+      `Renewed ${id}, held by ${grant.holder}: renewal deadline ${renewalDeadline}, hard maximum ${hardMax}, next expiry ${nextExpiry}.\n`,
+    )
     return 0
   })
 }
