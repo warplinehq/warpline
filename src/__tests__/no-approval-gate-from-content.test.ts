@@ -14,19 +14,20 @@
  * so a ninth export added tomorrow is covered without anyone remembering.
  *
  * **Why an AST walk and not a grep.** A file-granularity import closure — the
- * shape `src/cli/__tests__/deny.test.ts:498-551` uses — is already non-empty
- * from every plausible root in this tree, because `engine.ts:22` imports
+ * shape test 14 in `src/cli/__tests__/deny.test.ts` uses — is already non-empty
+ * from every plausible root in this tree, because `engine.ts` imports
  * `checkApproval` for a legitimate session-grant call that must stay. A
  * file-level predicate could therefore only be made green by a hand list of
- * blessed call sites, which `src/__tests__/no-orphan-schema-fields.test.ts:19-20`
- * rejects by name. So the unit of analysis is the FUNCTION: start at the four
+ * blessed call sites, which the header of
+ * `src/__tests__/no-orphan-schema-fields.test.ts` rejects by name ("a hand list
+ * again"). So the unit of analysis is the FUNCTION: start at the four
  * named module-level functions the content branch lives in, walk their bodies
  * and the bodies of everything they call, and assert the identifiers met along
  * the way name none of the forbidden set.
  *
  * This is the repository's first AST-based guard. `typescript` is already a
  * devDependency (`package.json:68`) and
- * `src/cli/__tests__/manifest-declarative.test.ts:97-110` sanctions reaching
+ * `topLevelStatements` in `src/cli/__tests__/manifest-declarative.test.ts` sanctions reaching
  * for `ts.createSourceFile` when a line-oriented scan stops being enough. A
  * syntactic `SourceFile` is enough for a name-level assertion; no `Program` and
  * no type checker, which keeps the walk far inside the suite's 20 s default.
@@ -34,7 +35,7 @@
  * **Every enumeration here throws rather than returning empty.** An enumeration
  * that found nothing is "did not look", and returning `[]` from it reports
  * silently, perfectly green — the discipline
- * `src/__tests__/no-grant-recheck.test.ts:56-66` states in its own words, and
+ * `capabilityLayer` in `src/__tests__/no-grant-recheck.test.ts` states in its own words, and
  * the failure class this repository has now logged six instances of. That
  * covers the export enumeration, the two named-elsewhere declarations, the
  * roots, and the closure itself.
@@ -150,7 +151,7 @@ function descendable(node: ts.Node): boolean {
  * Imported binding name to the absolute path of the file it comes from, for
  * relative specifiers only.
  *
- * `.js` is rewritten to `.ts` the way `src/cli/__tests__/deny.test.ts:513-542`
+ * `.js` is rewritten to `.ts` the way `walkImports` in `test-utils/import-walk.ts`
  * does it — the sources are ESM-specified TypeScript, so the specifier names
  * the built artifact and the declaration lives beside it.
  *
@@ -399,7 +400,7 @@ describe('the same helper reports a closure that does reach the grant machinery'
   })
 
   /**
-   * The case a single-file scan misses, and the one `deny.test.ts:498-511`
+   * The case a single-file scan misses, and the one test 14 in `deny.test.ts`
    * records having paid for: a grant write added to a helper two modules down
    * broke the prohibition with that test still green.
    */

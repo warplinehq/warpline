@@ -33,14 +33,14 @@
  *
  * **Four import forms, and one predicate covering them.** A guard blind to one
  * import form is a defect this repository has already shipped;
- * `src/__tests__/screen-plugin-root.test.ts:14-16` records it in its own words.
+ * the header of `src/__tests__/screen-plugin-root.test.ts` records it in its own words.
  * The forms that matter here are the static named import, the `import type`
  * declaration (type-only, erased at build, and still a dependency a reader
  * copies), the dynamic `import()` expression, and the `export … from`
  * re-export, which names no import keyword at all and is the form that restored
  * five relocated helpers to a published subpath the last time it was missed.
  * Rather than four arms, the specifier scanner below is taken verbatim from
- * `src/__tests__/no-orphan-schema-fields.test.ts:131-132`, where it is already
+ * `SPECIFIER` in `src/__tests__/no-orphan-schema-fields.test.ts`, where it is already
  * reviewed and already load-bearing. It closes all four plus the side-effect
  * `import 'x'` and the CommonJS `require('x')` form, because it asks where a
  * quoted specifier sits rather than which keyword introduced it.
@@ -139,7 +139,8 @@ function escapesRoot(root: string, file: string, specifier: string): boolean {
 
 /**
  * The line prefilter handed to `grep`. POSIX ERE only — no non-capturing
- * groups and no backslash shorthand classes. `src/__tests__/no-private-planning-refs.test.ts:124-137`
+ * groups and no backslash shorthand classes. The comment on `unportablePatterns` in
+ * `src/__tests__/no-private-planning-refs.test.ts`
  * records why in full: a non-capturing group makes GNU grep error out, and a
  * shorthand class compiles cleanly under a strict engine and then matches
  * nothing, which is a search that is green because it never looked.
@@ -152,7 +153,7 @@ function escapesRoot(root: string, file: string, specifier: string): boolean {
 const CANDIDATE = `(from|import|require)[[:space:]]*[('"]`
 
 /**
- * Verbatim from `src/__tests__/no-orphan-schema-fields.test.ts:131-132`, where
+ * Verbatim from `SPECIFIER` in `src/__tests__/no-orphan-schema-fields.test.ts`, where
  * its edges are already documented: it takes a backtick only in call position,
  * because a template literal is legal in `import(...)` and a syntax error after
  * `from`, and this repository writes specifiers inside prose. Reusing it rather

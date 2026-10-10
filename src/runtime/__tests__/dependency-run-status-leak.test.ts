@@ -200,7 +200,7 @@ export async function handler(manifest, args, signal, capabilities) {
 
     const consumerEntry = await home.entryFor(r2.run_log_path, 'consumer')
     expect(consumerEntry).not.toBeNull()
-    // The consumer RAN. `completed` is the run-LOG vocabulary (`run-log.ts:26`),
+    // The consumer RAN. `completed` is the run-LOG vocabulary (an entry's `status` in `run-log.ts`),
     // not the `plugin_runs` one — the two enums differ and the difference is
     // easy to write past. A `skipped` here would mean the producer armed a gate
     // and this arm had stopped crossing the seam.

@@ -162,7 +162,7 @@ export async function main(argv: string[]): Promise<number> {
       err instanceof Error &&
       (err.name === 'EngineStateInvalidError' || err.name === 'FormatVersionUnsupportedError')
     ) {
-      // Surface the message, not a stack — the convention at plan.ts:198.
+      // Surface the message, not a stack — the convention `run` in plan.ts keeps.
       process.stderr.write(`${err.message}\n`)
       return 1
     }

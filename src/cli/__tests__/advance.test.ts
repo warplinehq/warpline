@@ -878,8 +878,8 @@ describe('main([advance, --json])', () => {
    * somebody's plugin turned this document into a parse failure that looked
    * like a warpline bug.
    *
-   * Both writers, because they are genuinely two. `engine-stdout.test.ts:9-16`
-   * records that `console.log` does not travel through `process.stdout.write`
+   * Both writers, because they are genuinely two. The header of
+   * `engine-stdout.test.ts` ("Why this is source-level", point 1) records that `console.log` does not travel through `process.stdout.write`
    * in this runner's scope, so a redirect that patches only the write function
    * leaves the console half printing to the real terminal — green here and
    * broken in the field.

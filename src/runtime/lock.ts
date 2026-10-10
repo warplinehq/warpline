@@ -91,7 +91,9 @@ export function _setHeartbeatInterval(ms: number | null): void {
  * Every function below takes its lock path as a REQUIRED first parameter.
  *
  * There used to be a module-load-time constant here holding `lockPath()`,
- * which is the one thing `src/lib/paths.ts:17-21` tells you not to write:
+ * which is the one thing `src/lib/paths.ts` tells you not to write (its header
+ * paragraph "Paths are exposed as accessor FUNCTIONS, not module-load-time
+ * constants"):
  * a path frozen at import time survives a later re-root. `bench/run.ts` swaps
  * `WARPLINE_HOME` per iteration and `bench/arms.ts` calls `runAdvance()` with
  * no options, so a frozen default would put the bench's lock in the wrong home
@@ -242,7 +244,7 @@ export async function acquireLock(
   if (held === null || !isLockStale(held, read)) throw lockedError(lockPath, held)
 
   // Stale. Break it and retry once. The window between the unlink and the
-  // retry is the same race `state-manager.ts:112-116` already accepts in
+  // retry is the same race the stale break in `state-manager.ts`'s `acquireLock` accepts in
   // production: another process can win the retry, and then this one refuses
   // by name rather than trying again — which is only true because the unlink
   // is scoped to the stale lock this call read back. An unconditional unlink

@@ -60,10 +60,12 @@ reason a two-line change to a scheduled job stays a two-line change.
 ## The gate, and exactly how far it goes
 
 A claim about a safety property is worth nothing without its source. So here's
-this one, with line numbers attached.
+this one, with the code named. I name the function, not the line, because a
+line number moves with the next edit and nobody notices.
 
-Blanket approval exists. `approval-gate.ts:261` is the loop that finds it. The
-check looks up the wildcard window first, then the plugin's own. A live wildcard
+Blanket approval exists. The loop that finds it is in `grantsCovering` in
+`approval-gate.ts`. The check looks up the wildcard window first, then the
+plugin's own. A live wildcard
 window covers every plugin, whatever it's called. Read it at
 [approval-gate.ts](https://github.com/warplinehq/warpline/blob/main/src/runtime/approval-gate.ts).
 I'd rather write that sentence myself than have somebody find it.
@@ -98,9 +100,10 @@ an email going out on Thursday. A session grant says a plugin may act. It
 doesn't say what the plugin will send, and by Thursday it might send something
 you never saw.
 
-So you approve the content itself. `warpline approve <plugin> --content` shows
-you the exact bytes before it writes anything. Control characters are escaped so
-nothing hides in them, and the fingerprint sits on a line of its own. You have
+So you approve the content itself. `warpline approve <plugin> --content` binds
+the approval to the exact bytes and prints them back to you once it's written.
+Control characters are escaped so nothing hides in them, and the fingerprint
+sits on a line of its own. You have
 to pass `--not-after`, because a content approval must say when it stops being
 true. The command won't write one that doesn't. See
 [approve.ts](https://github.com/warplinehq/warpline/blob/main/src/cli/approve.ts).
@@ -314,67 +317,70 @@ The gate holds because it isn't a policy. It's the only path through.
 <!--
 Verification notes for the claims above. Each clause of "blanket approval is one
 explicit human command that prints its coverage first, it expires, and no run
-grants itself anything" is tied below to the search that established it. Run
-2026-09-01 against this tree; re-run them rather than re-reasoning them.
+grants itself anything" is tied below to the code that holds it, cited by
+symbol and file, never by line number: src/__tests__/doc-citations.test.ts
+fails on a line-number citation in docs/ and on a cited symbol its file does not
+declare. Re-checked 2026-10-10 against this tree. Re-run the searches rather
+than re-reasoning them.
 
-1. "no run grants itself anything" — the engine imports the read path only.
-   grep -n 'approval-gate' on the engine returns one import:
-     22:import { checkApproval } from './approval-gate.js'
-   (two further hits at :348 and :1328 are prose inside docstrings, not
-   imports). Neither write function is imported by the advance path.
+1. "no run grants itself anything": the engine imports read paths only from
+   the gate, `grantsCovering` in `approval-gate.ts` and `listStandingGrants` in
+   `approval-gate.ts`, plus two types. No writer is imported by the advance
+   path, and FREEZE-10 clause 4 (src/__tests__/no-standing-write-from-run.test.ts)
+   holds the whole advance closure to that.
 
-2. "no run grants itself anything" — neither write function has a caller
+2. "no run grants itself anything": neither session writer has a caller
    outside its own module and the approve CLI. Searching the source tree for
-   grantApproval, excluding the tests directory and the approval-gate module
-   itself, returns nothing at all: exit 1, no output. The same search for
-   mergeGrant returns one import and one call site, both in the approve CLI:
-     approve.ts:58  import { DEFAULT_TTL_MS, mergeGrant, MAX_GRANT_WINDOW_MS } ...
-     approve.ts:450 const result = await mergeGrant(
-   (a third hit at suggest.ts:8 is prose inside a docstring, not a call).
+   grantApproval, excluding the tests and the gate module itself, returns
+   nothing. The same search for mergeGrant finds one import and one call site,
+   the call in `writeSessionGrant` in `approve.ts`. Two further hits, in
+   suggest.ts and engine-state-store.ts, are prose inside comments, not calls.
    One importer, one call site, and it is the command a person types.
 
-3. "one explicit human command" / "prints its coverage first" — the wildcard is
-   reachable from the CLI only through the explicit flag, which the guard at
-   approve.ts:132 makes mutually exclusive with positional plugin names:
-     132:  if (values.all && positionals.length > 0) {
-   and the coverage line is written at approve.ts:435, fifteen lines before the
-   grant is merged at :450. Reading order is the proof: nothing is on disk when
-   the coverage is printed.
+3. "one explicit human command" / "prints its coverage first": the wildcard is
+   reachable from the CLI only through the explicit flag, which `run` in
+   `approve.ts` makes mutually exclusive with positional plugin names
+   ("--all approves every plugin; do not also name plugins."). The coverage
+   line ("Blanket approval: ...") is written in `writeSessionGrant` in
+   `approve.ts` before its `mergeGrant` call. Reading order is the proof:
+   nothing is on disk when the coverage is printed.
 
-4. "it expires" — the two constants, quoted from the module that defines them:
-     28:export const DEFAULT_TTL_MS = 4 * 60 * 60 * 1000
-     47:export const MAX_GRANT_WINDOW_MS = 23 * 60 * 60 * 1000
-   The second carries the docstring "Anchored at FIRST issue, not at the latest
-   grant", which is why re-granting cannot walk the window forward.
+4. "it expires": the two constants, `DEFAULT_TTL_MS` in `approval-gate.ts` (four
+   hours) and `MAX_GRANT_WINDOW_MS` in `approval-gate.ts` (23 hours). The second
+   carries the docstring "Anchored at FIRST issue, not at the latest grant",
+   which is why re-granting cannot walk the window forward.
 
-5. "the ceiling is liftable" — the CLI's own help text, as `warpline approve
+5. "the ceiling is liftable": the CLI's own help text, as `warpline approve
    --help` prints it:
        --long       Permit an expiry past 23h from the first grant.
    The source builds that hour from MAX_GRANT_WINDOW_MS rather than typing it
-   (approve.ts, CEILING_H), so the help text cannot drift from the constant.
-   This is why no sentence above calls the ceiling absolute.
+   (`CEILING_H` in `approve.ts`), so the help text cannot drift from the
+   constant. This is why no sentence above calls the ceiling absolute.
 
 6. "records that plugin skipped and carries on" vs "recorded gated, and the run
-   stops after its level" — two different mechanisms, and the essay used to
-   describe the second under the first's trigger. Both are in the engine:
-     613:  result_summary: `skipped (unapproved): side effects [...] require
-           session approval`
-   is the unapproved-declared-effect path; it pushes a `skipped` entry and
-   returns, so siblings and later levels run normally. Whereas:
-     679:  plugin_states.set(pluginName, 'gated')
-   is the post-execution supervised path, and the level-end check that follows
-   it sets `stopped = true`. `warpline plan` prints the first as
-   `skipped (unapproved)`, which is the one-command check.
+   stops after its level": two different mechanisms, both in `runAdvance` in
+   `engine.ts`. The unapproved-declared-effect path writes the result summary
+   `skipped (unapproved): side effects [...] require session approval`, pushes
+   a `skipped` entry and returns, so siblings and later levels run normally.
+   The post-execution supervised path sets `plugin_states.set(pluginName,
+   'gated')`, and the level-end check that follows it sets `stopped = true`.
+   `warpline plan` prints the first as `skipped (unapproved)`, which is the
+   one-command check.
 
-7. "A second way through" — added 2026-10-02. Each clause and its source:
-     "doesn't read the grant file at all": docs/runtime-spec.md:1355, the
-       content branch sits ABOVE the grant read.
-     "must say when it stops being true": src/cli/approve.ts:395, the
-       --not-after refusal, quoted.
-     "fingerprint ... a line of its own", "bytes before it writes": approve.ts
-       around :476, header, fingerprint, window, then the bytes.
-     "a closed list": src/schemas/run-log.ts:47, RefusalReasonSchema.
-     "no 23-hour ceiling": approve.ts:392-421 resolves --not-after with no
-       CEILING_H check. Re-run the greps; line numbers drift.
+7. "A second way through", added 2026-10-02. Each clause and its source:
+     "doesn't read the grant file at all": `contentGateApplies` in `engine.ts`
+       decides a content-class plugin, and the unapproved check returns its
+       answer before any grant is read.
+     "must say when it stops being true": `approveContent` in `approve.ts`,
+       the --not-after refusal ("a content approval must say when it stops
+       being true").
+     "fingerprint ... a line of its own", "prints them back once it's written":
+       `approveContent` in `approve.ts` records and writes the approval, then
+       prints the header, the fingerprint on its own line, the window, and the
+       bytes last. (Until 2026-10-10 the essay said the bytes came before the
+       write. The code never did that.)
+     "a closed list": `RefusalReasonSchema` in `run-log.ts`.
+     "no 23-hour ceiling": `approveContent` in `approve.ts` resolves
+       --not-after with no CEILING_H check.
 -->
 

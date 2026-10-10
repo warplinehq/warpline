@@ -806,7 +806,7 @@ describe('the content-authority decision', () => {
  * Written out by hand rather than read off the schema's own member array: a
  * list derived from the source asserts the implementation against itself,
  * which is the one thing this block exists not to do. The discipline is
- * `gate-order.test.ts:38-48`, copied deliberately.
+ * `DECLARED_ORDER` in `gate-order.test.ts`, copied deliberately.
  *
  * `19-SPEC.md:125` names the three in a different sequence, but that line is a
  * list of the enum's members and its trailing clause reads loosely as a

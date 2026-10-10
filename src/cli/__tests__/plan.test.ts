@@ -310,10 +310,10 @@ describe('buildPlanModel', () => {
    *
    * `currentTier` never leaves `buildPlanModel`, so it is observed through the
    * gate it feeds: `min_tier: 'degraded'` runs at 'degraded' and is blocked at
-   * 'suspended' (tier.ts:89 — a plugin runs when the current tier's order is <=
-   * its min_tier order). The same plugin therefore lands on opposite sides
-   * depending on which clock was read. Drop the second argument at plan.ts:132
-   * and this turns red.
+   * 'suspended' (`isEligibleForTier` in tier.ts — a plugin runs when the current tier's
+   * order is <= its min_tier order). The same plugin therefore lands on opposite
+   * sides depending on which clock was read. Drop the second argument of the
+   * `computeTier` call in `buildPlanModel` and this turns red.
    */
   test('Test 5: currentTier comes from the injected clock, not the wall clock', async () => {
     const PINNED_NOW = Date.parse('2020-06-01T12:00:00.000Z')

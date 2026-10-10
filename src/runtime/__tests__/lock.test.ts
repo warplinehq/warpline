@@ -338,7 +338,7 @@ describe('acquireLock', () => {
  * Contention and healing.
  *
  * The error is checked by `name`, never by `instanceof` and never by importing
- * the class — that is how `warpline.ts:119` recognises a typed error, and it is
+ * the class — that is how `main` in `warpline.ts` recognises a typed error, and it is
  * what lets a CLI module map this one to an exit code without an import.
  */
 describe('acquireLock — contention and healing', () => {

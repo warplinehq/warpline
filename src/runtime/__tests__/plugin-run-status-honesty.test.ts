@@ -21,7 +21,7 @@
  *      not a handler that throws: that is caught inside `invokePlugin` and
  *      comes back as a `failed` result, which the normal write handles. The
  *      reachable case is `loadPluginConfig` rethrowing a non-`PluginConfigError`
- *      (`invoke-plugin.ts:378`) — here a config path that is a directory, so
+ *      (in `invokePlugin`, `invoke-plugin.ts`) — here a config path that is a directory, so
  *      `readFile` raises EISDIR rather than ENOENT.
  *
  * Arm 2 no longer reads the status through a consumer, because it cannot: the

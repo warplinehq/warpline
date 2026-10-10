@@ -8,8 +8,9 @@
  * machines — that window is as wide as the run, which is hours in the shape this
  * runtime is built for rather than a scheduling accident.
  *
- * **The wedge, not a forced interleave.** `src/cli/__tests__/deny.test.ts:575-583`
- * records that the interleave cannot be produced from outside the process for a
+ * **The wedge, not a forced interleave.** The lock test in
+ * `src/cli/__tests__/deny.test.ts` ("a denial waits while another writer holds
+ * the state lock") records that the interleave cannot be produced from outside the process for a
  * command that is too fast to catch mid-flight. It does not have to be, here:
  * the advance is held open on purpose. Its one firing plugin blocks in its
  * handler on a file that does not exist yet, the test does its concurrent write
