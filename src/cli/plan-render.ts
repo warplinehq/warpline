@@ -94,9 +94,21 @@ export interface StandingLine {
   scopes: string[]
   /** Epoch milliseconds: the earlier of the renewal deadline and the hard maximum. */
   nextExpiry: number
+  /** Epoch milliseconds: when the current period starts. A `future dated` lapse turns live then, on its own. */
+  periodStart: number
   state: 'live' | 'lapsed'
   /** The lapse reason, null when live. */
   reason: string | null
+}
+
+/**
+ * A grant's state as `plan` prints it. A `future dated` lapse is the one that
+ * turns live on its own, with no human act, so its line says when.
+ */
+function standingState(g: StandingLine): string {
+  if (g.state === 'live') return 'live'
+  if (g.reason === 'future dated') return `lapsed (future dated, live from ${new Date(g.periodStart).toISOString()})`
+  return `lapsed (${g.reason})`
 }
 
 /** The standing grants file as read, or the fact that it could not be. */
@@ -191,7 +203,7 @@ function standingLines(view: StandingView | undefined): string[] {
     `Standing grants (${view.grants.length}):`,
     ...view.grants.map(
       (g) =>
-        `${INDENT}${g.id} — holder ${g.holder}, issuer ${g.issuer}, scopes ${g.scopes.map(visible).join(', ')} — next expiry ${new Date(g.nextExpiry).toISOString()} — ${g.state === 'live' ? 'live' : `lapsed (${g.reason})`}`,
+        `${INDENT}${g.id} — holder ${g.holder}, issuer ${g.issuer}, scopes ${g.scopes.map(visible).join(', ')} — next expiry ${new Date(g.nextExpiry).toISOString()} — ${standingState(g)}`,
     ),
   ]
 }

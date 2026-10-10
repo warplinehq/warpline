@@ -136,6 +136,8 @@ async function readStanding(now: number, registry: RegistrySnapshot | null): Pro
       issuer: g.issuer,
       scopes: g.scopes,
       nextExpiry: g.next_expiry,
+      // The gate read refuses a grant whose period_start does not parse.
+      periodStart: Date.parse(g.period_start),
       state: g.state,
       reason: g.reason,
     })),

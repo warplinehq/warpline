@@ -1619,7 +1619,9 @@ the first in this order is the one reported:
 1. `hard max`: past the hard maximum.
 2. `not renewed`: past the renewal deadline.
 3. `future dated`: `period_start` is later than `now`. A clock that ran ahead
-   when the grant was issued or renewed, then was set back, leaves one.
+   when the grant was issued or renewed, then was set back, leaves one. It
+   turns live on its own, with no renewal and no human act, once the clock
+   reaches `period_start`.
 4. `registry unreadable`: no usable registry was read (below). A missing
    `principals.json` is one: it says nothing about any holder.
 5. `holder not registered`: the registry was read and does not name the holder.
@@ -1637,8 +1639,8 @@ advance or a verb acts on the file. `registry unreadable`, `holder not machine` 
 not final. Such a lapse clears, with no renewal, if `principals.json` names the
 holder an active machine before the grant's next expiry, the earlier of its
 renewal deadline and its hard maximum. After that expiry the lapse is final.
-`future dated` is not final either. It clears, with no renewal, when the clock
-reaches `period_start`, which the read keeps at or before the hard maximum.
+`future dated` is not final either. It clears by itself when the clock reaches
+`period_start`, which the read keeps at or before the hard maximum.
 
 **The caps hold for every stored grant.** The caps are constants in code,
 never preferences, and no file can raise them. The read refuses a grant whose
@@ -1646,8 +1648,14 @@ never preferences, and no file can raise them. The read refuses a grant whose
 before `issued_at` or after the hard maximum, and a grant whose period has not
 started is lapsed. So a grant is live only inside its current period and
 before its hard maximum, whatever its stored timestamps say: at most 7 days
-from any read to its renewal deadline, and at most 90 days from `issued_at`. A
-grant dated ahead of the clock gains no life from the lead.
+from any read to its renewal deadline, and at most 90 days from `issued_at`.
+The caps bound how long a grant is live, never when. Both are measured from
+the stored timestamps, which are the readings of the clock that issued or
+renewed the grant. A grant issued by a clock running ahead by some lead covers
+nothing until the clock reaches its `period_start`, then turns live on its own,
+and its renewal deadline and hard maximum fall that lead later than a right
+clock would have set them. The read cannot tell a clock's lead from a date
+meant, so `warpline plan` names the moment such a grant turns live (below).
 
 A lapsed grant stays in the standing grants file until revoked. Nothing
 collects it.
@@ -1690,7 +1698,8 @@ it, so its `approved:` column agrees with the run. An advance given
 
 The next expiry is the earlier of the renewal deadline and the hard maximum. A
 lapsed grant's line ends `lapsed (<reason>)`, with one of the seven reasons
-above. The lines come in the gate's order, by next expiry and then by id, and
+above, except a `future dated` one. That lapse ends with no human act, so its
+line ends `lapsed (future dated, live from <period_start>)`. The lines come in the gate's order, by next expiry and then by id, and
 no line shows a principal's key. The read refuses a scope that is not a plugin
 name, so no scope holds a C0 control byte or DEL. A plugin name as the store
 carries one can hold a C1 byte (the loader admits none, but the store reads

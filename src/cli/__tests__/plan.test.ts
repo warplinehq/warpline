@@ -1529,6 +1529,21 @@ describe('main([plan]) standing grants', () => {
     expect(stdout).not.toContain(KEY)
   })
 
+  // A grant issued by a clock that ran ahead turns live by itself at its
+  // period_start, with no human act, so the line names that moment.
+  test('a future-dated grant says when it turns live on its own', async () => {
+    await seedRegistry()
+    const ahead = Math.floor((Date.now() + DAY / 2) / 1000) * 1000
+    await issue(ahead, DAY)
+
+    const { code, stdout } = await capture(() => run([]))
+
+    expect(code).toBe(0)
+    const lines = grantLines(stdout)
+    expect(lines).toHaveLength(1)
+    expect(lines[0]).toEndWith(`— lapsed (future dated, live from ${new Date(ahead).toISOString()})`)
+  })
+
   test('an unusable registry lists every standing grant as registry unreadable', async () => {
     await writeFile(join(home.root, 'principals.json'), '{not json')
     await issue(Date.now() - 60_000, DAY)

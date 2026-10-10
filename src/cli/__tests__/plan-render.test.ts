@@ -394,6 +394,7 @@ describe('renderPlan — standing grants', () => {
       issuer: 'ops',
       scopes: ['digest-sender', 'issue-render'],
       nextExpiry: NOW + HOUR,
+      periodStart: NOW - HOUR,
       state: 'live',
       reason: null,
       ...overrides,
@@ -409,7 +410,6 @@ describe('renderPlan — standing grants', () => {
     const reasons = [
       'hard max',
       'not renewed',
-      'future dated',
       'registry unreadable',
       'holder not registered',
       'holder not machine',
@@ -419,6 +419,13 @@ describe('renderPlan — standing grants', () => {
       ...reasons.map((reason, i) =>
         standing({ id: `aaaaaaaaaaa${i + 1}`, nextExpiry: NOW + (i + 1) * HOUR, state: 'lapsed', reason }),
       ),
+      standing({
+        id: 'aaaaaaaaaaa7',
+        nextExpiry: NOW + 7 * HOUR,
+        periodStart: NOW + HOUR,
+        state: 'lapsed',
+        reason: 'future dated',
+      }),
       standing({ id: 'aaaaaaaaaaa8', nextExpiry: NOW + 8 * HOUR }),
     ]
     const out = renderPlan(makeModel({ standing: { readable: true, grants } }), NOW)
@@ -426,9 +433,13 @@ describe('renderPlan — standing grants', () => {
     expect(out).toContain('Standing grants (8):')
     const expected = grants.map(
       (g) =>
-        `  ${g.id} — holder ci, issuer ops, scopes digest-sender, issue-render — next expiry ${new Date(g.nextExpiry).toISOString()} — ${g.state === 'live' ? 'live' : `lapsed (${g.reason})`}`,
+        `  ${g.id} — holder ci, issuer ops, scopes digest-sender, issue-render — next expiry ${new Date(g.nextExpiry).toISOString()} — ${g.state === 'live' ? 'live' : g.reason === 'future dated' ? `lapsed (future dated, live from ${new Date(NOW + HOUR).toISOString()})` : `lapsed (${g.reason})`}`,
     )
     const lines = out.split('\n')
+    // A future-dated lapse turns live on its own, and the line says when.
+    expect(lines).toContain(
+      `  aaaaaaaaaaa7 — holder ci, issuer ops, scopes digest-sender, issue-render — next expiry ${new Date(NOW + 7 * HOUR).toISOString()} — lapsed (future dated, live from ${new Date(NOW + HOUR).toISOString()})`,
+    )
     for (const line of expected) expect(lines).toContain(line)
     // The renderer prints the order it is given: the gate already sorted it.
     const at = expected.map((line) => out.indexOf(line))
