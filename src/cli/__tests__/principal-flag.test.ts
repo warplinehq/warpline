@@ -257,9 +257,9 @@ describe('a named principal is recorded', () => {
 })
 
 describe('a principal that names nobody writes nothing', () => {
-  // The SPEC's three verbs by three values (D-38). Each row asserts its
-  // reason, so it can only pass for that reason: today `--principal` is an
-  // unknown option, which also exits 1 with nothing written (D-46).
+  // Three verbs by three values. Each row asserts its reason, so it can only
+  // pass for that reason: an unknown `--principal` option also exits 1 with
+  // nothing written.
   const verbs: ReadonlyArray<readonly [string, () => Promise<string[]>]> = [
     ['approve p', async () => ['approve', 'p']],
     ['deny p', async () => ['deny', 'p']],

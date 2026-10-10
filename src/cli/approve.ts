@@ -835,7 +835,7 @@ export async function run(argv: string[]): Promise<number> {
   await mkdir(dirname(lockPath), { recursive: true })
 
   // `--all` cannot answer a parked result, so its hold covers the grant path
-  // alone: the principal check, the record and the write (D-18).
+  // alone: the principal check, the record and the write.
   if (values.all) {
     return await withStateLockAt(lockPath, () =>
       writeSessionGrant(values, positionals, ttlMs, manifests, statePath, approvalPath, now),
@@ -910,7 +910,7 @@ export async function run(argv: string[]): Promise<number> {
 
     if (gated.length > 0) {
       // No audit kind records a parked apply yet, so a principal named here
-      // would be recorded nowhere. Refused by name rather than dropped (D-19).
+      // would be recorded nowhere. Refused by name rather than dropped.
       if (values.principal !== undefined) {
         process.stderr.write(
           'approve: --principal names who grants authority, and applying a parked result is not ' +

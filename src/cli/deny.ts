@@ -143,7 +143,7 @@ export async function run(argv: string[]): Promise<number> {
   }
 
   // Refused first and by name: a flag that vanished would let the operator
-  // believe their name went on a record that does not exist (D-19).
+  // believe their name went on a record that does not exist.
   if (values.list && values.principal !== undefined) {
     process.stderr.write(
       'deny: --list records nothing, so there is no act for --principal to name. Nothing was written.\n',
