@@ -836,8 +836,8 @@ describe('generated plan demo', () => {
   beforeAll(() => {
     // Fresh and 0700, so `buildPlanModel`'s two other home reads —
     // `.session-approval` and `state/` — cannot carry anything over from a
-    // previous run. A leftover grant would rewrite `Grant: none` as
-    // `Grant: … — Nm remaining` and the block would stop being byte-stable
+    // previous run. A leftover grant would rewrite `Session grant: none` as
+    // `Session grant: … — Nm remaining` and the block would stop being byte-stable
     // minute to minute; an empty private directory cannot hold one, so there
     // is nothing left here to assert.
     demoHome = mkdtempSync(join(tmpdir(), 'warpline-demo-'))

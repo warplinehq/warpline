@@ -18,7 +18,9 @@
  *      "improve" this file by reintroducing aligned columns.
  *
  * The function returns a string and prints nothing, and every time-derived
- * value comes from the injected `now`. Reading the wall clock here
+ * value comes from the injected `now`. It sorts the standing grants it is
+ * given by nothing: the gate's listing is already ordered by next expiry, then
+ * id, and a second sort here would be a second owner of that order. Reading the wall clock here
  * would break byte identity the moment two renders straddled a minute
  * boundary — which is exactly the guarantee this command sells.
  */
@@ -84,11 +86,32 @@ export interface GrantState {
   expiresAt: number
 }
 
+/** One standing grant as listed by the gate. Ids, names and times only, never a key. */
+export interface StandingLine {
+  id: string
+  holder: string
+  issuer: string
+  scopes: string[]
+  /** Epoch milliseconds: the earlier of the renewal deadline and the hard maximum. */
+  nextExpiry: number
+  state: 'live' | 'lapsed'
+  /** The lapse reason, null when live. */
+  reason: string | null
+}
+
+/** The standing grants file as read, or the fact that it could not be. */
+export type StandingView = { readable: false } | { readable: true; grants: StandingLine[] }
+
 export interface PlanModel {
   /** Resolved plugins directory — named in the no-plugins state. */
   pluginsDir: string
-  /** Absent when no live grant exists. */
+  /** The live session grant. Absent when no live grant exists. */
   grant?: GrantState
+  /**
+   * Absent or readable-and-empty: no standing section. Unreadable: one fixed
+   * line, never an absent section, because could not look is not none.
+   */
+  standing?: StandingView
   due: PlanEntry[]
   notDue: NotDueEntry[]
   failures: LoadFailure[]
@@ -124,22 +147,43 @@ function byLevelThenName(
   return a.level !== b.level ? a.level - b.level : byCodepoint(a.plugin, b.plugin)
 }
 
-function grantLine(grant: GrantState | undefined, now: number): string {
+/**
+ * The session grant header. One sentence shape: the none case gains the
+ * standing clause exactly when the standing grants file was read and lists a
+ * grant, live or lapsed. An unreadable file gets the plain sentence, because
+ * its own line already says none is live.
+ */
+function grantLine(grant: GrantState | undefined, now: number, standingListed: boolean): string {
   if (!grant) {
-    return 'Grant: none — plugins with side effects would be SKIPPED this run'
+    const none = 'Session grant: none — plugins with side effects would be SKIPPED this run'
+    return standingListed ? `${none} unless a live standing grant covers them` : none
   }
 
   const scopes =
     grant.scopes === '*' ? 'all plugins (*)' : [...grant.scopes].sort(byCodepoint).join(', ')
 
   const remainingMs = grant.expiresAt - now
-  if (remainingMs <= 0) return `Grant: ${scopes} — expired`
+  if (remainingMs <= 0) return `Session grant: ${scopes} — expired`
 
   // Rounded DOWN: a grant with 59s left has 0 whole minutes of usable life,
   // and rounding up would advertise time the operator does not have.
   const minutes = Math.floor(remainingMs / 60_000)
   const soon = minutes <= EXPIRES_SOON_MINUTES ? ' ⚠ expires soon' : ''
-  return `Grant: ${scopes} — ${minutes}m remaining${soon}`
+  return `Session grant: ${scopes} — ${minutes}m remaining${soon}`
+}
+
+/** The standing section, in the order the model gives it. No cause is shown for an unreadable file. */
+function standingLines(view: StandingView | undefined): string[] {
+  if (view === undefined) return []
+  if (!view.readable) return ['Standing grants: none live — the standing grants file cannot be read']
+  if (view.grants.length === 0) return []
+  return [
+    `Standing grants (${view.grants.length}):`,
+    ...view.grants.map(
+      (g) =>
+        `${INDENT}${g.id} — holder ${g.holder}, issuer ${g.issuer}, scopes ${g.scopes.join(', ')} — next expiry ${new Date(g.nextExpiry).toISOString()} — ${g.state === 'live' ? 'live' : `lapsed (${g.reason})`}`,
+    ),
+  ]
 }
 
 function pluralDirectories(n: number): string {
@@ -170,7 +214,9 @@ export function renderPlan(model: PlanModel, now: number): string {
 
   lines.push('warpline plan — preview only; nothing was executed.')
   lines.push('')
-  lines.push(grantLine(model.grant, now))
+  const standingListed = model.standing?.readable === true && model.standing.grants.length > 0
+  lines.push(grantLine(model.grant, now, standingListed))
+  lines.push(...standingLines(model.standing))
   lines.push(`Plugins: ${model.pluginsDir}`)
   lines.push('')
 

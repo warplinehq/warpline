@@ -53,13 +53,14 @@ import {
   RUN_PROFILES,
 } from '../runtime/engine.js'
 import type { EvalContext, RunProfile } from '../runtime/engine.js'
+import type { RegistrySnapshot } from '../runtime/approval-gate.js'
 import { computeTier } from '../runtime/tier.js'
-import { grantsCovering, liveGrantScopes } from '../runtime/approval-gate.js'
+import { grantsCovering, listStandingGrants, liveGrantScopes } from '../runtime/approval-gate.js'
 import { readRegistry, registryView } from '../lib/principals.js'
 import { readEngineStateReadOnly, withoutStateBackups } from '../runtime/engine-state-store.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../board/state-manager.js'
 import { renderPlan } from './plan-render.js'
-import type { GrantState, NotDueEntry, PlanEntry, PlanModel } from './plan-render.js'
+import type { GrantState, NotDueEntry, PlanEntry, PlanModel, StandingView } from './plan-render.js'
 
 const USAGE = `Usage: warpline plan [--profile daily|weekly|manual]
 
@@ -120,6 +121,28 @@ async function readGrant(approvalPath: string, now: number): Promise<GrantState 
 }
 
 /**
+ * The gate's standing listing, in the gate's order. The unreadable cause is
+ * dropped, and only ids, names and times are copied, so no key can reach the
+ * render.
+ */
+async function readStanding(now: number, registry: RegistrySnapshot | null): Promise<StandingView> {
+  const listing = await listStandingGrants({ now, registry })
+  if (!listing.readable) return { readable: false }
+  return {
+    readable: true,
+    grants: listing.grants.map((g) => ({
+      id: g.id,
+      holder: g.holder,
+      issuer: g.issuer,
+      scopes: g.scopes,
+      nextExpiry: g.next_expiry,
+      state: g.state,
+      reason: g.reason,
+    })),
+  }
+}
+
+/**
  * Build the plan model for the given clock reading.
  *
  * Exported so the model is assertable without going through argv. Paths come
@@ -133,7 +156,10 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
 
   const { manifests, failures } = await loadPluginManifests(resolvedPluginsDir)
   const grant = await readGrant(approvalPath, now)
-  const shell = { pluginsDir: resolvedPluginsDir, grant, failures }
+  // Read as a run reads it, and never recorded: a preview writes nothing.
+  const read = await readRegistry()
+  const registry = 'refused' in read ? null : registryView(read.registry)
+  const shell = { pluginsDir: resolvedPluginsDir, grant, standing: await readStanding(now, registry), failures }
 
   let levels: string[][]
   try {
@@ -143,8 +169,6 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
   }
 
   const state = await readEngineStateReadOnly(statePath)
-  const read = await readRegistry()
-  const registry = 'refused' in read ? null : registryView(read.registry)
   const ctx: EvalContext = {
     // The profile and nothing derived from it. The schedule tier and headless
     // mode (A2) are both worked out inside the gates, so a preview and the run

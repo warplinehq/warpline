@@ -1367,9 +1367,9 @@ effect it did not declare is a plugin bug, and no approval state changes that.
 authorises that plugin's class**, not from this file for every plugin. A
 content-class plugin's column reads its content approval's standing (§ 10,
 `approvals`); every other plugin's reads the live grants covering it, this
-file's windows and the standing grants (`### Standing grants` below), with the
-registry `plan` reads as the run would. Rendered from
-the grant for all of them the column was wrong in both directions at once — a
+file's windows and the standing grants (`### Standing grants` below). The
+registry is read the way a run reads it and never recorded, so the column
+agrees with the run. Rendered from the grant for all of them the column was wrong in both directions at once — a
 plugin with a live approval and no grant previewed as blocked while it was
 authorised, and one under a live `scopes: '*'` grant and no approval previewed
 as ready while it was refused. The preview exists to tell an operator whether a
@@ -1629,6 +1629,28 @@ that check, a grant issued after it lapses as `registry unreadable`
 for that advance. An unusable `principals.json` lapses every standing grant as
 `registry unreadable`. `warpline plan` reads the registry without recording
 it, so its `approved:` column agrees with the run.
+
+**What `warpline plan` shows.** Under the session grant line, `plan` prints a
+`Standing grants (<n>):` heading and one line per standing grant:
+
+```
+  3f9a0c5e1b2d — holder ci-bot, issuer ops, scopes digest-sender, issue-render — next expiry 2026-08-23T09:00:00.000Z — live
+```
+
+The next expiry is the earlier of the renewal deadline and the hard maximum. A
+lapsed grant's line ends `lapsed (<reason>)`, with one of the six reasons
+above. The lines come in the gate's order, by next expiry and then by id, and
+no line shows a principal's key. With no standing grant the section is absent.
+A standing grants file that cannot be read, for any cause, prints the one line
+`Standing grants: none live — the standing grants file cannot be read`, never
+an absent section, and shows no cause.
+
+The header names the session grant: `Session grant: <scopes> — <n>m
+remaining`, `— expired`, or with none live `Session grant: none — plugins with
+side effects would be SKIPPED this run`. That last sentence adds `unless a live
+standing grant covers them` exactly when the standing grants file was read and
+lists at least one grant, live or lapsed. A file that cannot be read gets the
+plain sentence, since its own line already says none is live.
 
 **Issuing.** `warpline approve <plugin>... --standing --holder <machine-id>
 --principal <human-id> --hard-max <dur> [--period <dur>]` issues one standing

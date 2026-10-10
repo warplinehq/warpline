@@ -30,7 +30,7 @@ Published docs: [warplinehq.github.io/warpline](https://warplinehq.github.io/war
 ```
 warpline plan — preview only; nothing was executed.
 
-Grant: none — plugins with side effects would be SKIPPED this run
+Session grant: none — plugins with side effects would be SKIPPED this run
 Plugins: /tmp/warpline-demo/plugins
 
 Due (10):
