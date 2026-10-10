@@ -122,6 +122,12 @@ export async function run(argv: string[]): Promise<number> {
       for (const note of unrecorded) process.stderr.write(note)
       return unrecorded.size > 0 ? EXIT_AUDIT_FAILED : 0
     }
+    // A revoke whose sync failed: the warning, then the unrecorded notes, and
+    // 70 over 1 when something went unrecorded, since that is the stronger signal.
+    const unsynced = (warning: string): number => {
+      process.stderr.write(warning)
+      return finish() || 1
+    }
 
     // The actor, checked in the hold, so a principal disabled while this waited is refused.
     let principal: string | null = null
@@ -231,19 +237,17 @@ export async function run(argv: string[]): Promise<number> {
       try {
         await syncInstalled(standingGrantsPath())
       } catch {
-        process.stderr.write(
+        return unsynced(
           'revoke: the standing grants file was written but could not be synced to disk, so a power loss can bring the grant back.\n',
         )
-        return 1
       }
     } else {
       try {
         await syncRemoved(sessionApprovalPath())
       } catch {
-        process.stderr.write(
+        return unsynced(
           'revoke: the session grant file was removed but the removal could not be synced to disk, so a power loss can bring the grant back.\n',
         )
-        return 1
       }
     }
 

@@ -221,6 +221,29 @@ describe('revoke takes exactly what it names', () => {
     }
   })
 
+  // A failed sync and a failed record together: the operator hears both, and
+  // the exit is the record's 70, the stronger signal. One row per sync arm.
+  for (const [form, argv, fn] of [
+    ['a standing revoke', () => ['revoke', '--standing', ciIds[0]!], 'syncInstalled'],
+    ['a bare revoke', () => ['revoke'], 'syncRemoved'],
+  ] as const) {
+    test(`${form} whose record and sync both fail says both, and exits 70`, async () => {
+      const fail = failAppendOnce('grant.revoked')
+      const sync = spyOn(fsAtomic, fn).mockImplementation(async () => {
+        throw new Error('EIO')
+      })
+      try {
+        const r = await capture(argv())
+        expect(fail.trips()).toBe(1)
+        expect(r.code).toBe(70)
+        expect(r.stderr).toContain('could not be synced to disk')
+        expect(r.stderr).toContain('no audit record of this revoke was written')
+      } finally {
+        sync.mockRestore()
+      }
+    })
+  }
+
   test('bare revoke leaves standing grants byte-identical', async () => {
     const bytes = readFileSync(standingGrantsPath())
     const mtime = statSync(standingGrantsPath()).mtimeMs
