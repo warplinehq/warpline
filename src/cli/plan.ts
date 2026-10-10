@@ -54,7 +54,8 @@ import {
 } from '../runtime/engine.js'
 import type { EvalContext, RunProfile } from '../runtime/engine.js'
 import { computeTier } from '../runtime/tier.js'
-import { checkApproval, liveGrantScopes } from '../runtime/approval-gate.js'
+import { grantsCovering, liveGrantScopes } from '../runtime/approval-gate.js'
+import { readRegistry, registryView } from '../lib/principals.js'
 import { readEngineStateReadOnly, withoutStateBackups } from '../runtime/engine-state-store.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../board/state-manager.js'
 import { renderPlan } from './plan-render.js'
@@ -85,9 +86,9 @@ function cycleMembers(err: unknown): string[] {
 /**
  * The live grant's scopes and expiry, for the header line.
  *
- * Fail-closed and never throws, matching `checkApproval`: a missing, corrupt or
+ * Fail-closed and never throws, matching `grantsCovering`: a missing, corrupt or
  * unreadable grant file reads as no grant. Only two fields are touched, and the
- * per-plugin verdicts still come from `checkApproval` itself — this read is for
+ * per-plugin verdicts still come from `grantsCovering` itself — this read is for
  * display, never for a decision.
  */
 async function readGrant(approvalPath: string, now: number): Promise<GrantState | undefined> {
@@ -142,6 +143,8 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
   }
 
   const state = await readEngineStateReadOnly(statePath)
+  const read = await readRegistry()
+  const registry = 'refused' in read ? null : registryView(read.registry)
   const ctx: EvalContext = {
     // The profile and nothing derived from it. The schedule tier and headless
     // mode (A2) are both worked out inside the gates, so a preview and the run
@@ -161,6 +164,7 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
     // content approval's producer exactly as a run would.
     manifests,
     approvalPath,
+    registry,
   }
 
   const due: PlanEntry[] = []
@@ -241,10 +245,14 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
             // firing. Without this sentence the call reads as a second
             // authority read, which would make the exactly-one-call-site
             // property false by inspection.
+            //
+            // The registry is passed so the column agrees with the run for a
+            // plugin a standing grant covers. `plan` reads it without recording
+            // it, because a preview writes nothing.
             approved:
               manifest.approval_class === 'content'
                 ? approvalStanding(state, name, manifests, now).standing === 'live'
-                : await checkApproval(name, approvalPath, { now }),
+                : (await grantsCovering(name, { now, approvalPath, registry })).length > 0,
           }
           if (evaluation.due) {
             due.push(entry)

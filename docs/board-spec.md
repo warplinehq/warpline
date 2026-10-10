@@ -243,8 +243,8 @@ filter, not a sixth place.
 The Board's first line states the latest time up to which every
 side-effecting plugin entry in the run log executed under a live Grant. The
 gate's own invariant makes this derivable from the run log alone: an entry
-with declared side effects is `completed` only when `checkApproval` passed
-immediately before invocation, else it is `skipped` or `gated`. It is
+with declared side effects is `completed` only when the gate found a live grant
+covering it immediately before invocation, else it is `skipped` or `gated`. It is
 computed, never asserted; if the Board cannot compute it (no run log, an
 unreadable entry) it says that instead. This sentence is what the Board
 exists to be able to say.

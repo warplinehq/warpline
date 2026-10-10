@@ -1241,8 +1241,9 @@ is ever extracted.)
 ## 9. Session Approval File
 
 A plugin whose manifest declares a non-empty `side_effects` array may not run
-until an operator has approved it for this session. The approval is a single
-JSON file; there is no daemon, no keyring and no server.
+until a live grant covers it: a session grant (this file) or a standing grant
+(`### Standing grants` below). The session approval is a single JSON file;
+there is no daemon, no keyring and no server.
 
 **Path:** `<warplineHome>/.session-approval`, where `<warplineHome>` is
 `WARPLINE_HOME` if set, else the nearest ancestor directory containing a
@@ -1349,7 +1350,7 @@ run.
 
 A plugin whose `side_effects` array is **empty** is never gated. The engine
 tests for a non-empty array before it consults the gate at all, so
-`checkApproval` is never called for such a plugin and it runs whether or not a
+the gate is never consulted for such a plugin and it runs whether or not a
 grant exists — always, including with no grant file on disk at all. This is
 worth stating because everything above reads like a universal rule: it is not.
 The gate covers the effects a plugin *declares*. A plugin that performs an
@@ -1358,7 +1359,9 @@ effect it did not declare is a plugin bug, and no approval state changes that.
 **`warpline plan`'s `approved:` column is rendered from whichever mechanism
 authorises that plugin's class**, not from this file for every plugin. A
 content-class plugin's column reads its content approval's standing (§ 10,
-`approvals`); every other plugin's reads this grant, unchanged. Rendered from
+`approvals`); every other plugin's reads the live grants covering it, this
+file's windows and the standing grants (`### Standing grants` below), with the
+registry `plan` reads as the run would. Rendered from
 the grant for all of them the column was wrong in both directions at once — a
 plugin with a live approval and no grant previewed as blocked while it was
 authorised, and one under a live `scopes: '*'` grant and no approval previewed
@@ -1496,12 +1499,123 @@ live scopes. A revoke only narrows authority, so it removes the file even when
 that append fails, then exits `70` with a stderr line saying no audit record of
 the revoke was written. With no grant file it writes no record.
 
-**Nothing reachable from a run writes this file.** `checkApproval` — the only
-function the engine calls — opens it read-only, and the write path
-(`grantApproval` / `mergeGrant` / `revokeApproval`) has no caller inside
-`runAdvance`. That is a property of the call graph, verifiable by inspection,
-and a test pins it: a full advance over side-effecting plugins leaves the file
-byte- and mtime-identical.
+**Nothing reachable from a run writes this file or the standing grants file.**
+The engine reaches both only through the gate's readers, `grantsCovering` and
+`listStandingGrants`, which open them read-only. The write paths
+(`grantApproval` / `mergeGrant` / `revokeApproval` for this file,
+`writeStandingStore` for the standing grants file) have no caller inside
+`runAdvance`. That is a property of the call graph, and tests pin it: a
+file-graph guard walks every module `warpline advance` and `warpline run`
+reach, dynamic imports included, and finds no call to a standing writer or to
+the accessor that names the standing grants file; a full advance over
+side-effecting plugins leaves this file byte- and mtime-identical; and a full
+advance that fires a plugin under a standing grant leaves the standing grants
+file byte- and mtime-identical.
+
+### Standing grants
+
+A standing grant is authority an active human issues to an active machine
+principal over named plugins. It is held in the standing grants file, apart
+from the session file above, and every read derives whether it is live or
+lapsed.
+
+**Path:** `<warplineHome>/standing-grants.json`, owner-only `0600`. One writer
+writes the whole file atomically and never deletes it: a file holding no grant
+is written as `"grants": []`.
+
+```json
+{
+  "min_reader_version": 1,
+  "grants": [
+    {
+      "id": "3f9a0c5e1b2d",
+      "holder": "ci-bot",
+      "issuer": "ops",
+      "scopes": ["digest-sender", "issue-render"],
+      "issued_at": "2026-08-20T09:30:00.000Z",
+      "period_start": "2026-08-22T09:00:00.000Z",
+      "period_ms": 86400000,
+      "hard_max_ms": 2592000000
+    }
+  ]
+}
+```
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `min_reader_version` | integer | The oldest reader that may interpret the file. Always written, as `STANDING_READER_VERSION` (1 in this build). |
+| `grants` | array | Every standing grant, sorted by `id`. |
+| `id` | string | 12 random lowercase hex characters. Issue refuses an id already in the file. |
+| `holder` | principal id | The principal the grant authorises. It must be an active machine in `principals.json` (§ 15) for the grant to be live. |
+| `issuer` | principal id | Always the active human who issued it. Never the holder. |
+| `scopes` | `string[]` | The plugin directory names it covers, sorted, without duplicates. Never `"*"`: a standing grant names every plugin it covers. |
+| `issued_at` | ISO 8601 string | When it was issued. The hard maximum is measured from here. |
+| `period_start` | ISO 8601 string | Set at issue, and moved only by a renewal. The renewal deadline is measured from here. |
+| `period_ms` | integer | The renewal period in milliseconds. At most 7 days, and 24 hours when the issuer names none. |
+| `hard_max_ms` | integer | How long after `issued_at` the grant can stay live, however often it is renewed. At most 90 days, and at least `period_ms`. |
+
+Deadlines are derived from these fields, never stored.
+
+**The live rule.** A standing grant is live at `now` when all three hold:
+
+- `now` ≤ `period_start + period_ms`, the renewal deadline;
+- `now` ≤ `issued_at + hard_max_ms`, the hard maximum;
+- `principals.json` was read and names `holder` an active machine.
+
+Both instants are inclusive, like a session window's expiry. Live or lapsed is
+derived on every read from the fields, the clock and the registry. Nothing ever
+writes a lapse into the file.
+
+A grant that is not live is lapsed, for one of six reasons. When several apply,
+the first in this order is the one reported:
+
+1. `hard max`: past the hard maximum.
+2. `not renewed`: past the renewal deadline.
+3. `registry unreadable`: no usable registry was read (below).
+4. `holder not registered`: the registry was read and does not name the holder.
+5. `holder not machine`: the holder is a human.
+6. `holder disabled`: the holder is a disabled machine.
+
+`hard max`, `not renewed` and `holder not registered` are final: the lapse
+cannot clear, and only a new grant fixes it. A holder missing from
+`principals.json` does not come back, since § 15's verbs never delete or reuse
+an id. `registry unreadable`, `holder not machine` and `holder disabled` are
+not final. Such a lapse clears, with no renewal, if `principals.json` names the
+holder an active machine before the grant's next expiry, the earlier of its
+renewal deadline and its hard maximum. After that expiry the lapse is final.
+
+A lapsed grant stays in the standing grants file until revoked. Nothing
+collects it.
+
+**The whole file or nothing.** The standing grants file is read whole. Any
+malformed entry, a cap exceeded, a duplicate id, or a `min_reader_version` this
+build does not read makes the whole file unreadable, so one bad entry takes
+every grant in it down, and then no standing grant is live. A missing file
+holds none. No read throws.
+
+**Reader version.** `min_reader_version` is read before any other field, and a
+file asking for a reader newer than `STANDING_READER_VERSION`, 1 in this build,
+is refused whole even when its grants would not parse here. The version is the
+standing grants file's own, apart from the session file's
+`GRANT_READER_VERSION`. Because the standing grants file sits apart from the
+session file, a build that predates it reads its session grant and no standing
+grant: a rollback drops standing authority and keeps the session.
+
+**The registry, once an advance.** The gate never reads `principals.json`; the
+engine hands it a snapshot. An advance reads and records `principals.json`
+once (§ 15), after taking the run lock and only when the standing grants file
+holds a grant, so a home without one gains no audit line. A record the audit
+store cannot take ends the advance with `75` (§ 11) before anything fires. The
+snapshot holds for the whole advance, so a principal disabled during an advance
+takes effect at the next one. When the standing grants file held no grant at
+that check, a grant issued after it lapses as `registry unreadable`
+for that advance. An unusable `principals.json` lapses every standing grant as
+`registry unreadable`. `warpline plan` reads the registry without recording
+it, so its `approved:` column agrees with the run.
+
+**A grant written by hand.** A standing grant written into the standing grants
+file by hand carries no `grant.issued` record. The file is not compared with
+the audit store the way `principals.json` and `preferences.json` are.
 
 ---
 
@@ -4148,3 +4262,8 @@ record it, put part of the change back, run `warpline principal list`, then
 make the rest. A file that will not parse, or that
 fails the schema, is refused with a message naming key paths and schema facts,
 never a value from the file.
+
+An advance reads this file only when the standing grants file holds a grant
+(§ 9), and records a hand edit first, as `warpline principal` does. A record it
+cannot write ends the advance with `75` before anything fires. `warpline plan`
+reads this file without recording it.

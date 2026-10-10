@@ -20,7 +20,8 @@ import { readFileSync } from 'node:fs'
 import { join, dirname, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createHash, randomUUID } from 'node:crypto'
-import { checkApproval } from './approval-gate.js'
+import { grantsCovering, listStandingGrants, type CoveringGrant, type RegistrySnapshot } from './approval-gate.js'
+import { loadRegistry, registryView } from '../lib/principals.js'
 import {
   sessionApprovalPath,
   preferencesPath as defaultPreferencesPath,
@@ -944,6 +945,13 @@ export interface EvalContext {
    * example under `runAdvance` and `plan.test.ts` Test 2c.
    */
   heldAtEarlierLevel?: ReadonlySet<string>
+  /**
+   * The principal registry as this advance or preview read it, once. Null or
+   * absent makes every standing grant read lapsed (`registry unreadable`).
+   * `plan` passes a plain read; `runAdvance` passes one the audit store has
+   * observed.
+   */
+  registry?: RegistrySnapshot | null
 }
 
 /**
@@ -981,6 +989,13 @@ interface GateInput {
    * of the authority is the thing this phase refuses by name.
    */
   contentStanding: ApprovalStanding
+  /**
+   * The ONE read of the grant authority for this plugin: every live session
+   * window and standing grant covering it. Lazy, so a plugin an earlier entry
+   * stopped never reads it, and memoised, so the approval entry and anything
+   * after it share one answer rather than reading twice.
+   */
+  covering: () => Promise<CoveringGrant[]>
 }
 
 /**
@@ -2235,10 +2250,10 @@ export const GATES: readonly Gate[] = [
   {
     reason: 'unapproved',
     applies: async (g) => {
-      const { plugin, manifest, ctx, now } = g
+      const { manifest } = g
       if (manifest.side_effects.length === 0) return false
       if (manifest.approval_class === 'content') return contentGateApplies(g)
-      return !(await checkApproval(plugin, ctx.approvalPath, { now }))
+      return (await g.covering()).length === 0
     },
     // No `skipped` in this string, for the reason the `dependency_failed` arm
     // above spells out at length: the detail has a second author downstream.
@@ -2281,8 +2296,8 @@ export const GATES: readonly Gate[] = [
  * previews are byte-identical.
  *
  * `now` reaches every clock read this function makes, not just its own: it is
- * threaded into `isPluginFresh` (`staleness.ts`) and `checkApproval`
- * (`approval-gate.ts`), which grew a `now` option for exactly this. That is
+ * threaded into `isPluginFresh` (`staleness.ts`) and `grantsCovering`
+ * (`approval-gate.ts`), which take a `now` option for exactly this. That is
  * what makes the promise above literally true rather than nearly true. Pass a
  * past `now` and the freshness verdicts, the approval rows and the header all
  * move together; before the seam existed they did not, and the render
@@ -2306,6 +2321,11 @@ export async function evaluatePlugin(
       ? approvalStanding(ctx.state, pluginName, ctx.manifests, now)
       : { standing: 'none' }
 
+  // Read at most once, and only if the approval entry asks for it.
+  let read: Promise<CoveringGrant[]> | undefined
+  const covering = (): Promise<CoveringGrant[]> =>
+    (read ??= grantsCovering(pluginName, { now, approvalPath: ctx.approvalPath, registry: ctx.registry ?? null }))
+
   /**
    * The cross-entry values, resolved before the scan starts.
    *
@@ -2328,6 +2348,7 @@ export async function evaluatePlugin(
     freshness: isPluginFresh(pluginName, manifest, ctx.state, { force: ctx.force, now }),
     standing,
     contentStanding,
+    covering,
     supersededNote:
       standing.standing === 'superseded'
         ? `previously denied ${standing.denial.denied_at} ('${standing.denial.reason}') — the ` +
@@ -2602,6 +2623,17 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // uses a value from it. A failed append throws out through the `finally`,
     // which releases the lock, and `warpline advance` reports 75: nothing fired.
     await observeAuthorityFile(stateDir, 'preferences.observed', prefsBytes)
+
+    // The registry is read and recorded only when the standing grants file
+    // holds a grant, so a home without one gains no audit line. Read once, here:
+    // a principal disabled while this advance runs takes effect at the next one.
+    // A failed record throws like the one above, and nothing fires.
+    let registry: RegistrySnapshot | null = null
+    const standingListing = await listStandingGrants()
+    if (standingListing.readable && standingListing.grants.length > 0) {
+      const loaded = await loadRegistry(stateDir)
+      registry = 'refused' in loaded ? null : registryView(loaded.registry)
+    }
 
     // A readable root that produced no manifests is its own outcome, not a
     // clean run over nothing. Computed once, here, above the quiet-hours guard
@@ -3025,6 +3057,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // manifest.
       manifests: plugins,
       heldAtEarlierLevel: heldThisAdvance,
+      registry,
     }
 
     // 7. Execute each level
