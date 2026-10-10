@@ -33,6 +33,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { codeOf } from '../../test-utils/import-walk.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 
@@ -40,7 +41,6 @@ const FIND = '/usr/bin/find'
 const GREP = '/usr/bin/grep'
 
 const DELETION = String.raw`\b(unlink|rm|rmdir|rename|truncate|ftruncate)(Sync)?\(|\.delete\([[:space:]]*\)`
-const COMMENT = /^\s*(\*|\/\/)/
 
 /** The measured budget. A change here is a decision about where a delete may live. */
 const EXPECTED: Record<string, number> = {
@@ -104,7 +104,8 @@ function deletionSites(files: string[], root: string): Record<string, number> {
     const m = /^(.*?):(\d+):(.*)$/.exec(hit)
     if (m === null) throw new Error(`unparsed grep line: ${hit}`)
     const [, file, , text] = m as unknown as [string, string, string, string]
-    if (COMMENT.test(text)) continue
+    // The shared rule: a line is skipped only when all of it is comment.
+    if (codeOf(text) === '') continue
     const rel = file.startsWith(`${root}/`) ? file.slice(root.length + 1) : file
     counts[rel] = (counts[rel] ?? 0) + 1
   }
@@ -139,9 +140,12 @@ describe('every deletion site in shipped code is counted', () => {
       'commented.ts': '// await unlink(p)\nconst m = new Map()\nm.delete(key)\n',
       'sync.ts': 'rmSync(p)\n',
       'bun.ts': 'await Bun.file(p).delete()\n',
+      // Code after a block comment's close is code: the old rule skipped this line.
+      'block.ts': '/**\n * doc\n */ await unlink(p)\n',
     })
     try {
       expect(deletionSites(paths, dir)).toEqual({
+        'block.ts': 1,
         'bun.ts': 1,
         'intruder.ts': 1,
         'kept.ts': 2,

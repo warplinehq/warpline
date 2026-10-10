@@ -14,7 +14,7 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
-import { dirname, join, relative, resolve } from 'node:path'
+import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir } from 'node:os'
 import { _setHome, engineStatePath, sessionApprovalPath } from '../../lib/paths.js'
@@ -22,6 +22,7 @@ import { mergeGrant } from '../../runtime/approval-gate.js'
 import * as gate from '../../runtime/approval-gate.js'
 import { denialFingerprint } from '../../runtime/engine.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
+import { codeLines, walkImports } from '../../../test-utils/import-walk.js'
 
 let root: string
 let statePath: string
@@ -510,32 +511,11 @@ describe('warpline deny', () => {
   ]
   const GRANT_DEFINER = join('runtime', 'approval-gate.ts')
 
-  // Both edge shapes: `from '…'` and `import('…')`, the latter covering the
-  // bare side-effect `import '…'` too, under any of the three quotes. Matching
-  // only the static form left a hole a grant writer could hide in —
-  // `engine-state-store.ts` already uses `await import('../board/engine-events.js')`,
-  // so the shape the walker could not see was in the closure it was walking. A
-  // template specifier with an interpolation resolves to no file, so the walk
-  // throws on it rather than skipping a subtree.
-  const RELATIVE_EDGE = /(?:from|import)\s*\(?\s*(['"`])(\.[^'"`]+)\1/g
-
-  /** Every file reachable from `entry` by relative import, with its source. */
-  async function walkImports(entry: string): Promise<Map<string, string>> {
-    const seen = new Map<string, string>()
-    async function visit(file: string): Promise<void> {
-      if (seen.has(file)) return
-      const source = await readFile(file, 'utf-8')
-      seen.set(file, source)
-      for (const m of source.matchAll(RELATIVE_EDGE)) {
-        await visit(resolve(dirname(file), (m[2] as string).replace(/\.js$/, '.ts')))
-      }
-    }
-    await visit(entry)
-    return seen
-  }
-
-  // A comment line is skipped: naming a writer to explain why it is not called is not a call.
-  const COMMENT = /^\s*(\*|\/\/|\/\*)/
+  // The walk and the comment rule are the shared ones (test-utils/import-walk.ts):
+  // every edge shape under any quote, and a line is skipped only when all of it
+  // is comment, so `/* note */ mergeGrant(s)` is scanned. Matching only the
+  // static form once left a hole: `engine-state-store.ts` already uses
+  // `await import('../board/engine-events.js')`.
   // Any mention, not only a call: an aliased import, a destructure, a reference
   // held for later and a quoted bracket key all spell the name somewhere.
   const MENTIONS = GRANT_WRITERS.map((w) => new RegExp(`\\b${w}\\b`))
@@ -545,11 +525,9 @@ describe('warpline deny', () => {
     const out: string[] = []
     for (const [file, source] of closure) {
       if (file.endsWith(GRANT_DEFINER)) continue
-      source.split('\n').forEach((text, i) => {
-        if (!COMMENT.test(text) && MENTIONS.some((re) => re.test(text))) {
-          out.push(`${relative(root, file)}:${i + 1}: ${text.trim()}`)
-        }
-      })
+      for (const [n, code] of codeLines(source)) {
+        if (MENTIONS.some((re) => re.test(code))) out.push(`${relative(root, file)}:${n}: ${code.trim()}`)
+      }
     }
     return out
   }
@@ -608,7 +586,7 @@ describe('warpline deny', () => {
 
   // Each shape reaches a writer without spelling `mergeGrant(` on one line, or
   // hides its module behind an import a single-quote walk skips.
-  test('14b: the scan reports an aliased import, a reference, a bracket access, a destructure, and modules behind double-quoted and template imports', async () => {
+  test('14b: the scan reports an aliased import, a reference, a bracket access, a destructure, code after a block comment, a writer two modules deep, and modules behind double-quoted and template imports', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'warpline-deny-guard-'))
     const files: Record<string, string> = {
       'root.ts': [
@@ -618,6 +596,8 @@ describe('warpline deny', () => {
         "import { s } from './destructure.js'",
         'import { q } from "./double.js"',
         "import { c } from './comment.js'",
+        "import { b } from './block.js'",
+        "import { d } from './deep.js'",
         'export async function root(): Promise<void> {',
         '  await import(`./template.js`)',
         '  a(); r(); k(); s(); q(); c()',
@@ -630,15 +610,20 @@ describe('warpline deny', () => {
       'destructure.ts': "import * as g from './gate.js'\nconst { writeStandingStore: w } = g\nexport const s = () => w(x)\n",
       'double.ts': "export const q = () => mergeGrant('p')\n",
       'template.ts': "export const t = () => issueStanding(x)\n",
-      'comment.ts': '// mergeGrant( is named here in a comment only\nexport const c = () => 1\n',
+      'comment.ts': '// mergeGrant( is named here in a comment only\n/* mergeGrant( here too */ export const c = () => 1\n',
+      'block.ts': "/* note */ export const b = () => mergeGrant('p')\n/**\n * a doc comment\n */ export const b2 = () => revokeApproval()\n",
+      'deep.ts': "import { t } from './transitive.js'\nexport const d = () => t()\n",
+      'transitive.ts': "export const t = () => grantApproval('p')\n",
       'gate.ts': 'export const nothing = 1\n',
     }
     try {
       for (const [name, body] of Object.entries(files)) await writeFile(join(dir, name), body)
       const found = grantWriterCallers(await walkImports(join(dir, 'root.ts')), dir)
       expect([...new Set(found.map((line) => line.split(':')[0]))].sort()).toEqual(
-        ['alias.ts', 'bracket.ts', 'destructure.ts', 'double.ts', 'ref.ts', 'template.ts'],
+        ['alias.ts', 'block.ts', 'bracket.ts', 'destructure.ts', 'double.ts', 'ref.ts', 'template.ts', 'transitive.ts'],
       )
+      // Both block-comment lines in block.ts, each for the code after its `*/`.
+      expect(found.filter((line) => line.startsWith('block.ts:')).map((line) => line.split(':')[1])).toEqual(['1', '4'])
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

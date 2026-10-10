@@ -31,6 +31,7 @@ import { appendRelinked } from '../../lib/__tests__/helpers/audit-chain.js'
 import { _setHome, engineStatePath } from '../../lib/paths.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import { run } from '../principal.js'
+import { codeLines } from '../../../test-utils/import-walk.js'
 
 const SOURCE = join(import.meta.dir, '..', 'principal.ts')
 const ADDED = 'warpline.audit.principal.added'
@@ -148,10 +149,10 @@ function failAppend(kind: string): () => number {
 
 /** The code lines of a source file, comment lines dropped, that match `re`. */
 function offending(path: string, re: RegExp): string[] {
-  return readFileSync(path, 'utf-8')
-    .split('\n')
-    .filter((text) => !/^\s*(\*|\/\/|\/\*)/.test(text))
-    .filter((text) => re.test(text))
+  // The shared comment rule: a line is skipped only when all of it is comment.
+  return codeLines(readFileSync(path, 'utf-8'))
+    .map(([, code]) => code)
+    .filter((code) => re.test(code))
 }
 
 /** A temp source file holding `body`, for showing a static check red. */

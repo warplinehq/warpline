@@ -21,6 +21,7 @@ import { join } from 'node:path'
 import * as audit from '../audit-log.js'
 import { _setHome } from '../paths.js'
 import * as principals from '../principals.js'
+import { codeLines } from '../../../test-utils/import-walk.js'
 
 const SOURCE = join(import.meta.dir, '..', 'principals.ts')
 const OBSERVED = 'warpline.audit.principal_registry.observed'
@@ -86,10 +87,10 @@ async function seed(registry: unknown = SEED): Promise<void> {
 
 /** The code lines of a source file, comment lines dropped, that match `re`. */
 function offending(path: string, re: RegExp): string[] {
-  return readFileSync(path, 'utf-8')
-    .split('\n')
-    .filter((text) => !/^\s*(\*|\/\/|\/\*)/.test(text))
-    .filter((text) => re.test(text))
+  // The shared comment rule: a line is skipped only when all of it is comment.
+  return codeLines(readFileSync(path, 'utf-8'))
+    .map(([, code]) => code)
+    .filter((code) => re.test(code))
 }
 
 /** Make the observe throw an `AuditAppendError` once. Returns the trip count. */

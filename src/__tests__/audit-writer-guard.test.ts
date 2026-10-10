@@ -28,12 +28,12 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { codeLines } from '../../test-utils/import-walk.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const FIND = '/usr/bin/find'
 const STORE = 'src/lib/audit-log.ts'
 
-const COMMENT = /^\s*(\*|\/\/)/
 // The rest of the line, not `[^)]*`: an argument that is itself a call, like
 // `warplineHome()` or `dirname(dirname(p))`, closes a paren before `'audit'`.
 const JOINS_AUDIT = /\b(join|resolve)\(.*['"`]audit['"`]/
@@ -65,11 +65,6 @@ function sourceFiles(): string[] {
   return files
 }
 
-const codeLines = (source: string): Array<[number, string]> =>
-  source
-    .split('\n')
-    .map((text, i): [number, string] => [i + 1, text])
-    .filter(([, text]) => !COMMENT.test(text))
 
 /** `<file>:<line>: <text>` for every code line outside the store that names the store's directory. */
 function writerOffenders(files: string[], root: string): string[] {
@@ -123,6 +118,8 @@ describe('only the store writes the store', () => {
       'joins.ts': "const d = join(home, 'audit')\n",
       'nested.ts': "const a = join(warplineHome(), 'audit')\nconst b = resolve(dirname(dirname(p)), 'audit')\n",
       'quoted.ts': 'await writeFile(`${home}/audit/x`, \'\')\n',
+      // Code after a block comment's close is code: the old rule skipped both lines.
+      'block.ts': "/**\n * doc\n */ const e = join(home, 'audit')\n/* x */ const f = join(home, 'audit')\n",
     })
     try {
       expect(writerOffenders(paths, dir)).toEqual([
@@ -130,6 +127,8 @@ describe('only the store writes the store', () => {
         "nested.ts:1: const a = join(warplineHome(), 'audit')",
         "nested.ts:2: const b = resolve(dirname(dirname(p)), 'audit')",
         "quoted.ts:1: await writeFile(`${home}/audit/x`, '')",
+        "block.ts:3: const e = join(home, 'audit')",
+        "block.ts:4: const f = join(home, 'audit')",
       ])
     } finally {
       rmSync(dir, { recursive: true, force: true })

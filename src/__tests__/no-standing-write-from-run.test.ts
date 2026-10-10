@@ -15,8 +15,10 @@
  * `no-approval-gate-from-content.test.ts` follows static imports only. The
  * advance closure reaches `board/engine-events.ts` only through the dynamic
  * import in `runtime/engine-state-store.ts`, so a writer hidden there would be
- * invisible to it. This walker follows `from '…'` and `import('…')` edges both,
- * the way test 14 in `src/cli/__tests__/deny.test.ts` does.
+ * invisible to it. This walker follows `from '…'` and `import('…')` edges both.
+ * It is the one in `test-utils/import-walk.ts`, which test 14 in
+ * `src/cli/__tests__/deny.test.ts` uses too, with the same comment rule: a line
+ * is skipped only when all of it is comment.
  *
  * A second scan is a plain line scan: no non-test source file but the paths
  * module spells the file's name. A name built from pieces at run time, such as
@@ -32,13 +34,13 @@
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative } from 'node:path'
 import * as paths from '../lib/paths.js'
 import * as gate from '../runtime/approval-gate.js'
 import { runAdvance } from '../runtime/engine.js'
 import { loadRegistry } from '../lib/principals.js'
+import { codeLines, walkImports as walk } from '../../test-utils/import-walk.js'
 
 const SRC = join(import.meta.dir, '..')
 const REPO_ROOT = join(SRC, '..')
@@ -50,34 +52,6 @@ const DEFINER = join('runtime', 'approval-gate.ts')
 const PATHS_MODULE = join('lib', 'paths.ts')
 const DECLARATION = /function standingGrantsPath\s*\(/
 const LITERAL = 'standing-grants'
-const COMMENT = /^\s*(\*|\/\/)/
-
-// Both edge shapes: `from '…'` and `import('…')`, the latter covering the bare
-// side-effect `import '…'` too, under any of the three quotes. A template
-// specifier with an interpolation resolves to no file, so the walk throws on it
-// rather than skipping a subtree.
-const RELATIVE_EDGE = /(?:from|import)\s*\(?\s*(['"`])(\.[^'"`]+)\1/g
-
-/** Every file reachable from `entry` by relative import, with its source. */
-async function walk(entry: string): Promise<Map<string, string>> {
-  const seen = new Map<string, string>()
-  async function visit(file: string): Promise<void> {
-    if (seen.has(file)) return
-    const source = await readFile(file, 'utf-8')
-    seen.set(file, source)
-    for (const m of source.matchAll(RELATIVE_EDGE)) {
-      await visit(resolve(dirname(file), (m[2] as string).replace(/\.js$/, '.ts')))
-    }
-  }
-  await visit(entry)
-  return seen
-}
-
-const codeLines = (source: string): Array<[number, string]> =>
-  source
-    .split('\n')
-    .map((text, i): [number, string] => [i + 1, text])
-    .filter(([, text]) => !COMMENT.test(text))
 
 // Any mention, not only a call: an aliased import, a destructure, a reference
 // held for later and a quoted bracket key all spell the name somewhere.
@@ -194,7 +168,7 @@ describe('the scanners report what they are built to catch', () => {
 
   // Each shape reaches a writer without spelling `writeStandingStore(` on one
   // line, or hides its module behind an import the single-quote walk skipped.
-  test('the scanner reports an aliased import, a reference, a bracket access, and modules behind double-quoted and template imports', async () => {
+  test('the scanner reports an aliased import, a reference, a bracket access, code after a block comment, and modules behind double-quoted and template imports', async () => {
     const dir = fixture({
       'root.ts': [
         "import { a } from './alias.js'",
@@ -202,9 +176,10 @@ describe('the scanners report what they are built to catch', () => {
         "import { k } from './bracket.js'",
         "import { s } from './destructure.js'",
         'import { q } from "./double.js"',
+        "import { b } from './block.js'",
         'export async function root(): Promise<void> {',
         '  await import(`./template.js`)',
-        '  a(); r(); k(); s(); q()',
+        '  a(); r(); k(); s(); q(); b()',
         '}',
         '',
       ].join('\n'),
@@ -214,12 +189,14 @@ describe('the scanners report what they are built to catch', () => {
       'destructure.ts': "import * as g from './gate.js'\nconst { writeStandingStore: w } = g\nexport const s = () => w(x)\n",
       'double.ts': 'export const q = () => writeStandingStore(x)\n',
       'template.ts': 'export const t = standingGrantsPath()\n',
+      'block.ts': '/* note */ export const b = () => writeStandingStore(x)\n/* writeStandingStore( in a comment only */\n',
       'gate.ts': 'export const nothing = 1\n',
     })
     try {
       const found = offenders(await walk(join(dir, 'root.ts')), dir)
+      expect(found.filter((line) => line.startsWith('block.ts:'))).toEqual(['block.ts:1: export const b = () => writeStandingStore(x)'])
       expect([...new Set(found.map((line) => line.split(':')[0]))].sort()).toEqual(
-        ['alias.ts', 'bracket.ts', 'destructure.ts', 'double.ts', 'ref.ts', 'template.ts'],
+        ['alias.ts', 'block.ts', 'bracket.ts', 'destructure.ts', 'double.ts', 'ref.ts', 'template.ts'],
       )
     } finally {
       rmSync(dir, { recursive: true, force: true })

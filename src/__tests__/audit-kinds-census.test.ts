@@ -24,6 +24,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'n
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { appendAudit, AUDIT_KINDS, INTERNAL_KINDS } from '../lib/audit-log.js'
+import { codeOf } from '../../test-utils/import-walk.js'
 
 const REPO_ROOT = join(import.meta.dir, '..', '..')
 const STORE = 'src/lib/audit-log.ts'
@@ -111,9 +112,10 @@ function emitSites(files: string[], root: string): { sites: Sites; offenders: st
     const rel = file.startsWith(`${root}/`) ? file.slice(root.length + 1) : file
     // The store passes a variable kind internally, by design.
     if (rel === STORE) continue
-    const trimmed = raw.trimStart()
-    if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) continue
-    const text = raw.replace(/\s\/\/.*$/, '')
+    // The shared comment rule: a line is skipped only when all of it is comment.
+    const trimmed = codeOf(raw)
+    if (trimmed === '') continue
+    const text = trimmed.replace(/\s\/\/.*$/, '')
     const names = [...text.matchAll(NAME)].map((n) => n.index)
     if (names.length === 0) continue
     if (IMPORT.test(trimmed) && !ALIAS.test(text)) continue
@@ -279,11 +281,13 @@ describe('every record kind has an emit call or a pending entry', () => {
       '  {},',
       ')',
       "await appendAudit(join(home, 'state'), 'grant.issued', {})",
+      // Code after a block comment's close is code: the old rule skipped this line.
+      '/* note */ const held = appendAudit',
       '',
     ].join('\n')
     withFixture({ 'offenders.ts': body }, (dir, paths) => {
       const { sites, offenders } = emitSites(paths, dir)
-      expect(offenders).toEqual(['offenders.ts:1', 'offenders.ts:2', 'offenders.ts:4', 'offenders.ts:5'])
+      expect(offenders).toEqual(['offenders.ts:1', 'offenders.ts:2', 'offenders.ts:4', 'offenders.ts:5', 'offenders.ts:11'])
       expect(sites).toEqual({ state: ['offenders.ts'] })
       const found = census(EXPECTED_KINDS, INTERNAL, sites, PENDING, offenders)
       for (const line of offenders) {
