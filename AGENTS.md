@@ -24,18 +24,18 @@ bun run build               # tsc -p tsconfig.build.json → dist/. Required
                             # package self-reference through the exports map
                             # into dist/ — deliberately, since that is the
                             # path a real consumer hits (`files` ships dist/
-                            # and examples/, never src/). Forgetting it now
-                            # fails fast with one actionable error from
-                            # __test_preload.ts, not 9 module-resolution ones.
+                            # and examples/, never src/). Forgetting it fails
+                            # fast with one actionable error from
+                            # __test_preload.ts.
 bun run test                # build, then bun test
 bun test                    # fine bare — no --timeout needed. The 20s default
                             # is set by `setDefaultTimeout` in
                             # __test_preload.ts, because bunfig's [test]
-                            # timeout key is SILENTLY IGNORED (bun 1.3.11) and
-                            # bun's own 5s default flakes ~3% under CPU
-                            # contention. Do not re-add the flag to
-                            # invocations; an explicit --timeout still wins if
-                            # a single case needs longer. CI shards per src/
+                            # timeout key is silently ignored (checked on bun
+                            # 1.4.2) and bun's own 5s default flakes ~3% under
+                            # CPU contention. Leave --timeout off invocations;
+                            # pass it only when a single case needs longer.
+                            # CI shards per src/
                             # subdir plus an explicit examples/ shard.
 bun run typecheck           # build, then tsc --noEmit (strict; no
                             # noUncheckedIndexedAccess yet — raising
@@ -44,9 +44,10 @@ bun run typecheck           # build, then tsc --noEmit (strict; no
 
 ## Layout
 
-- `src/schemas/` — manifest, skill-result, board, run-log, lock, engine-state
-- `src/runtime/` — invoke-plugin, run-artifacts, approval-gate, engine, tier, staleness
-- `src/board/` — engine-events, state-manager, board-cli
+- `src/schemas/` — plugin-manifest, plugin-config, skill-result, board, run-log, engine-state
+- `src/runtime/` — invoke-plugin, run-artifacts, approval-gate, engine, lock, tier, staleness
+- `src/board/` — engine-events, state-manager
+- `src/cli/` — the `warpline` verbs (advance, approve, deny, resolve, run-plugin, …) and board-cli
 - `src/lib/` — fs-atomic, jsonl-logger, api-budget, preferences, paths
 - `docs/` — doctrine, runtime-spec, board-spec, needs-llm-contract, plugin-authoring
 - `examples/plugins/` — fresh-written examples; never port private plugins here
@@ -57,9 +58,9 @@ bun run typecheck           # build, then tsc --noEmit (strict; no
    manifest fields, or the [needs-llm] protocol MUST update the matching
    `docs/*.md` in the same commit.
 2. **Tests never write outside temp dirs.** `__test_preload.ts` re-roots
-   state/runs via `WARPLINE_STATE_DIR`/`WARPLINE_RUNS_DIR`-style env before
-   paths evaluate; its state-manager import is DYNAMIC on purpose (static
-   imports hoist above the env set — do not "clean it up").
+   `WARPLINE_HOME` at a throwaway temp dir. Path accessors resolve lazily,
+   but keep the preload: it is the backstop for code that caches a resolved
+   path.
 3. **`warplinehq/warpline-attic` is permanently private.** It holds the
    pre-rewrite object store. Never flip it, never pull from it, never push
    to it.
@@ -72,14 +73,10 @@ bun run typecheck           # build, then tsc --noEmit (strict; no
 5. **History stays stable once public** — no force-pushes to main; the
    flip-day ruleset enforces it (see EXTRACTION-NOTES.md checklist).
 6. **First-person prose has a register, and it is enforced.** Before editing
-   `docs/why-the-gate-holds.md` — or adding a file to `VOICED_DOCS` in
+   `docs/why-the-gate-holds.md` or `docs/derive-dont-store.md` — or adding a
+   file to `VOICED_DOCS` in
    `src/__tests__/voice.test.ts` — read CONTRIBUTING.md § Voice. Contractions
    at speaking rate, no em dashes, no semicolons, short sentences, no balanced
    "X rather than Y" antithesis. The test catches the measurable half; the
    guide carries the rest. Accuracy review does not test voice, so this is the
    only gate that does.
-
-## Release / launch
-
-Flip-day checklist: EXTRACTION-NOTES.md. Launch tracking: the "v0.1 public
-launch" GitHub milestone.
