@@ -9,7 +9,11 @@
  * limit.
  *
  * Admission only. The audit store and the gate carry a looser rule on purpose,
- * so a record or grant written under an older name stays readable.
+ * so a record or grant written under an older name stays readable: the
+ * carriage rule, `CarriedPluginName` in lib/audit-log.ts. The frozen gate's
+ * copy of the carriage rule is also spelled `PLUGIN_NAME` / `isPluginName`, a
+ * name clash with this module kept until the next FREEZE-10 amendment renames
+ * it. Read which file a `PLUGIN_NAME` comes from before relying on it.
  *
  * Import-free, so the published `warpline/schemas/plugin-name` subpath reaches
  * nothing else.

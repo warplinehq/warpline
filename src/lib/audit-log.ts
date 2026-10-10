@@ -90,14 +90,22 @@ export type EmitKind = Exclude<AuditKind, (typeof INTERNAL_KINDS)[number]>
 
 const Hex = z.string().regex(/^[0-9a-f]{64}$/)
 const Urn = z.string().regex(/^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
-const PluginName = z.string().min(1).max(255).regex(/^[^\x00-\x1f\x7f/\\]+$/)
+/**
+ * The CARRIAGE rule: what a record may carry as a plugin name, so history
+ * written under a name the loader no longer admits stays readable. Not the
+ * ADMISSION rule (`PLUGIN_NAME` / `isPluginName` in schemas/plugin-name.ts),
+ * which is stricter. The gate keeps its own copy of this one, still named
+ * `PLUGIN_NAME` / `isPluginName` inside approval-gate.ts until the next FREEZE-10
+ * amendment can rename it; audit-log.test.ts holds the two copies in agreement.
+ */
+const CarriedPluginName = z.string().min(1).max(255).regex(/^[^\x00-\x1f\x7f/\\]+$/)
 const RunId = z.string().regex(/^[0-9A-Za-z][0-9A-Za-z._:-]{0,127}$/)
 const PrincipalId = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/)
 const PrefKey = z.string().regex(/^[a-z_]+(\.[a-z_]+)?$/)
 const Iso = z.iso.datetime()
 const Seq = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const SemVer = z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/)
-const Scope = z.union([z.literal('*'), PluginName])
+const Scope = z.union([z.literal('*'), CarriedPluginName])
 /** A standing grant id: 12 lowercase hex, the rule the gate's `newStandingId` makes. */
 const GrantId = z.string().regex(/^[0-9a-f]{12}$/)
 /**
@@ -126,7 +134,7 @@ const DATA = {
       principals: z.strictObject({ sha256: Hex, entries: Entries }).nullable(),
     }),
     open_intents: z.array(
-      z.strictObject({ seq: Seq, plugin: PluginName, run_id: RunId, effect_id: Hex.nullable() }),
+      z.strictObject({ seq: Seq, plugin: CarriedPluginName, run_id: RunId, effect_id: Hex.nullable() }),
     ),
   }),
   'segment.sealed': z.strictObject({
@@ -149,7 +157,7 @@ const DATA = {
       id: GrantId,
       holder: PrincipalId,
       principal: PrincipalId,
-      scopes: z.array(PluginName).min(1),
+      scopes: z.array(CarriedPluginName).min(1),
       period_ms: z.number().int().positive(),
       hard_max_ms: z.number().int().positive(),
     }),
@@ -173,14 +181,14 @@ const DATA = {
       kind: z.literal('standing'),
       ids: z.array(GrantId).min(1),
       holder: PrincipalId,
-      scopes: z.array(PluginName).min(1),
+      scopes: z.array(CarriedPluginName).min(1),
       principal: PrincipalId.nullable(),
       principal_unchecked: PrincipalId.nullable(),
     }),
   ]),
   'content_approval.issued': z.strictObject({
-    plugin: PluginName,
-    producer: PluginName,
+    plugin: CarriedPluginName,
+    producer: CarriedPluginName,
     fingerprint: Hex,
     run_id: RunId.nullable(),
     opens_at: Iso,
@@ -189,19 +197,19 @@ const DATA = {
     principal: PrincipalId.nullable(),
   }),
   'content_approval.withdrawn': z.strictObject({
-    plugin: PluginName,
+    plugin: CarriedPluginName,
     fingerprint: Hex.nullable(),
     principal: PrincipalId.nullable(),
   }),
   'denial.recorded': z.strictObject({
-    plugin: PluginName,
+    plugin: CarriedPluginName,
     fingerprint: Hex,
     discarded_gate_run_id: RunId.nullable(),
     principal: PrincipalId.nullable(),
   }),
-  'denial.lifted': z.strictObject({ plugin: PluginName, fingerprint: Hex.nullable(), principal: PrincipalId.nullable() }),
+  'denial.lifted': z.strictObject({ plugin: CarriedPluginName, fingerprint: Hex.nullable(), principal: PrincipalId.nullable() }),
   'fire.intent': z.strictObject({
-    plugin: PluginName,
+    plugin: CarriedPluginName,
     run_id: RunId,
     class: z.enum(['session', 'content']),
     effect_id: Hex.nullable(),
@@ -209,19 +217,19 @@ const DATA = {
     grants: z.array(Covering),
   }),
   'fire.outcome': z.strictObject({
-    plugin: PluginName,
+    plugin: CarriedPluginName,
     run_id: RunId,
     intent_seq: Seq,
     status: z.enum(['success', 'partial', 'skipped', 'failed', 'threw']),
   }),
   'fire.refused': z.strictObject({
-    plugin: PluginName,
+    plugin: CarriedPluginName,
     run_id: RunId,
     reason: RefusalReasonSchema,
     intent_seq: Seq.nullable(),
   }),
   'fire.resolved': z.strictObject({
-    plugin: PluginName,
+    plugin: CarriedPluginName,
     effect_id: Hex.nullable(),
     intent_seq: Seq.nullable(),
     answer: z.enum(['shipped', 'not_shipped']),
@@ -438,7 +446,7 @@ const EMPTY_STATE: Carried = { authority: { preferences: null, principals: null 
  * folding whichever shape is listed first.
  */
 const CARRIED = {
-  'warpline.audit.fire.intent': z.object({ plugin: PluginName, run_id: RunId, effect_id: Hex.nullable() }),
+  'warpline.audit.fire.intent': z.object({ plugin: CarriedPluginName, run_id: RunId, effect_id: Hex.nullable() }),
   'warpline.audit.fire.outcome': z.object({ intent_seq: Seq.nullable() }),
   'warpline.audit.fire.refused': z.object({ intent_seq: Seq.nullable() }),
   'warpline.audit.fire.resolved': z.object({ intent_seq: Seq.nullable() }),
@@ -467,7 +475,7 @@ const OPENED_CARRIES = z.object({
     preferences: Hex.nullable(),
     principals: z.object({ sha256: Hex, entries: Entries }).nullable(),
   }),
-  open_intents: z.array(z.object({ seq: Seq, plugin: PluginName, run_id: RunId, effect_id: Hex.nullable() })),
+  open_intents: z.array(z.object({ seq: Seq, plugin: CarriedPluginName, run_id: RunId, effect_id: Hex.nullable() })),
 })
 
 type CarriedType = keyof typeof CARRIED
