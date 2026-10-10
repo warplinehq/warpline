@@ -1666,6 +1666,9 @@ grant. On `approve`, `--standing` names the kind of grant. On `revoke`,
   environment or the account running the command.
 - The scopes are the plugins named. A standing grant never covers `*`, and
   `--all` is refused beside `--standing`.
+- A plugin no grant authorises is refused by name: a content-class plugin
+  answers to its content approval, and one with no side effects is never
+  gated, so a standing grant over either would cover nothing.
 - The renewal period, `--period`, is at most 7 days (default 24 hours). The
   hard maximum, `--hard-max`, is required, at most 90 days, and never shorter
   than the period. The caps are constants in code, never preferences, so no

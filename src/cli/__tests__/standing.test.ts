@@ -42,8 +42,8 @@ let saved: { principal: string | undefined; user: string | undefined }
 
 const marker = (name: string): string => join(vh.home, 'fired-' + name)
 
-/** A side-effecting session-class plugin whose handler leaves `fired-<name>` in the home. */
-function writeMarkerPlugin(name: string): void {
+/** A side-effecting session-class plugin whose handler leaves `fired-<name>` in the home. `fields` replace manifest fields. */
+function writeMarkerPlugin(name: string, fields: Record<string, unknown> = {}): void {
   const dir = join(vh.home, 'plugins', name)
   mkdirSync(dir, { recursive: true })
   writeFileSync(
@@ -68,6 +68,7 @@ function writeMarkerPlugin(name: string): void {
       min_tier: 'normal',
       max_retries: 1,
       retry_delay_ms: 2000,
+      ...fields,
     })}`,
   )
   writeFileSync(
@@ -270,6 +271,24 @@ describe('approve --standing refuses and writes nothing', () => {
     test(name, async () => {
       const before = await snapshotHome(vh.home)
       const r = await capture(argv)
+      expect(r.code).toBe(1)
+      expect(r.stderr).toContain(reason)
+      expect(auditRecords(vh.home, 'grant.issued')).toEqual([])
+      expect(await snapshotHome(vh.home)).toEqual(before)
+    })
+  }
+
+  // Nothing reads a standing grant for these, so issuing one would show a live
+  // grant that authorises nothing.
+  for (const [name, fields, plugins, reason] of [
+    ['a content-class plugin', { approval_class: 'content', dependencies: ['p'] }, ['c'], 'c is never authorised by a grant'],
+    ['a plugin with no side effects', { side_effects: [] }, ['c'], 'c is never authorised by a grant'],
+    ['one of two names', { side_effects: [] }, ['p', 'c'], 'c is never authorised by a grant'],
+  ] as const) {
+    test(`${name} is refused`, async () => {
+      writeMarkerPlugin('c', fields)
+      const before = await snapshotHome(vh.home)
+      const r = await capture(['approve', ...plugins, ...STANDING_TAIL])
       expect(r.code).toBe(1)
       expect(r.stderr).toContain(reason)
       expect(auditRecords(vh.home, 'grant.issued')).toEqual([])

@@ -1396,6 +1396,17 @@ async function issueStandingGrant(
   // A `*` is left to the transform, which says why it is refused.
   const { manifests, failures } = await loadPluginManifests(pluginsDir())
   if (refuseUnknownNames(positionals.filter((name) => name !== '*'), manifests, failures)) return 1
+  // The run reads no grant for these: a content-class plugin answers to its
+  // content approval, and one with no side effects is never gated.
+  const inert = positionals.filter((name) => {
+    const m = manifests.get(name)
+    return m !== undefined && (m.approval_class === 'content' || m.side_effects.length === 0)
+  })
+  if (inert.length > 0) {
+    return refuse(
+      `${inert.join(', ')} ${inert.length === 1 ? 'is' : 'are'} never authorised by a grant, so a standing grant would cover nothing.`,
+    )
+  }
 
   const statePath = engineStatePath()
   const lockPath = pathsForStateFile(statePath).lockPath
