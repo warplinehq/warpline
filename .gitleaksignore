@@ -16,3 +16,11 @@
 # look like one; it authenticates against nothing, and its entropy (3.97) is
 # what earns it the generic-api-key rule.
 ff9cd11786e518a61fa6307720a86138589712fc:src/runtime/__tests__/secrets.test.ts:generic-api-key:456
+
+# The audit store's sentinel test fixture, not a credential. audit-sentinels
+# asserts that no audit record carries approved content, secrets, config
+# values, deny notes or a principal's key, so it plants one recognisable value
+# per class and greps every record for it. 'SENTINEL_PRINCIPAL_KEY_6e70' is
+# the planted key; it authenticates against nothing, and the `KEY =` name with
+# its entropy (3.90) is what earns it the generic-api-key rule.
+6c8d734b5fec7884dcc2ae12751b62e6baa8ff52:src/runtime/__tests__/audit-sentinels.test.ts:generic-api-key:31
