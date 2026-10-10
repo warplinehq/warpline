@@ -367,7 +367,7 @@ describe('grant issue and revoke', () => {
 
     expect(code).toBe(0)
     expect(seen()).toBe(true)
-    expect(recordsOf('grant.revoked')).toEqual([{ kind: 'session', scopes: ['mailer'], principal: null }])
+    expect(recordsOf('grant.revoked')).toEqual([{ kind: 'session', scopes: ['mailer'], principal: null, principal_unchecked: null }])
     expect(existsSync(grantPath())).toBe(false)
   })
 

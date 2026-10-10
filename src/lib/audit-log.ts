@@ -160,11 +160,24 @@ const DATA = {
     principal: PrincipalId,
     renewal_deadline: Iso,
   }),
-  'grant.revoked': z.strictObject({
-    kind: z.literal('session'),
-    scopes: z.array(Scope),
-    principal: PrincipalId.nullable(),
-  }),
+  // `principal` is always a checked id; a claim the registry could not
+  // confirm is kept apart in `principal_unchecked`.
+  'grant.revoked': z.discriminatedUnion('kind', [
+    z.strictObject({
+      kind: z.literal('session'),
+      scopes: z.array(Scope),
+      principal: PrincipalId.nullable(),
+      principal_unchecked: PrincipalId.nullable(),
+    }),
+    z.strictObject({
+      kind: z.literal('standing'),
+      ids: z.array(GrantId).min(1),
+      holder: PrincipalId,
+      scopes: z.array(PluginName).min(1),
+      principal: PrincipalId.nullable(),
+      principal_unchecked: PrincipalId.nullable(),
+    }),
+  ]),
   'content_approval.issued': z.strictObject({
     plugin: PluginName,
     producer: PluginName,

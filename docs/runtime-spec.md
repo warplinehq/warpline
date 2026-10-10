@@ -1479,7 +1479,7 @@ later one is the failure this behaviour exists to prevent.
 | Default TTL | 4 hours. |
 | `--all` | The only path to `"*"`. No positional name is ever treated as a wildcard. It prints the number of side-effecting plugins and the total number of declared side effects it covers before granting. |
 | Issuer | The last grant that named a scope sets its issuer, none included. A scope the command did not name keeps its issuer. |
-| Concurrent approve | Serialised by the state lock: each invocation checks the principal, records the grant and writes the file inside one hold, so two overlapping invocations both land. |
+| Concurrent approve | Serialised by the state lock: each invocation checks the principal, records the grant and writes the file inside one hold, so two overlapping invocations both land. Bare `warpline revoke` holds the same lock, so a revoke and an approve never interleave. |
 | Zero duration | Rejected before anything is written. `--ttl` takes a positive integer followed by `m`, `h` or `d`; a bare `0` fails the grammar and `0h` fails the positive-value check. The command exits 1 and the file is untouched. |
 | Empty scope list | Reachable only from the library path, which writes an empty `scopes` array. It approves nothing — an empty list is not a synonym for `"*"`. The command cannot produce one: `approve` with no plugin name and no `--all` prints usage and exits 1. |
 
@@ -1506,12 +1506,15 @@ never of the format.
 An unknown plugin name aborts the whole command, writes nothing, and exits 1 —
 partial application is not a state the file is ever left in.
 
-`warpline revoke` deletes the file and exits 0, including when no grant exists.
-After a revoke, every side-effecting plugin reads as unapproved. When a grant
-file exists, revoke first appends a `grant.revoked` record (§ 14) naming its
-live scopes. A revoke only narrows authority, so it removes the file even when
-that append fails, then exits `70` with a stderr line saying no audit record of
-the revoke was written. With no grant file it writes no record.
+Bare `warpline revoke` deletes the file and exits 0, including when no grant
+exists. After a revoke, every side-effecting plugin reads as unapproved. It
+holds the state lock, and never reads or writes the standing grants file. When
+a grant file exists, revoke first appends a `grant.revoked` record (§ 14) with
+`kind: session`, naming its live scopes. A revoke only narrows authority, so it
+removes the file even when that append fails, then exits `70` with a stderr
+line saying no audit record of the revoke was written. With no grant file it
+writes no record. The standing forms, `--holder` and `--standing`, are under
+Standing grants below.
 
 **Nothing reachable from a run writes this file or the standing grants file.**
 The engine reaches both only through the gate's readers, `grantsCovering` and
@@ -1677,6 +1680,49 @@ Every refusal exits 1 and writes nothing. The command appends `grant.renewed`
 (§ 14) before it writes the standing grants file, so a failed append renews
 nothing: it says so on stderr and exits 1. On success it prints the new
 renewal deadline and the hard maximum. Renewal never touches the session file.
+
+**Revoking.** `warpline revoke` has three forms. Bare, it clears the session
+grant and never reads or writes the standing grants file (above).
+`warpline revoke --holder <principal-id>` revokes every standing grant that one
+principal holds, and no other grant. `warpline revoke --standing <grant-id>`
+revokes one standing grant by its id. Here `--standing` takes a grant id; on
+`approve` it names the kind of grant. `--holder` and `--standing` together are
+refused.
+
+- `--holder` names a registered principal, active or disabled, so a disabled
+  machine's grants can still be revoked. When `principals.json` cannot be read,
+  a holder the standing grants file names counts as registered.
+- A registered holder that holds no standing grant exits 0, says so, and writes
+  no record. An unknown grant id, or a holder that is not registered, exits 1
+  with nothing written.
+- `--principal <id>` is optional on every form. It names who is revoking, an
+  active registered principal of either type, is checked under the state lock,
+  and is recorded as `principal` on `grant.revoked`. It is never taken from the
+  environment or the account running the command. A `--principal` that names
+  nobody, a disabled principal, or the empty id is refused with nothing
+  written. When the registry cannot confirm the claim, because `principals.json`
+  cannot be read or its change cannot be recorded, the revoke still goes
+  through: the record carries `principal: null` and the claimed id as
+  `principal_unchecked`, and stderr says the principal could not be checked. So
+  `principal` always means checked. A claim that is no principal id at all is
+  refused, whatever the registry holds.
+- Every form holds the state lock. Inside it, the standing forms read the
+  standing grants file, run the gate's revoke transform, append `grant.revoked`
+  with `kind: standing` (§ 14), and only then write the file.
+- A revoke only narrows authority, so a failing audit store or registry
+  observation never blocks one. The grants are removed anyway, and the command
+  exits `70` with a stderr line saying what was not recorded.
+- No revoke deletes the standing grants file. With no grants left it holds
+  `"grants": []`.
+
+The standing grants file is read whole, so one malformed grant makes every
+standing grant in it unreadable, and then both standing forms refuse with
+nothing written. The refusal names the cause: the file is not JSON or holds a
+malformed grant, a newer warpline wrote it, or the file system refused the
+read. The one way out is to move the file aside, which drops every standing
+grant in it at once. A file a newer warpline wrote must not be edited: lowering
+its `min_reader_version` would let this build act on grants it does not
+understand. Revoke with the newer warpline instead.
 
 **A grant written by hand.** A standing grant written into the standing grants
 file by hand carries no `grant.issued` record. The file is not compared with
@@ -3046,8 +3092,8 @@ written, because the advance itself finished. An advance whose Checkpoint was
 written but whose store could not be read back after it exits `70` too: its
 document carries the Checkpoint's seq with `indeterminate: null`, never an empty
 list, and stderr points at `warpline audit verify` for the reason.
-`warpline revoke` exits `70` too, when the grant was removed but its record
-could not be written (§ 9).
+`warpline revoke` exits `70` too, when the grant was removed but its record,
+or a change to `principals.json` it read, could not be written (§ 9).
 
 `130` is the conventional code for a process ended by SIGINT, and this command
 reports it deliberately rather than by default: it installs a handler for the
@@ -3786,7 +3832,7 @@ The set is closed. A kind outside it cannot be written.
 |------|-----------------|
 | `grant.issued` | `warpline approve` is about to write a grant. A session grant (`kind: session`) carries the scopes, duration and flags asked for. A standing grant (`kind: standing`) carries its id, holder, scopes, renewal period and hard maximum. Both carry the acting `principal`. |
 | `grant.renewed` | `warpline renew` is about to restart a standing grant's period: the grant id, its holder, the renewing `principal` and the new renewal deadline. |
-| `grant.revoked` | `warpline revoke` is about to clear the session grant. |
+| `grant.revoked` | `warpline revoke` is about to remove a grant. A session revoke (`kind: session`) carries the live scopes it clears. A standing revoke (`kind: standing`) carries the grant ids, sorted, their holder and the union of their scopes. Both carry `principal`, the registered id `--principal` named and the registry confirmed, or null, and `principal_unchecked`, the id `--principal` named when the registry could not confirm it, or null. |
 | `content_approval.issued` | A content approval is about to be bound to an Output's fingerprint. |
 | `content_approval.withdrawn` | A content approval is about to be removed. |
 | `denial.recorded` | `warpline deny` is about to record a denial: the plugin, the proposal's fingerprint, and the run id of any parked gate it discards. |
@@ -4119,10 +4165,12 @@ check it inside the state lock, before the append. So a principal disabled while
 verb waited for the lock is refused, and nothing is written.
 
 `warpline revoke` is the one exception. It appends `grant.revoked` before it
-removes the grant file, but a revoke only narrows authority, and a failing
-store must never leave authority wider than the operator chose. So when that
-append fails the file is removed anyway, and the command exits `70` with a
-stderr line saying no audit record of the revoke was written.
+removes the session grant file or writes the standing grants file, but a revoke
+only narrows authority, and a failing store must never leave authority wider
+than the operator chose. So when that append fails, or the store cannot record
+a change to `principals.json` the revoke read, the grant is removed anyway, and
+the command exits `70` with a stderr line saying what was not recorded. That
+covers all three forms, `--holder` and `--standing` as well as bare (§ 9).
 
 A fire is written ahead the same way. When `warpline advance` fires a
 session-class plugin that declares side effects, it appends `fire.intent`

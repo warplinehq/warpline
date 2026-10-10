@@ -49,7 +49,7 @@ Commands:
   approve    Grant a side-effect approval for this session, or a standing one for a machine
   deny       Record a no, so the next engine tick stops asking
   resolve    Answer a fire nothing confirmed: a marked content fire, or any open intent by its seq
-  revoke     Clear the current session approval
+  revoke     Clear the session approval, or drop standing grants by holder or id
   renew      Restart a standing grant's period before it lapses
   audit      Print the record's head, export it, check it against a Checkpoint, or pass over a line its walk stops on
   prefs      Set one guardrail in preferences.json, on the record
