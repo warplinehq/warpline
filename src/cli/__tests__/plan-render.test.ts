@@ -383,7 +383,8 @@ describe('renderPlan — the declared handoff line', () => {
 describe('renderPlan — standing grants', () => {
   const HOUR = 60 * 60_000
   const PLAIN_NONE = 'Session grant: none — plugins with side effects would be SKIPPED this run'
-  const STANDING_NONE = `${PLAIN_NONE} unless a live standing grant covers them`
+  const STANDING_NONE =
+    'Session grant: none — plugins with side effects would be SKIPPED this run unless a live standing grant covers them'
   const UNREADABLE = 'Standing grants: none live — the standing grants file cannot be read'
 
   function standing(overrides: Partial<StandingLine> = {}): StandingLine {
