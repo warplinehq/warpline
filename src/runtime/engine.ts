@@ -4357,10 +4357,10 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
       // __proto__` line over a state file that gained nothing.
       //
       // `PluginManifestSchema.name` carries the same refusal, deliberately
-      // independently: the two strings are not the same string, `manifest.name`
-      // is decorative here (a warning string and a dependency fallback set),
-      // and a future keying change should meet a guard wherever it lands.
-      // Derived from the prototype rather than listed, so it cannot go stale.
+      // independently: a manifest is admitted only when its name is this
+      // directory's (`admitManifest`), and a future keying change should meet
+      // a guard wherever it lands. Derived from the prototype rather than
+      // listed, so it cannot go stale.
       if (entry in Object.prototype) {
         failures.push({
           plugin: entry,
@@ -4443,18 +4443,13 @@ export async function loadPluginManifests(pluginsDir: string): Promise<{
   failures.sort((a, b) => (a.plugin < b.plugin ? -1 : a.plugin > b.plugin ? 1 : 0))
 
   // Warn on unresolved dependencies — topoSort silently ignores them today.
-  // Loaded keys are directory names (what `entries` returned). Manifests also declare their own
-  // `name` field; in practice directory and manifest name match, but match against both sets so the
-  // warning only fires on genuinely dangling references.
-  const loadedKeys = new Set<string>(plugins.keys())
-  const loadedNames = new Set<string>(
-    Array.from(plugins.values()).map((m) => m.name),
-  )
+  // Every loaded manifest's name is its directory's (`admitManifest`), so the
+  // map's keys are the whole set of names a dependency can resolve to.
   for (const [key, m] of plugins.entries()) {
     for (const dep of m.dependencies ?? []) {
-      if (!loadedKeys.has(dep) && !loadedNames.has(dep)) {
+      if (!plugins.has(dep)) {
         console.warn(
-          `  [engine] plugin '${m.name ?? key}' declares unresolved dependency '${dep}' — ordering is not enforced`,
+          `  [engine] plugin '${key}' declares unresolved dependency '${dep}' — ordering is not enforced`,
         )
       }
     }
