@@ -111,6 +111,7 @@ import {
 import { appendAudit } from '../lib/audit-log.js'
 import { judgePrincipal, requirePrincipal } from '../lib/principals.js'
 import {
+  ANSWER_REFUSAL_TEXT,
   asksPath,
   checkAnswer,
   openAskFor,
@@ -118,6 +119,7 @@ import {
   readAsks,
   recordAnswer,
   type AnswerFlags,
+  type AnswerRefusal,
   type Ask,
   type AsksUnreadableCause,
 } from '../lib/asks.js'
@@ -508,24 +510,23 @@ async function approveContent(
     const replaced = Object.hasOwn(state.approvals, consumer) ? state.approvals[consumer] : undefined
 
     // The Answer goes on the record, and its Ask is marked answered, before the
-    // content approval's own record. A nonce naming no Ask is the plain verb.
+    // content approval's own record. An Answer its Ask does not match is refused.
     let answered = false
     if (answer !== null && who !== null) {
       const found = checkAnswer(asks.store, answer, consumer, now, {
         kinds: ['content'],
         liveDigest: () => fingerprint,
       })
-      if ('ask' in found) {
-        const rec = await recordAnswer(statePath, found.ask, {
-          answer: 'approve_content',
-          principal: who.principal,
-          via: who.via,
-          evidence: answer.evidence,
-          answeredAt: Date.now(),
-        })
-        if ('refused' in rec) return refuseRecord(rec.refused, statePath)
-        answered = true
-      }
+      if ('refused' in found) return refuseAnswer(found.refused)
+      const rec = await recordAnswer(statePath, found.ask, {
+        answer: 'approve_content',
+        principal: who.principal,
+        via: who.via,
+        evidence: answer.evidence,
+        answeredAt: Date.now(),
+      })
+      if ('refused' in rec) return refuseRecord(rec.refused, statePath)
+      answered = true
     }
 
     // On the audit record before anything changes, in memory or on disk. The
@@ -714,6 +715,12 @@ function refuseBare(ask: Ask): number {
       `Read it with 'warpline approvals show ${ask.id}', then answer it with its --nonce and --digest. ` +
       `Nothing was written.\n`,
   )
+  return 1
+}
+
+/** An Answer that does not match its Ask: the reason by name, and nothing written. */
+function refuseAnswer(reason: AnswerRefusal): number {
+  process.stderr.write(`approve: refused (${reason}): ${ANSWER_REFUSAL_TEXT[reason]} Nothing was written.\n`)
   return 1
 }
 
@@ -1058,7 +1065,8 @@ export async function run(argv: string[]): Promise<number> {
         kinds: gated.length > 0 ? ['parked_result'] : ['missing_grant'],
         liveDigest: () => proposalFingerprint(state, plugin, manifest),
       })
-      if ('ask' in found) answered = { ask: found.ask, ...who, evidence: answer.evidence }
+      if ('refused' in found) return refuseAnswer(found.refused)
+      answered = { ask: found.ask, ...who, evidence: answer.evidence }
     }
     const recordTheAnswer = async (): Promise<number | null> => {
       if (answered === null) return null

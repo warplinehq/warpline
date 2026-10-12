@@ -594,9 +594,22 @@ export function openAskFor(store: AskStore, scopes: readonly string[], now: numb
   return store.asks.find((a) => a.state === 'open' && scopes.includes(a.scope) && now < Date.parse(a.expires_at))
 }
 
+/** Why an Answer is refused, in the order `checkAnswer` checks. A short prefix is refused earlier, by `parseAnswerFlags`. */
+export type AnswerRefusal = 'unknown' | 'superseded' | 'expired' | 'nonce reused' | 'digest mismatch'
+
+/** One sentence per refusal. None names a typed value, so a nonce never reaches a terminal or a log. */
+export const ANSWER_REFUSAL_TEXT: Record<AnswerRefusal, string> = {
+  unknown: 'No Ask on this scope carries that nonce.',
+  superseded: 'The decision changed and a newer Ask replaced this one.',
+  expired: 'The Ask is past its expiry and can no longer be answered.',
+  'nonce reused': 'That nonce has already answered its Ask.',
+  'digest mismatch': 'The digest prefix, the decision as it stands now or this form of the verb does not match the Ask.',
+}
+
 /**
- * The Ask an Answer names: the one on `scope` whose nonce it carries, in any
- * state. With none, `{ plain: true }`, and the verb runs as it would bare.
+ * The Ask an Answer names: the one on `scope` whose nonce it carries. With
+ * none, the Answer is refused as `unknown`, never run as the bare verb, and a
+ * nonce carried to another scope is unknown there too.
  * `now` and `verb` (the kinds this branch answers, and the live digest of what
  * it would act on) are the inputs the refusal checks read.
  */
@@ -606,8 +619,9 @@ export function checkAnswer(
   scope: string,
   now: number,
   verb: { kinds: readonly AskKind[]; liveDigest: (ask: Ask) => string | null },
-): { ask: Ask } | { plain: true } {
-  // shortcut: the accepting baseline; the refusal checks read `now` and `verb` when they land.
+): { ask: Ask } | { refused: AnswerRefusal } {
+  // shortcut: unknown is the only refusal so far; the other four read `now` and `verb` when they land.
   const ask = store.asks.find((a) => a.scope === scope && a.nonce === flags.nonce)
-  return ask === undefined ? { plain: true } : { ask }
+  if (ask === undefined) return { refused: 'unknown' }
+  return { ask }
 }

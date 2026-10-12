@@ -4926,9 +4926,9 @@ written. Neither is ever taken from the environment or the account running the
 command. On the parked form, the refusal of `--principal` that a bare apply
 gets (§ 9) is lifted for an Answer, because `ask.answered` records it.
 
-The Answer names its Ask by the plugin and the nonce, in any state. In this
-release a nonce that names no Ask on that plugin runs the form as it would run
-bare.
+The Answer names its Ask by the plugin and the nonce. A nonce that names no
+Ask on that plugin is refused as `unknown` (see Refusals below), never run as
+the bare form, so a nonce carried from another plugin's Ask is unknown here.
 
 **A bare form refuses while an Ask is open.** `approve <plugin>`, on either
 gate, and `approve <plugin> --content` exit `1` with nothing written while an
@@ -4975,10 +4975,13 @@ reminder's. The answer instant is the same one the Ask's `closed_at` records.
 ### Refusals
 
 An Answer that does not match its Ask is refused by name. Each refusal exits
-`1`, prints the reason, and writes nothing: the state document, the session
+`1`, prints `approve: refused (<reason>): <sentence> Nothing was written.`
+(the short prefix prints `prefix shorter than 12:` and its sentence), never a
+typed value, and writes nothing: the state document, the session
 grant file, the standing grants file, `asks.json` and the audit store are as
 they were.
 
 | Reason | When |
 |---|---|
 | `prefix shorter than 12` | `--digest` has fewer than 12 hex characters. Checked before anything is read. |
+| `unknown` | No Ask on the plugin named carries the nonce, in any state. |
