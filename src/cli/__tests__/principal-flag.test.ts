@@ -470,7 +470,7 @@ describe('no verb reads the account running it', () => {
     (JSON.parse(readFileSync(join(vh.home, 'standing-grants.json'), 'utf-8')) as { grants: { id: string }[] }).grants[0]!.id
 
   type Case = { argv: () => string[]; code: number; setup?: () => Promise<void> }
-  // No case here answers an Ask: an Answer records the account name in ask.answered.os_user by design (D-28).
+  // No case here answers an Ask: an Answer records the account name in ask.answered.os_user by design.
   const CASES: Record<string, Case> = {
     'approve p': { argv: () => ['approve', 'p'], code: 0 },
     'approve --all': { argv: () => ['approve', '--all'], code: 0 },

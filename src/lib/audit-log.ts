@@ -38,6 +38,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { RefusalReasonSchema } from '../schemas/run-log.js'
 import { deriveHost, isProcessAlive } from './host-identity.js'
+import { ASSURANCE_LEVELS } from './assurance.js'
 
 /** The longest stored line, newline included. The tail read holds four. */
 export const MAX_LINE_BYTES = 16_384
@@ -115,6 +116,19 @@ const SemVer = z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za
 const Scope = z.union([z.literal('*'), CarriedPluginName])
 /** A standing grant id: 12 lowercase hex, the rule the gate's `newStandingId` makes. */
 const GrantId = z.string().regex(/^[0-9a-f]{12}$/)
+/**
+ * The account an Answer was given from, as `ask.answered` records it: an
+ * account-name token, mixed case so most macOS account names are kept. A name
+ * off this rule is recorded as `unknown`, which the rule also admits.
+ */
+export const OS_USER_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/
+/**
+ * The evidence an Answer names, as a bounded token: a ticket id (`OPS-123`),
+ * a reference (`gh:org/repo#12`) or a path-style ticket URL. Whitespace, `?`,
+ * `&`, `=` and `@` are refused, so neither a query string nor a free-text
+ * note can ride in on it.
+ */
+export const EVIDENCE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,199}$/
 /** An Ask id: 12 lowercase hex, drawn apart from the Ask's nonce. */
 const AskId = z.string().regex(/^[0-9a-f]{12}$/)
 /** What an Ask is about: a plugin, or a standing grant by its id. */
@@ -279,9 +293,25 @@ const DATA = {
     raised_at: Iso,
     expires_at: Iso,
   }),
-  // Pending: nothing may be written under these until the work that defines
-  // them lands and replaces the schema.
-  'ask.answered': z.never(),
+  // Who answered (`principal`, never null), through what (`via`), on what
+  // evidence, at what assurance, as which account, and how long after the
+  // raise. `os_user` sits beside the principal and is never one.
+  'ask.answered': z.strictObject({
+    id: AskId,
+    kind: z.enum(ASK_KINDS),
+    scope: AskScope,
+    answer: z.enum(ASK_ANSWERS),
+    digest: Hex,
+    principal: PrincipalId,
+    via: PrincipalId.nullable(),
+    os_user: z.string().regex(OS_USER_NAME),
+    evidence: z.string().regex(EVIDENCE_TOKEN).nullable(),
+    assurance: z.enum(ASSURANCE_LEVELS),
+    raised_at: Iso,
+    decide_ms: z.number().int().nonnegative(),
+  }),
+  // Pending: nothing may be written under this until the work that defines
+  // it lands and replaces the schema.
   'handoff.tried': z.never(),
 } as const satisfies Record<AuditKind, z.ZodType>
 

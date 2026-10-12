@@ -23,12 +23,19 @@
  *
  * **The file holds live nonces.** It is written owner-only, atomically, and
  * synced, so a lost write cannot hand back a nonce already consumed.
+ *
+ * **The Answer helpers run inside the verb's state-lock hold, never the
+ * notify runner.** An Answer is on the audit record as `ask.answered` before
+ * its Ask is marked answered, and the account it was given from is read here
+ * and nowhere else, recorded beside the principal and never as one.
  */
 import { createHash, randomBytes } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
+import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
-import { appendAudit, ASK_ANSWERS, ASK_KINDS, CarriedPluginName } from './audit-log.js'
+import { appendAudit, ASK_ANSWERS, ASK_KINDS, CarriedPluginName, OS_USER_NAME } from './audit-log.js'
+import { verifyAnswer } from './assurance.js'
 import { atomicWriteJson, syncInstalled } from './fs-atomic.js'
 
 export const ASKS_READER_VERSION = 1
@@ -464,4 +471,68 @@ export function askMessage(entries: readonly AskEntry[], includeContent: boolean
       ...(includeContent ? { content: e.content ?? null } : {}),
     })),
   })
+}
+
+/**
+ * The account running this command, for `ask.answered.os_user`: its name when
+ * it fits the account-name rule, else `unknown`, and `unknown` when it cannot
+ * be read (a uid with no passwd entry throws). These are the module's only
+ * account reads.
+ */
+export function osUser(): string {
+  try {
+    const name = userInfo().username
+    return OS_USER_NAME.test(name) ? name : 'unknown'
+  } catch {
+    return 'unknown'
+  }
+}
+
+/**
+ * Record an Answer to `ask`, then close it. `ask.answered` goes on the audit
+ * store first; when the store refuses it, nothing is written and the Ask stays
+ * open (`audit`). Then the store is read fresh and the Ask marked `answered`
+ * with `closed_at` and `answer`, written and synced. A store that cannot be
+ * read, or a write that fails, returns `store` and writes nothing over a file
+ * it could not read: the audit record then names an Answer whose effect was
+ * not written, the class `renew` already narrates.
+ *
+ * `principal` comes from the caller alone, never the environment. The answer
+ * instant does too, so a verb passes `Date.now()` and needs no clock seam.
+ */
+export async function recordAnswer(
+  statePath: string,
+  ask: Ask,
+  input: { answer: AskAnswer; principal: string; via: string | null; evidence: string | null; answeredAt: number },
+): Promise<{ recorded: true } | { refused: 'audit' | 'store' }> {
+  try {
+    await appendAudit(statePath, 'ask.answered', {
+      id: ask.id,
+      kind: ask.kind,
+      scope: ask.scope,
+      answer: input.answer,
+      digest: ask.digest,
+      principal: input.principal,
+      via: input.via,
+      os_user: osUser(),
+      evidence: input.evidence,
+      assurance: verifyAnswer(input.evidence),
+      raised_at: ask.raised_at,
+      decide_ms: input.answeredAt - Date.parse(ask.raised_at),
+    })
+  } catch {
+    return { refused: 'audit' }
+  }
+  const fresh = await readAsks(statePath)
+  if (!fresh.readable) return { refused: 'store' }
+  const closed_at = new Date(input.answeredAt).toISOString()
+  const asks = fresh.store.asks.map((a) =>
+    a.id === ask.id ? { ...a, state: 'answered' as const, closed_at, answer: input.answer } : a,
+  )
+  try {
+    await writeAsks(statePath, { ...fresh.store, asks })
+  } catch {
+    return { refused: 'store' }
+  }
+  return { recorded: true }
 }

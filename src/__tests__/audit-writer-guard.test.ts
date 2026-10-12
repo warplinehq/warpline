@@ -13,11 +13,12 @@
  * `import('./audit.js')` name the verb, not the directory, and stay green.
  * Lines whose text starts with `*` or `//` are dropped first.
  *
- * **What the store may import.** `node:*`, `zod`, `../schemas/run-log.js` and
- * `./host-identity.js`, nothing else. The identity module holds the machine
- * identifier and the liveness probe the lock uses, and it imports only
- * `node:*`, which a case below checks, so the store still reaches the runtime
- * through nothing. The approval gate lives in the runtime, and a store that
+ * **What the store may import.** `node:*`, `zod`, `../schemas/run-log.js`,
+ * `./host-identity.js` and `./assurance.js`, nothing else. The identity module
+ * holds the machine identifier and the liveness probe the lock uses, and it
+ * imports only `node:*`. The assurance seam holds the levels `ask.answered`
+ * may carry, and it imports nothing. Cases below check both, so the store
+ * still reaches the runtime through nothing. The approval gate lives in the runtime, and a store that
  * could reach it would make this a graph walk instead of a line scan. The
  * specifier regex is the one the schema-module guard uses, so all four import
  * forms are seen: static, type-only, dynamic and re-export. The store also
@@ -40,7 +41,7 @@ const JOINS_AUDIT = /\b(join|resolve)\(.*['"`]audit['"`]/
 const AUDIT_PATH = /['"`][^'"`]*\/audit(\/[^'"`]*)?['"`]/
 const SPECIFIER =
   /(?<![.\w])(?:(?:from|import)\s*["']|(?:import|require)\s*\(\s*["'`])([^"'`\n]+)["'`]/g
-const ALLOWED_SPECIFIER = /^(node:[a-z/_]+|zod|\.\.\/schemas\/run-log\.js|\.\/host-identity\.js)$/
+const ALLOWED_SPECIFIER = /^(node:[a-z/_]+|zod|\.\.\/schemas\/run-log\.js|\.\/host-identity\.js|\.\/assurance\.js)$/
 
 /** Every non-test `.ts` file under `src/` and `examples/`; empty throws. */
 function sourceFiles(): string[] {
@@ -159,6 +160,12 @@ describe('the store reaches nothing in the runtime or the board', () => {
     const specifiers = [...source.matchAll(SPECIFIER)].map((m) => m[1])
     expect(specifiers.length).toBeGreaterThan(0)
     expect(specifiers.filter((s) => !/^node:[a-z/_]+$/.test(s))).toEqual([])
+  })
+
+  test('the assurance seam the store imports reaches nothing', () => {
+    const source = readFileSync(join(REPO_ROOT, 'src/lib/assurance.ts'), 'utf8')
+    expect(source).toContain('export const ASSURANCE_LEVELS')
+    expect([...source.matchAll(SPECIFIER)].map((m) => m[1])).toEqual([])
   })
 
   test('the approval gate named in each of the four import forms is caught four times', () => {

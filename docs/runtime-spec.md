@@ -3977,15 +3977,15 @@ The set is closed. A kind outside it cannot be written.
 | `preference.set` | A preference key is about to be set by a warpline command. |
 | `preferences.observed` | The preferences file changed without a warpline command. |
 | `ask.raised` | An Ask is about to be stored (§ 16): its `id`, `kind`, `scope`, `plugin` (null for a standing grant's renewal), `digest`, `raised_at` and `expires_at`. Never its nonce or its summary. |
-| `ask.answered` | An Ask answered. |
+| `ask.answered` | An Answer is about to close an Ask (§ 16): the Ask's `id`, `kind`, `scope`, `digest` and `raised_at`; the `answer`; `principal`, the registered id that answered, never null; `via`, the id it came through, or null; `os_user`, the account that ran the command, or `unknown` when it cannot be read or is not an account-name token, recorded beside the principal and never used as one; `evidence`, a bounded reference token with no whitespace, `?`, `&`, `=` or `@`, or null; `assurance`, always `asserted` in this release; and `decide_ms`, the ms from the Ask's `raised_at` to the Answer, never from a reminder. |
 | `handoff.tried` | A handoff tried. |
 | `segment.opened` | The first line of a segment file. One opened by `warpline audit pass-over` names each line it passed over, by its position and sha256, as `passed_over`. |
 | `segment.sealed` | The last line of a segment file that is full or old. |
 | `checkpoint.recorded` | The head as it stood, so it can be exported and checked later. |
 
-Nothing writes `ask.answered` or `handoff.tried` yet. Their schema admits
-nothing, so an append under either of them is refused until the work that
-writes them lands and defines their fields. The last three
+Nothing writes `handoff.tried` yet. Its schema admits nothing, so an append
+under it is refused until the work that writes it lands and defines its
+fields. The last three
 kinds in the table are written by the store itself, never by a caller.
 
 Each `grants` entry on a `fire.intent` names its `issuer`. A session window's
@@ -3996,7 +3996,8 @@ records, `grant.issued`, `grant.revoked`, `content_approval.issued`,
 `content_approval.withdrawn`, `denial.recorded`, `denial.lifted` and
 `fire.resolved`, carry `principal`: the registered id `--principal` named, or
 null when none was named. A principal is never taken from the environment or
-from the account running the command. `grant.issued` and `grant.revoked` carry
+from the account running the command. `os_user` on `ask.answered` is the one
+account read on record, and it is never a principal. `grant.issued` and `grant.revoked` carry
 `kind`, the kind of grant the record is about. Records written before these
 fields existed are read without them.
 
