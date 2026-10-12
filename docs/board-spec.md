@@ -162,7 +162,8 @@ open ──answered──▶ closed        (approve | deny | choose | seen | don
  │ ▲
  │ └── expiry of the deferral ──┐
  └────defer(1h|4h|1d|1w)──▶ deferred
-open ──expiry──▶ expired         (approval kind only; see below)
+open ──expiry──▶ expired         (every stored Ask; see below)
+open ──decision changed──▶ superseded   (every stored Ask; a new Ask replaces it)
 ```
 
 Rules that follow from the runtime, not from taste:
@@ -172,11 +173,15 @@ Rules that follow from the runtime, not from taste:
   (a blanket `--all` grant still does not reach a denied plugin; `approve`
   names any that stay denied)
   (`MAX_GRANT_WINDOW_MS`). The Ask shows `expires_at`; **defer options that
-  would outlive it are not offered.** An approval Ask that has never been
-  granted has no expiry to cap holds against: the ceiling anchors on
-  `first_granted_at`, which does not exist before a grant, so defer options for
-  such an Ask are not capped at all. The cap is a property of a live Grant, not
-  of the approval kind.
+  would outlive it are not offered.** That defer cap is a property of a live
+  Grant, not of the approval kind. Every stored Ask expires at the earlier of
+  its subject's clock and 23 hours after it was raised (runtime-spec.md § 16),
+  so a never-granted approval Ask expires 23 hours after it was raised.
+- **A changed decision supersedes its Ask.** A stored Ask whose decision
+  changes kind or digest closes `superseded`, and a new Ask with a new nonce
+  takes its scope, so a scope has at most one open Ask. A decision that goes
+  away with no Answer lapses: its Ask stays open with no reminders and expires
+  with no message.
 - **Answering an expired Ask is refused and said.** If the operator opened
   the Ask before expiry and answers after, the Board reports "this expired
   at *t*" and does nothing. It never silently re-raises.

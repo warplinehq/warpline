@@ -4732,3 +4732,60 @@ producer's, each only while that Output is current, not erased and inline.
 Every other entry carries `content: null`. With it unset, no entry carries
 `content` at all. No other text a plugin or a model wrote ever reaches a
 message or a summary, a result's `summary` and its error messages included.
+
+### One open Ask per scope, reminders and expiry
+
+Each advance takes the store through one pass, in this order: prune, expire,
+the decisions it saw, reminders, then the due set. Every step runs on the
+advance's clock (`now`, for a library host). None of them writes an Answer, a
+Grant, a content approval or a renewal, and none of them reads one.
+
+**One open Ask per scope.** A decision whose open Ask has the same kind and
+digest raises nothing. One whose kind or digest differs supersedes it: the new
+Ask is raised with a new id and a new nonce, the old one closes `superseded`
+with its `closed_at`, and a `superseded` entry for the old one goes out in the
+same message as the new one's `raised` entry. A change of kind with an equal
+digest supersedes too. The old Ask closes only once the new one's `ask.raised`
+is on the audit record. When the audit store refuses it, nothing is
+superseded and the old Ask stays open.
+
+**Reminders.** `notify.reminders_ms` lists the reminder points, in
+milliseconds after `raised_at`, by default 1 hour and 4 hours. An open Ask gets
+a `reminder` entry from the first advance at or after a point. One advance
+sends one reminder however many points have passed since the last, and an
+advance with no new point passed sends none. Reminders are counted from
+`raised_at` and the last reminder event, never from the number of advances.
+
+**Expiry.** `expires_at` is the earlier of the clock of the thing asked about
+and 23 hours after `raised_at`. The first advance at or after it closes the Ask
+`expired` and sends one `expired` entry. An expiry is never an Answer. If the
+decision is still waiting, the next advance raises a new Ask for it, with a new
+id and a new nonce. An Ask that expires before its next reminder point sends
+only the `expired` entry.
+
+**A decision that vanished lapses silently.** Its plugin was evaluated this
+advance and no longer waits on a human, or for a renewal Ask its grant is gone
+from a readable standing grants file. Examples: `approve --all` covered it, its
+gate was discarded, the grant was revoked. Its Ask stays `open` with no
+reminders, and at `expires_at` it closes `expired` with no message. It is never
+closed `superseded`, because nothing replaced it.
+
+**An Ask whose plugin was not evaluated keeps its state.** When the level loop
+stops above a plugin, its Ask is not closed, not superseded and keeps its
+reminders. The same holds for a renewal Ask while the standing grants file
+cannot be read.
+
+**A denied decision is not asked again.** A scope whose most recently closed
+Ask was answered `deny`, with the same kind and digest as the decision now,
+raises nothing. A decision answered `approve`, `approve_content` or `renew`
+whose effect did not take is still waiting, so the next advance raises a fresh
+Ask for it.
+
+**Closed Asks leave the file 23 hours after they close.** The first advance at
+or after `closed_at` plus 23 hours drops a closed Ask from `asks.json`. The
+audit store keeps its `ask.raised` record.
+
+**What is due.** Every event of an open Ask with no delivered try. For a closed
+Ask, only its closing `superseded` or `expired` event, until it is delivered.
+An answered Ask, or one that lapsed silently, has nothing due. An advance with
+nothing due sends no message.

@@ -245,33 +245,107 @@ const decisionKey = (kind: string, scope: string, digest: string): string => `${
 
 const severityRank = (kind: AskKind): number => (askSeverity(kind) === 'warning' ? 0 : 1)
 
+/** The event that closed an Ask, or null for one that lapsed silently or is still open. */
+function closingEvent(a: Ask): AskEvent | null {
+  const last = a.events.at(-1)
+  return last !== undefined && (last.event === 'expired' || last.event === 'superseded') && a.state === last.event
+    ? last
+    : null
+}
+
 /**
- * One pass over the decisions seen now. A scope with no open Ask raises one,
- * recorded before it is stored. A scope whose open Ask has the same kind and
- * digest raises nothing new. Returns the new store (the one passed in is left
- * as it was), every entry still due, how many Asks the audit store refused,
- * and whether anything was added.
+ * One pass over the decisions seen now, on a copy of the store, in five steps:
+ *
+ * 1. **Prune.** A closed Ask leaves the file 23 hours after it closed. The
+ *    audit store keeps its record.
+ * 2. **Expire.** An open Ask at or past `expires_at` closes `expired`. It
+ *    sends an `expired` event unless its decision vanished: no decision for
+ *    its scope although the scope was looked at (its plugin evaluated this
+ *    advance, or for a renewal a readable standing store). A vanished
+ *    decision lapses silently.
+ * 3. **Each decision.** An open Ask with the same kind and digest is
+ *    unchanged. One that differs is superseded, but only once the new Ask's
+ *    `ask.raised` is on the record. With no open Ask, a scope expired in this
+ *    pass waits for the next one, and a scope whose most recently closed Ask
+ *    was answered with a deny of the same kind and digest is not asked again.
+ * 4. **Reminders.** An open Ask whose decision is seen, or whose scope was not
+ *    looked at, gets one `reminder` when more reminder points have passed
+ *    since `raised_at` than had at its last reminder. Never once per pass.
+ * 5. **Due.** An open Ask's every event with no delivered try; a closed Ask's
+ *    closing event, until delivered; nothing for an answered Ask.
+ *
+ * Returns the new store (the one passed in is left as it was), every entry
+ * still due, how many Asks the audit store refused, and whether anything
+ * changed.
  */
 export async function advanceAsks(
   statePath: string,
   store: AskStore,
-  input: { decisions: readonly AskDecision[]; now: number },
+  input: {
+    decisions: readonly AskDecision[]
+    now: number
+    /** The plugins this advance evaluated. An Ask on one of them with no decision has vanished. */
+    evaluatedPlugins: ReadonlySet<string>
+    /** Whether the standing grants file was readable. A renewal Ask with no decision then has vanished. */
+    standingListed: boolean
+    /** Reminder points, in ms after `raised_at`, ascending. */
+    remindersMs: readonly number[]
+  },
 ): Promise<{ store: AskStore; entries: AskEntry[]; unrecorded: number; changed: boolean }> {
-  const asks = [...store.asks]
+  const { now } = input
+  const at = new Date(now).toISOString()
+  const decided = new Map(input.decisions.map((d) => [d.scope, d]))
+  const lookedAt = (a: Ask): boolean => (a.kind === 'renewal' ? input.standingListed : input.evaluatedPlugins.has(a.scope))
   const content = new Map<string, string | null>()
   let unrecorded = 0
   let changed = false
 
+  // 1. Prune.
+  const asks = store.asks.filter(
+    (a) => a.state === 'open' || a.closed_at === null || Date.parse(a.closed_at) > now - ASK_MAX_AGE_MS,
+  )
+  if (asks.length !== store.asks.length) changed = true
+
+  const close = (i: number, state: 'expired' | 'superseded', event: boolean): void => {
+    const a = asks[i]!
+    asks[i] = {
+      ...a,
+      state,
+      closed_at: at,
+      events: event ? [...a.events, { seq: a.events.length + 1, event: state, at }] : a.events,
+    }
+    changed = true
+  }
+
+  // 2. Expire.
+  const expiredNow = new Set<string>()
+  for (let i = 0; i < asks.length; i++) {
+    const a = asks[i]!
+    if (a.state !== 'open' || now < Date.parse(a.expires_at)) continue
+    close(i, 'expired', decided.has(a.scope) || !lookedAt(a))
+    expiredNow.add(a.scope)
+  }
+
+  // 3. Each decision.
+  const raisedNow = new Set<string>()
   for (const d of input.decisions) {
     if (d.content !== undefined) content.set(decisionKey(d.kind, d.scope, d.digest), d.content)
-    // shortcut: an open Ask whose kind or digest differs is left open too, until superseding lands.
-    if (asks.some((a) => a.state === 'open' && a.scope === d.scope)) continue
+    const openAt = asks.findIndex((a) => a.state === 'open' && a.scope === d.scope)
+    if (openAt >= 0) {
+      const a = asks[openAt]!
+      if (a.kind === d.kind && a.digest === d.digest) continue
+    } else {
+      if (expiredNow.has(d.scope)) continue
+      const last = asks
+        .filter((a) => a.scope === d.scope && a.closed_at !== null)
+        .reduce<Ask | null>((x, a) => (x === null || Date.parse(a.closed_at!) >= Date.parse(x.closed_at!) ? a : x), null)
+      if (last?.state === 'answered' && last.answer === 'deny' && last.kind === d.kind && last.digest === d.digest) continue
+    }
 
     const ids = new Set(asks.map((a) => a.id))
     let id = newAskId()
     while (ids.has(id)) id = newAskId()
-    const raised_at = new Date(input.now).toISOString()
-    const expires_at = new Date(Math.min(d.clock ?? Infinity, input.now + ASK_MAX_AGE_MS)).toISOString()
+    const expires_at = new Date(Math.min(d.clock ?? Infinity, now + ASK_MAX_AGE_MS)).toISOString()
     try {
       await appendAudit(statePath, 'ask.raised', {
         id,
@@ -279,13 +353,15 @@ export async function advanceAsks(
         scope: d.scope,
         plugin: d.plugin,
         digest: d.digest,
-        raised_at,
+        raised_at: at,
         expires_at,
       })
     } catch {
+      // Unrecorded: nothing is stored or sent, and an Ask it would replace stays open.
       unrecorded += 1
       continue
     }
+    if (openAt >= 0) close(openAt, 'superseded', true)
     asks.push({
       id,
       nonce: newNonce(),
@@ -294,23 +370,38 @@ export async function advanceAsks(
       plugin: d.plugin,
       digest: d.digest,
       summary: askSummary(d.kind, d.plugin),
-      raised_at,
+      raised_at: at,
       expires_at,
       state: 'open',
       closed_at: null,
       answer: null,
-      events: [{ seq: 1, event: 'raised', at: raised_at }],
+      events: [{ seq: 1, event: 'raised', at }],
       tries: [],
     })
+    raisedNow.add(id)
     changed = true
   }
 
+  // 4. Reminders, counted from `raised_at` and the last reminder, never per pass.
+  for (let i = 0; i < asks.length; i++) {
+    const a = asks[i]!
+    if (a.state !== 'open' || raisedNow.has(a.id) || (!decided.has(a.scope) && lookedAt(a))) continue
+    const raised = Date.parse(a.raised_at)
+    const passed = (t: number): number => input.remindersMs.filter((r) => t >= raised + r).length
+    const lastReminder = a.events.filter((e) => e.event === 'reminder').at(-1)
+    if (passed(now) <= passed(lastReminder === undefined ? raised : Date.parse(lastReminder.at))) continue
+    asks[i] = { ...a, events: [...a.events, { seq: a.events.length + 1, event: 'reminder', at }] }
+    changed = true
+  }
+
+  // 5. Due.
   const entries: AskEntry[] = []
   for (const a of asks) {
-    if (a.state !== 'open') continue
     const delivered = new Set(a.tries.filter((t) => t.outcome === 'delivered').map((t) => t.seq))
+    const closing = closingEvent(a)
+    const due = a.state === 'open' ? a.events : closing === null ? [] : [closing]
     const key = decisionKey(a.kind, a.scope, a.digest)
-    for (const e of a.events) {
+    for (const e of due) {
       if (delivered.has(e.seq)) continue
       entries.push({
         id: a.id,

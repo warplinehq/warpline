@@ -3127,6 +3127,12 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
      */
     const askSeen: Array<{ kind: AskKind; plugin: string }> = []
     /**
+     * Every plugin this advance evaluated. An Ask on one of them whose
+     * decision is not in `askSeen` has vanished and lapses silently. An Ask on
+     * a plugin outside it (the level loop stopped above it) stays as it is.
+     */
+    const evaluatedThisAdvance = new Set<string>()
+    /**
      * The fire records the store could not take, one per failed append. The
      * advance carries on and does its end-of-run write, so a sibling that
      * already fired keeps its run record and does not fire again.
@@ -3212,6 +3218,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // stays on this side of the seam, keyed off the returned reason.
           // `entryStart` is the single clock read threaded in as `now`.
           const ev = await evaluatePlugin(pluginName, manifest, evalCtx, options.now ?? entryStart)
+          evaluatedThisAdvance.add(pluginName)
 
           // -- Dry-run side-effect block -----------------------
           // Run-only, so it is deliberately outside the evaluator. In
@@ -4276,7 +4283,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               }
             }
             const decisions: AskDecision[] = [...byScope.values(), ...renewals]
-            const next = await advanceAsks(stateDir, read.store, { decisions, now: approvalNow })
+            const next = await advanceAsks(stateDir, read.store, {
+              decisions,
+              now: approvalNow,
+              evaluatedPlugins: evaluatedThisAdvance,
+              standingListed: standingListing.readable,
+              remindersMs: notifyCfg.reminders_ms,
+            })
             if (next.changed) await writeAsks(stateDir, next.store)
             pass = next
           }
