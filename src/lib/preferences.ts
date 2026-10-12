@@ -13,10 +13,23 @@
  *   PREFERENCE_KEYS    — every key `warpline prefs set` accepts, dotted
  *   setPreference()    — one key set, refused unless the result is valid
  *   isQuietHours()     — check if current time is within quiet hours window
+ *   NotifySchema       — the `notify` block, strict
+ *   parseNotify()      — judges the `notify` block on its own
  *
  * Written atomically and Zod-validated on write — a half-written or
  * malformed preferences file must not be loadable. Strict on read too: an
  * unknown key at any level is an error, never stripped.
+ *
+ * Two rules. Every key fails closed: a file holding an unusable value throws
+ * `PreferencesInvalidError`, and nothing runs on it (the 2026-09-30 decision).
+ * The one exception is the `notify` block. The file-level parse accepts it
+ * unvalidated, and `parseNotify` judges it on its own, so a broken block makes
+ * an advance raise and send no Ask while every other guardrail still applies.
+ * An unusable block is reported as unusable, never as unset: could not look is
+ * not none. `prefs set` validates the block strictly either way.
+ *
+ * Downgrade cost: an earlier build refuses a file carrying `notify` as an
+ * unknown key, so remove the key before downgrading.
  */
 import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
@@ -64,6 +77,26 @@ const RetentionSchema = z.strictObject({
   max_bytes: z.number().int().min(0).default(104857600),
 })
 
+/**
+ * The operator's `notify` command and how it is run. Strict, and parsed apart
+ * from the file by `parseNotify`. The timeout is capped at five minutes: an
+ * unbounded one would let one setting stall every advance. Retry count and
+ * backoff are not settings.
+ */
+export const NotifySchema = z.strictObject({
+  argv: z.array(z.string().min(1)).min(1),
+  timeout_ms: z.number().int().min(1).max(300000).default(10000),
+  include_content: z.boolean().default(false),
+  reminders_ms: z
+    .array(z.number().int().min(1))
+    .refine((list) => list.every((ms, i) => i === 0 || ms > (list[i - 1] as number)), {
+      params: { expected: 'strictly ascending values' },
+    })
+    .default([3600000, 14400000]),
+})
+
+export type NotifySettings = z.infer<typeof NotifySchema>
+
 export const PreferencesSchema = z.strictObject({
   max_sends_per_day: z.number().int().min(0).default(20),
   review_gate: z.boolean().default(true),
@@ -73,6 +106,10 @@ export const PreferencesSchema = z.strictObject({
     // as-is without parsing it, so `.default({})` would yield an empty object
     // and none of the three field defaults above would ever fire.
     .prefault({}),
+  // Accepted unvalidated here and judged by `parseNotify`, so a broken block
+  // degrades instead of refusing the file. No default: a home that never sets
+  // it reads and writes the bytes it did before the block existed.
+  notify: z.unknown().optional(),
 })
 
 export type Preferences = z.infer<typeof PreferencesSchema>
@@ -87,6 +124,7 @@ const SHAPES: Record<string, readonly string[]> = {
   '': Object.keys(PreferencesSchema.shape),
   quiet_hours: Object.keys(QuietHoursSchema.shape),
   retention: Object.keys(RetentionSchema.shape),
+  notify: Object.keys(NotifySchema.shape),
 }
 
 /** Every settable key, dotted: each top-level key, and each key of the objects under one. */
@@ -213,7 +251,31 @@ export function setPreference(prefs: Preferences, key: string, value: unknown, p
   next[top] = sub === undefined ? value : { ...((next[top] as Record<string, unknown> | null) ?? {}), [sub]: value }
   const result = PreferencesSchema.safeParse(next)
   if (!result.success) throw new PreferencesInvalidError(prefsPath, describeIssues(result.error.issues, key))
+  if (top === 'notify') {
+    // The file-level parse does not judge the block, so the set does, strictly.
+    const block = NotifySchema.nullable().safeParse(result.data.notify ?? null)
+    if (!block.success) {
+      const issues = block.error.issues.map((issue) => ({ ...issue, path: ['notify', ...issue.path] }) as Issue)
+      throw new PreferencesInvalidError(prefsPath, describeIssues(issues, key))
+    }
+  }
   return result.data
+}
+
+/**
+ * The `notify` block judged on its own. Absent or `null` is unset. A block the
+ * schema refuses is `{ unusable }`, naming the first failing key path, never
+ * unset and never a value: the path is built from issue paths and, for an
+ * unknown key, that key's name.
+ */
+export function parseNotify(raw: unknown): { notify: NotifySettings | null } | { unusable: string } {
+  if (raw === undefined || raw === null) return { notify: null }
+  const result = NotifySchema.safeParse(raw)
+  if (result.success) return { notify: result.data }
+  const issue = result.error.issues[0] as Issue
+  const path = ['notify', ...issue.path.map(String)]
+  if (issue.code === 'unrecognized_keys' && issue.keys[0] !== undefined) path.push(issue.keys[0])
+  return { unusable: path.join('.') }
 }
 
 // -----------------------------------------------------------------------
@@ -292,6 +354,13 @@ function describeIssues(issues: readonly Issue[], typed?: string): string {
         break
       case 'too_small':
         expected = `expected ${String(issue.minimum)} or more`
+        break
+      case 'too_big':
+        expected = `expected ${String(issue.maximum)} or less`
+        break
+      case 'custom':
+        // The schema's own words, set where the check is declared.
+        expected = typeof issue.params?.expected === 'string' ? `expected ${issue.params.expected}` : issue.code
         break
       case 'invalid_format':
         expected = issue.pattern

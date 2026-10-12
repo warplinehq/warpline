@@ -1015,6 +1015,13 @@ the file. A missing file is the built-in defaults. The strictness has one
 accepted cost: a key added by a later release is refused by an earlier one, so
 remove it before downgrading.
 
+The `notify` block is the one exception. The file-level read accepts it without
+judging it, and it is parsed on its own. An unusable block, an empty `argv` for
+example, does not refuse the file: the advance raises and sends no Ask, and
+nothing else changes (§ 16). An unusable block is reported as unusable, never
+read as unset. An earlier build refuses a file carrying `notify` as an unknown
+key, so remove it before downgrading.
+
 Every production read of `preferences.json` is checked against the audit store
 (§ 14): an advance, once it holds the run lock and before it uses any value, and
 `warpline run`, before the plugin runs. Only a file that parsed is checked. The
@@ -4549,3 +4556,47 @@ An advance reads this file only when the standing grants file holds a grant
 (§ 9), and records a hand edit first, as `warpline principal` does. A record it
 cannot write ends the advance with `75` before anything fires. `warpline plan`
 reads this file without recording it.
+
+## 16. Asks and Answers
+
+A run that waits on a human sends an Ask through the operator's `notify`
+command, and the Answer comes back through the CLI.
+
+### The `notify` setting
+
+`notify` is a block in `<home>/preferences.json`. Absent or `null`, it is
+unset.
+
+| Key | Default | Bounds |
+|---|---|---|
+| `notify.argv` | none, required | at least one entry, each a non-empty string |
+| `notify.timeout_ms` | `10000` | an integer from `1` to `300000` |
+| `notify.include_content` | `false` | a boolean |
+| `notify.reminders_ms` | `[3600000, 14400000]` | positive integers, strictly ascending |
+
+Set it with `warpline prefs set notify '<json>'`, or one key at a time with
+`warpline prefs set notify.timeout_ms 5000` once a block holding `argv` exists.
+The set validates the block strictly and goes on the audit record like every
+other set (§ 6): an empty `argv`, an empty entry, an unknown key, a timeout out
+of range or reminders out of order exits `1` with nothing written and nothing
+recorded, naming the key path and never the typed value. `prefs set notify null`
+unsets it. A block holding only `argv` takes the defaults above. Retry count
+and backoff are not settings.
+
+The command is spawned from `argv` with no shell, so `$(…)` or a quote in an
+entry arrives as text. One JSON message goes to its stdin. Its stdout and
+stderr are discarded, and only its exit code, or `timeout`, is kept: exit `0`
+is delivered, any other exit is failed, and a command that cannot start is
+failed with no code. At the timeout the command's whole process group is
+killed, a grandchild included. So is a group still running when warpline
+exits.
+
+The command's environment is built from an allowlist and nothing else: `PATH`,
+`HOME`, `LANG`, `LC_ALL`, `TZ`, `TMPDIR`, `http_proxy`, `https_proxy`,
+`HTTP_PROXY`, `HTTPS_PROXY`, `all_proxy`, `ALL_PROXY`, `no_proxy`, `NO_PROXY`,
+`SSL_CERT_FILE`, `SSL_CERT_DIR` and `NODE_EXTRA_CA_CERTS`, each only when set.
+A plugin secret in warpline's environment never reaches it.
+
+A hand-edited block that is unusable degrades instead of refusing the file
+(§ 6). Keep secrets out of `argv`, which `ps` shows to every user on the
+machine. Put them in the script's own configuration instead.

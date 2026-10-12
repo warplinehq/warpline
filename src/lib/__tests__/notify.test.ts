@@ -121,12 +121,12 @@ describe('the notify runner', () => {
       expect(await runNotify(stub.argv, '{}', 5000, env)).toEqual({ outcome: 'delivered', exit_code: 0 })
 
       const seen = stub.envs()[0]!
-      expect(seen.HTTPS_PROXY).toBe('http://proxy.invalid')
-      expect(seen.PATH).toBe(process.env.PATH!)
       const names = Object.keys(seen)
       expect(names).not.toContain('WARPLINE_TEST_SECRET')
       expect(names).not.toContain('USER')
       expect(names).not.toContain('LOGNAME')
+      expect(seen.HTTPS_PROXY).toBe('http://proxy.invalid')
+      expect(seen.PATH).toBe(process.env.PATH!)
     } finally {
       delete process.env.WARPLINE_TEST_SECRET
     }
