@@ -835,25 +835,31 @@ describe('the four Answer forms take one flag set', () => {
       const LABELS = ['approve p', 'deny p', 'renew', 'deny --standing']
       const FLAGS = ['--nonce', '--digest', '--principal']
       const refusing: Record<string, string[]> = {}
-      const accepted: Record<string, number> = {}
+      // The three flags alone, then (on a fresh Ask) with --via and --evidence:
+      // a form that needed anything more would refuse the first.
+      const accepted: Record<string, { bare: number; full: number }> = {}
       for (const label of LABELS) {
         await resetHome()
         const f = form(label)
-        const ask = await f.open()
-        const full = f.answer(ask.nonce, prefix(ask))
+        let ask = await f.open()
+        const minimal = f.answer(ask.nonce, prefix(ask))
         refusing[label] = []
         for (const flag of FLAGS) {
           const before = await snap()
-          const r = await capture(drop(full, flag))
+          const r = await capture(drop(minimal, flag))
           const after = await snap()
           if (r.code === 1 && r.stderr.includes(flag) && JSON.stringify(after) === JSON.stringify(before)) {
             refusing[label].push(flag)
           }
         }
-        accepted[label] = (await capture([...full, '--via', 'ci', '--evidence', 'OPS-1'])).code
+        const bare = (await capture(minimal)).code
+        await resetHome()
+        ask = await f.open()
+        const full = (await capture([...f.answer(ask.nonce, prefix(ask)), '--via', 'ci', '--evidence', 'OPS-1'])).code
+        accepted[label] = { bare, full }
       }
       expect(refusing).toEqual(Object.fromEntries(LABELS.map((l) => [l, FLAGS])))
-      expect(accepted).toEqual(Object.fromEntries(LABELS.map((l) => [l, 0])))
+      expect(accepted).toEqual(Object.fromEntries(LABELS.map((l) => [l, { bare: 0, full: 0 }])))
     },
     120_000,
   )
