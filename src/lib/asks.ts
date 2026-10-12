@@ -620,11 +620,13 @@ export function checkAnswer(
   now: number,
   verb: { kinds: readonly AskKind[]; liveDigest: (ask: Ask) => string | null },
 ): { ask: Ask } | { refused: AnswerRefusal } {
-  // shortcut: nonce reused and digest mismatch read their state and `verb` when they land.
+  // shortcut: digest mismatch reads `verb` when it lands.
   const ask = store.asks.find((a) => a.scope === scope && a.nonce === flags.nonce)
   if (ask === undefined) return { refused: 'unknown' }
   if (ask.state === 'superseded') return { refused: 'superseded' }
   // The clock, not only the mark: no advance may have run since the Ask lapsed.
   if (ask.state === 'expired' || now >= Date.parse(ask.expires_at)) return { refused: 'expired' }
+  // A spent nonce: replaying a captured Answer reaches no second effect.
+  if (ask.state === 'answered') return { refused: 'nonce reused' }
   return { ask }
 }
