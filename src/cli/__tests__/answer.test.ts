@@ -14,11 +14,14 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { randomBytes } from 'node:crypto'
-import { cpSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { join } from 'node:path'
-import { liveGrantScopes } from '../../runtime/approval-gate.js'
+import { liveGrantScopes, readStandingStore, renewStanding, writeStandingStore } from '../../runtime/approval-gate.js'
+import { runAdvance } from '../../runtime/engine.js'
+import { readAsks, writeAsks, type Ask, type AskAnswer } from '../../lib/asks.js'
 import { sessionApprovalPath } from '../../lib/paths.js'
+import { readRegistry, standingRegistry } from '../../lib/principals.js'
 import { notifyStub, setNotify } from '../../../test-utils/notify-stub.js'
 import {
   auditRecords,
@@ -61,6 +64,7 @@ type StoredAsk = {
   state: string
   closed_at: string | null
   answer: string | null
+  tries: Array<{ seq: number; outcome: string }>
 }
 
 let vh: VerbHome
@@ -139,20 +143,36 @@ interface Form {
   /** Leaves the home with an open Ask of this form's kind, and returns it. */
   open: () => Promise<StoredAsk>
   /** The form typed with no Answer flags, or null when it has no bare form. */
-  bare: string[] | null
+  bare: (() => string[]) | null
   /** The form typed as an Answer, carrying `--principal ops`. */
   answer: (nonce: string, digestPrefix: string) => string[]
   /** The `answer` its `ask.answered` records. */
-  recorded: 'approve' | 'approve_content'
+  recorded: AskAnswer
 }
 
 const CONTENT_WINDOW = ['--not-after', '2099-01-01T00:00']
+
+/** The id of the one standing grant the home holds. */
+const standingId = (): string =>
+  (JSON.parse(readFileSync(join(vh.home, 'standing-grants.json'), 'utf-8')) as { grants: { id: string }[] }).grants[0]!.id
+
+/**
+ * A standing grant for `ci` over `p`, due for renewal within the 23 hours an
+ * Ask can live, and the renewal Ask the next advance raises for it.
+ */
+async function openRenewal(): Promise<StoredAsk> {
+  await ok(['approve', 'p', '--holder', 'ci', '--principal', 'ops', '--standing', '--period', '12h', '--hard-max', '30d'])
+  await ok(['advance'])
+  const ask = askFor(standingId())
+  expect(ask.kind).toBe('renewal')
+  return ask
+}
 
 const FORMS: Form[] = [
   {
     label: 'approve p',
     open: async () => askFor('p'),
-    bare: ['approve', 'p'],
+    bare: () => ['approve', 'p'],
     answer: (nonce, digest) => ['approve', 'p', '--nonce', nonce, '--digest', digest, '--principal', 'ops'],
     recorded: 'approve',
   },
@@ -166,14 +186,14 @@ const FORMS: Form[] = [
       expect(parked.kind).toBe('parked_result')
       return parked
     },
-    bare: ['approve', 'p'],
+    bare: () => ['approve', 'p'],
     answer: (nonce, digest) => ['approve', 'p', '--nonce', nonce, '--digest', digest, '--principal', 'ops'],
     recorded: 'approve',
   },
   {
     label: 'approve sender --content',
     open: async () => askFor('sender'),
-    bare: ['approve', 'sender', '--content', ...CONTENT_WINDOW],
+    bare: () => ['approve', 'sender', '--content', ...CONTENT_WINDOW],
     answer: (nonce, digest) => [
       'approve',
       'sender',
@@ -188,11 +208,45 @@ const FORMS: Form[] = [
     ],
     recorded: 'approve_content',
   },
+  {
+    label: 'deny p',
+    open: async () => askFor('p'),
+    bare: () => ['deny', 'p'],
+    answer: (nonce, digest) => ['deny', 'p', '--nonce', nonce, '--digest', digest, '--principal', 'ops'],
+    recorded: 'deny',
+  },
+  {
+    label: 'deny --standing',
+    open: openRenewal,
+    // It answers an Ask and does nothing else, so it has no bare form.
+    bare: null,
+    answer: (nonce, digest) => [
+      'deny',
+      '--standing',
+      standingId(),
+      '--nonce',
+      nonce,
+      '--digest',
+      digest,
+      '--principal',
+      'ops',
+    ],
+    recorded: 'deny',
+  },
+  {
+    label: 'renew',
+    open: openRenewal,
+    // renew always names its human, so the bare form carries --principal too.
+    bare: () => ['renew', standingId(), '--principal', 'ops'],
+    answer: (nonce, digest) => ['renew', standingId(), '--nonce', nonce, '--digest', digest, '--principal', 'ops'],
+    recorded: 'renew',
+  },
 ]
 
 const form = (label: string): Form => FORMS.find((f) => f.label === label)!
 
-beforeEach(async () => {
+/** A fresh home with the principals seeded and the two Asks raised. */
+async function setupHome(): Promise<void> {
   vh = makeVerbHome()
   await seedPrincipals([
     ['ops', 'human'],
@@ -203,7 +257,16 @@ beforeEach(async () => {
   await ok(['principal', 'disable', 'bot2'])
   await prepare(vh.home, true)
   await ok(['advance'])
-})
+}
+
+/** Swap the home for a fresh one, for a case that walks several forms from the start. */
+async function resetHome(): Promise<void> {
+  delete process.env.WARPLINE_PLUGINS_DIR
+  vh.cleanup()
+  await setupHome()
+}
+
+beforeEach(setupHome)
 
 afterEach(() => {
   delete process.env.WARPLINE_PLUGINS_DIR
@@ -369,7 +432,7 @@ describe('an Answer through approve is bound to its Ask and says who answered', 
     const before = await snap()
     for (const f of [form('approve p'), form('approve sender --content')]) {
       const ask = await f.open()
-      const r = await capture(f.bare!)
+      const r = await capture(f.bare!())
       expect(r.code).toBe(1)
       expect(r.stderr).toContain(ask.id)
       expect(r.stderr).toContain(`warpline approvals show ${ask.id}`)
@@ -430,7 +493,7 @@ describe('an unreadable asks.json refuses every Answer form, naming the file', (
         const ask = await f.open()
         writeFileSync(asksFile(), '{')
         const before = await snap()
-        const r = await capture(mode === 'bare' ? f.bare! : f.answer(ask.nonce, prefix(ask)))
+        const r = await capture(mode === 'bare' ? f.bare!() : f.answer(ask.nonce, prefix(ask)))
         expect(r.code).toBe(1)
         expect(r.stderr).toContain('asks.json cannot be read (')
         expect(r.stderr).not.toContain(ask.nonce)
@@ -441,22 +504,27 @@ describe('an unreadable asks.json refuses every Answer form, naming the file', (
   }
 })
 
+type Reason = 'prefix shorter than 12' | 'unknown' | 'superseded' | 'expired' | 'nonce reused' | 'digest mismatch'
+
+/** The text that names `reason` and nothing else: a bare word such as `unknown` could come from any message. */
+const marker = (reason: Reason): string =>
+  reason === 'prefix shorter than 12' ? 'prefix shorter than 12:' : `refused (${reason})`
+
+/**
+ * `argv` exits 1 naming `reason` and never the nonce it presented, and the
+ * whole home is byte-identical across the run.
+ */
+async function refused(argv: string[], reason: Reason): Promise<void> {
+  const before = await snap()
+  const r = await capture(argv)
+  expect({ argv, code: r.code }).toEqual({ argv, code: 1 })
+  expect(r.stderr).toContain(marker(reason))
+  const at = argv.indexOf('--nonce')
+  if (at >= 0) expect(r.stderr).not.toContain(argv[at + 1]!)
+  expect(await snap()).toEqual(before)
+}
+
 describe('every Answer refusal is named, in its fixed order, and writes nothing', () => {
-  type Reason = 'prefix shorter than 12' | 'unknown' | 'superseded' | 'expired' | 'nonce reused' | 'digest mismatch'
-
-  /** The text that names `reason` and nothing else: a bare word such as `unknown` could come from any message. */
-  const marker = (reason: Reason): string =>
-    reason === 'prefix shorter than 12' ? 'prefix shorter than 12:' : `refused (${reason})`
-
-  /** `argv` exits 1 naming `reason`, and the whole home is byte-identical across the run. */
-  async function refused(argv: string[], reason: Reason): Promise<void> {
-    const before = await snap()
-    const r = await capture(argv)
-    expect({ argv, code: r.code }).toEqual({ argv, code: 1 })
-    expect(r.stderr).toContain(marker(reason))
-    expect(await snap()).toEqual(before)
-  }
-
   test('a digest prefix shorter than 12 refuses as prefix shorter than 12', async () => {
     const ask = askFor('p')
     await refused(form('approve p').answer(ask.nonce, ask.digest.slice(0, 11)), 'prefix shorter than 12')
@@ -555,4 +623,337 @@ describe('every Answer refusal is named, in its fixed order, and writes nothing'
     }
     expect(askById(p.id).state).toBe('open')
   })
+})
+
+/** The state document's denials, as the file holds them. */
+const denials = (): Record<string, unknown> =>
+  (JSON.parse(readFileSync(vh.statePath, 'utf-8')) as { denials: Record<string, unknown> }).denials
+
+describe('deny answers an Ask, and costs what approve costs', () => {
+  test('deny answers a missing-Grant Ask and records answer deny before the denial', async () => {
+    const ask = askFor('p')
+    expect(ask.kind).toBe('missing_grant')
+
+    const r = await capture(form('deny p').answer(ask.nonce, prefix(ask)))
+    expect(r.code).toBe(0)
+
+    const after = askById(ask.id)
+    expect(after.state).toBe('answered')
+    expect(after.answer).toBe('deny')
+
+    const answered = auditRecords(vh.home, 'ask.answered')
+    expect(answered).toHaveLength(1)
+    expect(answered[0]).toMatchObject({ id: ask.id, kind: 'missing_grant', scope: 'p', answer: 'deny', principal: 'ops' })
+
+    const lines = auditRecords(vh.home)
+    const answeredSeq = lines.find((l) => l.type === 'warpline.audit.ask.answered')!.warplineseq
+    const denied = lines.filter((l) => l.type === 'warpline.audit.denial.recorded')
+    expect(denied).toHaveLength(1)
+    expect(answeredSeq).toBeLessThan(denied[0]!.warplineseq)
+    expect(Object.keys(denials())).toEqual(['p'])
+  })
+
+  test("deny answers a content Ask against the producer's digest", async () => {
+    const ask = askFor('sender')
+    expect(ask.kind).toBe('content')
+    const r = await capture(['deny', 'sender', '--nonce', ask.nonce, '--digest', prefix(ask), '--principal', 'ops'])
+    expect(r.code).toBe(0)
+    expect(askById(ask.id)).toMatchObject({ state: 'answered', answer: 'deny' })
+    expect(auditRecords(vh.home, 'ask.answered')[0]).toMatchObject({ kind: 'content', scope: 'sender', answer: 'deny' })
+  })
+
+  test(
+    'deny answers a parked-result Ask and discards the gate',
+    async () => {
+      const ask = await form('approve p on a parked result').open()
+      const r = await capture(form('deny p').answer(ask.nonce, prefix(ask)))
+      expect(r.code).toBe(0)
+      expect(r.stdout).toContain('The parked result was discarded')
+      expect(askById(ask.id)).toMatchObject({ state: 'answered', answer: 'deny' })
+      expect(auditRecords(vh.home, 'ask.answered').at(-1)).toMatchObject({ kind: 'parked_result', answer: 'deny' })
+      const state = JSON.parse(readFileSync(vh.statePath, 'utf-8')) as { pending_gates: Array<{ plugin: string }> }
+      expect(state.pending_gates.filter((g) => g.plugin === 'p')).toEqual([])
+    },
+    SLOW,
+  )
+
+  test('a bare deny refuses while an open Ask covers the plugin', async () => {
+    const ask = askFor('p')
+    const before = await snap()
+    const r = await capture(form('deny p').bare!())
+    expect(r.code).toBe(1)
+    expect(r.stderr).toContain(ask.id)
+    expect(r.stderr).toContain(`warpline approvals show ${ask.id}`)
+    expect(r.stderr).not.toContain(ask.nonce)
+    expect(r.stdout).not.toContain(ask.nonce)
+    expect(await snap()).toEqual(before)
+  })
+
+  test('a reused nonce through deny refuses as nonce reused', async () => {
+    const ask = askFor('p')
+    const answer = form('deny p').answer(ask.nonce, prefix(ask))
+    await ok(answer)
+    await refused(answer, 'nonce reused')
+    expect(auditRecords(vh.home, 'ask.answered')).toHaveLength(1)
+  })
+})
+
+describe('renew and deny --standing answer a renewal Ask', () => {
+  let ask: StoredAsk
+  beforeEach(async () => {
+    ask = await openRenewal()
+  })
+
+  const standingFile = (): string => join(vh.home, 'standing-grants.json')
+
+  test(
+    'renew answers a renewal Ask and records answer renew before the renewal',
+    async () => {
+      const r = await capture(form('renew').answer(ask.nonce, prefix(ask)))
+      expect(r.code).toBe(0)
+      expect(askById(ask.id)).toMatchObject({ state: 'answered', answer: 'renew' })
+      const answered = auditRecords(vh.home, 'ask.answered')
+      expect(answered).toHaveLength(1)
+      expect(answered[0]).toMatchObject({ kind: 'renewal', scope: standingId(), answer: 'renew', principal: 'ops' })
+      const lines = auditRecords(vh.home)
+      const answeredSeq = lines.find((l) => l.type === 'warpline.audit.ask.answered')!.warplineseq
+      const renewed = lines.filter((l) => l.type === 'warpline.audit.grant.renewed')
+      expect(renewed).toHaveLength(1)
+      expect(answeredSeq).toBeLessThan(renewed[0]!.warplineseq)
+    },
+    SLOW,
+  )
+
+  test(
+    'a renewal Ask whose grant was renewed since refuses as digest mismatch',
+    async () => {
+      await Bun.sleep(5)
+      const read = await readStandingStore()
+      if (!read.readable) throw new Error('standing grants file unreadable')
+      const change = renewStanding(read.store, ask.scope, 'ops', Date.now(), standingRegistry(await readRegistry()))
+      if ('refused' in change) throw new Error(`renewStanding refused: ${change.refused.code}`)
+      await writeStandingStore(change.store)
+      await refused(form('renew').answer(ask.nonce, prefix(ask)), 'digest mismatch')
+    },
+    SLOW,
+  )
+
+  test(
+    'a nonce used by renew cannot be reused through deny --standing',
+    async () => {
+      await ok(form('renew').answer(ask.nonce, prefix(ask)))
+      await refused(form('deny --standing').answer(ask.nonce, prefix(ask)), 'nonce reused')
+    },
+    SLOW,
+  )
+
+  test(
+    'a bare renew refuses while an open renewal Ask covers the grant',
+    async () => {
+      const before = await snap()
+      const r = await capture(form('renew').bare!())
+      expect(r.code).toBe(1)
+      expect(r.stderr).toContain(ask.id)
+      expect(r.stderr).toContain(`warpline approvals show ${ask.id}`)
+      expect(r.stderr).not.toContain(ask.nonce)
+      expect(await snap()).toEqual(before)
+    },
+    SLOW,
+  )
+
+  test(
+    "renew's Answer still needs an active human, and its via an active machine",
+    async () => {
+      const id = standingId()
+      const base = ['renew', id, '--nonce', ask.nonce, '--digest', prefix(ask)]
+      const before = await snap()
+      for (const { argv, names } of [
+        { argv: [...base, '--principal', 'ci'], names: '--principal' },
+        { argv: [...base, '--principal', 'ops', '--via', 'ops'], names: '--via' },
+      ]) {
+        const r = await capture(argv)
+        expect({ argv, code: r.code }).toEqual({ argv, code: 1 })
+        expect(r.stderr).toContain(names)
+        expect(r.stderr).not.toContain(ask.nonce)
+        expect(await snap()).toEqual(before)
+      }
+    },
+    SLOW,
+  )
+
+  test(
+    'deny --standing answers a renewal Ask, writes only the Answer record, and the next advance does not ask again',
+    async () => {
+      const grants = readFileSync(standingFile())
+      const state = readFileSync(vh.statePath)
+      const seen = auditRecords(vh.home).length
+
+      const r = await capture(form('deny --standing').answer(ask.nonce, prefix(ask)))
+      expect(r.code).toBe(0)
+      expect(askById(ask.id)).toMatchObject({ state: 'answered', answer: 'deny' })
+      expect(auditRecords(vh.home).slice(seen).map((l) => l.type)).toEqual(['warpline.audit.ask.answered'])
+      expect(auditRecords(vh.home, 'ask.answered')[0]).toMatchObject({ kind: 'renewal', answer: 'deny' })
+      expect(readFileSync(standingFile()).equals(grants)).toBe(true)
+      expect(readFileSync(vh.statePath).equals(state)).toBe(true)
+
+      await ok(['advance'])
+      expect(storedAsks().filter((a) => a.scope === ask.scope && a.state === 'open')).toEqual([])
+      expect(readFileSync(standingFile()).equals(grants)).toBe(true)
+    },
+    SLOW,
+  )
+
+  test(
+    'deny --standing without --nonce refuses by name',
+    async () => {
+      const id = standingId()
+      const before = await snap()
+      for (const argv of [
+        ['deny', '--standing', id, '--principal', 'ops'],
+        ['deny', '--standing', id, '--digest', prefix(ask), '--principal', 'ops'],
+      ]) {
+        const r = await capture(argv)
+        expect({ argv, code: r.code }).toEqual({ argv, code: 1 })
+        expect(r.stderr).toContain('--nonce')
+        expect(await snap()).toEqual(before)
+      }
+    },
+    SLOW,
+  )
+})
+
+describe('the four Answer forms take one flag set', () => {
+  /** `argv` without `flag` and the value after it. */
+  const drop = (argv: string[], flag: string): string[] => {
+    const at = argv.indexOf(flag)
+    return [...argv.slice(0, at), ...argv.slice(at + 2)]
+  }
+
+  test(
+    'dropping --nonce, --digest or --principal refuses every form, and the full set with --via and --evidence is accepted by each',
+    async () => {
+      const LABELS = ['approve p', 'deny p', 'renew', 'deny --standing']
+      const FLAGS = ['--nonce', '--digest', '--principal']
+      const refusing: Record<string, string[]> = {}
+      const accepted: Record<string, number> = {}
+      for (const label of LABELS) {
+        await resetHome()
+        const f = form(label)
+        const ask = await f.open()
+        const full = f.answer(ask.nonce, prefix(ask))
+        refusing[label] = []
+        for (const flag of FLAGS) {
+          const before = await snap()
+          const r = await capture(drop(full, flag))
+          const after = await snap()
+          if (r.code === 1 && r.stderr.includes(flag) && JSON.stringify(after) === JSON.stringify(before)) {
+            refusing[label].push(flag)
+          }
+        }
+        accepted[label] = (await capture([...full, '--via', 'ci', '--evidence', 'OPS-1'])).code
+      }
+      expect(refusing).toEqual(Object.fromEntries(LABELS.map((l) => [l, FLAGS])))
+      expect(accepted).toEqual(Object.fromEntries(LABELS.map((l) => [l, 0])))
+    },
+    120_000,
+  )
+})
+
+describe('an Answer during a send', () => {
+  async function until(done: () => boolean, ms: number): Promise<void> {
+    const end = Date.now() + ms
+    while (!done()) {
+      if (Date.now() > end) throw new Error('timed out waiting for notify to start')
+      await Bun.sleep(20)
+    }
+  }
+
+  test(
+    'an Answer that lands while notify runs stays answered after the try is recorded, and its replay refuses',
+    async () => {
+      vh.cleanup()
+      vh = makeVerbHome()
+      await seedPrincipals([
+        ['ops', 'human'],
+        ['ci', 'machine'],
+      ])
+      await prepare(vh.home, false)
+      const stub = await notifyStub(vh.home, 'block')
+      setNotify(join(vh.home, 'preferences.json'), { argv: stub.argv })
+
+      // The library call, so no output capture is installed while approve's runs.
+      const advancing = runAdvance()
+      try {
+        await until(() => existsSync(stub.startedPath), 15_000)
+        const ask = askFor('p')
+        const answer = form('approve p').answer(ask.nonce, prefix(ask))
+        const r = await capture(answer)
+        expect(r.code).toBe(0)
+        writeFileSync(stub.releasePath, '')
+        await advancing
+
+        const after = askById(ask.id)
+        expect(after.state).toBe('answered')
+        expect(after.tries.at(-1)?.outcome).toBe('delivered')
+        await refused(answer, 'nonce reused')
+      } finally {
+        writeFileSync(stub.releasePath, '')
+        await advancing.catch(() => {})
+      }
+    },
+    SLOW,
+  )
+})
+
+describe('every refusal is observed through every Answer form', () => {
+  /** Rewrite one stored Ask through the lib, so the store stays schema-valid. */
+  async function patchAsk(id: string, patch: Partial<Ask>): Promise<void> {
+    const read = await readAsks(vh.statePath)
+    if (!read.readable) throw new Error(`asks.json unreadable: ${read.cause}`)
+    await writeAsks(vh.statePath, { ...read.store, asks: read.store.asks.map((a) => (a.id === id ? { ...a, ...patch } : a)) })
+  }
+
+  /** The digest prefix of `ask` with its first character changed. */
+  const otherPrefix = (ask: StoredAsk): string => (ask.digest[0] === '0' ? '1' : '0') + ask.digest.slice(1, 12)
+
+  const REASONS: Array<{ reason: Reason; apply: (f: Form, ask: StoredAsk) => Promise<[nonce: string, digest: string]> }> = [
+    { reason: 'prefix shorter than 12', apply: async (_f, ask) => [ask.nonce, ask.digest.slice(0, 11)] },
+    { reason: 'unknown', apply: async (_f, ask) => [randomBytes(16).toString('hex'), prefix(ask)] },
+    {
+      reason: 'superseded',
+      apply: async (_f, ask) => {
+        await patchAsk(ask.id, { state: 'superseded', closed_at: new Date().toISOString() })
+        return [ask.nonce, prefix(ask)]
+      },
+    },
+    {
+      reason: 'expired',
+      apply: async (_f, ask) => {
+        await patchAsk(ask.id, { expires_at: new Date(Date.now() - 60_000).toISOString(), state: 'open' })
+        return [ask.nonce, prefix(ask)]
+      },
+    },
+    {
+      reason: 'nonce reused',
+      apply: async (f, ask) => {
+        await patchAsk(ask.id, { state: 'answered', closed_at: new Date().toISOString(), answer: f.recorded })
+        return [ask.nonce, prefix(ask)]
+      },
+    },
+    { reason: 'digest mismatch', apply: async (_f, ask) => [ask.nonce, otherPrefix(ask)] },
+  ]
+
+  for (const f of FORMS) {
+    for (const { reason, apply } of REASONS) {
+      test(
+        `refusal matrix: ${f.label}, ${reason}`,
+        async () => {
+          const ask = await f.open()
+          const [nonce, digest] = await apply(f, ask)
+          await refused(f.answer(nonce, digest), reason)
+        },
+        SLOW,
+      )
+    }
+  }
 })
