@@ -158,7 +158,7 @@ describe('audit store: what it refuses writes nothing and echoes nothing', () =>
     })
   }
 
-  for (const kind of ['ask.answered', 'handoff.tried']) {
+  for (const kind of ['handoff.tried']) {
     test(`the pending kind ${kind}, whose schema admits nothing yet`, async () => {
       await refuses(() => anyAppend(statePath, kind, {}))
     })
@@ -188,6 +188,41 @@ describe('audit store: what it refuses writes nothing and echoes nothing', () =>
     await refuses(() => anyAppend(statePath, 'ask.raised', { ...raised, nonce: '0123456789abcdef0123456789abcdef' }))
     await refuses(() => anyAppend(statePath, 'ask.raised', { ...raised, summary: 'mailer ran.' }))
     await refuses(() => anyAppend(statePath, 'ask.raised', { ...raised, kind: 'bogus' }))
+  })
+
+  const answered = {
+    id: 'a1b2c3d4e5f6',
+    kind: 'missing_grant',
+    scope: 'mailer',
+    answer: 'approve',
+    digest: HEX_A,
+    principal: 'ops',
+    via: 'ci',
+    os_user: 'Alice.Smith',
+    evidence: 'gh:org/repo#12',
+    assurance: 'asserted',
+    raised_at: '2030-01-01T00:00:00.000Z',
+    decide_ms: 90_000,
+  }
+
+  test('ask.answered appends its twelve fields, and refuses free text as evidence or an unknown assurance', async () => {
+    await lift()
+    await anyAppend(statePath, 'ask.answered', answered)
+    const last = JSON.parse(segmentLines().at(-1)!) as { type: string; data: unknown }
+    expect(last.type).toBe('warpline.audit.ask.answered')
+    expect(last.data).toEqual(answered)
+
+    const bare = { ...answered, via: null, evidence: null, os_user: 'unknown' }
+    await anyAppend(statePath, 'ask.answered', bare)
+    expect((JSON.parse(segmentLines().at(-1)!) as { data: unknown }).data).toEqual(bare)
+
+    const { decide_ms: _dropped, ...noDecide } = answered
+    await refuses(() => anyAppend(statePath, 'ask.answered', { ...answered, evidence: 'a note with spaces' }))
+    await refuses(() => anyAppend(statePath, 'ask.answered', { ...answered, evidence: 'https://x.test/t?id=1' }))
+    await refuses(() => anyAppend(statePath, 'ask.answered', { ...answered, assurance: 'verified' }))
+    await refuses(() => anyAppend(statePath, 'ask.answered', noDecide))
+    await refuses(() => anyAppend(statePath, 'ask.answered', { ...answered, principal: null }))
+    await refuses(() => anyAppend(statePath, 'ask.answered', { ...answered, os_user: 'two words' }))
   })
 
   const renewed = { id: 'a1b2c3d4e5f6', holder: 'ci', principal: 'ops', renewal_deadline: '2030-01-02T00:00:00.000Z' }

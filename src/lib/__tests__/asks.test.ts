@@ -13,7 +13,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { tmpdir, userInfo } from 'node:os'
 import { join } from 'node:path'
 import {
   ASK_MAX_AGE_MS,
@@ -33,7 +33,7 @@ import {
 } from '../asks.js'
 // The exports this file pins before they exist, read through the namespace so
 // a missing one fails its own case and not the whole file.
-import * as asksMod from '../asks.js'
+import * as askLib from '../asks.js'
 import * as audit from '../audit-log.js'
 import { notifyEnv, runNotify } from '../notify.js'
 import { notifyStub } from '../../../test-utils/notify-stub.js'
@@ -435,16 +435,16 @@ describe('severity, order and the renewal digest', () => {
         }),
       )
       .digest('hex')
-    expect(asksMod.renewalDigest(grant)).toBe(expected)
-    expect(asksMod.renewalDigest({ ...grant, scopes: ['alpha', 'zeta'] })).toBe(expected)
-    expect(asksMod.renewalDigest({ ...grant, period_start: iso(T0 + HOUR) })).not.toBe(expected)
+    expect(askLib.renewalDigest(grant)).toBe(expected)
+    expect(askLib.renewalDigest({ ...grant, scopes: ['alpha', 'zeta'] })).toBe(expected)
+    expect(askLib.renewalDigest({ ...grant, period_start: iso(T0 + HOUR) })).not.toBe(expected)
   })
 
   test('askSeverity gives parked_result and renewal warning, missing_grant and content info', () => {
-    expect(asksMod.askSeverity('parked_result')).toBe('warning')
-    expect(asksMod.askSeverity('renewal')).toBe('warning')
-    expect(asksMod.askSeverity('missing_grant')).toBe('info')
-    expect(asksMod.askSeverity('content')).toBe('info')
+    expect(askLib.askSeverity('parked_result')).toBe('warning')
+    expect(askLib.askSeverity('renewal')).toBe('warning')
+    expect(askLib.askSeverity('missing_grant')).toBe('info')
+    expect(askLib.askSeverity('content')).toBe('info')
   })
 
   test('entries order warning before info, then oldest raised_at, then id', async () => {
@@ -697,5 +697,79 @@ describe('the lifecycle', () => {
       ['c0ffee000006', 1, 'raised'],
       ['c0ffee000006', 2, 'reminder'],
     ])
+  })
+})
+
+describe('an Answer is recorded before its Ask closes', () => {
+  /** One open missing-Grant Ask for `mailer`, raised at T0, stored and read back. */
+  async function openAsk(): Promise<Ask> {
+    const out = await pass(empty(), [missingGrant()], T0)
+    await writeAsks(statePath, out.store)
+    const back = await readAsks(statePath)
+    if (!back.readable) throw new Error('unreadable')
+    return back.store.asks[0]!
+  }
+
+  const answer = { answer: 'approve', principal: 'ops', via: 'ci', evidence: 'OPS-123', answeredAt: T0 + 90_000 } as const
+
+  test('recordAnswer appends ask.answered with its twelve fields, then marks the Ask answered', async () => {
+    expect(typeof askLib.recordAnswer).toBe('function')
+    const ask = await openAsk()
+
+    expect(await askLib.recordAnswer(statePath, ask, answer)).toEqual({ recorded: true })
+
+    const name = userInfo().username
+    const expected = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/.test(name) ? name : 'unknown'
+    const records = auditRecords('ask.answered')
+    expect(records).toHaveLength(1)
+    expect(records[0]!.data).toEqual({
+      id: ask.id,
+      kind: 'missing_grant',
+      scope: 'mailer',
+      answer: 'approve',
+      digest: HEX_A,
+      principal: 'ops',
+      via: 'ci',
+      os_user: expected,
+      evidence: 'OPS-123',
+      assurance: 'asserted',
+      raised_at: ask.raised_at,
+      decide_ms: 90_000,
+    })
+
+    const after = await readAsks(statePath)
+    if (!after.readable) throw new Error('unreadable')
+    expect(after.store.asks).toHaveLength(1)
+    expect(after.store.asks[0]).toMatchObject({ id: ask.id, state: 'answered', closed_at: iso(T0 + 90_000), answer: 'approve' })
+  })
+
+  test('a refused ask.answered leaves the Ask open and asks.json byte-identical', async () => {
+    expect(typeof askLib.recordAnswer).toBe('function')
+    const ask = await openAsk()
+    const real = audit.appendAudit
+    spies.push(
+      spyOn(audit, 'appendAudit').mockImplementation((async (p: string, kind: string, data: unknown, opts?: unknown) => {
+        if (kind === 'ask.answered') throw new Error('refused for the test')
+        return (real as (...args: unknown[]) => Promise<unknown>)(p, kind, data, opts)
+      }) as typeof audit.appendAudit),
+    )
+    const bytes = readFileSync(asksPath(statePath))
+
+    expect(await askLib.recordAnswer(statePath, ask, answer)).toEqual({ refused: 'audit' })
+
+    expect(readFileSync(asksPath(statePath)).equals(bytes)).toBe(true)
+    expect(auditRecords('ask.answered')).toEqual([])
+  })
+
+  test('an asks.json that cannot be read after the append returns store and is left as found', async () => {
+    expect(typeof askLib.recordAnswer).toBe('function')
+    const ask = await openAsk()
+    writeFileSync(asksPath(statePath), '{')
+
+    expect(await askLib.recordAnswer(statePath, ask, answer)).toEqual({ refused: 'store' })
+
+    expect(readFileSync(asksPath(statePath), 'utf-8')).toBe('{')
+    // The accepted class: a record naming an Answer whose effect was not written.
+    expect(auditRecords('ask.answered')).toHaveLength(1)
   })
 })

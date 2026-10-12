@@ -58,7 +58,6 @@ const INTERNAL = ['segment.opened', 'segment.sealed', 'checkpoint.recorded']
 
 /** Kinds with no emit call yet, each naming the roadmap work that wires it. */
 const PENDING: Record<string, string> = {
-  'ask.answered': 'asks out of band',
   'handoff.tried': 'warpline consume',
 }
 
@@ -215,11 +214,11 @@ describe('the record kinds are a closed set', () => {
 })
 
 describe('every record kind has an emit call or a pending entry', () => {
-  test('the real tree: no offender, the two pending kinds, and every other kind called', () => {
+  test('the real tree: no offender, the one pending kind, and every other kind called', () => {
     const { sites, offenders } = real()
     expect(offenders).toEqual([])
     expect(census(EXPECTED_KINDS, INTERNAL, sites, PENDING, offenders)).toEqual([])
-    expect(Object.keys(PENDING)).toEqual(['ask.answered', 'handoff.tried'])
+    expect(Object.keys(PENDING)).toEqual(['handoff.tried'])
     const wired = EXPECTED_KINDS.filter((k) => !INTERNAL.includes(k) && !(k in PENDING))
     for (const kind of wired) expect(sites[kind]?.length ?? 0).toBeGreaterThan(0)
     expect(INTERNAL.length + wired.length + Object.keys(PENDING).length).toBe(EXPECTED_KINDS.length)
@@ -308,12 +307,12 @@ describe('every record kind has an emit call or a pending entry', () => {
 
   test('a pending kind that gains an emit call is reported, so its entry has to go', () => {
     const { sites } = real()
-    withFixture({ 'wired.ts': "await appendAudit(p, 'ask.answered', {})\n" }, (dir, paths) => {
+    withFixture({ 'wired.ts': "await appendAudit(p, 'handoff.tried', {})\n" }, (dir, paths) => {
       const planted = emitSites(paths, dir)
       expect(planted.offenders).toEqual([])
       const merged = { ...sites, ...planted.sites }
       expect(census(EXPECTED_KINDS, INTERNAL, merged, PENDING, [])).toEqual([
-        'ask.answered: pending (asks out of band), yet has an emit call in wired.ts',
+        'handoff.tried: pending (warpline consume), yet has an emit call in wired.ts',
       ])
     })
   })

@@ -470,6 +470,7 @@ describe('no verb reads the account running it', () => {
     (JSON.parse(readFileSync(join(vh.home, 'standing-grants.json'), 'utf-8')) as { grants: { id: string }[] }).grants[0]!.id
 
   type Case = { argv: () => string[]; code: number; setup?: () => Promise<void> }
+  // No case here answers an Ask: an Answer records the account name in ask.answered.os_user by design (D-28).
   const CASES: Record<string, Case> = {
     'approve p': { argv: () => ['approve', 'p'], code: 0 },
     'approve --all': { argv: () => ['approve', '--all'], code: 0 },
@@ -573,6 +574,8 @@ describe('no verb reads the account running it', () => {
    * so a second read added to one of these lines changes it and fails.
    */
   const KNOWN_READS = [
+    "lib/asks.ts: import { userInfo } from 'node:os'",
+    'lib/asks.ts: const name = userInfo().username',
     'lib/notify.ts: env: Record<string, string | undefined> = process.env,',
     'lib/paths.ts: const env = process.env.WARPLINE_HOME',
     'lib/paths.ts: const env = process.env.WARPLINE_PLUGINS_DIR',
