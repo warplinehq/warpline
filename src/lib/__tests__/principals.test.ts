@@ -16,6 +16,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as audit from '../audit-log.js'
@@ -272,6 +273,44 @@ describe('loadRegistry and readRegistry', () => {
 
     await expect(principals.loadRegistry(statePath)).rejects.toBeInstanceOf(audit.AuditAppendError)
     expect(trips()).toBe(1)
+  })
+
+  test('readPrincipal judges without recording, and observeRegistry records the bytes it judged, never a later edit', async () => {
+    await seed()
+    const sha = (b: Buffer): string => createHash('sha256').update(b).digest('hex')
+    const write = (registry: unknown): Buffer => {
+      const bytes = Buffer.from(JSON.stringify(registry))
+      writeFileSync(file(), bytes)
+      return bytes
+    }
+
+    // A hand edit, judged: the bytes kept, nothing recorded.
+    const edited = structuredClone(SEED)
+    edited.principals[2]!.status = 'disabled'
+    const b = write(edited)
+    const got = await principals.readPrincipal('ops', 'active')
+    if (!('loaded' in got)) throw new Error(`readPrincipal did not admit ops: ${JSON.stringify(got)}`)
+    expect(got.id).toBe('ops')
+    expect(got.loaded.bytes?.equals(b)).toBe(true)
+    expect(ofType(OBSERVED)).toHaveLength(1)
+
+    // An edit after the judgment: the record names the judged bytes, not the file now.
+    edited.principals[0]!.status = 'disabled'
+    const c = write(edited)
+    expect(await principals.observeRegistry(got.loaded, statePath)).toBeNull()
+    const observed = ofType(OBSERVED) as Array<{ data: { new: string } }>
+    expect(observed).toHaveLength(2)
+    expect(observed[1]!.data.new).toBe(sha(b))
+    expect(observed[1]!.data.new).not.toBe(sha(c))
+
+    // A store that refuses the record refuses the command, with the shared phrase.
+    const again = await principals.readPrincipal('ops', 'registered')
+    if (!('loaded' in again)) throw new Error('readPrincipal did not admit ops')
+    failObserve()
+    expect(await principals.observeRegistry(again.loaded, statePath)).toEqual({
+      refused: 'the audit store could not record a change to principals.json: write failed',
+      cause: 'audit',
+    })
   })
 })
 

@@ -1370,3 +1370,84 @@ describe('a hand edit of notify is recorded only by a command that acts', () => 
     )
   }
 })
+
+describe('a hand edit of principals.json is recorded only by a command that acts', () => {
+  /** Add a principal by hand, leaving ops, ann, ci and bot2 as they were. */
+  function handEdit(): void {
+    const path = join(vh.home, 'principals.json')
+    const registry = JSON.parse(readFileSync(path, 'utf-8')) as { principals: unknown[] }
+    registry.principals.push({ id: 'zed', type: 'human', status: 'active' })
+    writeFileSync(path, JSON.stringify(registry))
+  }
+
+  for (const f of FORMS) {
+    test(
+      `hand edit: ${f.label}: refused Answers write nothing, and the accepted Answer records the edit first`,
+      async () => {
+        const ask = await f.open()
+        handEdit()
+        await refused(f.answer(randomBytes(16).toString('hex'), prefix(ask)), 'unknown')
+
+        const before = await snap()
+        const via = await capture([...f.answer(ask.nonce, prefix(ask)), '--via', 'nobody'])
+        expect(via.code).toBe(1)
+        expect(via.stderr).toContain('--via')
+        expect(await snap()).toEqual(before)
+
+        const observedBefore = linesOf('principal_registry.observed').length
+        const r = await capture(f.answer(ask.nonce, prefix(ask)))
+        expect({ code: r.code, stderr: r.stderr }).toMatchObject({ code: 0 })
+        const observed = linesOf('principal_registry.observed')
+        expect(observed).toHaveLength(observedBefore + 1)
+        expect(observed.at(-1)!.warplineseq).toBeLessThan(linesOf('ask.answered').at(-1)!.warplineseq)
+      },
+      SLOW,
+    )
+  }
+
+  const BARE: Array<{ label: string; open: () => Promise<unknown>; argv: () => string[]; record: string }> = [
+    { label: 'deny p', open: async () => askFor('p'), argv: () => ['deny', 'p', '--principal', 'ops'], record: 'denial.recorded' },
+    {
+      label: 'approve sender --content',
+      open: async () => askFor('sender'),
+      argv: () => [...form('approve sender --content').bare!(), '--principal', 'ops'],
+      record: 'content_approval.issued',
+    },
+    { label: 'renew', open: () => form('renew').open(), argv: () => form('renew').bare!(), record: 'grant.renewed' },
+  ]
+
+  for (const b of BARE) {
+    test(
+      `hand edit: bare ${b.label}, refused by its open Ask, writes nothing`,
+      async () => {
+        await b.open()
+        handEdit()
+        const before = await snap()
+        const r = await capture(b.argv())
+        expect(r.code).toBe(1)
+        expect(r.stderr).toContain('has an open Ask')
+        expect(await snap()).toEqual(before)
+      },
+      SLOW,
+    )
+
+    test(
+      `hand edit: bare ${b.label} with notify unset records the edit before its own record`,
+      async () => {
+        await b.open()
+        unsetNotify()
+        handEdit()
+        const observedBefore = linesOf('principal_registry.observed').length
+        const recordBefore = linesOf(b.record).length
+        const r = await capture(b.argv())
+        expect({ code: r.code, stderr: r.stderr }).toMatchObject({ code: 0 })
+        const observed = linesOf('principal_registry.observed')
+        const records = linesOf(b.record)
+        expect(observed).toHaveLength(observedBefore + 1)
+        expect(records).toHaveLength(recordBefore + 1)
+        expect(observed.at(-1)!.warplineseq).toBeLessThan(records.at(-1)!.warplineseq)
+      },
+      SLOW,
+    )
+  }
+})
