@@ -212,6 +212,49 @@ describe('warpline approvals', () => {
   })
 })
 
+/**
+ * `report`, whose one inline Output is read from `<home>/body.txt` when it
+ * runs, and the shared home's `sender` re-pointed at it as its content-class
+ * consumer, before anything loads either. Returns the body file.
+ */
+function reportAndSender(): string {
+  const body = join(vh.home, 'body.txt')
+  writeFileSync(body, 'line one\nline two\nline three\n')
+  writePlugin(
+    'report',
+    { outputs: { body: { type: 'text' } } },
+    outputHandler(
+      `{ type: 'body', format: 'text', body: readFileSync(${JSON.stringify(body)}, 'utf-8') }`,
+      `import { readFileSync } from 'node:fs'`,
+    ),
+  )
+  // The shared home's sender, re-pointed at report before anything loads it.
+  writePlugin(
+    'sender',
+    {
+      approval_class: 'content',
+      dependencies: ['report'],
+      side_effects: ['sends_email'],
+      ttl_hours: 0.000001,
+    },
+    outputHandler(''),
+  )
+  return body
+}
+
+/**
+ * A day later: report's run is past its 24 h TTL, so the next advance runs it
+ * again. Backdated by hand, because a TTL short enough to lapse in a test
+ * would also expire a parked gate before approve could apply it.
+ */
+function reportRanADayAgo(): void {
+  const doc = JSON.parse(readFileSync(vh.statePath, 'utf-8')) as {
+    plugin_runs: Record<string, { last_run_at: string }>
+  }
+  doc.plugin_runs.report!.last_run_at = new Date(Date.now() - 25 * HOUR).toISOString()
+  writeFileSync(vh.statePath, JSON.stringify(doc))
+}
+
 describe('warpline approvals show', () => {
   test('an unknown id refuses with its reason', async () => {
     const unknown = await capture(['approvals', 'show', 'aaaaaaaaaaaa'])
@@ -240,42 +283,14 @@ describe('warpline approvals show', () => {
   })
 
   test('show on a content Ask with an earlier approved Output prints the diff', async () => {
-    const body = join(vh.home, 'body.txt')
-    writeFileSync(body, 'line one\nline two\nline three\n')
-    writePlugin(
-      'report',
-      { outputs: { body: { type: 'text' } } },
-      outputHandler(
-        `{ type: 'body', format: 'text', body: readFileSync(${JSON.stringify(body)}, 'utf-8') }`,
-        `import { readFileSync } from 'node:fs'`,
-      ),
-    )
-    // The shared home's sender, re-pointed at report before anything loads it.
-    writePlugin(
-      'sender',
-      {
-        approval_class: 'content',
-        dependencies: ['report'],
-        side_effects: ['sends_email'],
-        ttl_hours: 0.000001,
-      },
-      outputHandler(''),
-    )
+    const body = reportAndSender()
 
     await ok(['prefs', 'set', 'review_gate', 'true'])
     await capture(['advance'])
     await ok(['approve', 'report'])
     await ok(['approve', 'sender', '--content', '--not-after', '2099-01-01T00:00'])
 
-    // A day later: report's run is past its 24 h TTL, so the next advance runs
-    // it again. Backdated by hand, because a TTL short enough to lapse here
-    // would also expire the parked gate before approve could apply it.
-    const doc = JSON.parse(readFileSync(vh.statePath, 'utf-8')) as {
-      plugin_runs: Record<string, { last_run_at: string }>
-    }
-    doc.plugin_runs.report!.last_run_at = new Date(Date.now() - 25 * HOUR).toISOString()
-    writeFileSync(vh.statePath, JSON.stringify(doc))
-
+    reportRanADayAgo()
     await ok(['prefs', 'set', 'review_gate', 'false'])
     writeFileSync(body, 'line one\nline TWO\nline three\n')
     await withNotify()
@@ -289,6 +304,35 @@ describe('warpline approvals show', () => {
     const lines = r.stdout.split('\n')
     expect(lines.filter((l) => l.startsWith('-'))).toEqual(['-line two'])
     expect(lines.filter((l) => l.startsWith('+'))).toEqual(['+line TWO'])
+    expectNoNonce(r.stdout)
+  })
+
+  test('show never diffs against bytes the content approval did not name', async () => {
+    const body = reportAndSender()
+
+    // sender approved over the first body.
+    await ok(['prefs', 'set', 'review_gate', 'true'])
+    await capture(['advance'])
+    await ok(['approve', 'report'])
+    await ok(['approve', 'sender', '--content', '--not-after', '2099-01-01T00:00'])
+
+    // report runs again, parks the second body, and that one is applied too.
+    // Its marker replaces the first one's, so the approved bytes are gone.
+    writeFileSync(body, 'line one\nline TWO\nline three\n')
+    reportRanADayAgo()
+    await capture(['advance'])
+    await ok(['approve', 'report'])
+
+    await ok(['prefs', 'set', 'review_gate', 'false'])
+    await withNotify()
+    await capture(['advance'])
+    const a = openAsk('content', 'sender')
+
+    const r = await capture(['approvals', 'show', a.id])
+    expect(r.code).toBe(0)
+    expect(r.stdout).toContain('line TWO')
+    expect(r.stdout).toContain('no earlier approved content')
+    expect(r.stdout.split('\n').filter((l) => l.startsWith('-') || l.startsWith('+'))).toEqual([])
     expectNoNonce(r.stdout)
   })
 

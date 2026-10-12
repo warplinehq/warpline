@@ -48,6 +48,7 @@ Commands:
   run        Invoke a single plugin handler directly
   approve    Grant a side-effect approval for this session, or a standing one for a machine
   deny       Record a no, so the next engine tick stops asking
+  approvals  List the Asks waiting on a human, or show one with its content and diff
   resolve    Answer a fire nothing confirmed: a marked content fire, or any open intent by its seq
   revoke     Clear the session approval, or drop standing grants by holder or id
   renew      Restart a standing grant's period before it lapses
@@ -120,6 +121,11 @@ export async function main(argv: string[]): Promise<number> {
 
       case 'deny': {
         const { run } = await import('./deny.js')
+        return await run(rest)
+      }
+
+      case 'approvals': {
+        const { run } = await import('./approvals.js')
         return await run(rest)
       }
 

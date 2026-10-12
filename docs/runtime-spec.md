@@ -4833,3 +4833,53 @@ A library host reads the same facts on `AdvanceResult.asks`: `undelivered`
 (the Ask ids), `unrecorded` (a count), `skipped` (`null`, or the reason with
 its key path, or its cause and file path) and `tries_unrecorded`. A dry run and
 an advance skipped for quiet hours report nothing there.
+
+### `warpline approvals`
+
+An approver, or a channel adapter, reads what is waiting with two forms:
+
+- `warpline approvals` lists every Ask in `asks.json` that is `open` and has
+  not reached its `expires_at`. They are ordered `warning` before `info`, then
+  oldest `raised_at` first, then by id, the order a message uses. Each line
+  holds the id, the severity, the kind, the scope, `raised_at`, `expires_at`
+  and the first 12 hex of the digest. With none it prints exactly
+  `Nothing waiting.` and exits `0`, whether `asks.json` is absent or holds no
+  open Ask.
+- `warpline approvals show <id>` prints one Ask, in any state: its id, kind,
+  scope, plugin (`none` for a renewal), severity, state, `raised_at`,
+  `expires_at`, the full digest and the summary. Then the content it is about:
+  the plugin's current Output for a parked result, the producer's current
+  Output for content, the manifest's declared side effects for a missing
+  Grant, and the grant's stored fields for a renewal, or that the grant is
+  gone. An id that is not 12 lowercase hex exits `1` saying it is not an Ask
+  id. An id no Ask in the store has exits `1` with `no Ask has id <id>.`
+
+Both forms take no lock and write nothing. An unreadable `asks.json` makes
+either form exit `1`, naming the file and its cause (`corrupt`,
+`newer reader` or `io`), with nothing on stdout. It is never read as
+"nothing waiting".
+
+Neither form prints a nonce. It reaches an approver in the `notify` message.
+An operator with no `notify` channel reads it from `<home>/state/asks.json`.
+
+Every byte a plugin wrote is printed through one escape, the one
+`approve --content` uses: a C0 control character other than LF and TAB, DEL
+and a C1 control character each print as `\xNN`, and a backslash prints as
+two. Nothing is stripped. An inline body prints between begin and end lines.
+A `path` Output is read from its file and decoded as strict UTF-8. Content
+that is not UTF-8 prints as its sha256, its size in bytes and its path, never
+as raw bytes. An erased Output prints that its content was erased, with its
+`body_sha256`. There is no size cap in this release, so a large `path` Output
+prints whole.
+
+**The diff.** `show` prints a line diff from the last approved content to the
+content asked about, with ` `, `-` and `+` lines, when that approved content's
+bytes are still on disk. For content, the baseline is an inline Output, from
+the producer's applied gate markers or its current Output, whose fingerprint
+over the producer's name, its declared side effects and that one Output
+(the § 10 proposal fingerprint) equals the one the consumer's content approval
+recorded. For a parked result, it is the inline Output of the plugin's latest
+applied gate marker. No copy of approved bytes is ever kept to diff against,
+so the content erasure policy (§ 10) is unchanged: once those bytes are
+erased or gone, there is no baseline. Without one, `show` prints
+`no earlier approved content`.
