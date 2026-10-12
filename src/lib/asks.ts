@@ -620,7 +620,6 @@ export function checkAnswer(
   now: number,
   verb: { kinds: readonly AskKind[]; liveDigest: (ask: Ask) => string | null },
 ): { ask: Ask } | { refused: AnswerRefusal } {
-  // shortcut: digest mismatch reads `verb` when it lands.
   const ask = store.asks.find((a) => a.scope === scope && a.nonce === flags.nonce)
   if (ask === undefined) return { refused: 'unknown' }
   if (ask.state === 'superseded') return { refused: 'superseded' }
@@ -628,5 +627,12 @@ export function checkAnswer(
   if (ask.state === 'expired' || now >= Date.parse(ask.expires_at)) return { refused: 'expired' }
   // A spent nonce: replaying a captured Answer reaches no second effect.
   if (ask.state === 'answered') return { refused: 'nonce reused' }
+  // Three ways one reason: the prefix, the decision as it stands now (it may
+  // have moved before any advance superseded the Ask), and the verb form,
+  // since two kinds can share one digest.
+  const live = verb.liveDigest(ask)
+  if (!ask.digest.startsWith(flags.digestPrefix) || live !== ask.digest || !verb.kinds.includes(ask.kind)) {
+    return { refused: 'digest mismatch' }
+  }
   return { ask }
 }

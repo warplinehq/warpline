@@ -4988,3 +4988,9 @@ they were.
 | `superseded` | The Ask was closed `superseded`: its decision changed and a newer Ask, with a new nonce, replaced it. |
 | `expired` | The Ask is marked `expired`, or the command's clock has reached its `expires_at`, checked even when no advance has marked it. |
 | `nonce reused` | The Ask is `answered`: its nonce was spent by an earlier Answer. |
+| `digest mismatch` | The Ask's digest does not start with the `--digest` prefix; or the digest of the decision as it stands now, recomputed by the command, is not the Ask's digest (the decision moved before any advance superseded the Ask); or the form typed does not answer the Ask's kind, for example a `content` Ask answered without `--content`. |
+
+The checks after the short prefix run in a fixed order, `unknown`,
+`superseded`, `expired`, `nonce reused`, `digest mismatch`, and the first that
+fails is the one named. An Answer to an expired Ask that also carries a wrong
+prefix is refused as `expired`.
