@@ -799,6 +799,10 @@ async function until(check: () => boolean, ms: number, what: string): Promise<vo
  * move is read off a twin home that has no `notify` at all.
  */
 describe('delivery outlives a broken notify', () => {
+  // Three tries with their waits run past bun's own 5 s default, which a run
+  // of several files was seen to apply despite the preload's 20 s, so the
+  // cases that wait on tries carry their own.
+  const SLOW = 30_000
   let vh: VerbHome
   const vhPrefs = (): string => join(vh.home, 'preferences.json')
   const vhAsksFile = (): string => join(vh.home, 'state', 'asks.json')
@@ -859,7 +863,7 @@ describe('delivery outlives a broken notify', () => {
       expect(said[0]).toContain(a.id)
       expect(stdout).not.toContain(a.id)
     }
-  })
+  }, SLOW)
 
   test('the next advance sends the undelivered Ask again with the same id and seq', async () => {
     const failing = await notifyStub(vh.home, 'fail', { exitCode: 3 })
@@ -879,7 +883,7 @@ describe('delivery outlives a broken notify', () => {
     expect(messages[0]!.entries.map((e) => e.id).sort()).toEqual(ids)
     for (const e of messages[0]!.entries) expect(e.seq).toBe(1)
     for (const a of vhAsks().filter((x) => ids.includes(x.id))) expect(a.tries.at(-1)!.outcome).toBe('delivered')
-  })
+  }, SLOW)
 
   test('an Ask recorded and never sent is sent by the next advance', async () => {
     const ok = await notifyStub(vh.home, 'ok')
@@ -919,7 +923,7 @@ describe('delivery outlives a broken notify', () => {
     const tried = vhAsks().filter((a) => a.tries.length > 0)
     expect(tried.length).toBeGreaterThan(0)
     for (const a of tried) expect(a.tries[0]).toMatchObject({ outcome: 'timeout', exit_code: null })
-  })
+  }, SLOW)
 
   test('an interrupted advance takes its notify down with it', async () => {
     const stub = await notifyStub(vh.home, 'hang', { grandchild: true })
@@ -943,7 +947,7 @@ describe('delivery outlives a broken notify', () => {
     const alive = (): boolean => spawnSync('pgrep', ['-f', `sleep ${stub.marker}`]).status !== 1
     await until(() => !alive(), 3000, 'the notify group to go').catch(() => {})
     expect(spawnSync('pgrep', ['-f', `sleep ${stub.marker}`]).status).toBe(1)
-  })
+  }, SLOW)
 
   test('an unusable notify block raises and sends nothing, says so once, and keeps the exit code', async () => {
     const baseline = await twinExit()
