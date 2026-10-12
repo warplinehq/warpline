@@ -4869,11 +4869,14 @@ Every byte a plugin wrote is printed through one escape, the one
 `approve --content` uses: a C0 control character other than LF and TAB, DEL
 and a C1 control character each print as `\xNN`, and a backslash prints as
 two. Nothing is stripped. An inline body prints between begin and end lines.
-A `path` Output is read from its file and decoded as strict UTF-8. Content
-that is not UTF-8 prints as its sha256, its size in bytes and its path, never
-as raw bytes. An erased Output prints that its content was erased, with its
-`body_sha256`. There is no size cap in this release, so a large `path` Output
-prints whole.
+A `path` Output is never read. `show` prints its escaped path and says the
+Ask binds the path, not the file's bytes: the fingerprint covers
+`path:<string>`, so the file can say something else by the time it is read,
+a relative path would resolve against the reader's directory, and a FIFO or
+device would never end. This is the reason `approve --content` refuses a
+`path` Output (§ 10), and the diff says there are no inline bytes to compare.
+An erased Output prints that its content was erased, with its
+`body_sha256`.
 
 **The diff.** `show` prints a line diff from the last approved content to the
 content asked about, with ` `, `-` and `+` lines, when that approved content's

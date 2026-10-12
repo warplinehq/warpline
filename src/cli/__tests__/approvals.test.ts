@@ -348,7 +348,7 @@ describe('warpline approvals show', () => {
     expectNoNonce(r.stdout)
   })
 
-  // T-27-30: the Ask binds `path:<string>`, never the file's bytes, so show prints the path and reads nothing.
+  // The Ask binds `path:<string>`, never the file's bytes, so show prints the path and reads nothing.
   const showPathOutput = async (path: string) => {
     writePlugin(
       'pather',

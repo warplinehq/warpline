@@ -17,8 +17,8 @@
  *
  * **Every byte a plugin wrote goes through `escapeForOperator`**, the one copy
  * `approve --content` uses: control characters print as `\xNN`, escaped and
- * never stripped. Content that is not UTF-8 prints as its sha256, its size and
- * its path, never as raw bytes.
+ * never stripped. A `path` Output prints its path and is never read: the Ask
+ * binds the path string, not the file's bytes.
  *
  * **The diff baseline is only bytes still on disk.** For content, an inline
  * Output from the producer's applied gate markers or its current Output whose
@@ -29,8 +29,6 @@
  *
  * Never terminates the process — it returns a code to the dispatcher.
  */
-import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 import { askSeverity, asksPath, readAsks, type Ask } from '../lib/asks.js'
 import { escapeForOperator } from '../lib/escape.js'
 import { lineDiff } from '../lib/line-diff.js'
@@ -57,29 +55,20 @@ const END = '==== end content ===='
 type StoredOutput = NonNullable<EngineState['plugin_runs'][string]['last_output']>
 
 /** The bytes of one Output as text, or why there is no text to show. */
-type Content = { text: string; from: string | null } | { note: string }
+type Content = { text: string } | { note: string }
 
-async function contentOf(out: StoredOutput | undefined): Promise<Content> {
+/**
+ * A path Output is never read: the Ask binds `path:<string>`, not the file's
+ * bytes, and the file may say something else, sit relative to another cwd, or
+ * be a FIFO that never ends. Same reason `approve --content` refuses one (runtime-spec § 10).
+ */
+function contentOf(out: StoredOutput | undefined): Content {
   if (out === undefined) return { note: 'no Output on record' }
   if (out.erased_at !== undefined) {
     return { note: `its content was erased at ${out.erased_at} (sha256 ${out.body_sha256})` }
   }
-  if (out.body !== undefined) return { text: out.body, from: null }
-  const path = out.path!
-  let bytes: Buffer
-  try {
-    // shortcut: no size cap, so a very large file prints whole; add one if a path Output that large ever matters.
-    bytes = await readFile(path)
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException | null)?.code ?? 'unreadable'
-    return { note: `${escapeForOperator(path)} cannot be read (${code})` }
-  }
-  try {
-    return { text: new TextDecoder('utf-8', { fatal: true }).decode(bytes), from: path }
-  } catch {
-    const sha = createHash('sha256').update(bytes).digest('hex')
-    return { note: `not UTF-8: sha256 ${sha}, ${bytes.length} bytes, ${escapeForOperator(path)}` }
-  }
+  if (out.body !== undefined) return { text: out.body }
+  return { note: `a path Output, not read: ${escapeForOperator(out.path!)}. This Ask binds the path, not the file's bytes` }
 }
 
 /** The applied gate markers of `plugin`, oldest first. */
@@ -136,8 +125,7 @@ function printContent(label: string, c: Content): void {
     process.stdout.write(`${label}: ${c.note}\n`)
     return
   }
-  const from = c.from === null ? '' : ` (read from ${escapeForOperator(c.from)})`
-  process.stdout.write(`${label}${from}:\n${BEGIN}\n${escapeForOperator(c.text)}\n${END}\n`)
+  process.stdout.write(`${label}:\n${BEGIN}\n${escapeForOperator(c.text)}\n${END}\n`)
 }
 
 function printDiff(baseline: string | null, current: Content): void {
@@ -146,7 +134,7 @@ function printDiff(baseline: string | null, current: Content): void {
     return
   }
   if ('note' in current) {
-    process.stdout.write('no diff: the content asked about is not text\n')
+    process.stdout.write('no diff: the content asked about has no inline bytes\n')
     return
   }
   process.stdout.write('diff from the last approved content:\n')
@@ -163,7 +151,7 @@ async function show(a: Ask): Promise<void> {
   switch (a.kind) {
     case 'parked_result': {
       const plugin = a.plugin!
-      const current = await contentOf(state.plugin_runs[plugin]?.last_output)
+      const current = contentOf(state.plugin_runs[plugin]?.last_output)
       printContent('the parked result', current)
       printDiff(inline(markersOf(state, plugin).at(-1)?.plugin_result.artifacts_produced.at(-1)), current)
       return
@@ -174,7 +162,7 @@ async function show(a: Ask): Promise<void> {
       const current: Content =
         producer === undefined
           ? { note: `${consumer} has no loaded manifest naming its producer` }
-          : await contentOf(state.plugin_runs[producer]?.last_output)
+          : contentOf(state.plugin_runs[producer]?.last_output)
       printContent(producer === undefined ? 'the content' : `the content from ${producer}`, current)
       printDiff(contentBaseline(state, consumer, manifests), current)
       return
