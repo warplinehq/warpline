@@ -134,6 +134,15 @@ Ask is not raised. When it moves, the plugin is due again and the returning Ask
 says a denial existed and that the proposal changed — a returning question must
 not be able to pass itself off as a new one.
 
+**An approve or deny that answers an Ask carries its nonce and digest.** When
+an open Ask covers the plugin, `warpline approve <plugin>` and `warpline deny
+<plugin>` answer it with `--nonce`, a prefix of its digest in `--digest`, and
+`--principal`, and a bare one refuses, naming the Ask. A no takes exactly the
+flags a yes does. `warpline deny --standing <grant-id>` is the deny form of a
+renewal Ask: it records the Answer and nothing else, so the grant lapses at its
+renewal deadline unless someone renews it
+([runtime-spec.md § 16](runtime-spec.md)).
+
 Listing and taking back are flags on the same verb: `warpline deny --list`
 prints the live denials and writes nothing, and `warpline deny --remove
 <plugin>` takes one back, after which the plugin is asked about again on the
@@ -312,7 +321,7 @@ stated, not hidden.
 | `<home>/state/` engine state | `EngineStateSchema`: tasks, deferrals, per-plugin last run | Engine | Board |
 | `<home>/runs/` | one `RunArtifact` per run — [runtime-spec.md § 5](runtime-spec.md) | Engine | Board |
 | `<home>/.session-approval` | the Grant — [runtime-spec.md § 9](runtime-spec.md) | `warpline approve` / Board approve | Engine, Board |
-| `<home>/state/asks.json` | JSON, owner-only, reader-versioned: the stored Asks — [runtime-spec.md § 16](runtime-spec.md) | Engine (raise, delivery tries), `warpline approve` (marks an Ask answered) | Engine, `warpline approvals` (no lock), `warpline approve` (every named and `--content` form, under the state lock) |
+| `<home>/state/asks.json` | JSON, owner-only, reader-versioned: the stored Asks — [runtime-spec.md § 16](runtime-spec.md) | Engine (raise, delivery tries), `warpline approve`, `warpline deny` (each marks an Ask answered) | Engine, `warpline approvals` (no lock), `warpline approve` (every named and `--content` form, under the state lock), `warpline deny` (every form but `--list` and `--remove`, under the state lock) |
 
 IPC is file-based only: the engine and the Board are separate processes and
 share no stdout. `acknowledgements.json` survives across sessions.

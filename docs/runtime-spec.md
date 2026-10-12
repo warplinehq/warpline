@@ -4890,8 +4890,9 @@ erased or gone, there is no baseline. Without one, `show` prints
 ### Answers
 
 An Answer is a decision on one Ask, typed through the CLI. Answering an Ask is
-not issuing a Grant. `approve --all`, `approve --standing` and `resolve` are not
-Answers: they never read `asks.json`, and an open Ask stays open across them.
+not issuing a Grant. `approve --all`, `approve --standing`, `deny --list`,
+`deny --remove` and `resolve` are not Answers: they never read `asks.json`, and
+an open Ask stays open across them.
 
 `warpline approve` answers three kinds, on the form gate-first already picks
 for the plugin named:
@@ -4901,6 +4902,35 @@ for the plugin named:
 | `approve <plugin>` with a parked result waiting | `parked_result` | the parked result is applied |
 | `approve <plugin>` with none waiting | `missing_grant` | a session Grant is merged |
 | `approve <plugin> --content --not-after <w>` | `content` | the content approval is written |
+
+`warpline deny` answers the same three kinds no, and a renewal:
+
+| Form | Answers | Effect |
+|---|---|---|
+| `deny <plugin>` | `parked_result`, `missing_grant` or `content` | the denial is recorded (§ 9), and a parked result waiting is discarded |
+| `deny --standing <grant-id>` | `renewal` | nothing beyond the Answer record |
+
+`deny <plugin>` answers whichever of the three kinds the open Ask on the plugin
+is. For a `content` Ask the decision as it stands now is the producer's
+proposal fingerprint, the digest the Ask was raised with; for the other two it
+is the plugin's own.
+
+`deny --standing <grant-id>` is the no to a standing grant's renewal Ask.
+`--standing` takes the grant's id as its value, and `deny`'s positional stays a
+plugin name, so it goes with no plugin name, `--list`, `--remove` or `--note`.
+It answers an Ask and does nothing else, so without `--nonce` it refuses by
+name. It appends `ask.answered` with `answer: 'deny'`, marks the Ask answered,
+and writes neither the standing grants file nor the state document. The grant
+lapses at its renewal deadline unless someone renews it. The next advance does
+not raise a renewal Ask for that grant while its digest is unchanged, because
+the most recently closed Ask on that scope was answered `deny` with the same
+kind and digest (see One open Ask per scope, reminders and expiry above).
+
+**A no costs what a yes costs.** Every Answer form takes the same flags and
+refuses the same missing ones: `--nonce`, `--digest` and `--principal` are
+required on `approve`, `deny` and `deny --standing` alike, and `--via` and
+`--evidence` are optional on each. `deny` needs no flag, confirmation or step
+that `approve` does not.
 
 An Answer carries four flags beside the form's own:
 
@@ -4931,16 +4961,18 @@ Ask on that plugin is refused as `unknown` (see Refusals below), never run as
 the bare form, so a nonce carried from another plugin's Ask is unknown here.
 
 **A bare form refuses while an Ask is open.** `approve <plugin>`, on either
-gate, and `approve <plugin> --content` exit `1` with nothing written while an
-Ask on that plugin is `open` and has not reached its `expires_at`. The line
+gate, `approve <plugin> --content` and `deny <plugin>` exit `1` with nothing
+written while an Ask on that plugin is `open` and has not reached its
+`expires_at`. The line
 names the Ask's id and `warpline approvals show <id>`, never its nonce. With no
 open Ask, for example with `notify` unset, every form behaves as it did before
 Asks existed.
 
-**An unreadable store refuses every form.** Every named and `--content` form,
-bare or answering, reads `asks.json` under the state lock. When it cannot be
-read, the command prints `approve: <path> cannot be read (<cause>). Nothing
-was written.`, with the cause `corrupt`, `newer reader` or `io`, and exits `1`.
+**An unreadable store refuses every form.** Every named and `--content` form
+of `approve`, and every form of `deny` but `--list` and `--remove`, bare or
+answering, reads `asks.json` under the state lock. When it cannot be read, the
+command prints `<verb>: <path> cannot be read (<cause>). Nothing was
+written.`, with the cause `corrupt`, `newer reader` or `io`, and exits `1`.
 It is never read as "no Asks", because a bare form must never slip past an
 open Ask the command could not see.
 
@@ -4951,7 +4983,8 @@ Answer:
 2. reads `asks.json` fresh and marks the Ask `answered`, with `closed_at` and
    `answer`, written and synced, so its nonce is spent;
 3. writes the effect, with its own record where it has one (`grant.issued`,
-   `content_approval.issued`).
+   `content_approval.issued`, `denial.recorded`). `deny --standing` has no
+   effect to write.
 
 When the audit store refuses `ask.answered`, the command prints
 `The audit store could not record this Answer. Nothing was written.` and exits
@@ -4964,7 +4997,7 @@ apply prints its usual line, and a line saying the Answer is on the record and
 the parked result was not applied, and exits `1`.
 
 **The Answer record.** `ask.answered` carries the Ask's id, kind, scope,
-digest and `raised_at`; `answer`, `approve` or `approve_content` here;
+digest and `raised_at`; `answer`, `approve`, `approve_content` or `deny`;
 `principal`, the `--principal` given; `via`, the `--via` given or `null` when
 answered directly; `os_user`, the account that ran the command, or `unknown`,
 recorded beside the principal and never as one; `evidence`, or `null` when
@@ -4975,7 +5008,7 @@ reminder's. The answer instant is the same one the Ask's `closed_at` records.
 ### Refusals
 
 An Answer that does not match its Ask is refused by name. Each refusal exits
-`1`, prints `approve: refused (<reason>): <sentence> Nothing was written.`
+`1`, prints `<verb>: refused (<reason>): <sentence> Nothing was written.`
 (the short prefix prints `prefix shorter than 12:` and its sentence), never a
 typed value, and writes nothing: the state document, the session
 grant file, the standing grants file, `asks.json` and the audit store are as

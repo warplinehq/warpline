@@ -43,11 +43,34 @@
  * Every denial, and every removal of one, is on the audit record before the
  * state document changes.
  *
+ * **A deny can answer an Ask.** With `--nonce`, `--digest` and `--principal`
+ * it answers the open parked-result, missing-Grant or content Ask on the one
+ * plugin it names, through the same check `approve` runs, and needs nothing
+ * `approve` does not: a no costs what a yes costs. A bare deny refuses while
+ * such an Ask is open. `deny --standing <grant-id>` is the no to a standing
+ * grant's renewal Ask. It records the Answer and writes nothing else: no
+ * standing grant, no state document. Every form but `--list` and `--remove`
+ * reads `asks.json` under the state lock and refuses when it cannot be read.
+ *
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { parseArgs } from 'node:util'
 import { appendAudit } from '../lib/audit-log.js'
-import { requirePrincipal } from '../lib/principals.js'
+import {
+  ANSWER_REFUSAL_TEXT,
+  asksPath,
+  checkAnswer,
+  openAskFor,
+  parseAnswerFlags,
+  readAsks,
+  recordAnswer,
+  renewalDigest,
+  type AnswerFlags,
+  type AnswerRefusal,
+  type Ask,
+} from '../lib/asks.js'
+import { judgePrincipal, requirePrincipal } from '../lib/principals.js'
+import { readStandingStore } from '../runtime/approval-gate.js'
 import { findPendingGate, loadPluginManifests, proposalFingerprint } from '../runtime/engine.js'
 import { emitDenialRecorded, emitGateInvalidated } from '../board/engine-events.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
@@ -62,6 +85,8 @@ import { engineStatePath, eventsJsonlPath, pluginsDir } from '../lib/paths.js'
 import { suggest } from './suggest.js'
 
 const USAGE = `Usage: warpline deny <plugin>... [options]
+       warpline deny <plugin> --nonce <hex> --digest <hex> --principal <id>
+       warpline deny --standing <grant-id> --nonce <hex> --digest <hex> --principal <id>
        warpline deny --list
        warpline deny --remove <plugin>...
 
@@ -77,8 +102,63 @@ Options:
   --remove        Take the denial back for each named plugin.
   --note <text>   Record why, in your own words.
   --principal <id>  Who is denying: a registered, active principal.
-                    Optional, never inferred.
+                    Optional, never inferred. Required on an Answer.
+
+Answering an Ask (the same flags approve takes):
+  --nonce <hex>   The Ask's nonce, from the notify message.
+  --digest <hex>  A prefix of the Ask's digest, at least 12 hex characters.
+  --via <id>      The registered machine that relayed the Answer.
+  --evidence <ref>  A reference token for the decision.
+  --standing <grant-id>  Answer a standing grant's renewal Ask no. Records the
+                  Answer and nothing else: the grant lapses at its renewal
+                  deadline unless someone renews it.
 `
+
+/** A store that could not be read is never read as "no Asks". */
+function refuseUnreadableAsks(statePath: string, cause: string): number {
+  process.stderr.write(`deny: ${asksPath(statePath)} cannot be read (${cause}). Nothing was written.\n`)
+  return 1
+}
+
+/** A bare deny while an Ask is open on what it names. Names the Ask, never its nonce. */
+function refuseBare(ask: Ask): number {
+  process.stderr.write(
+    `deny: ${ask.scope} has an open Ask, ${ask.id}, so a bare deny cannot answer it. ` +
+      `Read it with 'warpline approvals show ${ask.id}', then answer it with its --nonce and --digest. ` +
+      `Nothing was written.\n`,
+  )
+  return 1
+}
+
+/** An Answer that does not match its Ask: the reason by name, and nothing written. */
+function refuseAnswer(reason: AnswerRefusal): number {
+  process.stderr.write(`deny: refused (${reason}): ${ANSWER_REFUSAL_TEXT[reason]} Nothing was written.\n`)
+  return 1
+}
+
+/** `recordAnswer` refused: nothing of the effect was written. */
+function refuseRecord(refused: 'audit' | 'store', statePath: string): number {
+  process.stderr.write(
+    refused === 'audit'
+      ? 'The audit store could not record this Answer. Nothing was written.\n'
+      : `deny: ${asksPath(statePath)} could not be read or written after the Answer was recorded, so its ` +
+          `Ask is still open. The audit record names an Answer whose effect was not written, and nothing ` +
+          `else was written.\n`,
+  )
+  return 1
+}
+
+/** Who answered and through what, `--via` judged on the registry the `--principal` check read. */
+function answerer(
+  actor: Awaited<ReturnType<typeof requirePrincipal>>,
+  answer: AnswerFlags,
+): { principal: string; via: string | null } | { refused: string } {
+  if ('refused' in actor) return { refused: `--principal: ${actor.refused}.` }
+  if (actor.id === null) return { refused: '--principal is required on an Answer.' }
+  if (answer.via === null) return { principal: actor.id, via: null }
+  const judged = judgePrincipal(actor.loaded.registry, answer.via, 'active-machine')
+  return 'refused' in judged ? { refused: `--via: ${judged.refused}.` } : { principal: actor.id, via: judged.id }
+}
 
 /**
  * Read the state document, or explain why not.
@@ -118,7 +198,17 @@ function describe(denial: Denial): string {
 }
 
 export async function run(argv: string[]): Promise<number> {
-  let values: { list?: boolean; remove?: boolean; note?: string; principal?: string }
+  let values: {
+    list?: boolean
+    remove?: boolean
+    note?: string
+    principal?: string
+    nonce?: string
+    digest?: string
+    via?: string
+    evidence?: string
+    standing?: string
+  }
   let positionals: string[]
   try {
     // strict: true rejects an undeclared flag — an all-plugins wildcard among
@@ -131,6 +221,11 @@ export async function run(argv: string[]): Promise<number> {
         remove: { type: 'boolean' },
         note: { type: 'string' },
         principal: { type: 'string' },
+        nonce: { type: 'string' },
+        digest: { type: 'string' },
+        via: { type: 'string' },
+        evidence: { type: 'string' },
+        standing: { type: 'string' },
       },
       allowPositionals: true,
       strict: true,
@@ -154,7 +249,58 @@ export async function run(argv: string[]): Promise<number> {
     process.stderr.write('--list shows the denials and changes nothing; do not combine it.\n')
     return 1
   }
-  if (!values.list && positionals.length === 0) {
+
+  // The Answer flags, checked before anything is read.
+  if (values.standing !== undefined) {
+    const mixed = [
+      positionals.length > 0 ? 'a plugin name' : null,
+      values.list ? '--list' : null,
+      values.remove ? '--remove' : null,
+      values.note !== undefined ? '--note' : null,
+    ].filter((f): f is string => f !== null)
+    if (mixed.length > 0) {
+      process.stderr.write(
+        `deny: --standing answers a renewal Ask and does nothing else, so ${mixed.join(', ')} cannot go with it. ` +
+          `Nothing was written.\n`,
+      )
+      return 1
+    }
+    if (values.nonce === undefined) {
+      process.stderr.write(
+        'deny: --standing answers a renewal Ask and does nothing else, so it needs the Ask\'s --nonce and --digest. ' +
+          'Nothing was written.\n',
+      )
+      return 1
+    }
+  }
+  const answerFlagsGiven = [
+    values.nonce !== undefined ? '--nonce' : null,
+    values.digest !== undefined ? '--digest' : null,
+    values.via !== undefined ? '--via' : null,
+    values.evidence !== undefined ? '--evidence' : null,
+  ].filter((f): f is string => f !== null)
+  if (answerFlagsGiven.length > 0 && (values.list || values.remove)) {
+    process.stderr.write(
+      `deny: ${answerFlagsGiven.join(', ')} cannot go with ${values.list ? '--list' : '--remove'}: it answers no Ask. ` +
+        `Nothing was written.\n`,
+    )
+    return 1
+  }
+  const parsedAnswer = parseAnswerFlags(values, values.standing !== undefined ? [values.standing] : positionals)
+  if ('refused' in parsedAnswer) {
+    process.stderr.write(`deny: ${parsedAnswer.refused} Nothing was written.\n`)
+    return 1
+  }
+  const answer = parsedAnswer.answer
+  if (answer !== null && values.principal === undefined) {
+    process.stderr.write(
+      'deny: --principal is required on an Answer: it names who answered, and one is never inferred. ' +
+        'Nothing was written.\n',
+    )
+    return 1
+  }
+
+  if (!values.list && values.standing === undefined && positionals.length === 0) {
     process.stderr.write(USAGE)
     return 1
   }
@@ -163,6 +309,46 @@ export async function run(argv: string[]): Promise<number> {
   // The lock that guards THIS document, not whatever the state manager's
   // module paths point at — see `withStateLockAt`.
   const lockPath = pathsForStateFile(statePath).lockPath
+
+  // -- Deny a renewal: the Answer record and nothing else -------------------
+  // No standing grant is written and no state document: the grant lapses at
+  // its renewal deadline unless someone renews it, and the next advance does
+  // not ask again while the grant is unchanged.
+  if (values.standing !== undefined && answer !== null) {
+    const grantId = values.standing
+    return await withStateLockAt(lockPath, async () => {
+      // Checked in the hold, so a principal disabled while this waited is refused.
+      const who = answerer(await requirePrincipal(values.principal, 'active'), answer)
+      if ('refused' in who) {
+        process.stderr.write(`deny: ${who.refused} Nothing was written.\n`)
+        return 1
+      }
+      const asks = await readAsks(statePath)
+      if (!asks.readable) return refuseUnreadableAsks(statePath, asks.cause)
+      // The grant as it stands now. A grant gone, or a file that cannot be
+      // read, has no live digest, so the Answer refuses as a mismatch.
+      const standing = await readStandingStore()
+      const grant = standing.readable ? standing.store.grants.find((g) => g.id === grantId) : undefined
+      const found = checkAnswer(asks.store, answer, grantId, Date.now(), {
+        kinds: ['renewal'],
+        liveDigest: () => (grant === undefined ? null : renewalDigest(grant)),
+      })
+      if ('refused' in found) return refuseAnswer(found.refused)
+      const rec = await recordAnswer(statePath, found.ask, {
+        answer: 'deny',
+        principal: who.principal,
+        via: who.via,
+        evidence: answer.evidence,
+        answeredAt: Date.now(),
+      })
+      if ('refused' in rec) return refuseRecord(rec.refused, statePath)
+      process.stdout.write(
+        `Answered the renewal Ask ${found.ask.id} no. Standing grant ${grantId} was not renewed: it lapses at ` +
+          `its renewal deadline unless someone renews it. No grant was written.\n`,
+      )
+      return 0
+    })
+  }
 
   // -- List: read, print, write nothing -----------------------------------
   if (values.list) {
@@ -282,10 +468,53 @@ export async function run(argv: string[]): Promise<number> {
       process.stderr.write(`deny: --principal: ${actor.refused}. Nothing was denied.\n`)
       return 1
     }
-const state = await loadState(statePath)
-if (state === null) return 1
+    const state = await loadState(statePath)
+    if (state === null) return 1
 
-const denied_at = new Date().toISOString()
+    const now = Date.now()
+    const denied_at = new Date(now).toISOString()
+
+    // -- The Ask ---------------------------------------------------------
+    // Read in this hold, bare or answering. A store that cannot be read
+    // refuses, and a bare deny refuses while an Ask is open on what it names.
+    const asks = await readAsks(statePath)
+    if (!asks.readable) return refuseUnreadableAsks(statePath, asks.cause)
+    if (answer === null) {
+      const open = openAskFor(asks.store, positionals, now)
+      if (open !== undefined) return refuseBare(open)
+    } else {
+      const who = answerer(actor, answer)
+      if ('refused' in who) {
+        process.stderr.write(`deny: ${who.refused} Nothing was written.\n`)
+        return 1
+      }
+      // Exactly one plugin: parseAnswerFlags refused any other count.
+      const plugin = positionals[0]!
+      const manifest = manifests.get(plugin)!
+      // A content Ask binds the producer's proposal; every other kind the plugin's own.
+      const producer = manifest.approval_class === 'content' ? manifest.dependencies[0] : undefined
+      const producerManifest = producer === undefined ? undefined : manifests.get(producer)
+      const found = checkAnswer(asks.store, answer, plugin, now, {
+        kinds: ['parked_result', 'missing_grant', 'content'],
+        liveDigest: (ask) =>
+          ask.kind !== 'content'
+            ? proposalFingerprint(state, plugin, manifest)
+            : producer === undefined || producerManifest === undefined
+              ? null
+              : proposalFingerprint(state, producer, producerManifest),
+      })
+      if ('refused' in found) return refuseAnswer(found.refused)
+      // On the record, and the Ask closed, before any denial is decided or recorded.
+      const rec = await recordAnswer(statePath, found.ask, {
+        answer: 'deny',
+        principal: who.principal,
+        via: who.via,
+        evidence: answer.evidence,
+        answeredAt: Date.now(),
+      })
+      if ('refused' in rec) return refuseRecord(rec.refused, statePath)
+      process.stdout.write(`Answered Ask ${found.ask.id} no.\n`)
+    }
 
     for (const plugin of positionals) {
       const fingerprint = proposalFingerprint(state, plugin, manifests.get(plugin)!)
@@ -362,7 +591,7 @@ const denied_at = new Date().toISOString()
       recorded.push(denial)
     }
 
-if (recorded.length === 0) return 0
+    if (recorded.length === 0) return 0
 
     // Each denial is on the audit record before the state document changes,
     // one record per plugin, in order. The note is operator free text and
@@ -385,7 +614,7 @@ if (recorded.length === 0) return 0
       }
     }
 
-await writeEngineState(state, statePath)
+    await writeEngineState(state, statePath)
     return null
   })
   if (early !== null) return early
