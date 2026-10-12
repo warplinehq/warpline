@@ -114,14 +114,18 @@ import {
   ANSWER_REFUSAL_TEXT,
   asksPath,
   checkAnswer,
+  observePreferences,
   openAskFor,
   parseAnswerFlags,
   readAsks,
+  readNotify,
   recordAnswer,
   type AnswerFlags,
+  type AnswerForm,
   type AnswerRefusal,
   type Ask,
   type AsksUnreadableCause,
+  type PreferencesRead,
 } from '../lib/asks.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
@@ -133,7 +137,7 @@ import {
 } from '../runtime/engine-state-store.js'
 import type { Approval, EngineState } from '../schemas/engine-state.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
-import { engineStatePath, pluginsDir, sessionApprovalPath, standingGrantsPath } from '../lib/paths.js'
+import { engineStatePath, pluginsDir, preferencesPath, sessionApprovalPath, standingGrantsPath } from '../lib/paths.js'
 import { suggest } from './suggest.js'
 import { escapeForOperator } from '../lib/escape.js'
 
@@ -326,9 +330,21 @@ async function approveContent(
     // here, and a bare form refuses while an Ask is open on the consumer.
     const asks = await readAsks(statePath)
     if (!asks.readable) return refuseUnreadableAsks(statePath, asks.cause)
+    // One form for the bare guard and the Answer: a content Ask on the
+    // consumer, bound to its producer's proposal as it stands now.
+    const notify = await readNotify(preferencesPath())
+    const form: AnswerForm = {
+      kinds: ['content'],
+      liveDigest: () => {
+        const p = manifest.dependencies[0]
+        const pm = p === undefined ? undefined : manifests.get(p)
+        return p === undefined || pm === undefined ? null : proposalFingerprint(state, p, pm)
+      },
+      notify: notify.inUse,
+    }
     let who: { principal: string; via: string | null } | null = null
     if (answer === null) {
-      const open = openAskFor(asks.store, [consumer], now)
+      const open = openAskFor(asks.store, [consumer], now, form)
       if (open !== undefined) return refuseBare(open)
     } else {
       const judged = answerer(actor, answer)
@@ -512,12 +528,14 @@ async function approveContent(
     // The Answer goes on the record, and its Ask is marked answered, before the
     // content approval's own record. An Answer its Ask does not match is refused.
     let answered = false
-    if (answer !== null && who !== null) {
-      const found = checkAnswer(asks.store, answer, consumer, now, {
-        kinds: ['content'],
-        liveDigest: () => fingerprint,
-      })
-      if ('refused' in found) return refuseAnswer(found.refused)
+    const found = answer !== null && who !== null ? checkAnswer(asks.store, answer, consumer, now, form) : null
+    if (found !== null && 'refused' in found) return refuseAnswer(found.refused)
+
+    // The notify this command judged goes on the record before anything is written.
+    const observed = await observePreferences(notify.loaded, statePath)
+    if (observed !== null) return refuseObserve(observed.refused, 'written')
+
+    if (found !== null && answer !== null && who !== null) {
       const rec = await recordAnswer(statePath, found.ask, {
         answer: 'approve_content',
         principal: who.principal,
@@ -715,6 +733,12 @@ function refuseBare(ask: Ask): number {
       `Read it with 'warpline approvals show ${ask.id}', then answer it with its --nonce and --digest. ` +
       `Nothing was written.\n`,
   )
+  return 1
+}
+
+/** The notify read could not be recorded: nothing was written. */
+function refuseObserve(refused: string, ending: 'written' | 'granted' | 'applied'): number {
+  process.stderr.write(`approve: ${refused}. Nothing was ${ending}.\n`)
   return 1
 }
 
@@ -1047,10 +1071,20 @@ export async function run(argv: string[]): Promise<number> {
     // store that cannot be read refuses: it cannot show that no Ask is open.
     const asks = await readAsks(statePath)
     if (!asks.readable) return refuseUnreadableAsks(statePath, asks.cause)
+    // One form per plugin for the bare guard and the Answer: the gate
+    // gate-first picks for that name, bound to its proposal as it stands now.
+    const notify = await readNotify(preferencesPath())
+    const formFor = (name: string): AnswerForm => ({
+      kinds: liveGate(name) !== undefined ? ['parked_result'] : ['missing_grant'],
+      liveDigest: () => proposalFingerprint(state, name, manifests.get(name)!),
+      notify: notify.inUse,
+    })
     let answered: { ask: Ask; principal: string; via: string | null; evidence: string | null } | null = null
     if (answer === null) {
-      const open = openAskFor(asks.store, positionals, now)
-      if (open !== undefined) return refuseBare(open)
+      for (const name of positionals) {
+        const open = openAskFor(asks.store, [name], now, formFor(name))
+        if (open !== undefined) return refuseBare(open)
+      }
     } else {
       const who = answerer(await requirePrincipal(values.principal, 'active'), answer)
       if ('refused' in who) {
@@ -1059,17 +1093,22 @@ export async function run(argv: string[]): Promise<number> {
       }
       // Exactly one plugin: parseAnswerFlags refused any other count. The
       // branch is the one gate-first picks, so the Ask must be of its kind.
-      const plugin = positionals[0]!
-      const manifest = manifests.get(plugin)!
-      const found = checkAnswer(asks.store, answer, plugin, now, {
-        kinds: gated.length > 0 ? ['parked_result'] : ['missing_grant'],
-        liveDigest: () => proposalFingerprint(state, plugin, manifest),
-      })
+      const found = checkAnswer(asks.store, answer, positionals[0]!, now, formFor(positionals[0]!))
       if ('refused' in found) return refuseAnswer(found.refused)
       answered = { ask: found.ask, ...who, evidence: answer.evidence }
     }
+    // The notify this command judged goes on the record once, before its first write.
+    let observed = false
+    const observeOnce = async (ending: 'written' | 'applied'): Promise<number | null> => {
+      if (observed) return null
+      observed = true
+      const refused = await observePreferences(notify.loaded, statePath)
+      return refused === null ? null : refuseObserve(refused.refused, ending)
+    }
     const recordTheAnswer = async (): Promise<number | null> => {
       if (answered === null) return null
+      const refusedObserve = await observeOnce('written')
+      if (refusedObserve !== null) return refusedObserve
       const rec = await recordAnswer(statePath, answered.ask, {
         answer: 'approve',
         principal: answered.principal,
@@ -1172,7 +1211,8 @@ export async function run(argv: string[]): Promise<number> {
         }
 
         // The Answer is on the record, and its nonce spent, before the apply.
-        const refusedAnswer = await recordTheAnswer()
+        // A bare apply has no record of its own, so the notify read goes first.
+        const refusedAnswer = answered === null ? await observeOnce('applied') : await recordTheAnswer()
         if (refusedAnswer !== null) return refusedAnswer
 
         // `manifests` is the whole loaded map, not this plugin's manifest: the
@@ -1304,7 +1344,18 @@ export async function run(argv: string[]): Promise<number> {
     // already judged is the one the Grant names.
     const refusedAnswer = await recordTheAnswer()
     if (refusedAnswer !== null) return refusedAnswer
-    return await writeSessionGrant(values, positionals, ttlMs, manifests, statePath, approvalPath, answered?.principal)
+    // A bare Grant records the notify read inside the grant path, after its
+    // principal check. An Answer already recorded it with the Answer.
+    return await writeSessionGrant(
+      values,
+      positionals,
+      ttlMs,
+      manifests,
+      statePath,
+      approvalPath,
+      answered?.principal,
+      answered === null ? notify.loaded : undefined,
+    )
     },
   )
 }
@@ -1323,6 +1374,8 @@ async function writeSessionGrant(
   statePath: string,
   approvalPath: string,
   answeredBy?: string,
+  /** The preferences bytes the caller judged `notify` on, recorded before the grant. `--all` reads none. */
+  notifyRead?: PreferencesRead,
 ): Promise<number> {
   // Read in the hold, so a window that closed while this waited is judged closed.
   const now = Date.now()
@@ -1338,6 +1391,11 @@ async function writeSessionGrant(
       return 1
     }
     principal = actor.id
+  }
+
+  if (notifyRead !== undefined) {
+    const observed = await observePreferences(notifyRead, statePath)
+    if (observed !== null) return refuseObserve(observed.refused, 'granted')
   }
 
   // On the audit record before the grant file changes, and after every refusal

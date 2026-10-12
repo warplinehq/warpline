@@ -135,9 +135,11 @@ says a denial existed and that the proposal changed — a returning question mus
 not be able to pass itself off as a new one.
 
 **An approve or deny that answers an Ask carries its nonce and digest.** When
-an open Ask covers the plugin, `warpline approve <plugin>` and `warpline deny
-<plugin>` answer it with `--nonce`, a prefix of its digest in `--digest`, and
-`--principal`, and a bare one refuses, naming the Ask. A no takes exactly the
+an open Ask covers the plugin and the form could answer it (the decision
+unchanged since it was raised, and `notify` set), `warpline approve <plugin>`
+and `warpline deny <plugin>` answer it with `--nonce`, a prefix of its digest
+in `--digest`, and `--principal`, and a bare one refuses, naming the Ask. A
+bare one is never refused by an Ask it could not answer. A no takes exactly the
 flags a yes does. `warpline deny --standing <grant-id>` is the deny form of a
 renewal Ask: it records the Answer and nothing else, so the grant lapses at its
 renewal deadline unless someone renews it
@@ -190,7 +192,8 @@ Rules that follow from the runtime, not from taste:
   changes kind or digest closes `superseded`, and a new Ask with a new nonce
   takes its scope, so a scope has at most one open Ask. A decision that goes
   away with no Answer lapses: its Ask stays open with no reminders and expires
-  with no message.
+  with no message. It holds no bare verb back: a bare verb refuses only on an
+  Ask it could answer now, and with notify unset no Ask is open.
 - **Answering an expired Ask is refused and said.** If the operator opened
   the Ask before expiry and answers after, the Board reports "this expired
   at *t*" and does nothing. It never silently re-raises.

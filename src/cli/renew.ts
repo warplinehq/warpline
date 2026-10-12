@@ -35,16 +35,19 @@ import { dirname } from 'node:path'
 import { parseArgs } from 'node:util'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { appendAudit } from '../lib/audit-log.js'
-import { engineStatePath } from '../lib/paths.js'
+import { engineStatePath, preferencesPath } from '../lib/paths.js'
 import {
   ANSWER_REFUSAL_TEXT,
   asksPath,
   checkAnswer,
+  observePreferences,
   openAskFor,
   parseAnswerFlags,
   readAsks,
+  readNotify,
   recordAnswer,
   renewalDigest,
+  type AnswerForm,
   type Ask,
 } from '../lib/asks.js'
 import { judgePrincipal, requirePrincipal, standingRegistry } from '../lib/principals.js'
@@ -173,9 +176,18 @@ export async function run(argv: string[]): Promise<number> {
       process.stderr.write(`renew: ${asksPath(statePath)} cannot be read (${asks.cause}). Nothing was renewed.\n`)
       return 1
     }
+    // One renewal form over the grant as it stands now, for the bare guard and
+    // the Answer: one renewed since the Ask was raised has moved its digest.
+    const notify = await readNotify(preferencesPath())
+    const stored = read.store.grants.find((g) => g.id === id)
+    const form: AnswerForm = {
+      kinds: ['renewal'],
+      liveDigest: () => (stored === undefined ? null : renewalDigest(stored)),
+      notify: notify.inUse,
+    }
     let answered: { ask: Ask; via: string | null; evidence: string | null } | null = null
     if (answer === null) {
-      const open = openAskFor(asks.store, [id], now)
+      const open = openAskFor(asks.store, [id], now, form)
       if (open !== undefined) {
         return refuse(
           `${id} has an open Ask, ${open.id}, so a bare renew cannot answer it. Read it with ` +
@@ -190,12 +202,7 @@ export async function run(argv: string[]): Promise<number> {
         if ('refused' in judged) return refuse(`--via: ${judged.refused}.`)
         via = judged.id
       }
-      // The grant as it stands now: one renewed since the Ask was raised has moved its digest.
-      const stored = read.store.grants.find((g) => g.id === id)
-      const found = checkAnswer(asks.store, answer, id, now, {
-        kinds: ['renewal'],
-        liveDigest: () => (stored === undefined ? null : renewalDigest(stored)),
-      })
+      const found = checkAnswer(asks.store, answer, id, now, form)
       if ('refused' in found) return refuse(`refused (${found.refused}): ${ANSWER_REFUSAL_TEXT[found.refused]}`)
       answered = { ask: found.ask, via, evidence: answer.evidence }
     }
@@ -210,6 +217,10 @@ export async function run(argv: string[]): Promise<number> {
     const hardMax = iso(hardMaxAt)
     // A renewal near the hard maximum sets a deadline past it, and the grant lapses at the earlier.
     const nextExpiry = iso(Math.min(now + grant.period_ms, hardMaxAt))
+
+    // The notify this command judged goes on the record before anything is written.
+    const observed = await observePreferences(notify.loaded, statePath)
+    if (observed !== null) return refuse(`${observed.refused}.`)
 
     // The Answer is on the record, and its Ask closed, before the renewal's own record.
     if (answered !== null) {

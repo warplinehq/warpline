@@ -1019,20 +1019,30 @@ The `notify` block is the one exception. The file-level read accepts it without
 judging it, and it is parsed on its own. An unusable block, an empty `argv` for
 example, does not refuse the file: the advance raises and sends no Ask, and
 nothing else changes (§ 16). An unusable block is reported as unusable, never
-read as unset. An earlier build refuses a file carrying `notify` as an unknown
+read as unset. The Answer verbs read the block too, and with it unset or
+unusable they treat no Ask as open (§ 16). An earlier build refuses a file carrying `notify` as an unknown
 key, so remove it before downgrading.
 
 Every production read of `preferences.json` is checked against the audit store
 (§ 14): an advance, once it holds the run lock and before it uses any value, and
-`warpline run`, before the plugin runs. Only a file that parsed is checked. The
+`warpline run`, before the plugin runs.
+The Answer verbs record the bytes they read: `approve <plugin>`,
+`approve <plugin> --content`, `deny <plugin>`, `deny --standing` and `renew`
+read the file in their state-lock hold to tell whether an Ask can be open, and
+record nothing at that read. On a command they carry out, they record those
+same bytes just before their first record or write, never by a second read,
+and a command they refuse leaves the audit store as it was. They go on with a file that does not parse, counting `notify` set,
+so they record it too. A file they cannot read at all has no bytes to record.
+For an advance and `warpline run`, only a file that parsed is checked. The
 sha256 of the exact bytes parsed is compared with the last digest the store
 holds for the file. A difference appends `preferences.observed` naming the two
 digests, and neither what changed nor who changed it. A hand edit is a
 difference, so is a file the store has not seen and a file that was deleted.
 Bytes are compared, not values, so re-spacing the file is recorded too. A
 failed append refuses the read: `advance` exits `75` with nothing fired, and
-`run` exits `1` with `ok: false` and the plugin not run. An invalid file is
-refused before the comparison, as above, and is never digested. A missing file
+`run` exits `1` with `ok: false` and the plugin not run. An advance and
+`warpline run` refuse an invalid file before the comparison, as above, and
+never digest it. A missing file
 the store has never seen records nothing.
 
 `warpline prefs set <dotted.key> <json-value>` is the audited writer of
@@ -4781,7 +4791,8 @@ advance and no longer waits on a human, or for a renewal Ask its grant is gone
 from a readable standing grants file. Examples: `approve --all` covered it, its
 gate was discarded, the grant was revoked. Its Ask stays `open` with no
 reminders, and at `expires_at` it closes `expired` with no message. It is never
-closed `superseded`, because nothing replaced it.
+closed `superseded`, because nothing replaced it. It holds no bare form back
+(see Answers below).
 
 **An Ask whose plugin was not evaluated keeps its state.** When the level loop
 stops above a plugin, its Ask is not closed, not superseded and keeps its
@@ -4979,13 +4990,20 @@ The Answer names its Ask by the plugin and the nonce. A nonce that names no
 Ask on that plugin is refused as `unknown` (see Refusals below), never run as
 the bare form, so a nonce carried from another plugin's Ask is unknown here.
 
-**A bare form refuses while an Ask is open.** `approve <plugin>`, on either
-gate, `approve <plugin> --content`, `deny <plugin>` and `renew <grant-id>`
-exit `1` with nothing written while an Ask on that plugin or grant is `open`
-and has not reached its `expires_at`. The line
-names the Ask's id and `warpline approvals show <id>`, never its nonce. With no
-open Ask, for example with `notify` unset, every form behaves as it did before
-Asks existed.
+**A bare form refuses only on an Ask it could answer.** `approve <plugin>`, on
+either gate, `approve <plugin> --content`, `deny <plugin>` and
+`renew <grant-id>` exit `1` with nothing written while the plugin or grant has
+an Ask the form could answer now: `open`, before its `expires_at`, of a kind
+the form answers, naming the digest of the decision as it stands now,
+recomputed by the command, while `notify` is set and usable. The line names the
+Ask's id and `warpline approvals show <id>`, never its nonce. An Answer is
+checked against the same conditions, so a bare form never refuses unless the
+Ask's nonce would answer it. An Ask whose decision vanished or moved, or a
+`parked_result` Ask whose gate is gone, holds no bare form back, though it
+stays `open` until its `expires_at`. With `notify` unset or unusable no Ask is
+open: every form behaves as it did before Asks existed, and an Answer is
+refused as `unknown`. A `preferences.json` that cannot be read, or does not
+parse, counts as `notify` set.
 
 **An unreadable store refuses every form.** Every named and `--content` form
 of `approve`, every form of `deny` but `--list` and `--remove`, and every
@@ -5032,12 +5050,13 @@ An Answer that does not match its Ask is refused by name. Each refusal exits
 (the short prefix prints `prefix shorter than 12:` and its sentence), never a
 typed value, and writes nothing: the state document, the session
 grant file, the standing grants file, `asks.json` and the audit store are as
-they were.
+they were. This holds after a hand edit of preferences.json too: the next
+command that acts records the edit (§ 6).
 
 | Reason | When |
 |---|---|
 | `prefix shorter than 12` | `--digest` has fewer than 12 hex characters. Checked before anything is read. |
-| `unknown` | No Ask on the plugin named carries the nonce, in any state. |
+| `unknown` | No Ask on the plugin named carries the nonce, in any state; or notify is unset or unusable, so no Ask is open. |
 | `superseded` | The Ask was closed `superseded`: its decision changed and a newer Ask, with a new nonce, replaced it. |
 | `expired` | The Ask is marked `expired`, or the command's clock has reached its `expires_at`, checked even when no advance has marked it. |
 | `nonce reused` | The Ask is `answered`: its nonce was spent by an earlier Answer. |

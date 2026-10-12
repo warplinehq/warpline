@@ -1403,6 +1403,20 @@ export async function observeAuthorityFile(
   })
 }
 
+/**
+ * The one refusal a command returns when an authority-file observation
+ * rejects, shared by both authority files so the phrase exists once. An
+ * `AuditAppendError` adds its fixed reason; anything else adds nothing, since
+ * its message could name a path.
+ */
+export function observeRefusal(
+  file: 'preferences.json' | 'principals.json',
+  err: unknown,
+): { refused: string; cause: 'audit' } {
+  const phrase = `the audit store could not record a change to ${file}`
+  return { refused: err instanceof AuditAppendError ? `${phrase}: ${err.reason}` : phrase, cause: 'audit' }
+}
+
 /** The segment file names, or none when there is no store. */
 async function segmentsIn(dir: string): Promise<string[]> {
   try {

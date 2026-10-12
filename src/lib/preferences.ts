@@ -9,6 +9,7 @@
  *                        defaults and null bytes on a missing file only,
  *                        refuses an invalid one
  *   readPreferences()  — the same, the preferences only
+ *   parsePreferences() — the parse and check of bytes already read
  *   writePreferences() — atomic write through fs-atomic, refuses what read refuses
  *   PREFERENCE_KEYS    — every key `warpline prefs set` accepts, dotted
  *   setPreference()    — one key set, refused unless the result is valid
@@ -198,7 +199,15 @@ export async function readPreferencesFile(
     if (isEnoent(err)) return { prefs: DEFAULT_PREFERENCES, bytes: null }
     throw err
   }
+  return { prefs: parsePreferences(bytes, prefsPath), bytes }
+}
 
+/**
+ * The bytes of a preferences file, parsed and checked, so a caller that read
+ * them once judges exactly those bytes. Throws `PreferencesInvalidError` on
+ * bytes that are not JSON or that the schema refuses.
+ */
+export function parsePreferences(bytes: Buffer, prefsPath: string): Preferences {
   let parsed: unknown
   try {
     parsed = JSON.parse(bytes.toString('utf-8'))
@@ -212,7 +221,7 @@ export async function readPreferencesFile(
   if (!result.success) {
     throw new PreferencesInvalidError(prefsPath, describeIssues(result.error.issues))
   }
-  return { prefs: result.data, bytes }
+  return result.data
 }
 
 /**

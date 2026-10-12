@@ -60,12 +60,15 @@ import {
   ANSWER_REFUSAL_TEXT,
   asksPath,
   checkAnswer,
+  observePreferences,
   openAskFor,
   parseAnswerFlags,
   readAsks,
+  readNotify,
   recordAnswer,
   renewalDigest,
   type AnswerFlags,
+  type AnswerForm,
   type AnswerRefusal,
   type Ask,
 } from '../lib/asks.js'
@@ -81,7 +84,7 @@ import {
 } from '../runtime/engine-state-store.js'
 import { DenialSchema } from '../schemas/engine-state.js'
 import type { Denial, EngineState } from '../schemas/engine-state.js'
-import { engineStatePath, eventsJsonlPath, pluginsDir } from '../lib/paths.js'
+import { engineStatePath, eventsJsonlPath, pluginsDir, preferencesPath } from '../lib/paths.js'
 import { suggest } from './suggest.js'
 
 const USAGE = `Usage: warpline deny <plugin>... [options]
@@ -133,6 +136,12 @@ function refuseBare(ask: Ask): number {
 /** An Answer that does not match its Ask: the reason by name, and nothing written. */
 function refuseAnswer(reason: AnswerRefusal): number {
   process.stderr.write(`deny: refused (${reason}): ${ANSWER_REFUSAL_TEXT[reason]} Nothing was written.\n`)
+  return 1
+}
+
+/** The notify read could not be recorded: nothing was written. */
+function refuseObserve(refused: string, ending: 'written' | 'denied'): number {
+  process.stderr.write(`deny: ${refused}. Nothing was ${ending}.\n`)
   return 1
 }
 
@@ -325,6 +334,7 @@ export async function run(argv: string[]): Promise<number> {
       }
       const asks = await readAsks(statePath)
       if (!asks.readable) return refuseUnreadableAsks(statePath, asks.cause)
+      const notify = await readNotify(preferencesPath())
       // The grant as it stands now. A grant gone, or a file that cannot be
       // read, has no live digest, so the Answer refuses as a mismatch.
       const standing = await readStandingStore()
@@ -332,8 +342,12 @@ export async function run(argv: string[]): Promise<number> {
       const found = checkAnswer(asks.store, answer, grantId, Date.now(), {
         kinds: ['renewal'],
         liveDigest: () => (grant === undefined ? null : renewalDigest(grant)),
+        notify: notify.inUse,
       })
       if ('refused' in found) return refuseAnswer(found.refused)
+      // The notify this command judged goes on the record before the Answer.
+      const observed = await observePreferences(notify.loaded, statePath)
+      if (observed !== null) return refuseObserve(observed.refused, 'written')
       const rec = await recordAnswer(statePath, found.ask, {
         answer: 'deny',
         principal: who.principal,
@@ -479,22 +493,14 @@ export async function run(argv: string[]): Promise<number> {
     // refuses, and a bare deny refuses while an Ask is open on what it names.
     const asks = await readAsks(statePath)
     if (!asks.readable) return refuseUnreadableAsks(statePath, asks.cause)
-    if (answer === null) {
-      const open = openAskFor(asks.store, positionals, now)
-      if (open !== undefined) return refuseBare(open)
-    } else {
-      const who = answerer(actor, answer)
-      if ('refused' in who) {
-        process.stderr.write(`deny: ${who.refused} Nothing was written.\n`)
-        return 1
-      }
-      // Exactly one plugin: parseAnswerFlags refused any other count.
-      const plugin = positionals[0]!
+    // One form per plugin for the bare guard and the Answer. A content Ask
+    // binds the producer's proposal; every other kind the plugin's own.
+    const notify = await readNotify(preferencesPath())
+    const formFor = (plugin: string): AnswerForm => {
       const manifest = manifests.get(plugin)!
-      // A content Ask binds the producer's proposal; every other kind the plugin's own.
       const producer = manifest.approval_class === 'content' ? manifest.dependencies[0] : undefined
       const producerManifest = producer === undefined ? undefined : manifests.get(producer)
-      const found = checkAnswer(asks.store, answer, plugin, now, {
+      return {
         kinds: ['parked_result', 'missing_grant', 'content'],
         liveDigest: (ask) =>
           ask.kind !== 'content'
@@ -502,8 +508,26 @@ export async function run(argv: string[]): Promise<number> {
             : producer === undefined || producerManifest === undefined
               ? null
               : proposalFingerprint(state, producer, producerManifest),
-      })
+        notify: notify.inUse,
+      }
+    }
+    if (answer === null) {
+      for (const plugin of positionals) {
+        const open = openAskFor(asks.store, [plugin], now, formFor(plugin))
+        if (open !== undefined) return refuseBare(open)
+      }
+    } else {
+      const who = answerer(actor, answer)
+      if ('refused' in who) {
+        process.stderr.write(`deny: ${who.refused} Nothing was written.\n`)
+        return 1
+      }
+      // Exactly one plugin: parseAnswerFlags refused any other count.
+      const found = checkAnswer(asks.store, answer, positionals[0]!, now, formFor(positionals[0]!))
       if ('refused' in found) return refuseAnswer(found.refused)
+      // The notify this command judged goes on the record before the Answer.
+      const observed = await observePreferences(notify.loaded, statePath)
+      if (observed !== null) return refuseObserve(observed.refused, 'written')
       // On the record, and the Ask closed, before any denial is decided or recorded.
       const rec = await recordAnswer(statePath, found.ask, {
         answer: 'deny',
@@ -592,6 +616,13 @@ export async function run(argv: string[]): Promise<number> {
     }
 
     if (recorded.length === 0) return 0
+
+    // A bare deny records the notify it judged before its first denial record.
+    // An Answer already recorded it with the Answer.
+    if (answer === null) {
+      const observed = await observePreferences(notify.loaded, statePath)
+      if (observed !== null) return refuseObserve(observed.refused, 'denied')
+    }
 
     // Each denial is on the audit record before the state document changes,
     // one record per plugin, in order. The note is operator free text and

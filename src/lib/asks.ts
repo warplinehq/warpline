@@ -34,9 +34,10 @@ import { readFile } from 'node:fs/promises'
 import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
-import { appendAudit, ASK_ANSWERS, ASK_KINDS, CarriedPluginName, EVIDENCE_TOKEN, OS_USER_NAME } from './audit-log.js'
+import { appendAudit, ASK_ANSWERS, ASK_KINDS, CarriedPluginName, EVIDENCE_TOKEN, observeAuthorityFile, observeRefusal, OS_USER_NAME } from './audit-log.js'
 import { verifyAnswer } from './assurance.js'
 import { atomicWriteJson, syncInstalled } from './fs-atomic.js'
+import { parseNotify, parsePreferences, PreferencesInvalidError } from './preferences.js'
 
 export const ASKS_READER_VERSION = 1
 
@@ -592,9 +593,15 @@ export function parseAnswerFlags(
   }
 }
 
-/** The open Ask on any of `scopes` that has not reached its `expires_at`, if one exists. */
-export function openAskFor(store: AskStore, scopes: readonly string[], now: number): Ask | undefined {
-  return store.asks.find((a) => a.state === 'open' && scopes.includes(a.scope) && now < Date.parse(a.expires_at))
+/**
+ * One Answer form: the kinds of Ask it answers, the digest of the decision it
+ * would act on now, recomputed by the command, and whether `notify` is set and
+ * usable.
+ */
+export interface AnswerForm {
+  kinds: readonly AskKind[]
+  liveDigest: (ask: Ask) => string | null
+  notify: boolean
 }
 
 /** Why an Answer is refused, in the order `checkAnswer` checks. A short prefix is refused earlier, by `parseAnswerFlags`. */
@@ -602,7 +609,7 @@ export type AnswerRefusal = 'unknown' | 'superseded' | 'expired' | 'nonce reused
 
 /** One sentence per refusal. None names a typed value, so a nonce never reaches a terminal or a log. */
 export const ANSWER_REFUSAL_TEXT: Record<AnswerRefusal, string> = {
-  unknown: 'No Ask on this scope carries that nonce.',
+  unknown: 'No Ask on this scope carries that nonce, or none is open because notify is unset or unusable.',
   superseded: 'The decision changed and a newer Ask replaced this one.',
   expired: 'The Ask is past its expiry and can no longer be answered.',
   'nonce reused': 'That nonce has already answered its Ask.',
@@ -610,32 +617,94 @@ export const ANSWER_REFUSAL_TEXT: Record<AnswerRefusal, string> = {
 }
 
 /**
+ * Why `form` could not answer `ask` now, or null when it could. The one
+ * predicate the bare guard and `checkAnswer` share, so a bare form refuses
+ * exactly when the Ask's nonce would answer it. Worked out on each read and
+ * never stored: an Ask whose decision vanished stays `open` until it expires.
+ */
+export function whyUnanswerable(ask: Ask, now: number, form: AnswerForm): AnswerRefusal | null {
+  // With notify unset or unusable no Ask is open.
+  if (!form.notify) return 'unknown'
+  if (ask.state === 'superseded') return 'superseded'
+  // The clock, not only the mark: no advance may have run since the Ask lapsed.
+  if (ask.state === 'expired' || now >= Date.parse(ask.expires_at)) return 'expired'
+  // A spent nonce: replaying a captured Answer reaches no second effect.
+  if (ask.state === 'answered') return 'nonce reused'
+  // The verb form, since two kinds can share one digest, and the decision as
+  // it stands now, which may have moved before any advance superseded the Ask.
+  if (!form.kinds.includes(ask.kind) || form.liveDigest(ask) !== ask.digest) return 'digest mismatch'
+  return null
+}
+
+/** The Ask on any of `scopes` that `form` could answer now, if one exists. */
+export function openAskFor(store: AskStore, scopes: readonly string[], now: number, form: AnswerForm): Ask | undefined {
+  return store.asks.find((a) => scopes.includes(a.scope) && whyUnanswerable(a, now, form) === null)
+}
+
+/**
  * The Ask an Answer names: the one on `scope` whose nonce it carries. With
  * none, the Answer is refused as `unknown`, never run as the bare verb, and a
- * nonce carried to another scope is unknown there too.
- * `now` and `verb` (the kinds this branch answers, and the live digest of what
- * it would act on) are the inputs the refusal checks read.
+ * nonce carried to another scope is unknown there too. Then the Ask must be
+ * one `form` could answer now, and the digest prefix must match it.
  */
 export function checkAnswer(
   store: AskStore,
   flags: AnswerFlags,
   scope: string,
   now: number,
-  verb: { kinds: readonly AskKind[]; liveDigest: (ask: Ask) => string | null },
+  form: AnswerForm,
 ): { ask: Ask } | { refused: AnswerRefusal } {
   const ask = store.asks.find((a) => a.scope === scope && a.nonce === flags.nonce)
   if (ask === undefined) return { refused: 'unknown' }
-  if (ask.state === 'superseded') return { refused: 'superseded' }
-  // The clock, not only the mark: no advance may have run since the Ask lapsed.
-  if (ask.state === 'expired' || now >= Date.parse(ask.expires_at)) return { refused: 'expired' }
-  // A spent nonce: replaying a captured Answer reaches no second effect.
-  if (ask.state === 'answered') return { refused: 'nonce reused' }
-  // Three ways one reason: the prefix, the decision as it stands now (it may
-  // have moved before any advance superseded the Ask), and the verb form,
-  // since two kinds can share one digest.
-  const live = verb.liveDigest(ask)
-  if (!ask.digest.startsWith(flags.digestPrefix) || live !== ask.digest || !verb.kinds.includes(ask.kind)) {
-    return { refused: 'digest mismatch' }
-  }
+  const why = whyUnanswerable(ask, now, form)
+  if (why !== null) return { refused: why }
+  if (!ask.digest.startsWith(flags.digestPrefix)) return { refused: 'digest mismatch' }
   return { ask }
+}
+
+/** The preferences bytes a command judged `notify` on, or null when the file could not be read at all. */
+export type PreferencesRead = { bytes: Buffer | null } | null
+
+/**
+ * Whether `notify` is set and usable in the preferences file at `prefsPath`,
+ * from one read that records nothing. `loaded` is the bytes judged, null for a
+ * missing file, so a command that goes on to act records exactly those.
+ */
+export async function readNotify(prefsPath: string): Promise<{ inUse: boolean; loaded: PreferencesRead }> {
+  let bytes: Buffer
+  try {
+    bytes = await readFile(prefsPath)
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') return { inUse: false, loaded: { bytes: null } }
+    // Could not look never widens what a bare form may do, and nothing was read to record.
+    return { inUse: true, loaded: null }
+  }
+  try {
+    const judged = parseNotify(parsePreferences(bytes, prefsPath).notify)
+    return { inUse: 'notify' in judged && judged.notify !== null, loaded: { bytes } }
+  } catch (err) {
+    if (!(err instanceof PreferencesInvalidError)) throw err
+    // A file that does not parse counts as notify set, and is recorded like any other when a command acts.
+    return { inUse: true, loaded: { bytes } }
+  }
+}
+
+/**
+ * Record exactly the bytes `readNotify` judged, never a second read, so the
+ * record names what the command acted on. A command calls this once, on its
+ * accepting path, just before its first write, so a refused command leaves the
+ * audit store as it was. Null `loaded` (nothing read) records nothing.
+ * `statePath` is an argument: this module never resolves a home.
+ */
+export async function observePreferences(
+  loaded: PreferencesRead,
+  statePath: string,
+): Promise<null | { refused: string; cause: 'audit' }> {
+  if (loaded === null) return null
+  try {
+    await observeAuthorityFile(statePath, 'preferences.observed', loaded.bytes)
+  } catch (err) {
+    return observeRefusal('preferences.json', err)
+  }
+  return null
 }
