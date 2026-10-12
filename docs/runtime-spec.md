@@ -4907,7 +4907,7 @@ An Answer carries four flags beside the form's own:
 | Flag | Meaning |
 |---|---|
 | `--nonce <hex>` | The Ask's nonce, from the `notify` message. Compared lowercased. |
-| `--digest <hex>` | A hex prefix of the digest the Ask names, compared lowercased. |
+| `--digest <hex>` | A prefix of the digest the Ask names: 12 to 64 hex characters, compared case-insensitively. |
 | `--via <id>` | Optional. The registered machine that relayed the Answer. |
 | `--evidence <ref>` | Optional. A reference token: a letter or digit, then letters, digits and `. _ : / # -`, at most 200 characters. |
 
@@ -4915,7 +4915,7 @@ These are checked before anything is read, and each refusal exits `1` naming
 the flag, never a typed value, with nothing written: `--nonce` without
 `--digest` or the reverse; `--via` or `--evidence` without `--nonce`; `--nonce`
 with no plugin or with more than one; `--nonce` with `--all`; any Answer flag
-with `--standing` or with `--content --remove`; a `--digest` that is not hex;
+with `--standing` or with `--content --remove`; a `--digest` that is not hex or is longer than 64;
 an `--evidence` off the token rule; and an Answer without `--principal`.
 
 `--principal` is required on an Answer and must name an active principal of
@@ -4971,3 +4971,14 @@ recorded beside the principal and never as one; `evidence`, or `null` when
 absent; `assurance`, `asserted`, the only level in this release; and
 `decide_ms`, the answer instant minus the Ask's `raised_at`, never a
 reminder's. The answer instant is the same one the Ask's `closed_at` records.
+
+### Refusals
+
+An Answer that does not match its Ask is refused by name. Each refusal exits
+`1`, prints the reason, and writes nothing: the state document, the session
+grant file, the standing grants file, `asks.json` and the audit store are as
+they were.
+
+| Reason | When |
+|---|---|
+| `prefix shorter than 12` | `--digest` has fewer than 12 hex characters. Checked before anything is read. |

@@ -571,7 +571,13 @@ export function parseAnswerFlags(
   if (scopes.length !== 1) {
     return { refused: `--nonce answers one Ask, so it names exactly one plugin (got ${scopes.length}).` }
   }
-  if (!/^[0-9a-f]+$/i.test(digest!)) return { refused: '--digest is a prefix of the Ask\'s digest, in hex.' }
+  if (!/^[0-9a-f]{1,64}$/i.test(digest!)) {
+    return { refused: '--digest is a prefix of the Ask\'s digest: hex, at most 64 characters.' }
+  }
+  // A short prefix makes a match cheap to guess, so 12 is the floor.
+  if (digest!.length < 12) {
+    return { refused: 'prefix shorter than 12: --digest needs at least 12 hex characters of the Ask\'s digest.' }
+  }
   if (evidence !== undefined && !EVIDENCE_TOKEN.test(evidence)) {
     return {
       refused:
