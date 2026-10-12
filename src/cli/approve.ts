@@ -64,6 +64,16 @@
  * It is answered before every other mode and refused whole beside any session
  * or content flag, so it never applies a parked result.
  *
+ * **Answering an Ask is not issuing a Grant.** When an open Ask covers the
+ * plugin named, the command answers it only with that Ask's `--nonce` and a
+ * `--digest` prefix, and with `--principal`. The Answer goes on the audit
+ * record as `ask.answered` and its Ask is marked answered, both before the
+ * effect: the parked result applied, the Grant merged, or the content
+ * approval written. A bare form refuses while the Ask is open, and an Ask
+ * store that cannot be read refuses every named and `--content` form, bare or
+ * answering, because "could not look" is never "no Ask". `--all` and
+ * `--standing` issue grants and never read the store.
+ *
  * Each of the four record-writing gestures (a session Grant, a standing grant,
  * a content approval and its withdrawal) is on the audit record before it takes
  * effect, and the records
@@ -99,7 +109,18 @@ import {
   type IssueRefusal,
 } from '../runtime/approval-gate.js'
 import { appendAudit } from '../lib/audit-log.js'
-import { requirePrincipal } from '../lib/principals.js'
+import { judgePrincipal, requirePrincipal } from '../lib/principals.js'
+import {
+  asksPath,
+  checkAnswer,
+  openAskFor,
+  parseAnswerFlags,
+  readAsks,
+  recordAnswer,
+  type AnswerFlags,
+  type Ask,
+  type AsksUnreadableCause,
+} from '../lib/asks.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
 import {
@@ -169,6 +190,15 @@ Standing grant (held by a machine, issued by a human, over named plugins):
                      ${STANDING_PERIOD_CAP_D}d. Default ${STANDING_DEFAULT_H}h.
   Its scopes are the plugins named, never --all or *. Renewal and revoke are
   separate verbs.
+
+Answering an Ask (one plugin, on the named or --content form):
+  --nonce <hex>      The Ask's nonce, from the notify message. Needs --digest
+                     and --principal.
+  --digest <hex>     A prefix of the digest the Ask names.
+  --via <id>         The active machine principal that relayed the Answer.
+  --evidence <ref>   A reference token, such as a ticket id.
+  While an Ask is open on a plugin, a bare approve of it refuses and names the
+  Ask: read it with 'warpline approvals show <id>'.
 `
 
 const MINUTE = 60 * 1000
@@ -247,6 +277,7 @@ async function approveContent(
   consumer: string,
   values: { 'not-after'?: string; 'not-before'?: string; zone?: string; principal?: string },
   manifests: Map<string, PluginManifest>,
+  answer: AnswerFlags | null,
 ): Promise<number> {
   const manifest = manifests.get(consumer)
   if (manifest === undefined) {
@@ -286,6 +317,24 @@ async function approveContent(
         `Cannot read engine state: ${err.reason}\nNothing was approved.\n`,
       )
       return 1
+    }
+
+    // -- The Ask -----------------------------------------------------------
+    // Read in this hold, bare or answering. A store that cannot be read refuses
+    // here, and a bare form refuses while an Ask is open on the consumer.
+    const asks = await readAsks(statePath)
+    if (!asks.readable) return refuseUnreadableAsks(statePath, asks.cause)
+    let who: { principal: string; via: string | null } | null = null
+    if (answer === null) {
+      const open = openAskFor(asks.store, [consumer], now)
+      if (open !== undefined) return refuseBare(open)
+    } else {
+      const judged = answerer(actor, answer)
+      if ('refused' in judged) {
+        process.stderr.write(`approve: ${judged.refused} Nothing was written.\n`)
+        return 1
+      }
+      who = judged
     }
 
     // -- The class ---------------------------------------------------------
@@ -458,6 +507,27 @@ async function approveContent(
     const fingerprint = proposalFingerprint(state, producer, producerManifest)
     const replaced = Object.hasOwn(state.approvals, consumer) ? state.approvals[consumer] : undefined
 
+    // The Answer goes on the record, and its Ask is marked answered, before the
+    // content approval's own record. A nonce naming no Ask is the plain verb.
+    let answered = false
+    if (answer !== null && who !== null) {
+      const found = checkAnswer(asks.store, answer, consumer, now, {
+        kinds: ['content'],
+        liveDigest: () => fingerprint,
+      })
+      if ('ask' in found) {
+        const rec = await recordAnswer(statePath, found.ask, {
+          answer: 'approve_content',
+          principal: who.principal,
+          via: who.via,
+          evidence: answer.evidence,
+          answeredAt: Date.now(),
+        })
+        if ('refused' in rec) return refuseRecord(rec.refused, statePath)
+        answered = true
+      }
+    }
+
     // On the audit record before anything changes, in memory or on disk. The
     // window goes in as the instants it resolved to: the typed wall clocks and
     // the zone stay out. A replacement is one record carrying the replaced
@@ -474,7 +544,12 @@ async function approveContent(
         principal: actor.id,
       })
     } catch {
-      process.stderr.write('The audit store could not record this content approval. Nothing was written.\n')
+      process.stderr.write(
+        answered
+          ? 'The audit store could not record this content approval, so none was written. The Answer is ' +
+              'on the record, and the next advance asks again.\n'
+          : 'The audit store could not record this content approval. Nothing was written.\n',
+      )
       return 1
     }
 
@@ -626,6 +701,50 @@ async function removeContentApproval(
   })
 }
 
+/** Every Answer form refuses on a store it could not read: "could not look" is never "no Ask". */
+function refuseUnreadableAsks(statePath: string, cause: AsksUnreadableCause): number {
+  process.stderr.write(`approve: ${asksPath(statePath)} cannot be read (${cause}). Nothing was written.\n`)
+  return 1
+}
+
+/** A bare form while an Ask is open on what it names. Names the Ask, never its nonce. */
+function refuseBare(ask: Ask): number {
+  process.stderr.write(
+    `approve: ${ask.scope} has an open Ask, ${ask.id}, so a bare approve cannot answer it. ` +
+      `Read it with 'warpline approvals show ${ask.id}', then answer it with its --nonce and --digest. ` +
+      `Nothing was written.\n`,
+  )
+  return 1
+}
+
+/** `recordAnswer` refused: nothing of the effect was written. */
+function refuseRecord(refused: 'audit' | 'store', statePath: string): number {
+  process.stderr.write(
+    refused === 'audit'
+      ? 'The audit store could not record this Answer. Nothing was written.\n'
+      : `approve: ${asksPath(statePath)} could not be read or written after the Answer was recorded, so its ` +
+          `Ask is still open. The audit record names an Answer whose effect was not written, and nothing ` +
+          `else was written.\n`,
+  )
+  return 1
+}
+
+/**
+ * Who answered and through what. `--via` is judged on the registry the
+ * `--principal` check already read, never a second read.
+ */
+function answerer(
+  actor: Awaited<ReturnType<typeof requirePrincipal>>,
+  answer: AnswerFlags,
+): { principal: string; via: string | null } | { refused: string } {
+  if ('refused' in actor) return { refused: `--principal: ${actor.refused}.` }
+  // Unreachable: an Answer without --principal is refused before anything is read.
+  if (actor.id === null) return { refused: '--principal is required on an Answer.' }
+  if (answer.via === null) return { principal: actor.id, via: null }
+  const judged = judgePrincipal(actor.loaded.registry, answer.via, 'active-machine')
+  return 'refused' in judged ? { refused: `--via: ${judged.refused}.` } : { principal: actor.id, via: judged.id }
+}
+
 export async function run(argv: string[]): Promise<number> {
   let values: {
     all?: boolean
@@ -642,6 +761,10 @@ export async function run(argv: string[]): Promise<number> {
     holder?: string
     period?: string
     'hard-max'?: string
+    nonce?: string
+    digest?: string
+    via?: string
+    evidence?: string
   }
   let positionals: string[]
   try {
@@ -664,6 +787,10 @@ export async function run(argv: string[]): Promise<number> {
         holder: { type: 'string' },
         period: { type: 'string' },
         'hard-max': { type: 'string' },
+        nonce: { type: 'string' },
+        digest: { type: 'string' },
+        via: { type: 'string' },
+        evidence: { type: 'string' },
       },
       allowPositionals: true,
       strict: true,
@@ -677,6 +804,37 @@ export async function run(argv: string[]): Promise<number> {
     positionals = [...new Set(parsed.positionals)]
   } catch (err) {
     process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n\n${USAGE}`)
+    return 1
+  }
+
+  // The Answer flags, checked before anything is read. Issuing a standing grant
+  // and withdrawing a content approval answer no Ask, so a flag that would
+  // vanish there is named rather than dropped.
+  const answerFlagsGiven = [
+    values.nonce !== undefined ? '--nonce' : null,
+    values.digest !== undefined ? '--digest' : null,
+    values.via !== undefined ? '--via' : null,
+    values.evidence !== undefined ? '--evidence' : null,
+  ].filter((f): f is string => f !== null)
+  if (answerFlagsGiven.length > 0 && (values.standing || (values.content && values.remove))) {
+    process.stderr.write(
+      `approve: ${answerFlagsGiven.join(', ')} cannot go with ` +
+        `${values.standing ? '--standing: issuing a standing grant' : '--content --remove: withdrawing a content approval'} ` +
+        `answers no Ask. Nothing was written.\n`,
+    )
+    return 1
+  }
+  const parsedAnswer = parseAnswerFlags(values, positionals)
+  if ('refused' in parsedAnswer) {
+    process.stderr.write(`approve: ${parsedAnswer.refused} Nothing was written.\n`)
+    return 1
+  }
+  const answer = parsedAnswer.answer
+  if (answer !== null && values.principal === undefined) {
+    process.stderr.write(
+      'approve: --principal is required on an Answer: it names who answered, and one is never inferred. ' +
+        'Nothing was written.\n',
+    )
     return 1
   }
 
@@ -788,7 +946,7 @@ export async function run(argv: string[]): Promise<number> {
   // Reaches no symbol in `approval-gate.ts`, writes no grant, applies no parked
   // result, and returns before the gate-first dispatch below ever runs.
   if (values.content) {
-    return await approveContent(positionals[0]!, values, manifests)
+    return await approveContent(positionals[0]!, values, manifests, answer)
   }
 
   // -- Gate-first dispatch -------------------------------------------------
@@ -876,6 +1034,44 @@ export async function run(argv: string[]): Promise<number> {
       return g !== undefined && g.applied_at === null ? g : undefined
     }
     const gated = positionals.filter((name) => liveGate(name) !== undefined)
+
+    // -- The Ask -----------------------------------------------------------
+    // Read in this hold, bare or answering, before either gate is answered. A
+    // store that cannot be read refuses: it cannot show that no Ask is open.
+    const asks = await readAsks(statePath)
+    if (!asks.readable) return refuseUnreadableAsks(statePath, asks.cause)
+    let answered: { ask: Ask; principal: string; via: string | null; evidence: string | null } | null = null
+    if (answer === null) {
+      const open = openAskFor(asks.store, positionals, now)
+      if (open !== undefined) return refuseBare(open)
+    } else {
+      const who = answerer(await requirePrincipal(values.principal, 'active'), answer)
+      if ('refused' in who) {
+        process.stderr.write(`approve: ${who.refused} Nothing was written.\n`)
+        return 1
+      }
+      // Exactly one plugin: parseAnswerFlags refused any other count. The
+      // branch is the one gate-first picks, so the Ask must be of its kind.
+      const plugin = positionals[0]!
+      const manifest = manifests.get(plugin)!
+      const found = checkAnswer(asks.store, answer, plugin, now, {
+        kinds: gated.length > 0 ? ['parked_result'] : ['missing_grant'],
+        liveDigest: () => proposalFingerprint(state, plugin, manifest),
+      })
+      if ('ask' in found) answered = { ask: found.ask, ...who, evidence: answer.evidence }
+    }
+    const recordTheAnswer = async (): Promise<number | null> => {
+      if (answered === null) return null
+      const rec = await recordAnswer(statePath, answered.ask, {
+        answer: 'approve',
+        principal: answered.principal,
+        via: answered.via,
+        evidence: answered.evidence,
+        answeredAt: Date.now(),
+      })
+      return 'refused' in rec ? refuseRecord(rec.refused, statePath) : null
+    }
+
     if (gated.length > 0 && gated.length < positionals.length) {
       const ungated = positionals.filter((n) => !gated.includes(n))
       process.stderr.write(
@@ -888,9 +1084,10 @@ export async function run(argv: string[]): Promise<number> {
     }
 
     if (gated.length > 0) {
-      // No audit kind records a parked apply yet, so a principal named here
-      // would be recorded nowhere. Refused by name rather than dropped.
-      if (values.principal !== undefined) {
+      // No audit kind records a bare parked apply, so a principal named here
+      // would be recorded nowhere. Refused by name rather than dropped. An
+      // Answer records its principal on `ask.answered`, so it is let through.
+      if (values.principal !== undefined && answered === null) {
         process.stderr.write(
           'approve: --principal names who grants authority, and applying a parked result is not ' +
             'recorded with a principal. Nothing was applied.\n',
@@ -966,6 +1163,10 @@ export async function run(argv: string[]): Promise<number> {
           continue
         }
 
+        // The Answer is on the record, and its nonce spent, before the apply.
+        const refusedAnswer = await recordTheAnswer()
+        if (refusedAnswer !== null) return refusedAnswer
+
         // `manifests` is the whole loaded map, not this plugin's manifest: the
         // discard's approval carve-out resolves a PRODUCER named on an approval
         // record, which is a different plugin from the one being applied.
@@ -985,6 +1186,11 @@ export async function run(argv: string[]): Promise<number> {
           continue
         }
         refused.push(name)
+        if (answered !== null) {
+          process.stderr.write(
+            `The Answer to Ask ${answered.ask.id} is on the record, and the parked result for ${name} was not applied.\n`,
+          )
+        }
         if (result.outcome === 'already_applied') {
           process.stderr.write(
             `The parked result for ${name} was already applied at ${result.applied_at}. ` +
@@ -1085,8 +1291,12 @@ export async function run(argv: string[]): Promise<number> {
     // Fell through: no parked gate to apply and no denial standing in the
     // way. The principal check, the record and the grant write share this
     // hold, which serialises concurrent approves: each one reads the grant
-    // file after the last one wrote it, so both land.
-    return await writeSessionGrant(values, positionals, ttlMs, manifests, statePath, approvalPath)
+    // file after the last one wrote it, so both land. An Answer is on the
+    // record, and its nonce spent, before the Grant, and the principal it
+    // already judged is the one the Grant names.
+    const refusedAnswer = await recordTheAnswer()
+    if (refusedAnswer !== null) return refusedAnswer
+    return await writeSessionGrant(values, positionals, ttlMs, manifests, statePath, approvalPath, answered?.principal)
     },
   )
 }
@@ -1104,14 +1314,22 @@ async function writeSessionGrant(
   manifests: Map<string, PluginManifest>,
   statePath: string,
   approvalPath: string,
+  answeredBy?: string,
 ): Promise<number> {
   // Read in the hold, so a window that closed while this waited is judged closed.
   const now = Date.now()
   // Checked in the hold, so a principal disabled while this waited is refused.
-  const actor = await requirePrincipal(values.principal, 'active')
-  if ('refused' in actor) {
-    process.stderr.write(`approve: --principal: ${actor.refused}. Nothing was granted.\n`)
-    return 1
+  // An Answer passes the principal it already judged, so the registry is read once.
+  let principal: string | null
+  if (answeredBy !== undefined) {
+    principal = answeredBy
+  } else {
+    const actor = await requirePrincipal(values.principal, 'active')
+    if ('refused' in actor) {
+      process.stderr.write(`approve: --principal: ${actor.refused}. Nothing was granted.\n`)
+      return 1
+    }
+    principal = actor.id
   }
 
   // On the audit record before the grant file changes, and after every refusal
@@ -1125,10 +1343,15 @@ async function writeSessionGrant(
       ttl_ms: ttlMs ?? null,
       replace: values.replace === true,
       long: values.long === true,
-      principal: actor.id,
+      principal,
     })
   } catch {
-    process.stderr.write('The audit store could not record this grant, so nothing was granted.\n')
+    process.stderr.write(
+      answeredBy !== undefined
+        ? 'The audit store could not record this grant, so nothing was granted. The Answer is on the ' +
+            'record, and the next advance asks again.\n'
+        : 'The audit store could not record this grant, so nothing was granted.\n',
+    )
     return 1
   }
 
@@ -1179,7 +1402,7 @@ async function writeSessionGrant(
 
   const result = await mergeGrant(
     values.all ? '*' : positionals,
-    { ttlMs, replace: values.replace, long: values.long, now, principal: actor.id },
+    { ttlMs, replace: values.replace, long: values.long, now, principal },
     approvalPath,
   )
 

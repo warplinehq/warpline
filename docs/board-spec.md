@@ -312,7 +312,7 @@ stated, not hidden.
 | `<home>/state/` engine state | `EngineStateSchema`: tasks, deferrals, per-plugin last run | Engine | Board |
 | `<home>/runs/` | one `RunArtifact` per run — [runtime-spec.md § 5](runtime-spec.md) | Engine | Board |
 | `<home>/.session-approval` | the Grant — [runtime-spec.md § 9](runtime-spec.md) | `warpline approve` / Board approve | Engine, Board |
-| `<home>/state/asks.json` | JSON, owner-only, reader-versioned: the stored Asks — [runtime-spec.md § 16](runtime-spec.md) | Engine (raise, delivery tries) | Engine, `warpline approvals` (no lock) |
+| `<home>/state/asks.json` | JSON, owner-only, reader-versioned: the stored Asks — [runtime-spec.md § 16](runtime-spec.md) | Engine (raise, delivery tries), `warpline approve` (marks an Ask answered) | Engine, `warpline approvals` (no lock), `warpline approve` (every named and `--content` form, under the state lock) |
 
 IPC is file-based only: the engine and the Board are separate processes and
 share no stdout. `acknowledgements.json` survives across sessions.

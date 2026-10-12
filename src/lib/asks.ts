@@ -34,7 +34,7 @@ import { readFile } from 'node:fs/promises'
 import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
-import { appendAudit, ASK_ANSWERS, ASK_KINDS, CarriedPluginName, OS_USER_NAME } from './audit-log.js'
+import { appendAudit, ASK_ANSWERS, ASK_KINDS, CarriedPluginName, EVIDENCE_TOKEN, OS_USER_NAME } from './audit-log.js'
 import { verifyAnswer } from './assurance.js'
 import { atomicWriteJson, syncInstalled } from './fs-atomic.js'
 
@@ -535,4 +535,73 @@ export async function recordAnswer(
     return { refused: 'store' }
   }
   return { recorded: true }
+}
+
+/** What an Answer carries besides its principal. The nonce and the digest prefix are lowercase. */
+export interface AnswerFlags {
+  nonce: string
+  digestPrefix: string
+  via: string | null
+  evidence: string | null
+}
+
+/**
+ * The Answer flags, checked before anything is read. No Answer flag at all is
+ * `{ answer: null }`, the plain verb. Every refusal names flags and never a
+ * typed value.
+ */
+export function parseAnswerFlags(
+  values: { nonce?: string; digest?: string; via?: string; evidence?: string; all?: boolean },
+  scopes: readonly string[],
+): { answer: AnswerFlags | null } | { refused: string } {
+  const { nonce, digest, via, evidence } = values
+  if ((nonce === undefined) !== (digest === undefined)) {
+    return { refused: '--nonce and --digest go together: an Answer carries the Ask\'s nonce and a prefix of its digest.' }
+  }
+  if (nonce === undefined) {
+    const stray = [via !== undefined ? '--via' : null, evidence !== undefined ? '--evidence' : null].filter(
+      (f): f is string => f !== null,
+    )
+    if (stray.length > 0) {
+      return { refused: `${stray.join(' and ')} ${stray.length === 1 ? 'describes' : 'describe'} an Answer, and an Answer carries --nonce.` }
+    }
+    return { answer: null }
+  }
+  if (values.all) return { refused: '--nonce answers one Ask on one plugin, and --all names every plugin.' }
+  if (scopes.length !== 1) {
+    return { refused: `--nonce answers one Ask, so it names exactly one plugin (got ${scopes.length}).` }
+  }
+  if (!/^[0-9a-f]+$/i.test(digest!)) return { refused: '--digest is a prefix of the Ask\'s digest, in hex.' }
+  if (evidence !== undefined && !EVIDENCE_TOKEN.test(evidence)) {
+    return {
+      refused:
+        '--evidence is a reference token: a letter or digit, then letters, digits and . _ : / # -, at most 200 characters.',
+    }
+  }
+  return {
+    answer: { nonce: nonce.toLowerCase(), digestPrefix: digest!.toLowerCase(), via: via ?? null, evidence: evidence ?? null },
+  }
+}
+
+/** The open Ask on any of `scopes` that has not reached its `expires_at`, if one exists. */
+export function openAskFor(store: AskStore, scopes: readonly string[], now: number): Ask | undefined {
+  return store.asks.find((a) => a.state === 'open' && scopes.includes(a.scope) && now < Date.parse(a.expires_at))
+}
+
+/**
+ * The Ask an Answer names: the one on `scope` whose nonce it carries, in any
+ * state. With none, `{ plain: true }`, and the verb runs as it would bare.
+ * `now` and `verb` (the kinds this branch answers, and the live digest of what
+ * it would act on) are the inputs the refusal checks read.
+ */
+export function checkAnswer(
+  store: AskStore,
+  flags: AnswerFlags,
+  scope: string,
+  now: number,
+  verb: { kinds: readonly AskKind[]; liveDigest: (ask: Ask) => string | null },
+): { ask: Ask } | { plain: true } {
+  // shortcut: the accepting baseline; the refusal checks read `now` and `verb` when they land.
+  const ask = store.asks.find((a) => a.scope === scope && a.nonce === flags.nonce)
+  return ask === undefined ? { plain: true } : { ask }
 }

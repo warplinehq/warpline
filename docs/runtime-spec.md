@@ -1534,7 +1534,9 @@ grants nothing and exits 1.
 principal of either type. It is checked under the state lock, recorded as
 `principal` on `grant.issued`, and never taken from the environment or the
 account running the command. With a parked result waiting the flag is
-refused, because applying a parked result is not recorded with a principal.
+refused, because a bare apply of a parked result is not recorded with a
+principal. An apply that answers an Ask (§ 16, `### Answers`) takes it, and
+`ask.answered` records it.
 
 The 23-hour ceiling belongs to the merge path, not to the file. `mergeGrant`,
 behind `warpline approve`, is the only code that computes it; `grantApproval`,
@@ -4884,3 +4886,88 @@ applied gate marker. No copy of approved bytes is ever kept to diff against,
 so the content erasure policy (§ 10) is unchanged: once those bytes are
 erased or gone, there is no baseline. Without one, `show` prints
 `no earlier approved content`.
+
+### Answers
+
+An Answer is a decision on one Ask, typed through the CLI. Answering an Ask is
+not issuing a Grant. `approve --all`, `approve --standing` and `resolve` are not
+Answers: they never read `asks.json`, and an open Ask stays open across them.
+
+`warpline approve` answers three kinds, on the form gate-first already picks
+for the plugin named:
+
+| Form | Answers | Effect |
+|---|---|---|
+| `approve <plugin>` with a parked result waiting | `parked_result` | the parked result is applied |
+| `approve <plugin>` with none waiting | `missing_grant` | a session Grant is merged |
+| `approve <plugin> --content --not-after <w>` | `content` | the content approval is written |
+
+An Answer carries four flags beside the form's own:
+
+| Flag | Meaning |
+|---|---|
+| `--nonce <hex>` | The Ask's nonce, from the `notify` message. Compared lowercased. |
+| `--digest <hex>` | A hex prefix of the digest the Ask names, compared lowercased. |
+| `--via <id>` | Optional. The registered machine that relayed the Answer. |
+| `--evidence <ref>` | Optional. A reference token: a letter or digit, then letters, digits and `. _ : / # -`, at most 200 characters. |
+
+These are checked before anything is read, and each refusal exits `1` naming
+the flag, never a typed value, with nothing written: `--nonce` without
+`--digest` or the reverse; `--via` or `--evidence` without `--nonce`; `--nonce`
+with no plugin or with more than one; `--nonce` with `--all`; any Answer flag
+with `--standing` or with `--content --remove`; a `--digest` that is not hex;
+an `--evidence` off the token rule; and an Answer without `--principal`.
+
+`--principal` is required on an Answer and must name an active principal of
+either type. `--via` must name an active machine. Both are judged under the
+state lock, against one read of `principals.json`, so a `--via` naming a
+human, an unregistered id or a disabled principal refuses with nothing
+written. Neither is ever taken from the environment or the account running the
+command. On the parked form, the refusal of `--principal` that a bare apply
+gets (§ 9) is lifted for an Answer, because `ask.answered` records it.
+
+The Answer names its Ask by the plugin and the nonce, in any state. In this
+release a nonce that names no Ask on that plugin runs the form as it would run
+bare.
+
+**A bare form refuses while an Ask is open.** `approve <plugin>`, on either
+gate, and `approve <plugin> --content` exit `1` with nothing written while an
+Ask on that plugin is `open` and has not reached its `expires_at`. The line
+names the Ask's id and `warpline approvals show <id>`, never its nonce. With no
+open Ask, for example with `notify` unset, every form behaves as it did before
+Asks existed.
+
+**An unreadable store refuses every form.** Every named and `--content` form,
+bare or answering, reads `asks.json` under the state lock. When it cannot be
+read, the command prints `approve: <path> cannot be read (<cause>). Nothing
+was written.`, with the cause `corrupt`, `newer reader` or `io`, and exits `1`.
+It is never read as "no Asks", because a bare form must never slip past an
+open Ask the command could not see.
+
+**Order inside the state lock.** After every check of the form itself, an
+Answer:
+
+1. appends `ask.answered` (§ 14);
+2. reads `asks.json` fresh and marks the Ask `answered`, with `closed_at` and
+   `answer`, written and synced, so its nonce is spent;
+3. writes the effect, with its own record where it has one (`grant.issued`,
+   `content_approval.issued`).
+
+When the audit store refuses `ask.answered`, the command prints
+`The audit store could not record this Answer. Nothing was written.` and exits
+`1` with every file as it was. When the store cannot be read or written at
+step 2, it exits `1` saying the audit record names an Answer whose effect was
+not written. When the effect fails after step 2, the decision is still
+waiting. The Ask is answered with `approve` or `approve_content`, so the next
+advance raises a fresh Ask for it with a new nonce. A parked result refused at
+apply prints its usual line, and a line saying the Answer is on the record and
+the parked result was not applied, and exits `1`.
+
+**The Answer record.** `ask.answered` carries the Ask's id, kind, scope,
+digest and `raised_at`; `answer`, `approve` or `approve_content` here;
+`principal`, the `--principal` given; `via`, the `--via` given or `null` when
+answered directly; `os_user`, the account that ran the command, or `unknown`,
+recorded beside the principal and never as one; `evidence`, or `null` when
+absent; `assurance`, `asserted`, the only level in this release; and
+`decide_ms`, the answer instant minus the Ask's `raised_at`, never a
+reminder's. The answer instant is the same one the Ask's `closed_at` records.
