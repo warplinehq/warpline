@@ -58,7 +58,7 @@ code. Names that this spec retires: *dashboard*, *noticeboard*, *task board*.
 | **Plugin** | A unit of deterministic work with a manifest: schedule, tier, dependencies, declared inputs, outputs and side effects. | `PluginManifestSchema` |
 | **Run** | One execution of one Plugin: status, attempts, elapsed, error, and what it produced or raised. | `RunArtifact` (`runs/`), `PluginLogEntry` in the run log |
 | **Output** | A thing a Plugin produced that the operator will read and take away. Has a producing Run, a type, a body or path, and a time. | Not an object. Only `artifacts_produced: string[]` on a result. **0.2 introduces it.** |
-| **Ask** | Something waiting on the operator, with a kind, a severity, a source, what answering it will *do*, when it was raised and when it expires. | Three objects: `TaskItem`, a `gated`/`skipped` plugin entry, a `BoardEvent`. **0.2 unifies them.** |
+| **Ask** | Something waiting on the operator, with a kind, a severity, a source, what answering it will *do*, when it was raised and when it expires. | Three objects: `TaskItem`, a `gated`/`skipped` plugin entry, a `BoardEvent`. **0.2 unifies them.** A decision a run waits on a human for is also stored, with its nonce, digest and delivery history, in `<home>/state/asks.json` ([runtime-spec.md § 16](runtime-spec.md)). |
 | **Grant** | A live session approval: which plugins may exercise their declared side effects, until when. | The session approval file — [runtime-spec.md § 9](runtime-spec.md) |
 
 Relationships: a Run belongs to one Plugin; an Output belongs to one Run; an
@@ -299,6 +299,7 @@ stated, not hidden.
 | `<home>/state/` engine state | `EngineStateSchema`: tasks, deferrals, per-plugin last run | Engine | Board |
 | `<home>/runs/` | one `RunArtifact` per run — [runtime-spec.md § 5](runtime-spec.md) | Engine | Board |
 | `<home>/.session-approval` | the Grant — [runtime-spec.md § 9](runtime-spec.md) | `warpline approve` / Board approve | Engine, Board |
+| `<home>/state/asks.json` | JSON, owner-only, reader-versioned: the stored Asks — [runtime-spec.md § 16](runtime-spec.md) | Engine (raise, delivery tries) | Engine |
 
 IPC is file-based only: the engine and the Board are separate processes and
 share no stdout. `acknowledgements.json` survives across sessions.

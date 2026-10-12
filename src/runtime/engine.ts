@@ -125,7 +125,18 @@ import {
   emitGateInvalidated,
   emitPluginDenied,
 } from '../board/engine-events.js'
-import { readPreferencesFile, isQuietHours } from '../lib/preferences.js'
+import { readPreferencesFile, isQuietHours, parseNotify } from '../lib/preferences.js'
+import {
+  advanceAsks,
+  askMessage,
+  readAsks,
+  recordTry,
+  writeAsks,
+  type AskDecision,
+  type AskEntry,
+  type AskKind,
+} from '../lib/asks.js'
+import { notifyEnv, runNotify } from '../lib/notify.js'
 import {
   checkTaskLock as smCheckTaskLock,
   pathsForStateFile,
@@ -1193,14 +1204,17 @@ function refusalFor(standing: ApprovalStanding): RefusalReason | undefined {
  * Hold the lock beside a NAMED state document, for the length of one
  * read-modify-write.
  *
- * Two regions in this file take it — the mid-run spend mark and the end-of-run
- * write — and they derive the path identically because they derive it HERE. A
- * lock path spelled out at two call sites is two chances for one of them to
- * lock a file it is not writing, which is a lock that reports success and
- * protects nothing.
+ * Three regions in this file take it — the mid-run spend mark, the end-of-run
+ * write, and the try record after a `notify` send — and they derive the path
+ * identically because they derive it HERE. A lock path spelled out at three
+ * call sites is three chances for one of them to lock a file it is not
+ * writing, which is a lock that reports success and protects nothing.
  *
  * **Strictly sequential, never nested.** The mark's region is released inside
- * the level fan-out, long before the end-of-run write begins. The imported lock
+ * the level fan-out, long before the end-of-run write begins, and the try
+ * record starts after that write's region is released. `notify` itself runs
+ * inside none of them: the lock breaks as stale after 10 s, and a command left
+ * to its timeout inside it would let a concurrent writer break it. The imported lock
  * is a non-reentrant `O_EXCL` file lock: a nested acquire would block for the
  * state manager's full 10 s ceiling and then throw. Its name is spelled once on
  * the import and once on the call below, and nowhere in prose, because the gate
@@ -2655,10 +2669,20 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
   // The bytes it parsed are compared with the audit store's record of the file
   // once the run lock is held, before any value from it is used (the first
   // statement inside the `try` below). Only a file that parsed gets that far.
+  //
+  // Two rules, and the `notify` block is the only exception to the first.
+  // Every key fails closed, as above. The `notify` block degrades instead: the
+  // file-level parse accepts it unjudged and `parseNotify` judges it here, once.
+  // An unusable block raises and sends no Ask, and changes nothing else this
+  // advance does: what runs, what is written and the exit code stay as they
+  // would be with it unset. Unusable is not unset, though: could not look is
+  // never none.
   const resolvedPrefsPath =
     preferencesPath ??
     (options.stateDir ? join(dirname(options.stateDir), 'preferences.json') : defaultPreferencesPath())
   const { prefs, bytes: prefsBytes } = await readPreferencesFile(resolvedPrefsPath)
+  const notifyRead = parseNotify(prefs.notify)
+  const notifyCfg = 'notify' in notifyRead ? notifyRead.notify : null
 
   // The run lock. Acquired HERE — below the plugin-root and preferences
   // refusals above, above the state read below — so either refusal still
@@ -3068,6 +3092,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
      */
     const refused_plugins: AdvanceResult['refused_plugins'] = []
     /**
+     * The decisions this advance's arms recorded that a human must make, filled
+     * where the arm records them and read once, in the end-of-run hold, where
+     * each becomes an Ask when `notify` is set. Nothing here re-reads an
+     * authority record to build it.
+     */
+    const askSeen: Array<{ kind: AskKind; plugin: string }> = []
+    /**
      * The fire records the store could not take, one per failed append. The
      * advance carries on and does its end-of-run write, so a sibling that
      * already fired keeps its run record and does not fire again.
@@ -3349,6 +3380,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 if (ev.refusal !== undefined) {
                   refused_plugins.push({ plugin: pluginName, reason: ev.refusal })
                 }
+                // A session-class plugin skipped here waits on a Grant.
+                if (!contentClass) askSeen.push({ kind: 'missing_grant', plugin: pluginName })
                 plugin_entries.push({
                   plugin: pluginName,
                   status: entryStatus,
@@ -4063,7 +4096,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // full disk, a read-only home or an unbreakable lock that failed the mark
     // fails this write too, and the advance exits non-zero. Wrap this in a
     // `catch` and those faults go quiet: revisit `advanceExitCode` first.
-    const standingGates = await lockStateDocument(stateDir, async () => {
+    const { standing: standingGates, askPass } = await lockStateDocument(stateDir, async () => {
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
       const merged: EngineState = {
         ...disk,
@@ -4108,10 +4141,37 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         join(dirname(dirname(stateDir)), 'version'),
         `${ENGINE_STATE_MAX_SCHEMA_VERSION}\n`,
       )
+      // The Asks, after the state document and its version stamp are written
+      // and before the Checkpoint below, so the Checkpoint covers each
+      // `ask.raised`. In its own `try`: the state write above has no `catch` on
+      // purpose, and a fault here must neither skip it nor change the exit
+      // code. A fault leaves the decision waiting, and the next advance raises
+      // it. Every digest is drawn from `merged`, the document an Answer verb
+      // re-reads, so the raise and the Answer's recompute see one input.
+      let pass: { entries: AskEntry[] } | null = null
+      if (!dryRun && notifyCfg !== null) {
+        try {
+          const read = await readAsks(stateDir)
+          if (read.readable) {
+            const decisions: AskDecision[] = askSeen.map(({ kind, plugin }) => ({
+              kind,
+              scope: plugin,
+              plugin,
+              digest: proposalFingerprint(merged, plugin, plugins.get(plugin)!),
+              clock: null,
+            }))
+            const next = await advanceAsks(stateDir, read.store, { decisions, now: approvalNow })
+            if (next.changed) await writeAsks(stateDir, next.store)
+            pass = next
+          }
+        } catch {
+          // shortcut: a fault here is silent, until the advance reports it on stderr.
+        }
+      }
       // The gates still waiting, counted from the document this advance just
       // wrote. Re-applying the ceiling rule to it drops nothing the merge
       // kept, short of a gate crossing the ceiling in the same instant.
-      return standingGateCount(merged.pending_gates, Date.now(), plugins)
+      return { standing: standingGateCount(merged.pending_gates, Date.now(), plugins), askPass: pass }
     })
 
     // 9. Write run log
@@ -4202,6 +4262,33 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       { plugin_states, gated_plugins, refused_plugins, pending_gates: standingGates },
       { run_id, status: engineStatus, skipped_reason: null, pruned: prunedRunLogs },
     )
+
+    // 13. The due Asks go to `notify` as one message, with the run lock held
+    // and no state lock: the run lock only serialises advances, so a command
+    // that hangs to its timeout blocks no Answer. The try is recorded after,
+    // in its own hold, from a fresh read of the store, appended by Ask id and
+    // seq. The store read before the send is never written back: an Answer
+    // that consumed a nonce while `notify` ran would be undone by it. A fault
+    // anywhere here leaves the entry due, and the next advance sends it again.
+    if (askPass !== null && askPass.entries.length > 0 && notifyCfg !== null) {
+      const due = askPass.entries
+      try {
+        const outcome = await runNotify(
+          notifyCfg.argv,
+          askMessage(due, notifyCfg.include_content),
+          notifyCfg.timeout_ms,
+          notifyEnv(),
+        )
+        await lockStateDocument(stateDir, async () => {
+          const fresh = await readAsks(stateDir)
+          if (fresh.readable) {
+            await writeAsks(stateDir, recordTry(fresh.store, due, { at: new Date(approvalNow).toISOString(), ...outcome }))
+          }
+        })
+      } catch {
+        // shortcut: a fault here is silent, until the advance reports it on stderr.
+      }
+    }
 
     return {
       run_id,

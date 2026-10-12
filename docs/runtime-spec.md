@@ -3610,10 +3610,12 @@ guarantee this runtime cannot cash.
 There are two lock files in the state directory and they are not the same thing.
 
 `.lock` is the one this section is about: one advance at a time, per home.
-`.state.lock` serialises read-modify-writes of the engine state document, and
-its holders are every writer of that document: the board, `deny`, `approve` when
-it writes state, and the advance's spend mark and end-of-run write. They have
-different lifetimes and different holders.
+`.state.lock` serialises read-modify-writes of the engine state document and of
+the Ask store beside it (§ 16), and its holders are every writer of either: the
+board, `deny`, `approve` when it writes state, and the advance's three regions,
+which are its spend mark, its end-of-run write and the try record after a
+`notify` send. The three are sequential and never nested, and `notify` runs in
+none of them. They have different lifetimes and different holders.
 
 Neither collapses into the other. The state lock is non-reentrant, and the board
 takes it around a call that writes the state document, so the run lock cannot be
@@ -4652,3 +4654,36 @@ An event is due until a try with outcome `delivered` is recorded for its
 `expires_at`, and `content` only when `notify.include_content` is `true`. A
 retry resends an event under its own `seq`, so a receiver drops a duplicate by
 (`id`, `seq`).
+
+### Raising and sending
+
+`warpline advance` raises Asks, through `runAdvance`, so a library host that
+calls `runAdvance` raises them too. `warpline run` never does: it reads no
+grant (§ 9), so it records none of the decisions an Ask is about. With
+`notify` unset, nothing is raised or sent and no `asks.json` is written.
+
+A **missing Grant** raises an Ask of kind `missing_grant`. That is a plugin
+declaring side effects, of the session class, that the advance skipped for
+want of a Grant. Its `scope` and `plugin` are the plugin's name. Its `digest`
+is the plugin's proposal fingerprint, the value `warpline deny` records for it
+(§ 10, `denials`). It expires 23 hours after it was raised, because the Grant
+it waits on has no clock of its own.
+
+The raise happens inside the end-of-run state-lock hold, after the state
+document and the home's version stamp are written and before the Checkpoint
+(§ 14). So the Checkpoint covers each `ask.raised`. A decision whose open Ask
+has the same kind and digest raises nothing new, however many advances see it.
+A fault here leaves the decision waiting. It never skips the state write and
+never changes the exit code.
+
+The send happens after the dead-man file (§ 13) is written, with the run lock
+held and no state lock held. Every due entry goes in one message per advance.
+The try is recorded afterwards, in its own hold of the state lock, from a fresh
+read of the store, by Ask id and `seq`. The copy of the store read before the
+send is never written back, so an Answer that lands while `notify` runs is
+kept. A fault while sending or recording leaves the entry due, and the next
+advance sends it again.
+
+A dry run and an advance skipped for quiet hours raise and send nothing. So
+does an advance whose `notify` block is unusable, and everything else it does
+is unchanged.
