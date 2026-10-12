@@ -515,4 +515,25 @@ describe('every Answer refusal is named, in its fixed order, and writes nothing'
     await refused(answer, 'nonce reused')
     expect(auditRecords(vh.home, 'ask.answered')).toHaveLength(1)
   })
+
+  test('a digest that does not match refuses as digest mismatch (a prefix of another digest)', async () => {
+    const ask = askFor('p')
+    const other = (ask.digest[0] === '0' ? '1' : '0') + ask.digest.slice(1, 12)
+    await refused(form('approve p').answer(ask.nonce, other), 'digest mismatch')
+  })
+
+  test('a digest that does not match refuses as digest mismatch (the decision moved before any advance)', async () => {
+    const ask = askFor('p')
+    moveP()
+    await refused(form('approve p').answer(ask.nonce, prefix(ask)), 'digest mismatch')
+  })
+
+  test('a digest that does not match refuses as digest mismatch (a content Ask through the grant form)', async () => {
+    const ask = askFor('sender')
+    expect(ask.kind).toBe('content')
+    await refused(
+      ['approve', 'sender', '--nonce', ask.nonce, '--digest', prefix(ask), '--principal', 'ops'],
+      'digest mismatch',
+    )
+  })
 })
