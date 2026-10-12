@@ -506,4 +506,13 @@ describe('every Answer refusal is named, in its fixed order, and writes nothing'
     })
     await refused(answer, 'expired')
   })
+
+  test('a nonce already used refuses as nonce reused', async () => {
+    const ask = askFor('p')
+    const answer = form('approve p').answer(ask.nonce, prefix(ask))
+    await ok(answer)
+    expect(askById(ask.id).state).toBe('answered')
+    await refused(answer, 'nonce reused')
+    expect(auditRecords(vh.home, 'ask.answered')).toHaveLength(1)
+  })
 })
