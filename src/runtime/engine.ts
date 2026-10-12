@@ -4265,12 +4265,15 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             for (const g of waitingGates(merged.pending_gates, gateNow, plugins)) {
               if (byScope.has(g.plugin)) continue
               const manifest = plugins.get(g.plugin)!
+              const clock = g.run_completed_at === null ? null : Date.parse(g.run_completed_at) + gateCeilingMs(manifest)
+              // Past its TTL the gate can no longer be applied, so the plugin's other decision is the one waiting.
+              if (clock !== null && clock <= approvalNow) continue
               byScope.set(g.plugin, {
                 kind: 'parked_result',
                 scope: g.plugin,
                 plugin: g.plugin,
                 digest: proposalFingerprint(merged, g.plugin, manifest),
-                clock: g.run_completed_at === null ? null : Date.parse(g.run_completed_at) + gateCeilingMs(manifest),
+                clock,
                 content: asked(inlineBody(g.plugin)),
               })
             }

@@ -4769,6 +4769,13 @@ decision is still waiting, the next advance raises a new Ask for it, with a new
 id and a new nonce. An Ask that expires before its next reminder point sends
 only the `expired` entry.
 
+**No Ask is raised for a decision whose own clock has run out.** A parked
+result past its plugin's `ttl_hours` can no longer be applied: `approve` would
+refuse it and discard its gate as **Expired** (§ 10). So it is not asked about
+while its gate is still on file, and the plugin's other decision, a missing
+Grant for example, is asked about instead. No Ask is ever raised with an
+`expires_at` at or before its `raised_at`.
+
 **A decision that vanished lapses silently.** Its plugin was evaluated this
 advance and no longer waits on a human, or for a renewal Ask its grant is gone
 from a readable standing grants file. Examples: `approve --all` covered it, its

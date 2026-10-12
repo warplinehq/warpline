@@ -275,6 +275,7 @@ function closingEvent(a: Ask): AskEvent | null {
  *    `ask.raised` is on the record. With no open Ask, a scope expired in this
  *    pass waits for the next one, and a scope whose most recently closed Ask
  *    was answered with a deny of the same kind and digest is not asked again.
+ *    A decision whose own clock is at or before now raises nothing.
  * 4. **Reminders.** An open Ask whose decision is seen, or whose scope was not
  *    looked at, gets one `reminder` when more reminder points have passed
  *    since `raised_at` than had at its last reminder. Never once per pass.
@@ -348,6 +349,8 @@ export async function advanceAsks(
         .reduce<Ask | null>((x, a) => (x === null || Date.parse(a.closed_at!) >= Date.parse(x.closed_at!) ? a : x), null)
       if (last?.state === 'answered' && last.answer === 'deny' && last.kind === d.kind && last.digest === d.digest) continue
     }
+    // Its subject can no longer be answered, so an Ask for it would expire on arrival.
+    if (d.clock !== null && d.clock <= now) continue
 
     const ids = new Set(asks.map((a) => a.id))
     let id = newAskId()
