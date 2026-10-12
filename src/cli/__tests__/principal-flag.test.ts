@@ -573,6 +573,7 @@ describe('no verb reads the account running it', () => {
    * so a second read added to one of these lines changes it and fails.
    */
   const KNOWN_READS = [
+    'lib/notify.ts: env: Record<string, string | undefined> = process.env,',
     'lib/paths.ts: const env = process.env.WARPLINE_HOME',
     'lib/paths.ts: const env = process.env.WARPLINE_PLUGINS_DIR',
     'runtime/secrets.ts: env: Record<string, string | undefined> = process.env,',

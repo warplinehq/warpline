@@ -632,19 +632,20 @@ describe('a board write that lands mid-advance', () => {
 })
 
 /**
- * The end-of-run merge stays in one locked region.
+ * The state lock is taken through one wrapper, in a fixed set of regions.
  *
  * `engine.ts` says a gate counts the state lock's name and holds it at two:
  * the import and the one call inside `lockStateDocument`. Nothing counted it
  * until this. The lock is a non-reentrant `O_EXCL` file, so a second region
  * nested in the first self-deadlocks for ten seconds and then throws. A bound
  * on the name is the cheapest way to notice one appearing. The wrapper's own
- * calls are bounded the same way: the spend mark's region and the end-of-run
- * region, and no third.
+ * calls are bounded the same way: the spend mark's region, the end-of-run
+ * region, and the try record after a `notify` send, which reads the Ask store
+ * fresh, appends the try and is released before the next try. No fourth.
  *
  * Exact counts, never a floor. A read that found nothing fails both.
  */
-describe('the state lock is taken in exactly two places in engine.ts', () => {
+describe('the state lock is taken through one wrapper, in exactly three regions of engine.ts', () => {
   const source = readFileSync(fileURLToPath(new URL('../engine.ts', import.meta.url)), 'utf-8')
   const count = (needle: string): number => source.split(needle).length - 1
 
@@ -652,7 +653,7 @@ describe('the state lock is taken in exactly two places in engine.ts', () => {
     expect(count('withStateLockAt')).toBe(2)
   })
 
-  test('the wrapper is called twice: the spend mark and the end-of-run write', () => {
-    expect(count('lockStateDocument(')).toBe(2)
+  test('the wrapper is called three times: the spend mark, the end-of-run write and the notify try record', () => {
+    expect(count('lockStateDocument(')).toBe(3)
   })
 })
