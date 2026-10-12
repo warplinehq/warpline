@@ -11,6 +11,7 @@
  * caller does (AGENTS.md Rule 2). The clock is fixed and handed in.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -29,6 +30,9 @@ import {
   type AskDecision,
   type AskStore,
 } from '../asks.js'
+// The exports this file pins before they exist, read through the namespace so
+// a missing one fails its own case and not the whole file.
+import * as asksMod from '../asks.js'
 import * as audit from '../audit-log.js'
 import { notifyEnv, runNotify } from '../notify.js'
 import { notifyStub } from '../../../test-utils/notify-stub.js'
@@ -362,5 +366,64 @@ describe('tries', () => {
     const pruned: AskStore = { ...tried, asks: tried.asks.filter((a) => a.scope === 'a') }
     const again = recordTry(pruned, pass.entries, t)
     expect(again.asks.map((a) => [a.scope, a.tries.length])).toEqual([['a', 2]])
+  })
+})
+
+describe('severity, order and the renewal digest', () => {
+  const grant = {
+    id: 'a1b2c3d4e5f6',
+    holder: 'ci',
+    issuer: 'ops',
+    scopes: ['zeta', 'alpha'],
+    issued_at: iso(T0),
+    period_start: iso(T0),
+    period_ms: 12 * HOUR,
+    hard_max_ms: 30 * 24 * HOUR,
+  }
+
+  test('renewalDigest is sha256 over the stored grant\'s fields in the store\'s key order, and a renew changes it', () => {
+    const expected = createHash('sha256')
+      .update(
+        JSON.stringify({
+          id: grant.id,
+          holder: grant.holder,
+          issuer: grant.issuer,
+          scopes: ['alpha', 'zeta'],
+          issued_at: grant.issued_at,
+          period_start: grant.period_start,
+          period_ms: grant.period_ms,
+          hard_max_ms: grant.hard_max_ms,
+        }),
+      )
+      .digest('hex')
+    expect(asksMod.renewalDigest(grant)).toBe(expected)
+    expect(asksMod.renewalDigest({ ...grant, scopes: ['alpha', 'zeta'] })).toBe(expected)
+    expect(asksMod.renewalDigest({ ...grant, period_start: iso(T0 + HOUR) })).not.toBe(expected)
+  })
+
+  test('askSeverity gives parked_result and renewal warning, missing_grant and content info', () => {
+    expect(asksMod.askSeverity('parked_result')).toBe('warning')
+    expect(asksMod.askSeverity('renewal')).toBe('warning')
+    expect(asksMod.askSeverity('missing_grant')).toBe('info')
+    expect(asksMod.askSeverity('content')).toBe('info')
+  })
+
+  test('entries order warning before info, then oldest raised_at, then id', async () => {
+    const content = (scope: string): AskDecision => ({ kind: 'content', scope, plugin: scope, digest: HEX_B, clock: null })
+    const parked = (scope: string): AskDecision => ({ kind: 'parked_result', scope, plugin: scope, digest: HEX_A, clock: null })
+    // Two info Asks at T0, one a minute later, and the warning one last of all.
+    const first = await advanceAsks(statePath, empty(), { decisions: [content('c'), missingGrant('n')], now: T0 })
+    const second = await advanceAsks(statePath, first.store, {
+      decisions: [content('c'), missingGrant('n'), missingGrant('m')],
+      now: T0 + 60_000,
+    })
+    const third = await advanceAsks(statePath, second.store, {
+      decisions: [content('c'), missingGrant('n'), missingGrant('m'), parked('p')],
+      now: T0 + 120_000,
+    })
+
+    const idOf = (scope: string): string => third.store.asks.find((a) => a.scope === scope)!.id
+    const sameInstant = ['c', 'n'].sort((x, y) => (idOf(x) < idOf(y) ? -1 : idOf(x) > idOf(y) ? 1 : 0))
+    expect(third.entries.map((e) => e.scope)).toEqual(['p', ...sameInstant, 'm'])
   })
 })
