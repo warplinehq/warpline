@@ -167,7 +167,22 @@ export async function requirePrincipal(
   }
   if ('refused' in loaded) return { refused: loaded.refused, cause: 'registry' }
 
-  const entry = loaded.registry.principals.find((p) => p.id === flag)
+  const judged = judgePrincipal(loaded.registry, flag, rule)
+  return 'refused' in judged ? judged : { id: judged.id, loaded }
+}
+
+/**
+ * Whether `id` names a principal `rule` admits in `registry`. Pure: it reads
+ * nothing. A caller judging a second id against the same act (`--via` beside
+ * `--principal`) passes the registry `requirePrincipal` returned, never a
+ * second read a hand edit could land between.
+ */
+export function judgePrincipal(
+  registry: Registry,
+  id: string,
+  rule: PrincipalRule,
+): { id: string } | { refused: string; cause: PrincipalRefusalCause } {
+  const entry = registry.principals.find((p) => p.id === id)
   if (entry === undefined) return { refused: 'no principal has that id', cause: 'unknown' }
   if (rule === 'active-human' && entry.type !== 'human') {
     return { refused: 'that principal is not a human', cause: 'not human' }
@@ -178,5 +193,5 @@ export async function requirePrincipal(
   if (rule !== 'registered' && entry.status === 'disabled') {
     return { refused: 'that principal is disabled', cause: 'disabled' }
   }
-  return { id: entry.id, loaded }
+  return { id: entry.id }
 }
