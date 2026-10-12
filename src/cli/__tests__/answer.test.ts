@@ -415,3 +415,32 @@ describe('an unreadable asks.json refuses every Answer form, naming the file', (
     )
   }
 })
+
+describe('every Answer refusal is named, in its fixed order, and writes nothing', () => {
+  type Reason = 'prefix shorter than 12' | 'unknown' | 'superseded' | 'expired' | 'nonce reused' | 'digest mismatch'
+
+  /** The text that names `reason` and nothing else: a bare word such as `unknown` could come from any message. */
+  const marker = (reason: Reason): string =>
+    reason === 'prefix shorter than 12' ? 'prefix shorter than 12:' : `refused (${reason})`
+
+  /** `argv` exits 1 naming `reason`, and the whole home is byte-identical across the run. */
+  async function refused(argv: string[], reason: Reason): Promise<void> {
+    const before = await snap()
+    const r = await capture(argv)
+    expect({ argv, code: r.code }).toEqual({ argv, code: 1 })
+    expect(r.stderr).toContain(marker(reason))
+    expect(await snap()).toEqual(before)
+  }
+
+  test('a digest prefix shorter than 12 refuses as prefix shorter than 12', async () => {
+    const ask = askFor('p')
+    await refused(form('approve p').answer(ask.nonce, ask.digest.slice(0, 11)), 'prefix shorter than 12')
+  })
+
+  test('an upper-case prefix of the right digest is accepted', async () => {
+    const ask = askFor('p')
+    const r = await capture(form('approve p').answer(ask.nonce, prefix(ask).toUpperCase()))
+    expect(r.code).toBe(0)
+    expect(askById(ask.id).state).toBe('answered')
+  })
+})
