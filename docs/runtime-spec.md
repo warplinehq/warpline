@@ -4986,3 +4986,4 @@ they were.
 | `prefix shorter than 12` | `--digest` has fewer than 12 hex characters. Checked before anything is read. |
 | `unknown` | No Ask on the plugin named carries the nonce, in any state. |
 | `superseded` | The Ask was closed `superseded`: its decision changed and a newer Ask, with a new nonce, replaced it. |
+| `expired` | The Ask is marked `expired`, or the command's clock has reached its `expires_at`, checked even when no advance has marked it. |
