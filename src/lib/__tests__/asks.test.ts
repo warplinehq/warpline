@@ -788,3 +788,63 @@ describe('an Answer is recorded before its Ask closes', () => {
     expect(auditRecords('ask.answered')).toHaveLength(1)
   })
 })
+
+describe('the notify read and its record', () => {
+  test('readNotify judges without recording, and observePreferences records the bytes it judged, never a later edit', async () => {
+    const prefsPath = join(dir, 'preferences.json')
+    const sha = (b: Buffer): string => createHash('sha256').update(b).digest('hex')
+    const write = (value: unknown): Buffer => {
+      const bytes = Buffer.from(JSON.stringify(value))
+      writeFileSync(prefsPath, bytes)
+      return bytes
+    }
+
+    // Set and usable: judged in use, the bytes kept, nothing recorded.
+    const b = write({ notify: { argv: ['/bin/true'] } })
+    const got = await askLib.readNotify(prefsPath)
+    expect(got.inUse).toBe(true)
+    expect(got.loaded?.bytes?.equals(b)).toBe(true)
+    expect(auditRecords('preferences.observed')).toEqual([])
+
+    // An edit after the judgment: the record names the judged bytes, not the file now.
+    const c = write({ notify: null })
+    expect(await askLib.observePreferences(got.loaded, statePath)).toBeNull()
+    const observed = auditRecords('preferences.observed')
+    expect(observed).toHaveLength(1)
+    expect((observed[0]!.data as { new: string }).new).toBe(sha(b))
+    expect((observed[0]!.data as { new: string }).new).not.toBe(sha(c))
+
+    // Unset and unusable are not in use.
+    expect((await askLib.readNotify(prefsPath)).inUse).toBe(false)
+    write({ notify: { argv: [] } })
+    expect((await askLib.readNotify(prefsPath)).inUse).toBe(false)
+
+    // A file that does not parse as preferences counts as set, and its bytes are kept to record.
+    const invalid = write({ nope: 1 })
+    const bad = await askLib.readNotify(prefsPath)
+    expect(bad.inUse).toBe(true)
+    expect(bad.loaded?.bytes?.equals(invalid)).toBe(true)
+
+    // A file that cannot be read counts as set, with nothing read and so nothing to record.
+    rmSync(prefsPath)
+    mkdirSync(prefsPath)
+    expect(await askLib.readNotify(prefsPath)).toEqual({ inUse: true, loaded: null })
+    const seen = auditRecords('preferences.observed').length
+    expect(await askLib.observePreferences(null, statePath)).toBeNull()
+    expect(auditRecords('preferences.observed')).toHaveLength(seen)
+
+    // A record the audit store refuses is a refusal with cause audit.
+    rmSync(prefsPath, { recursive: true })
+    write({ notify: { argv: ['/bin/true'] }, review_gate: false })
+    const fresh = await askLib.readNotify(prefsPath)
+    spies.push(
+      spyOn(audit, 'observeAuthorityFile').mockImplementationOnce(async () => {
+        throw new audit.AuditAppendError('preferences.observed', 'write failed')
+      }),
+    )
+    expect(await askLib.observePreferences(fresh.loaded, statePath)).toEqual({
+      refused: 'the audit store could not record a change to preferences.json: write failed',
+      cause: 'audit',
+    })
+  })
+})

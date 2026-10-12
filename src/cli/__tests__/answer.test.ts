@@ -14,7 +14,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { randomBytes } from 'node:crypto'
-import { cpSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { join } from 'node:path'
 import { liveGrantScopes, readStandingStore, renewStanding, writeStandingStore } from '../../runtime/approval-gate.js'
@@ -514,7 +514,7 @@ const marker = (reason: Reason): string =>
  * `argv` exits 1 naming `reason` and never the nonce it presented, and the
  * whole home is byte-identical across the run.
  */
-async function refused(argv: string[], reason: Reason): Promise<void> {
+async function refused(argv: string[], reason: Reason): Promise<{ code: number; stdout: string; stderr: string }> {
   const before = await snap()
   const r = await capture(argv)
   expect({ argv, code: r.code }).toEqual({ argv, code: 1 })
@@ -522,6 +522,7 @@ async function refused(argv: string[], reason: Reason): Promise<void> {
   const at = argv.indexOf('--nonce')
   if (at >= 0) expect(r.stderr).not.toContain(argv[at + 1]!)
   expect(await snap()).toEqual(before)
+  return r
 }
 
 describe('every Answer refusal is named, in its fixed order, and writes nothing', () => {
@@ -973,5 +974,399 @@ describe('every refusal is observed through every Answer form', () => {
         SLOW,
       )
     }
+  }
+})
+
+/** The home's preferences file, where an operator's editor would change `notify`. */
+const prefsFile = (): string => join(vh.home, 'preferences.json')
+
+/** `notify` removed by hand: with it unset no Ask is open. */
+const unsetNotify = (): void => setNotify(prefsFile(), null)
+
+/** `notify` broken by hand: an argv the block's schema refuses. */
+const breakNotify = (): void => setNotify(prefsFile(), { argv: [] })
+
+/** Lines of `kind` in the audit store, with their seq. */
+const linesOf = (kind: string): Array<{ warplineseq: number }> =>
+  auditRecords(vh.home).filter((l) => l.type === `warpline.audit.${kind}`)
+
+/**
+ * Renew the stored grant out of band, the way the digest-mismatch renewal case
+ * does: the grant's digest moves while its renewal Ask stays open.
+ */
+async function renewOutOfBand(scope: string): Promise<void> {
+  await Bun.sleep(5)
+  const read = await readStandingStore()
+  if (!read.readable) throw new Error('standing grants file unreadable')
+  const change = renewStanding(read.store, scope, 'ops', Date.now(), standingRegistry(await readRegistry()))
+  if ('refused' in change) throw new Error(`renewStanding refused: ${change.refused.code}`)
+  await writeStandingStore(change.store)
+}
+
+/** Drop p's parked gates from the state document, leaving its parked-result Ask open. */
+function discardParkedP(): void {
+  const state = JSON.parse(readFileSync(vh.statePath, 'utf-8')) as { pending_gates: Array<{ plugin: string }> }
+  state.pending_gates = state.pending_gates.filter((g) => g.plugin !== 'p')
+  writeFileSync(vh.statePath, JSON.stringify(state))
+}
+
+const liveGrantNames = async (): Promise<string[]> =>
+  (await liveGrantScopes(sessionApprovalPath(), Date.now())).map((w) => w.scope)
+
+interface GuardRow {
+  name: string
+  /** Opens the Ask the bare form meets, and applies the condition that makes it unanswerable. */
+  arrange: () => Promise<void>
+  argv: () => string[]
+  /** Whether the condition is a hand edit of preferences.json, which the command records before it acts. */
+  notifyEdited: boolean
+  /** The audit kind of the effect's own record, or null when the effect has none. */
+  record: string | null
+  /** The effect, named. */
+  effect: (r: { stdout: string }) => Promise<void>
+}
+
+const grantNames = (plugin: string) => async (): Promise<void> => {
+  expect(await liveGrantNames()).toContain(plugin)
+}
+const deniedP = async (): Promise<void> => {
+  expect(Object.keys(denials())).toContain('p')
+}
+const contentApproved = async (): Promise<void> => {
+  const state = JSON.parse(readFileSync(vh.statePath, 'utf-8')) as { approvals: Record<string, unknown> }
+  expect(Object.hasOwn(state.approvals, 'sender')).toBe(true)
+}
+/** A renewal's effect is its one more `grant.renewed` record, which the row counts. */
+const renewed = async (): Promise<void> => {}
+
+const GUARD: GuardRow[] = [
+  {
+    name: 'approve p, notify unset',
+    arrange: async () => {
+      await form('approve p').open()
+      unsetNotify()
+    },
+    argv: () => ['approve', 'p'],
+    notifyEdited: true,
+    record: 'grant.issued',
+    effect: grantNames('p'),
+  },
+  {
+    name: 'approve p, notify unusable',
+    arrange: async () => {
+      await form('approve p').open()
+      breakNotify()
+    },
+    argv: () => ['approve', 'p'],
+    notifyEdited: true,
+    record: 'grant.issued',
+    effect: grantNames('p'),
+  },
+  {
+    name: 'approve p, decision moved',
+    arrange: async () => {
+      await form('approve p').open()
+      moveP()
+    },
+    argv: () => ['approve', 'p'],
+    notifyEdited: false,
+    record: 'grant.issued',
+    effect: grantNames('p'),
+  },
+  {
+    name: 'approve p, its parked result discarded',
+    arrange: async () => {
+      const parked = await form('approve p on a parked result').open()
+      discardParkedP()
+      expect(askById(parked.id).state).toBe('open')
+    },
+    argv: () => ['approve', 'p'],
+    notifyEdited: false,
+    record: 'grant.issued',
+    effect: grantNames('p'),
+  },
+  {
+    name: 'approve sender --content, notify unset',
+    arrange: async () => {
+      await form('approve sender --content').open()
+      unsetNotify()
+    },
+    argv: () => form('approve sender --content').bare!(),
+    notifyEdited: true,
+    record: 'content_approval.issued',
+    effect: contentApproved,
+  },
+  {
+    name: 'approve sender --content, notify unusable',
+    arrange: async () => {
+      await form('approve sender --content').open()
+      breakNotify()
+    },
+    argv: () => form('approve sender --content').bare!(),
+    notifyEdited: true,
+    record: 'content_approval.issued',
+    effect: contentApproved,
+  },
+  {
+    name: 'approve sender, a content Ask is open',
+    arrange: async () => {
+      expect((await form('approve sender --content').open()).kind).toBe('content')
+    },
+    argv: () => ['approve', 'sender'],
+    notifyEdited: false,
+    record: 'grant.issued',
+    effect: async () => {
+      await grantNames('sender')()
+      expect(askFor('sender').kind).toBe('content')
+    },
+  },
+  {
+    name: 'deny p, notify unset',
+    arrange: async () => {
+      await form('deny p').open()
+      unsetNotify()
+    },
+    argv: () => ['deny', 'p'],
+    notifyEdited: true,
+    record: 'denial.recorded',
+    effect: deniedP,
+  },
+  {
+    name: 'deny p, notify unusable',
+    arrange: async () => {
+      await form('deny p').open()
+      breakNotify()
+    },
+    argv: () => ['deny', 'p'],
+    notifyEdited: true,
+    record: 'denial.recorded',
+    effect: deniedP,
+  },
+  {
+    name: 'deny p, decision moved',
+    arrange: async () => {
+      await form('deny p').open()
+      moveP()
+    },
+    argv: () => ['deny', 'p'],
+    notifyEdited: false,
+    record: 'denial.recorded',
+    effect: deniedP,
+  },
+  {
+    name: 'renew, notify unset',
+    arrange: async () => {
+      await openRenewal()
+      unsetNotify()
+    },
+    argv: () => form('renew').bare!(),
+    notifyEdited: true,
+    record: 'grant.renewed',
+    effect: renewed,
+  },
+  {
+    name: 'renew, notify unusable',
+    arrange: async () => {
+      await openRenewal()
+      breakNotify()
+    },
+    argv: () => form('renew').bare!(),
+    notifyEdited: true,
+    record: 'grant.renewed',
+    effect: renewed,
+  },
+  {
+    name: 'renew, grant renewed since',
+    arrange: async () => {
+      const ask = await openRenewal()
+      await renewOutOfBand(ask.scope)
+    },
+    argv: () => form('renew').bare!(),
+    notifyEdited: false,
+    record: 'grant.renewed',
+    effect: renewed,
+  },
+  {
+    name: 'approve p on a parked result, notify unset',
+    arrange: async () => {
+      await form('approve p on a parked result').open()
+      unsetNotify()
+    },
+    argv: () => ['approve', 'p'],
+    notifyEdited: true,
+    record: null,
+    effect: async ({ stdout }) => {
+      expect(stdout).toContain('Applied the parked result for p')
+    },
+  },
+]
+
+describe('a bare form refuses only on an Ask it could answer', () => {
+  for (const row of GUARD) {
+    test(
+      `bare guard: ${row.name}`,
+      async () => {
+        await row.arrange()
+        const asksBefore = readFileSync(asksFile())
+        const answeredBefore = auditRecords(vh.home, 'ask.answered').length
+        const observedBefore = linesOf('preferences.observed').length
+        const recordBefore = row.record === null ? 0 : linesOf(row.record).length
+
+        const r = await capture(row.argv())
+
+        expect({ code: r.code, stderr: r.stderr }).toEqual({ code: 0, stderr: expect.not.stringContaining('has an open Ask') })
+        expect(readFileSync(asksFile()).equals(asksBefore)).toBe(true)
+        expect(auditRecords(vh.home, 'ask.answered')).toHaveLength(answeredBefore)
+        await row.effect(r)
+
+        const records = row.record === null ? [] : linesOf(row.record)
+        if (row.record !== null) expect(records).toHaveLength(recordBefore + 1)
+        const observed = linesOf('preferences.observed')
+        if (row.notifyEdited) {
+          // The hand edit is on the record before the effect it let through.
+          expect(observed).toHaveLength(observedBefore + 1)
+          if (row.record !== null) expect(observed.at(-1)!.warplineseq).toBeLessThan(records.at(-1)!.warplineseq)
+        }
+      },
+      SLOW,
+    )
+  }
+
+  test(
+    "approve --all, then a firing plugin's proposal moves: deny names it bare, and its stale nonce refuses as digest mismatch",
+    async () => {
+      const dir = join(vh.home, 'plugins', 'q')
+      mkdirSync(dir, { recursive: true })
+      const manifest = {
+        name: 'q',
+        version: '1.0.0',
+        description: 'q fixture plugin',
+        inputs: {},
+        outputs: { note: { type: 'text' } },
+        capabilities: [],
+        secrets: [],
+        schedule: 'on_run',
+        autonomy_level: 'autonomous',
+        approval_class: 'session',
+        llm_handoff: false,
+        side_effects: ['sends_email'],
+        ttl_hours: 0.001,
+        dependencies: [],
+        timeout_ms: 5000,
+        max_parallelism: 1,
+        min_tier: 'normal',
+        max_retries: 1,
+        retry_delay_ms: 2000,
+      }
+      writeFileSync(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+      writeFileSync(
+        join(dir, 'handler.ts'),
+        `import { randomUUID } from 'node:crypto'
+export async function handler() {
+  return {
+    status: 'success',
+    phases_completed: ['send'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'sent',
+    artifacts_produced: [{ type: 'note', format: 'text', body: randomUUID() }],
+    schema_version: 1,
+  }
+}
+`,
+      )
+
+      await ok(['advance'])
+      const ask = askFor('q')
+      expect(ask.kind).toBe('missing_grant')
+      await ok(['approve', '--all'])
+      await ok(['advance'])
+      const state = JSON.parse(readFileSync(vh.statePath, 'utf-8')) as {
+        plugin_runs: Record<string, { last_output?: unknown }>
+      }
+      expect(state.plugin_runs.q?.last_output).toBeDefined()
+      // The decision vanished and the Ask lapses silently: still open.
+      expect(askById(ask.id).state).toBe('open')
+
+      await refused(['deny', 'q', '--nonce', ask.nonce, '--digest', prefix(ask), '--principal', 'ops'], 'digest mismatch')
+
+      const asksBefore = readFileSync(asksFile())
+      const r = await capture(['deny', 'q'])
+      expect({ code: r.code, stderr: r.stderr }).toEqual({ code: 0, stderr: expect.not.stringContaining('has an open Ask') })
+      expect(Object.keys(denials())).toContain('q')
+      expect(readFileSync(asksFile()).equals(asksBefore)).toBe(true)
+    },
+    SLOW,
+  )
+
+  for (const f of FORMS) {
+    test(
+      `notify unset: ${f.label} refuses an Answer as unknown and writes nothing`,
+      async () => {
+        const ask = await f.open()
+        unsetNotify()
+        const r = await refused(f.answer(ask.nonce, prefix(ask)), 'unknown')
+        expect(r.stderr).toContain('notify is unset or unusable')
+        expect(askById(ask.id).state).toBe('open')
+      },
+      SLOW,
+    )
+  }
+
+  test('notify unusable: approve p refuses an Answer as unknown and writes nothing', async () => {
+    const f = form('approve p')
+    const ask = await f.open()
+    breakNotify()
+    const r = await refused(f.answer(ask.nonce, prefix(ask)), 'unknown')
+    expect(r.stderr).toContain('notify is unset or unusable')
+    expect(askById(ask.id).state).toBe('open')
+  })
+
+  test(
+    'bare guard holds: approve p on a parked result refuses while its Ask is open',
+    async () => {
+      const ask = await form('approve p on a parked result').open()
+      const before = await snap()
+      const r = await capture(['approve', 'p'])
+      expect(r.code).toBe(1)
+      expect(r.stderr).toContain(ask.id)
+      expect(r.stderr).toContain(`warpline approvals show ${ask.id}`)
+      expect(r.stderr).not.toContain(ask.nonce)
+      expect(r.stdout).not.toContain(ask.nonce)
+      expect(await snap()).toEqual(before)
+    },
+    SLOW,
+  )
+})
+
+describe('a hand edit of notify is recorded only by a command that acts', () => {
+  /**
+   * Change `notify` by hand and keep it set and usable: a timeout the seeded
+   * block does not carry, so the bytes differ from those the last advance recorded.
+   */
+  function notifyEdit(): void {
+    const prefs = JSON.parse(readFileSync(prefsFile(), 'utf-8')) as { notify: Record<string, unknown> }
+    expect(prefs.notify.timeout_ms).toBeUndefined()
+    setNotify(prefsFile(), { ...prefs.notify, timeout_ms: 20000 })
+  }
+
+  for (const f of FORMS) {
+    test(
+      `notify edit: ${f.label}: a refused Answer writes nothing, and the accepted Answer records the edit first`,
+      async () => {
+        const ask = await f.open()
+        notifyEdit()
+        await refused(f.answer(randomBytes(16).toString('hex'), prefix(ask)), 'unknown')
+
+        const observedBefore = linesOf('preferences.observed').length
+        const r = await capture(f.answer(ask.nonce, prefix(ask)))
+        expect({ code: r.code, stderr: r.stderr }).toMatchObject({ code: 0 })
+        const observed = linesOf('preferences.observed')
+        expect(observed).toHaveLength(observedBefore + 1)
+        expect(observed.at(-1)!.warplineseq).toBeLessThan(linesOf('ask.answered').at(-1)!.warplineseq)
+      },
+      SLOW,
+    )
   }
 })
