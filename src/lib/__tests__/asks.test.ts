@@ -27,6 +27,7 @@ import {
   readAsks,
   recordTry,
   writeAsks,
+  type Ask,
   type AskDecision,
   type AskStore,
 } from '../asks.js'
@@ -68,6 +69,24 @@ const missingGrant = (scope = 'mailer', digest = HEX_A): AskDecision => ({
   clock: null,
 })
 
+const REMINDERS = [HOUR, 4 * HOUR] as const
+
+type PassExtra = { evaluatedPlugins?: ReadonlySet<string>; standingListed?: boolean; remindersMs?: readonly number[] }
+
+/**
+ * One pass, the way the engine calls it: every decision's scope was evaluated,
+ * the standing store was readable, and reminders are the default schedule.
+ */
+function pass(store: AskStore, decisions: readonly AskDecision[], now: number, extra: PassExtra = {}) {
+  return advanceAsks(statePath, store, {
+    decisions,
+    now,
+    evaluatedPlugins: extra.evaluatedPlugins ?? new Set(decisions.map((d) => d.scope)),
+    standingListed: extra.standingListed ?? true,
+    remindersMs: extra.remindersMs ?? REMINDERS,
+  })
+}
+
 /** Every audit record of `kind` under the temp home, in store order. */
 function auditRecords(kind: string): Array<{ type: string; data: unknown }> {
   const auditDir = join(dir, 'audit')
@@ -90,12 +109,12 @@ describe('a decision becomes a recorded Ask whose message reaches notify', () =>
     expect(before).toEqual({ readable: true, store: { min_reader_version: 1, asks: [] } })
     if (!before.readable) throw new Error('unreadable')
 
-    const pass = await advanceAsks(statePath, before.store, { decisions: [missingGrant()], now: T0 })
-    expect(pass.unrecorded).toBe(0)
-    expect(pass.changed).toBe(true)
-    expect(pass.entries).toHaveLength(1)
+    const out = await pass(before.store, [missingGrant()], T0)
+    expect(out.unrecorded).toBe(0)
+    expect(out.changed).toBe(true)
+    expect(out.entries).toHaveLength(1)
 
-    await writeAsks(statePath, pass.store)
+    await writeAsks(statePath, out.store)
     const path = asksPath(statePath)
     expect(path).toBe(join(dir, 'state', 'asks.json'))
     expect(statSync(path).mode & 0o777).toBe(0o600)
@@ -136,7 +155,7 @@ describe('a decision becomes a recorded Ask whose message reaches notify', () =>
     })
 
     const okStub = await notifyStub(dir, 'ok')
-    const outcome = await runNotify(okStub.argv, askMessage(pass.entries, false), 5000, notifyEnv())
+    const outcome = await runNotify(okStub.argv, askMessage(out.entries, false), 5000, notifyEnv())
     expect(outcome).toEqual({ outcome: 'delivered', exit_code: 0 })
     const messages = okStub.messages() as Array<{ entries: Array<Record<string, unknown>> }>
     expect(messages).toEqual([
@@ -173,7 +192,7 @@ describe('a decision becomes a recorded Ask whose message reaches notify', () =>
     ])
 
     const at = iso(T0 + 1000)
-    const tried = recordTry(pass.store, pass.entries, { at, outcome: 'delivered', exit_code: 0 })
+    const tried = recordTry(out.store, out.entries, { at, outcome: 'delivered', exit_code: 0 })
     expect(tried.asks[0]!.tries).toEqual([{ seq: 1, at, outcome: 'delivered', exit_code: 0 }])
   })
 
@@ -187,21 +206,21 @@ describe('a decision becomes a recorded Ask whose message reaches notify', () =>
     )
     const store = empty()
 
-    const pass = await advanceAsks(statePath, store, { decisions: [missingGrant()], now: T0 })
+    const out = await pass(store, [missingGrant()], T0)
 
-    expect(pass.unrecorded).toBe(1)
-    expect(pass.entries).toEqual([])
-    expect(pass.changed).toBe(false)
-    expect(pass.store).toEqual(empty())
+    expect(out.unrecorded).toBe(1)
+    expect(out.entries).toEqual([])
+    expect(out.changed).toBe(false)
+    expect(out.store).toEqual(empty())
     expect(store).toEqual(empty())
     expect(auditRecords('ask.raised')).toEqual([])
   })
 
   test('an unchanged decision raises nothing new, and an undelivered entry stays due with its seq', async () => {
-    const first = await advanceAsks(statePath, empty(), { decisions: [missingGrant()], now: T0 })
+    const first = await pass(empty(), [missingGrant()], T0)
     const id = first.store.asks[0]!.id
 
-    const second = await advanceAsks(statePath, first.store, { decisions: [missingGrant()], now: T0 + 60_000 })
+    const second = await pass(first.store, [missingGrant()], T0 + 60_000)
     expect(second.unrecorded).toBe(0)
     expect(second.changed).toBe(false)
     expect(second.store.asks.map((a) => a.id)).toEqual([id])
@@ -209,24 +228,25 @@ describe('a decision becomes a recorded Ask whose message reaches notify', () =>
     expect(auditRecords('ask.raised')).toHaveLength(1)
 
     const failed = recordTry(second.store, second.entries, { at: iso(T0 + 61_000), outcome: 'failed', exit_code: 3 })
-    const third = await advanceAsks(statePath, failed, { decisions: [missingGrant()], now: T0 + 120_000 })
+    const third = await pass(failed, [missingGrant()], T0 + 120_000)
     expect(third.entries.map((e) => [e.id, e.seq])).toEqual([[id, 1]])
 
     const delivered = recordTry(third.store, third.entries, { at: iso(T0 + 121_000), outcome: 'delivered', exit_code: 0 })
-    const fourth = await advanceAsks(statePath, delivered, { decisions: [missingGrant()], now: T0 + 180_000 })
+    const fourth = await pass(delivered, [missingGrant()], T0 + 180_000)
     expect(fourth.entries).toEqual([])
     expect(fourth.store.asks.map((a) => a.id)).toEqual([id])
   })
 
   test('an Ask expires at the earlier of its subject\'s clock and 23 hours after it was raised', async () => {
-    const pass = await advanceAsks(statePath, empty(), {
-      decisions: [
+    const out = await pass(
+      empty(),
+      [
         { ...missingGrant('soon'), clock: T0 + 2 * HOUR },
         { ...missingGrant('late'), clock: T0 + 30 * HOUR },
       ],
-      now: T0,
-    })
-    const byScope = Object.fromEntries(pass.store.asks.map((a) => [a.scope, a.expires_at]))
+      T0,
+    )
+    const byScope = Object.fromEntries(out.store.asks.map((a) => [a.scope, a.expires_at]))
     expect(byScope).toEqual({ soon: iso(T0 + 2 * HOUR), late: iso(T0 + 23 * HOUR) })
   })
 
@@ -244,16 +264,13 @@ describe('a decision becomes a recorded Ask whose message reaches notify', () =>
   })
 
   test('the message carries content only when asked for', async () => {
-    const pass = await advanceAsks(statePath, empty(), {
-      decisions: [{ ...missingGrant('with'), content: 'the bytes' }, missingGrant('without', HEX_B)],
-      now: T0,
-    })
-    const withContent = JSON.parse(askMessage(pass.entries, true)) as { entries: Array<Record<string, unknown>> }
+    const out = await pass(empty(), [{ ...missingGrant('with'), content: 'the bytes' }, missingGrant('without', HEX_B)], T0)
+    const withContent = JSON.parse(askMessage(out.entries, true)) as { entries: Array<Record<string, unknown>> }
     expect(Object.fromEntries(withContent.entries.map((e) => [e.scope, e.content]))).toEqual({
       with: 'the bytes',
       without: null,
     })
-    const plain = JSON.parse(askMessage(pass.entries, false)) as { entries: Array<Record<string, unknown>> }
+    const plain = JSON.parse(askMessage(out.entries, false)) as { entries: Array<Record<string, unknown>> }
     expect(plain.entries.every((e) => !('content' in e))).toBe(true)
   })
 })
@@ -334,12 +351,12 @@ describe('the store reads closed', () => {
 describe('ids and nonces', () => {
   test('ids drawn through a pass are unique and 12 hex, and each nonce is 32 hex and never its id', async () => {
     const decisions = Array.from({ length: 200 }, (_, i) => missingGrant(`p${i}`))
-    const pass = await advanceAsks(statePath, empty(), { decisions, now: T0 })
-    expect(pass.unrecorded).toBe(0)
-    const ids = pass.store.asks.map((a) => a.id)
+    const out = await pass(empty(), decisions, T0)
+    expect(out.unrecorded).toBe(0)
+    const ids = out.store.asks.map((a) => a.id)
     expect(ids).toHaveLength(200)
     expect(new Set(ids).size).toBe(200)
-    for (const ask of pass.store.asks) {
+    for (const ask of out.store.asks) {
       expect(ask.id).toMatch(/^[0-9a-f]{12}$/)
       expect(ask.nonce).toMatch(/^[0-9a-f]{32}$/)
       expect(ask.nonce.startsWith(ask.id)).toBe(false)
@@ -356,15 +373,15 @@ describe('ids and nonces', () => {
 
 describe('tries', () => {
   test('recordTry appends to each Ask an entry names with that entry\'s seq, and skips an Ask no longer in the store', async () => {
-    const pass = await advanceAsks(statePath, empty(), { decisions: [missingGrant('a'), missingGrant('b', HEX_B)], now: T0 })
+    const out = await pass(empty(), [missingGrant('a'), missingGrant('b', HEX_B)], T0)
     const t = { at: iso(T0 + 1000), outcome: 'timeout' as const, exit_code: null }
 
-    const tried = recordTry(pass.store, pass.entries, t)
+    const tried = recordTry(out.store, out.entries, t)
     expect(tried.asks.map((a) => a.tries)).toEqual([[{ seq: 1, ...t }], [{ seq: 1, ...t }]])
-    expect(pass.store.asks.map((a) => a.tries)).toEqual([[], []])
+    expect(out.store.asks.map((a) => a.tries)).toEqual([[], []])
 
     const pruned: AskStore = { ...tried, asks: tried.asks.filter((a) => a.scope === 'a') }
-    const again = recordTry(pruned, pass.entries, t)
+    const again = recordTry(pruned, out.entries, t)
     expect(again.asks.map((a) => [a.scope, a.tries.length])).toEqual([['a', 2]])
   })
 })
@@ -412,18 +429,251 @@ describe('severity, order and the renewal digest', () => {
     const content = (scope: string): AskDecision => ({ kind: 'content', scope, plugin: scope, digest: HEX_B, clock: null })
     const parked = (scope: string): AskDecision => ({ kind: 'parked_result', scope, plugin: scope, digest: HEX_A, clock: null })
     // Two info Asks at T0, one a minute later, and the warning one last of all.
-    const first = await advanceAsks(statePath, empty(), { decisions: [content('c'), missingGrant('n')], now: T0 })
-    const second = await advanceAsks(statePath, first.store, {
-      decisions: [content('c'), missingGrant('n'), missingGrant('m')],
-      now: T0 + 60_000,
-    })
-    const third = await advanceAsks(statePath, second.store, {
-      decisions: [content('c'), missingGrant('n'), missingGrant('m'), parked('p')],
-      now: T0 + 120_000,
-    })
+    const first = await pass(empty(), [content('c'), missingGrant('n')], T0)
+    const second = await pass(first.store, [content('c'), missingGrant('n'), missingGrant('m')], T0 + 60_000)
+    const third = await pass(second.store, [content('c'), missingGrant('n'), missingGrant('m'), parked('p')], T0 + 120_000)
 
     const idOf = (scope: string): string => third.store.asks.find((a) => a.scope === scope)!.id
     const sameInstant = ['c', 'n'].sort((x, y) => (idOf(x) < idOf(y) ? -1 : idOf(x) > idOf(y) ? 1 : 0))
     expect(third.entries.map((e) => e.scope)).toEqual(['p', ...sameInstant, 'm'])
+  })
+})
+
+describe('the lifecycle', () => {
+  const MIN = 60 * 1000
+  const GRANT = 'a1b2c3d4e5f6'
+  const shape = (entries: ReadonlyArray<{ id: string; seq: number; event: string }>) =>
+    entries.map((e) => [e.id, e.seq, e.event])
+  const eventsOf = (store: AskStore, i = 0): string[] => store.asks[i]!.events.map((e) => e.event)
+
+  /** The audit store refuses every `ask.raised` from here on, and takes every other kind. */
+  function refuseRaise(): void {
+    const real = audit.appendAudit
+    spies.push(
+      spyOn(audit, 'appendAudit').mockImplementation((async (p: string, kind: string, data: unknown, opts?: unknown) => {
+        if (kind === 'ask.raised') throw new Error('refused for the test')
+        return (real as (...args: unknown[]) => Promise<unknown>)(p, kind, data, opts)
+      }) as typeof audit.appendAudit),
+    )
+  }
+
+  /** A stored Ask on `mailer`, raised an hour before T0, with `over` laid on it. */
+  const stored = (over: Partial<Ask>): Ask => ({
+    id: 'c0ffee000001',
+    nonce: '0123456789abcdef0123456789abcdef',
+    kind: 'missing_grant',
+    scope: 'mailer',
+    plugin: 'mailer',
+    digest: HEX_A,
+    summary: askSummary('missing_grant', 'mailer'),
+    raised_at: iso(T0 - HOUR),
+    expires_at: iso(T0 + 22 * HOUR),
+    state: 'open',
+    closed_at: null,
+    answer: null,
+    events: [{ seq: 1, event: 'raised', at: iso(T0 - HOUR) }],
+    tries: [],
+    ...over,
+  })
+  const storeOf = (...asks: Ask[]): AskStore => ({ min_reader_version: 1, asks })
+
+  test('a changed digest closes the open Ask superseded and raises a new one with a new nonce', async () => {
+    const first = await pass(empty(), [missingGrant()], T0)
+    const old = first.store.asks[0]!
+
+    const second = await pass(first.store, [missingGrant('mailer', HEX_B)], T0 + 10 * MIN)
+
+    const fresh = second.store.asks.find((a) => a.id !== old.id)
+    expect(fresh).toBeDefined()
+    expect(fresh!.digest).toBe(HEX_B)
+    expect(fresh!.nonce).not.toBe(old.nonce)
+    expect(second.changed).toBe(true)
+    expect(shape(second.entries)).toEqual([
+      [old.id, 2, 'superseded'],
+      [fresh!.id, 1, 'raised'],
+    ])
+    expect(second.store.asks.filter((a) => a.state === 'open').map((a) => a.id)).toEqual([fresh!.id])
+    const closed = second.store.asks.find((a) => a.id === old.id)!
+    expect(closed).toMatchObject({ state: 'superseded', closed_at: iso(T0 + 10 * MIN), answer: null })
+    expect(closed.events).toEqual([
+      { seq: 1, event: 'raised', at: iso(T0) },
+      { seq: 2, event: 'superseded', at: iso(T0 + 10 * MIN) },
+    ])
+    expect(auditRecords('ask.raised')).toHaveLength(2)
+  })
+
+  test('a changed kind with an equal digest still supersedes', async () => {
+    const first = await pass(empty(), [missingGrant()], T0)
+
+    const second = await pass(first.store, [{ ...missingGrant(), kind: 'content' }], T0 + 10 * MIN)
+
+    expect(second.store.asks.map((a) => [a.kind, a.digest, a.state])).toEqual([
+      ['missing_grant', HEX_A, 'superseded'],
+      ['content', HEX_A, 'open'],
+    ])
+  })
+
+  test('a refused raise leaves the open Ask open, not superseded', async () => {
+    const first = await pass(empty(), [missingGrant()], T0)
+    refuseRaise()
+
+    const second = await pass(first.store, [missingGrant('mailer', HEX_B)], T0 + 10 * MIN)
+
+    expect(second.unrecorded).toBe(1)
+    expect(second.store.asks).toHaveLength(1)
+    expect(second.store.asks[0]).toMatchObject({ id: first.store.asks[0]!.id, state: 'open', closed_at: null, digest: HEX_A })
+    expect(eventsOf(second.store)).toEqual(['raised'])
+  })
+
+  test('reminders go out at the first pass at or after each point, one per passed set', async () => {
+    let store = (await pass(empty(), [missingGrant()], T0)).store
+    for (const at of [59 * MIN, HOUR, 90 * MIN, 5 * HOUR]) {
+      store = (await pass(store, [missingGrant()], T0 + at)).store
+    }
+
+    expect(store.asks).toHaveLength(1)
+    expect(store.asks[0]!.events).toEqual([
+      { seq: 1, event: 'raised', at: iso(T0) },
+      { seq: 2, event: 'reminder', at: iso(T0 + HOUR) },
+      { seq: 3, event: 'reminder', at: iso(T0 + 5 * HOUR) },
+    ])
+  })
+
+  test('an expired Ask sends one expired event, and the scope waits a pass before it is raised again', async () => {
+    const first = await pass(empty(), [missingGrant()], T0)
+    const old = first.store.asks[0]!
+
+    const expired = await pass(first.store, [missingGrant()], T0 + 23 * HOUR)
+    expect(shape(expired.entries)).toEqual([[old.id, 2, 'expired']])
+    expect(expired.store.asks).toHaveLength(1)
+    expect(expired.store.asks[0]).toMatchObject({ state: 'expired', closed_at: iso(T0 + 23 * HOUR), answer: null })
+    expect(eventsOf(expired.store)).toEqual(['raised', 'expired'])
+
+    const next = await pass(expired.store, [missingGrant()], T0 + 23 * HOUR + MIN)
+    const fresh = next.store.asks.filter((a) => a.state === 'open')
+    expect(fresh).toHaveLength(1)
+    expect(fresh[0]!.id).not.toBe(old.id)
+    expect(fresh[0]!.nonce).not.toBe(old.nonce)
+    expect(shape(next.entries)).toEqual([
+      [old.id, 2, 'expired'],
+      [fresh[0]!.id, 1, 'raised'],
+    ])
+  })
+
+  test('expiry reached before a reminder point sends only expired', async () => {
+    const soon = { ...missingGrant(), clock: T0 + 30 * MIN }
+    const first = await pass(empty(), [soon], T0, { remindersMs: [HOUR] })
+
+    const later = await pass(first.store, [soon], T0 + 2 * HOUR, { remindersMs: [HOUR] })
+
+    expect(later.entries.map((e) => e.event)).toEqual(['expired'])
+    expect(eventsOf(later.store)).toEqual(['raised', 'expired'])
+  })
+
+  test('a decision that vanished lapses silently', async () => {
+    const first = await pass(empty(), [missingGrant()], T0)
+    const evaluated = { evaluatedPlugins: new Set(['mailer']) }
+
+    const hour = await pass(first.store, [], T0 + HOUR, evaluated)
+    expect(hour.store.asks[0]!.state).toBe('open')
+    expect(eventsOf(hour.store)).toEqual(['raised'])
+
+    const day = await pass(hour.store, [], T0 + 23 * HOUR, evaluated)
+    expect(day.store.asks).toHaveLength(1)
+    expect(day.store.asks[0]).toMatchObject({ state: 'expired', closed_at: iso(T0 + 23 * HOUR) })
+    expect(eventsOf(day.store)).toEqual(['raised'])
+    expect(day.entries).toEqual([])
+  })
+
+  test('a decision not evaluated this pass stays as it is and keeps its reminders', async () => {
+    const first = await pass(empty(), [missingGrant()], T0)
+
+    const hour = await pass(first.store, [], T0 + HOUR, { evaluatedPlugins: new Set() })
+
+    expect(hour.store.asks).toHaveLength(1)
+    expect(hour.store.asks[0]!.state).toBe('open')
+    expect(eventsOf(hour.store)).toEqual(['raised', 'reminder'])
+    expect(shape(hour.entries)).toEqual([
+      [first.store.asks[0]!.id, 1, 'raised'],
+      [first.store.asks[0]!.id, 2, 'reminder'],
+    ])
+  })
+
+  test('a renewal Ask whose grant left a readable standing store lapses silently', async () => {
+    const renewal: AskDecision = { kind: 'renewal', scope: GRANT, plugin: null, digest: HEX_A, clock: null }
+    const first = await pass(empty(), [renewal], T0)
+
+    // The standing store alone decides: the plugin set is the opposite way round each time.
+    const listed = await pass(first.store, [], T0 + HOUR, { evaluatedPlugins: new Set(), standingListed: true })
+    expect(eventsOf(listed.store)).toEqual(['raised'])
+
+    const unlisted = await pass(first.store, [], T0 + HOUR, { evaluatedPlugins: new Set([GRANT]), standingListed: false })
+    expect(eventsOf(unlisted.store)).toEqual(['raised', 'reminder'])
+  })
+
+  test('a deny with the same digest is never raised again, and an approve whose effect did not land is', async () => {
+    const answered = (over: Partial<Ask>): AskStore => storeOf(stored({ state: 'answered', closed_at: iso(T0), ...over }))
+
+    const denied = await pass(answered({ answer: 'deny' }), [missingGrant()], T0 + MIN)
+    expect(denied.store.asks.map((a) => a.state)).toEqual(['answered'])
+    expect(denied.entries).toEqual([])
+    expect(auditRecords('ask.raised')).toHaveLength(0)
+
+    const approved = await pass(answered({ answer: 'approve' }), [missingGrant()], T0 + MIN)
+    expect(approved.store.asks.map((a) => a.state)).toEqual(['answered', 'open'])
+
+    const moved = await pass(answered({ answer: 'deny', digest: HEX_B }), [missingGrant()], T0 + MIN)
+    expect(moved.store.asks.map((a) => a.state)).toEqual(['answered', 'open'])
+  })
+
+  test('closed Asks are pruned 23 hours after they closed', async () => {
+    const closed = storeOf(
+      stored({
+        state: 'expired',
+        closed_at: iso(T0),
+        events: [
+          { seq: 1, event: 'raised', at: iso(T0 - HOUR) },
+          { seq: 2, event: 'expired', at: iso(T0) },
+        ],
+      }),
+    )
+
+    const before = await pass(closed, [], T0 + 23 * HOUR - MIN)
+    expect(before.store.asks).toHaveLength(1)
+
+    const after = await pass(before.store, [], T0 + 23 * HOUR)
+    expect(after.store.asks).toEqual([])
+    expect(after.changed).toBe(true)
+  })
+
+  test('a closed Ask\'s only due entry is its closing event, and an answered Ask has none', async () => {
+    const at = (ms: number) => iso(ms)
+    const raised = { seq: 1, event: 'raised' as const, at: at(T0 - HOUR) }
+    const delivered = (seq: number) => ({ seq, at: at(T0), outcome: 'delivered' as const, exit_code: 0 })
+    const store = storeOf(
+      stored({ id: 'c0ffee000001', scope: 's1', state: 'superseded', closed_at: at(T0), events: [raised, { seq: 2, event: 'superseded', at: at(T0) }] }),
+      stored({
+        id: 'c0ffee000002',
+        scope: 's2',
+        state: 'expired',
+        closed_at: at(T0),
+        events: [raised, { seq: 2, event: 'reminder', at: at(T0 - MIN) }, { seq: 3, event: 'expired', at: at(T0) }],
+        tries: [delivered(1)],
+      }),
+      stored({ id: 'c0ffee000003', scope: 's3', state: 'expired', closed_at: at(T0), events: [raised, { seq: 2, event: 'expired', at: at(T0) }], tries: [delivered(2)] }),
+      // Lapsed silently: no closing event, so nothing is due.
+      stored({ id: 'c0ffee000004', scope: 's4', state: 'expired', closed_at: at(T0), events: [raised] }),
+      stored({ id: 'c0ffee000005', scope: 's5', state: 'answered', answer: 'approve', closed_at: at(T0), events: [raised] }),
+      stored({ id: 'c0ffee000006', scope: 's6', events: [raised, { seq: 2, event: 'reminder', at: at(T0) }] }),
+    )
+
+    const out = await pass(store, [], T0 + MIN, { evaluatedPlugins: new Set() })
+
+    expect(shape(out.entries)).toEqual([
+      ['c0ffee000001', 2, 'superseded'],
+      ['c0ffee000002', 3, 'expired'],
+      ['c0ffee000006', 1, 'raised'],
+      ['c0ffee000006', 2, 'reminder'],
+    ])
   })
 })

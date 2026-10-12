@@ -11,19 +11,23 @@
  * `sends_email`, with no Grant anywhere. Every advance skips it for want of a
  * Grant, which is the decision a missing-Grant Ask is raised for.
  *
- * The second describe adds the other three kinds. `builder` emits one inline
- * Output, `sender` is a content-class consumer of it, and `reviewed` is a
- * supervised session-class plugin holding a session grant, so it runs and
- * parks. Their sentinels are drawn per case at run time, so no source file in
- * the repository holds one.
+ * The four-kind home adds the other three kinds, and the second and third
+ * describes build on it. `builder` emits one inline Output, `sender` is a
+ * content-class consumer of it, and `reviewed` is a supervised session-class
+ * plugin holding a session grant, so it runs and parks. Their sentinels are
+ * drawn per case at run time, so no source file in the repository holds one.
+ *
+ * A module once imported is never read again in one process, so a case that
+ * changes a manifest between advances writes a fresh plugin root rather than
+ * rewriting the file in place.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { _setHome } from '../../lib/paths.js'
-import { loadRegistry } from '../../lib/principals.js'
+import { loadRegistry, standingRegistry } from '../../lib/principals.js'
 import { _getPaths, _setPaths, pathsForStateFile } from '../../board/state-manager.js'
 import { denialFingerprint, proposalFingerprint, runAdvance, type AdvanceOptions } from '../engine.js'
 import { readEngineState } from '../engine-state-store.js'
@@ -126,8 +130,8 @@ function asks(): { min_reader_version: number; asks: StoredAsk[] } | null {
 
 type Line = { type: string; warplineseq: number; data: Record<string, unknown> }
 
-/** Every `warpline.audit.<kind>` line under `<home>/audit/`, segments in name order. */
-function auditOf(kind: string): Line[] {
+/** Every audit line under `<home>/audit/`, segments in name order. */
+function auditLines(): Line[] {
   const dir = join(home, 'audit')
   if (!existsSync(dir)) return []
   return readdirSync(dir)
@@ -139,7 +143,11 @@ function auditOf(kind: string): Line[] {
         .filter((l) => l.length > 0)
         .map((l) => JSON.parse(l) as Line),
     )
-    .filter((l) => l.type === `warpline.audit.${kind}`)
+}
+
+/** Every `warpline.audit.<kind>` line under `<home>/audit/`, segments in name order. */
+function auditOf(kind: string): Line[] {
+  return auditLines().filter((l) => l.type === `warpline.audit.${kind}`)
 }
 
 /** A quiet window from an hour ago to an hour ahead, on the real clock the guard reads. */
@@ -150,6 +158,124 @@ function windowAroundNow(): { start: string; end: string } {
     return `${pad(d.getHours())}:${pad(d.getMinutes())}`
   }
   return { start: at(-HOUR), end: at(HOUR) }
+}
+
+// -- The four-kind home, shared by the describes below --------------------------
+
+const BUILDER = manifestOf('builder', { side_effects: [], outputs: { brief: { type: 'json' } } })
+const SENDER = manifestOf('sender', {
+  approval_class: 'content',
+  dependencies: ['builder'],
+  // Near zero, so sender is stale on every advance and reaches the content gate.
+  ttl_hours: 0.001,
+})
+const REVIEWED = manifestOf('reviewed', {
+  autonomy_level: 'supervised',
+  side_effects: ['creates_issue'],
+  dependencies: ['builder'],
+  ttl_hours: 2,
+  outputs: { note: { type: 'text' } },
+})
+const MAILER = manifestOf('mailer')
+const asManifest = (m: Record<string, unknown>): PluginManifest => m as unknown as PluginManifest
+
+let BODY_SENTINEL: string
+let PARKED_SENTINEL: string
+let SUMMARY_SENTINEL: string
+let ERROR_SENTINEL: string
+
+const sessionPath = (): string => join(home, '.session-approval')
+const capturePath = (): string => join(home, 'notify-ok.capture')
+type Entry = Record<string, unknown> & { kind: string; scope: string }
+
+beforeEach(() => {
+  BODY_SENTINEL = `body-${randomUUID()}`
+  PARKED_SENTINEL = `parked-${randomUUID()}`
+  SUMMARY_SENTINEL = `summary-${randomUUID()}`
+  ERROR_SENTINEL = `error-${randomUUID()}`
+})
+
+/** `builder` and `sender`; `sender` reports `failed` while `<home>/fail` exists. */
+function writeContentPair(): void {
+  writeFixture(
+    'builder',
+    BUILDER,
+    resultHandler({
+      summary: 'built',
+      artifacts_produced: [{ type: 'brief', format: 'json', body: JSON.stringify({ note: BODY_SENTINEL }) }],
+    }),
+  )
+  writeFixture(
+    'sender',
+    SENDER,
+    `import { existsSync } from 'node:fs'
+export async function handler() {
+  const failed = existsSync(${JSON.stringify(join(home, 'fail'))})
+  return {
+    status: failed ? 'failed' : 'success',
+    phases_completed: [],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: failed ? 'the send reported a failure' : 'sent',
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`,
+  )
+}
+
+/** The three-decision home: `mailer` with no Grant, `sender` with no approval, `reviewed` granted and supervised. */
+async function writeThreeDecisions(): Promise<void> {
+  writeContentPair()
+  writeFixture(
+    'reviewed',
+    REVIEWED,
+    resultHandler({
+      summary: SUMMARY_SENTINEL,
+      errors: [{ code: 'data_missing', message: ERROR_SENTINEL, impact: 'LOW' }],
+      artifacts_produced: [{ type: 'note', format: 'text', body: PARKED_SENTINEL }],
+    }),
+  )
+  await gate.mergeGrant(['reviewed'], {}, sessionPath())
+}
+
+async function state() {
+  return readEngineState(statePath(), { eventsPath: eventsPath(), announceDiscards: false })
+}
+
+const open = (): StoredAsk[] => (asks()?.asks ?? []).filter((a) => a.state === 'open')
+
+type Principal = { id: string; type: 'human' | 'machine'; status: 'active' | 'disabled' }
+
+async function seedRegistry(): Promise<void> {
+  const principals: Principal[] = [
+    { id: 'ops', type: 'human', status: 'active' },
+    { id: 'ci', type: 'machine', status: 'active' },
+  ]
+  writeFileSync(join(home, 'principals.json'), JSON.stringify({ principals }))
+  expect('refused' in (await loadRegistry(statePath()))).toBe(false)
+}
+
+/** A standing grant held by `ci`, issued by `ops`, over `scopes` (`mailer` unless named), through the gate's own writer. Returns its id. */
+async function issueGrant(
+  issuedAt: number,
+  periodMs: number,
+  hardMaxMs: number,
+  { scopes = ['mailer'] }: { scopes?: string[] } = {},
+): Promise<string> {
+  const read = await gate.readStandingStore()
+  if (!read.readable) throw new Error(`standing grants file unreadable: ${read.cause}`)
+  const id = gate.newStandingId()
+  const next = gate.issueStanding(
+    read.store,
+    { id, holder: 'ci', issuer: 'ops', scopes, periodMs, hardMaxMs },
+    issuedAt,
+  )
+  if ('refused' in next) throw new Error(`issue refused: ${next.refused.code}`)
+  await gate.writeStandingStore(next.store)
+  return id
 }
 
 beforeEach(() => {
@@ -284,90 +410,6 @@ describe('an advance raises a missing-Grant Ask and sends it through notify', ()
 })
 
 describe('every waited-on decision raises an Ask, one message per advance', () => {
-  const BUILDER = manifestOf('builder', { side_effects: [], outputs: { brief: { type: 'json' } } })
-  const SENDER = manifestOf('sender', {
-    approval_class: 'content',
-    dependencies: ['builder'],
-    // Near zero, so sender is stale on every advance and reaches the content gate.
-    ttl_hours: 0.001,
-  })
-  const REVIEWED = manifestOf('reviewed', {
-    autonomy_level: 'supervised',
-    side_effects: ['creates_issue'],
-    dependencies: ['builder'],
-    ttl_hours: 2,
-    outputs: { note: { type: 'text' } },
-  })
-  const MAILER = manifestOf('mailer')
-  const asManifest = (m: Record<string, unknown>): PluginManifest => m as unknown as PluginManifest
-
-  let BODY_SENTINEL: string
-  let PARKED_SENTINEL: string
-  let SUMMARY_SENTINEL: string
-  let ERROR_SENTINEL: string
-
-  const sessionPath = (): string => join(home, '.session-approval')
-  const capturePath = (): string => join(home, 'notify-ok.capture')
-  type Entry = Record<string, unknown> & { kind: string; scope: string }
-
-  beforeEach(() => {
-    BODY_SENTINEL = `body-${randomUUID()}`
-    PARKED_SENTINEL = `parked-${randomUUID()}`
-    SUMMARY_SENTINEL = `summary-${randomUUID()}`
-    ERROR_SENTINEL = `error-${randomUUID()}`
-  })
-
-  /** `builder` and `sender`; `sender` reports `failed` while `<home>/fail` exists. */
-  function writeContentPair(): void {
-    writeFixture(
-      'builder',
-      BUILDER,
-      resultHandler({
-        summary: 'built',
-        artifacts_produced: [{ type: 'brief', format: 'json', body: JSON.stringify({ note: BODY_SENTINEL }) }],
-      }),
-    )
-    writeFixture(
-      'sender',
-      SENDER,
-      `import { existsSync } from 'node:fs'
-export async function handler() {
-  const failed = existsSync(${JSON.stringify(join(home, 'fail'))})
-  return {
-    status: failed ? 'failed' : 'success',
-    phases_completed: [],
-    phases_failed: [],
-    errors: [],
-    data_freshness: {},
-    summary: failed ? 'the send reported a failure' : 'sent',
-    artifacts_produced: [],
-    schema_version: 1,
-  }
-}
-`,
-    )
-  }
-
-  /** The three-decision home: `mailer` with no Grant, `sender` with no approval, `reviewed` granted and supervised. */
-  async function writeThreeDecisions(): Promise<void> {
-    writeContentPair()
-    writeFixture(
-      'reviewed',
-      REVIEWED,
-      resultHandler({
-        summary: SUMMARY_SENTINEL,
-        errors: [{ code: 'data_missing', message: ERROR_SENTINEL, impact: 'LOW' }],
-        artifacts_produced: [{ type: 'note', format: 'text', body: PARKED_SENTINEL }],
-      }),
-    )
-    await gate.mergeGrant(['reviewed'], {}, sessionPath())
-  }
-
-  async function state() {
-    return readEngineState(statePath(), { eventsPath: eventsPath(), announceDiscards: false })
-  }
-
-  const open = (): StoredAsk[] => (asks()?.asks ?? []).filter((a) => a.state === 'open')
 
   test('three due decisions in one advance send one message holding three Asks, the parked one first', async () => {
     await writeThreeDecisions()
@@ -420,31 +462,6 @@ export async function handler() {
     expect(parked!.expires_at).toBe(new Date(Date.parse(gateOf!.run_completed_at!) + 2 * HOUR).toISOString())
   })
 
-  type Principal = { id: string; type: 'human' | 'machine'; status: 'active' | 'disabled' }
-
-  async function seedRegistry(): Promise<void> {
-    const principals: Principal[] = [
-      { id: 'ops', type: 'human', status: 'active' },
-      { id: 'ci', type: 'machine', status: 'active' },
-    ]
-    writeFileSync(join(home, 'principals.json'), JSON.stringify({ principals }))
-    expect('refused' in (await loadRegistry(statePath()))).toBe(false)
-  }
-
-  /** A standing grant held by `ci`, issued by `ops`, over `mailer`, through the gate's own writer. Returns its id. */
-  async function issueGrant(issuedAt: number, periodMs: number, hardMaxMs: number): Promise<string> {
-    const read = await gate.readStandingStore()
-    if (!read.readable) throw new Error(`standing grants file unreadable: ${read.cause}`)
-    const id = gate.newStandingId()
-    const next = gate.issueStanding(
-      read.store,
-      { id, holder: 'ci', issuer: 'ops', scopes: ['mailer'], periodMs, hardMaxMs },
-      issuedAt,
-    )
-    if ('refused' in next) throw new Error(`issue refused: ${next.refused.code}`)
-    await gate.writeStandingStore(next.store)
-    return id
-  }
 
   test('a standing grant due within 23 hours raises a renewal Ask with no plugin and the grant id as scope', async () => {
     await seedRegistry()
@@ -588,5 +605,173 @@ export async function handler() {
     const raw = readFileSync(capturePath(), 'utf-8')
     expect(raw).not.toContain(SUMMARY_SENTINEL)
     expect(raw).not.toContain(ERROR_SENTINEL)
+  })
+})
+
+describe('one open Ask per scope, on a schedule, until it expires', () => {
+  const MIN = 60 * 1000
+  type Message = { entries: Array<Entry & { id: string; seq: number; event: string }> }
+  const shape = (m: Message): Array<[string, number, string]> => m.entries.map((e) => [e.id, e.seq, e.event])
+  const byId = (id: string): StoredAsk => asks()!.asks.find((a) => a.id === id)!
+
+  /** A copy of the plugin root in which `mailer` declares a second side effect, so its proposal moves. */
+  function rootWithChangedMailer(): string {
+    const root = join(home, 'plugins-changed')
+    cpSync(join(home, 'plugins'), root, { recursive: true })
+    const manifest = manifestOf('mailer', { side_effects: ['sends_email', 'creates_issue'] })
+    writeFileSync(join(root, 'mailer', 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
+    return root
+  }
+
+  test('a changed decision supersedes: the old Ask closes, a superseded entry is sent, and the new Ask has a new nonce', async () => {
+    const stub = await notifyStub(home, 'ok')
+    setNotify(prefsPath(), { argv: stub.argv })
+
+    await advance(T0)
+    const old = asks()!.asks[0]!
+    await advance(T0 + 10 * MIN, { pluginsDir: rootWithChangedMailer() })
+
+    const messages = stub.messages() as Message[]
+    expect(messages).toHaveLength(2)
+    const fresh = asks()!.asks.find((a) => a.id !== old.id)
+    expect(fresh).toBeDefined()
+    expect(shape(messages[1]!)).toEqual([
+      [old.id, 2, 'superseded'],
+      [fresh!.id, 1, 'raised'],
+    ])
+    expect(open().map((a) => a.id)).toEqual([fresh!.id])
+    expect(fresh!.nonce).not.toBe(old.nonce)
+    expect(byId(old.id)).toMatchObject({ state: 'superseded', closed_at: new Date(T0 + 10 * MIN).toISOString() })
+  })
+
+  test('reminders follow the schedule, never every advance', async () => {
+    const stub = await notifyStub(home, 'ok')
+    setNotify(prefsPath(), { argv: stub.argv })
+
+    for (const at of [0, 59 * MIN, HOUR, 90 * MIN, 5 * HOUR]) await advance(T0 + at)
+
+    expect(stub.invocations()).toBe(3)
+    const messages = stub.messages() as Message[]
+    const id = asks()!.asks[0]!.id
+    expect(shape(messages[1]!)).toEqual([[id, 2, 'reminder']])
+    expect(shape(messages[2]!)).toEqual([[id, 3, 'reminder']])
+  })
+
+  test('an Ask for a never-granted plugin expires 23 hours after it was raised, sends one expired entry, and the next advance raises a new nonce', async () => {
+    const stub = await notifyStub(home, 'ok')
+    setNotify(prefsPath(), { argv: stub.argv })
+
+    await advance(T0)
+    const old = asks()!.asks[0]!
+    expect(old.expires_at).toBe(new Date(T0 + 23 * HOUR).toISOString())
+
+    await advance(T0 + 23 * HOUR)
+    expect(byId(old.id)).toMatchObject({ state: 'expired', closed_at: new Date(T0 + 23 * HOUR).toISOString(), answer: null })
+    expect(open()).toEqual([])
+    let messages = stub.messages() as Message[]
+    expect(messages).toHaveLength(2)
+    expect(shape(messages[1]!)).toEqual([[old.id, 2, 'expired']])
+
+    await advance(T0 + 23 * HOUR + MIN)
+    const fresh = open()
+    expect(fresh).toHaveLength(1)
+    expect(fresh[0]!.id).not.toBe(old.id)
+    expect(fresh[0]!.nonce).not.toBe(old.nonce)
+    messages = stub.messages() as Message[]
+    expect(messages).toHaveLength(3)
+    expect(shape(messages[2]!)).toEqual([[fresh[0]!.id, 1, 'raised']])
+  })
+
+  test('no raise, reminder, supersede, expiry or send writes an Answer, a Grant, a content approval or a renewal, for any kind of Ask', async () => {
+    await writeThreeDecisions()
+    await seedRegistry()
+    // The real clock, read once: the parked gate's clocks are wall-clock reads.
+    const t0 = Date.now()
+    // Over `builder`, which declares no side effect: the grant changes nothing that fires, and `mailer` still lacks a Grant.
+    const grantId = await issueGrant(t0 - HOUR, 12 * HOUR, 30 * 24 * HOUR, { scopes: ['builder'] })
+
+    // With notify unset: writes the state document and parks `reviewed`, so every authority store exists before the sequence.
+    await advance(t0 - 60_000)
+    const standingPath = join(home, 'standing-grants.json')
+    expect(existsSync(sessionPath())).toBe(true)
+    expect(existsSync(standingPath)).toBe(true)
+    expect(existsSync(statePath())).toBe(true)
+    expect((await state()).pending_gates.map((g) => g.plugin)).toEqual(['reviewed'])
+    expect(asks()).toBeNull()
+
+    const stub = await notifyStub(home, 'ok')
+    setNotify(prefsPath(), { argv: stub.argv })
+
+    const authority = async () => {
+      const s = await state()
+      return {
+        session: readFileSync(sessionPath(), 'utf-8'),
+        standing: readFileSync(standingPath, 'utf-8'),
+        approvals: JSON.stringify(s.approvals),
+        denials: JSON.stringify(s.denials),
+        applied: s.pending_gates
+          .filter((g) => g.applied_at !== null)
+          .map((g) => `${g.plugin}:${g.run_id}`)
+          .sort(),
+      }
+    }
+    const answersOrGrants = (type: string): boolean =>
+      type === 'warpline.audit.ask.answered' || /^warpline\.audit\.(grant|content_approval|denial)\./.test(type)
+    /** One advance, holding every authority store and the audit store's answer and grant kinds still across it. */
+    async function step(now: number, extra: Partial<AdvanceOptions> = {}): Promise<void> {
+      const before = await authority()
+      const mark = auditLines().length
+      await advance(now, extra)
+      expect(await authority()).toEqual(before)
+      expect(auditLines().slice(mark).map((l) => l.type).filter(answersOrGrants)).toEqual([])
+    }
+    const kindsOf = (list: StoredAsk[]): Record<string, StoredAsk> => Object.fromEntries(list.map((a) => [a.kind as string, a]))
+
+    // 1. Raise: one Ask of each kind.
+    await step(t0)
+    const first = kindsOf(open())
+    expect(open()).toHaveLength(4)
+    expect(Object.keys(first).sort()).toEqual(['content', 'missing_grant', 'parked_result', 'renewal'])
+    expect(first.parked_result!.scope).toBe('reviewed')
+    expect(first.content!.scope).toBe('sender')
+    expect(first.missing_grant!.scope).toBe('mailer')
+    expect(first.renewal!.scope).toBe(grantId)
+
+    // 2. Remind: each of the four.
+    await step(t0 + HOUR)
+    for (const a of Object.values(first)) expect(byId(a.id).events.map((e) => e.event)).toContain('reminder')
+
+    // 3. Supersede: mailer's proposal moves, and the grant is renewed the way `warpline renew` does it.
+    const pluginsDir = rootWithChangedMailer()
+    const read = await gate.readStandingStore()
+    if (!read.readable) throw new Error(`standing grants file unreadable: ${read.cause}`)
+    const renewed = gate.renewStanding(read.store, grantId, 'ops', t0 + 90 * MIN, standingRegistry(await loadRegistry(statePath())))
+    if ('refused' in renewed) throw new Error(`renew refused: ${renewed.refused.code}`)
+    await gate.writeStandingStore(renewed.store)
+    await step(t0 + 90 * MIN, { pluginsDir })
+    expect(byId(first.missing_grant!.id).state).toBe('superseded')
+    expect(byId(first.renewal!.id).state).toBe('superseded')
+    const third = kindsOf(open())
+    expect(open()).toHaveLength(4)
+    expect(third.missing_grant!.id).not.toBe(first.missing_grant!.id)
+    expect(third.renewal!.id).not.toBe(first.renewal!.id)
+    expect(third.parked_result!.id).toBe(first.parked_result!.id)
+    expect(third.content!.id).toBe(first.content!.id)
+
+    // 4. Expire: every Ask open after step 3.
+    await step(t0 + 25 * HOUR, { pluginsDir })
+    for (const a of Object.values(third)) expect(byId(a.id).state).toBe('expired')
+  })
+
+  test('an advance with nothing due sends no message', async () => {
+    const stub = await notifyStub(home, 'ok')
+    setNotify(prefsPath(), { argv: stub.argv })
+
+    await advance(T0)
+    expect(stub.invocations()).toBe(1)
+    expect(asks()!.asks[0]!.tries.map((t) => t.outcome)).toEqual(['delivered'])
+
+    await advance(T0 + 10 * MIN)
+    expect(stub.invocations()).toBe(1)
   })
 })
