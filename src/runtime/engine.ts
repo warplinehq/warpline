@@ -130,6 +130,7 @@ import {
   ASK_MAX_AGE_MS,
   advanceAsks,
   askMessage,
+  asksPath,
   readAsks,
   recordTry,
   renewalDigest,
@@ -137,8 +138,9 @@ import {
   type AskDecision,
   type AskEntry,
   type AskKind,
+  type AsksUnreadableCause,
 } from '../lib/asks.js'
-import { notifyEnv, runNotify } from '../lib/notify.js'
+import { NOTIFY_BACKOFF_MS, NOTIFY_TRIES, notifyEnv, runNotify, type NotifyOutcome } from '../lib/notify.js'
 import {
   checkTaskLock as smCheckTaskLock,
   pathsForStateFile,
@@ -370,6 +372,34 @@ export interface AuditFailure {
   intent_seq?: number
 }
 
+/**
+ * What this advance's Ask pass and `notify` send could not do. Every field is
+ * a fact `warpline advance` prints as one stderr line, and none of them moves
+ * the exit code: a broken `notify` changes neither what a run decides nor how
+ * it exits. Empty on the quiet-hours arm and on a dry run, which raise nothing.
+ */
+export interface AskReport {
+  /** Each Ask id in a message `notify` did not take in any of its tries. The next advance sends it again. */
+  undelivered: string[]
+  /** How many Asks the audit store refused to record. None of them was stored or sent. */
+  unrecorded: number
+  /**
+   * Why the pass raised and sent nothing, or null when it ran: a `notify` block
+   * set but unusable at `key`, an Ask store that could not be read, or a fault
+   * in the pass itself. Could not look is never none.
+   */
+  skipped:
+    | null
+    | { reason: 'notify_unusable'; key: string }
+    | { reason: 'store_unreadable'; cause: AsksUnreadableCause; path: string }
+    | { reason: 'failed' }
+  /** Whether some try could not be recorded on its Ask. Its entries stay due, and the next advance sends them again. */
+  tries_unrecorded: boolean
+}
+
+/** The report of an advance that raised and sent nothing, and had nothing to say about it. */
+const noAsks = (): AskReport => ({ undelivered: [], unrecorded: 0, skipped: null, tries_unrecorded: false })
+
 export interface AdvanceResult {
   run_id: string
   /**
@@ -441,6 +471,14 @@ export interface AdvanceResult {
    * Additive, on the argument `pruned` already makes above.
    */
   audit: AuditSummary | null
+  /**
+   * What the Ask pass and the `notify` send could not do this advance. Read by
+   * `warpline advance`, which prints each fact as one line on stderr and never
+   * lets one change the exit code. A library host reads the same facts here.
+   *
+   * Additive, on the argument `pruned` already makes above.
+   */
+  asks: AskReport
 }
 
 // -----------------------------------------------------------------------
@@ -3010,6 +3048,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         pending_gates: quietPendingGates,
         audit_failures: [],
         audit,
+        asks: noAsks(),
       }
     }
 
@@ -4144,7 +4183,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
     // full disk, a read-only home or an unbreakable lock that failed the mark
     // fails this write too, and the advance exits non-zero. Wrap this in a
     // `catch` and those faults go quiet: revisit `advanceExitCode` first.
-    const { standing: standingGates, askPass } = await lockStateDocument(stateDir, async () => {
+    const { standing: standingGates, askPass, askSkip } = await lockStateDocument(stateDir, async () => {
       const disk = await readEngineState(stateDir, { eventsPath, announceDiscards: false })
       const merged: EngineState = {
         ...disk,
@@ -4203,11 +4242,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // reports. The injected `approvalNow` still drives each Ask's own
       // `raised_at`, reminders and expiry.
       const gateNow = Date.now()
-      let pass: { entries: AskEntry[] } | null = null
+      let pass: { entries: AskEntry[]; unrecorded: number } | null = null
+      let skip: AskReport['skipped'] = null
       if (!dryRun && notifyCfg !== null) {
         try {
           const read = await readAsks(stateDir)
-          if (read.readable) {
+          if (!read.readable) skip = { reason: 'store_unreadable', cause: read.cause, path: asksPath(stateDir) }
+          else {
             // Inline approved bytes, or null: a current Output that still
             // carries its body is the only content an Answer could have read.
             const inlineBody = (plugin: string): string | null => {
@@ -4294,13 +4335,14 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             pass = next
           }
         } catch {
-          // shortcut: a fault here is silent, until the advance reports it on stderr.
+          // Reported on the result, and the decision still waits for the next advance.
+          skip = { reason: 'failed' }
         }
       }
       // The gates still waiting, counted from the document this advance just
       // wrote. Re-applying the ceiling rule to it drops nothing the merge
       // kept, short of a gate crossing the ceiling in the same instant.
-      return { standing: standingGateCount(merged.pending_gates, gateNow, plugins), askPass: pass }
+      return { standing: standingGateCount(merged.pending_gates, gateNow, plugins), askPass: pass, askSkip: skip }
     })
 
     // 9. Write run log
@@ -4394,29 +4436,52 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
 
     // 13. The due Asks go to `notify` as one message, with the run lock held
     // and no state lock: the run lock only serialises advances, so a command
-    // that hangs to its timeout blocks no Answer. The try is recorded after,
-    // in its own hold, from a fresh read of the store, appended by Ask id and
-    // seq. The store read before the send is never written back: an Answer
-    // that consumed a nonce while `notify` ran would be undone by it. A fault
-    // anywhere here leaves the entry due, and the next advance sends it again.
+    // that hangs to its timeout blocks no Answer. Up to `NOTIFY_TRIES` tries,
+    // `NOTIFY_BACKOFF_MS` apart, stopping at the first delivered. Each try is
+    // recorded after it, in its own hold, from a fresh read of the store,
+    // appended by Ask id and seq. The store read before the send is never
+    // written back: an Answer that consumed a nonce while `notify` ran would be
+    // undone by it. Whatever is not delivered stays due, and the next advance
+    // sends it again with the same id and seq.
+    const asks: AskReport = {
+      ...noAsks(),
+      unrecorded: askPass?.unrecorded ?? 0,
+      skipped: dryRun ? null : 'unusable' in notifyRead ? { reason: 'notify_unusable', key: notifyRead.unusable } : askSkip,
+    }
     if (askPass !== null && askPass.entries.length > 0 && notifyCfg !== null) {
       const due = askPass.entries
-      try {
-        const outcome = await runNotify(
-          notifyCfg.argv,
-          askMessage(due, notifyCfg.include_content),
-          notifyCfg.timeout_ms,
-          notifyEnv(),
-        )
-        await lockStateDocument(stateDir, async () => {
-          const fresh = await readAsks(stateDir)
-          if (fresh.readable) {
-            await writeAsks(stateDir, recordTry(fresh.store, due, { at: new Date(approvalNow).toISOString(), ...outcome }))
-          }
-        })
-      } catch {
-        // shortcut: a fault here is silent, until the advance reports it on stderr.
+      const sendStart = Date.now()
+      let delivered = false
+      for (let i = 0; i < NOTIFY_TRIES && !delivered; i++) {
+        if (i > 0) await new Promise<void>((resolve) => setTimeout(resolve, NOTIFY_BACKOFF_MS[i - 1]))
+        let outcome: NotifyOutcome
+        try {
+          outcome = await runNotify(
+            notifyCfg.argv,
+            askMessage(due, notifyCfg.include_content),
+            notifyCfg.timeout_ms,
+            notifyEnv(),
+          )
+        } catch {
+          // A spawn that threw: the command could not start, as on ENOENT.
+          outcome = { outcome: 'failed', exit_code: null }
+        }
+        delivered = outcome.outcome === 'delivered'
+        // On the advance's own clock, moved on by the time the tries took.
+        const at = new Date(approvalNow + (Date.now() - sendStart)).toISOString()
+        try {
+          const recorded = await lockStateDocument(stateDir, async () => {
+            const fresh = await readAsks(stateDir)
+            if (!fresh.readable) return false
+            await writeAsks(stateDir, recordTry(fresh.store, due, { at, ...outcome }))
+            return true
+          })
+          if (!recorded) asks.tries_unrecorded = true
+        } catch {
+          asks.tries_unrecorded = true
+        }
       }
+      if (!delivered) asks.undelivered = [...new Set(due.map((e) => e.id))]
     }
 
     return {
@@ -4430,6 +4495,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       pending_gates: standingGates,
       audit_failures,
       audit,
+      asks,
     }
   } finally {
     // The heartbeat first, and awaited: a refresh still in flight when the

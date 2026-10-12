@@ -48,6 +48,14 @@ export function notifyEnv(
   return out
 }
 
+/**
+ * How many times one advance runs `notify` for one message, and the waits
+ * between those tries. Constants, never settings: the long tail of a broken
+ * `notify` is the next advance, which sends every undelivered entry again.
+ */
+export const NOTIFY_TRIES = 3
+export const NOTIFY_BACKOFF_MS = [500, 2000] as const
+
 export type NotifyOutcome = { outcome: 'delivered' | 'failed' | 'timeout'; exit_code: number | null }
 
 /**

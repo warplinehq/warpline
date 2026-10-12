@@ -136,6 +136,7 @@ import type { AuditSummary } from '../lib/audit-log.js'
 import { advanceCounts, advanceExitCode, EXIT_AUDIT_FAILED } from '../runtime/exit-codes.js'
 import { isInteractive } from './prompt.js'
 import { exitAfterFlush } from '../lib/exit-after-flush.js'
+import { NOTIFY_TRIES } from '../lib/notify.js'
 import { RunTriggerSchema, type RunTrigger } from '../schemas/run-log.js'
 
 export const USAGE = `Usage: warpline advance [--strict] [--json]
@@ -497,6 +498,37 @@ export async function run(
     }
     if (exit_code === EXIT_AUDIT_FAILED) {
       process.stderr.write('Exit 70: the audit store failed during this run; see docs/runtime-spec.md § 11.\n')
+    }
+
+    // What the Asks could not do, read after the exit code is fixed and never
+    // fed back into it. Built from ids, a key path, a cause, a file path and
+    // fixed phrases only, so no operator config reaches the stream.
+    const asks = result.asks
+    if (asks.skipped?.reason === 'notify_unusable') {
+      process.stderr.write(`warpline advance: notify is set but unusable at ${asks.skipped.key}, so no Ask was raised or sent.\n`)
+    } else if (asks.skipped?.reason === 'store_unreadable') {
+      process.stderr.write(
+        `warpline advance: ${asks.skipped.path} cannot be read (${asks.skipped.cause}), so no Ask was raised or sent.\n`,
+      )
+    } else if (asks.skipped?.reason === 'failed') {
+      process.stderr.write('warpline advance: the Asks could not be updated, so none was raised or sent.\n')
+    }
+    if (asks.unrecorded > 0) {
+      process.stderr.write(
+        `warpline advance: the audit store could not record ${asks.unrecorded} Ask(s), so none of them was raised or sent. ` +
+          'The decision still waits.\n',
+      )
+    }
+    if (asks.undelivered.length > 0) {
+      process.stderr.write(
+        `warpline advance: notify did not deliver Ask ${asks.undelivered.join(', ')} after ${NOTIFY_TRIES} tries. ` +
+          'The next advance sends it again.\n',
+      )
+    }
+    if (asks.tries_unrecorded) {
+      process.stderr.write(
+        'warpline advance: a notify try could not be recorded on its Ask, so the next advance sends it again.\n',
+      )
     }
 
     // The one site anything reaches stdout from, past every refusal above it.

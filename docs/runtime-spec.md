@@ -3311,6 +3311,9 @@ on a run that already timed out or was cancelled. None of them is ruled out, so
 a consumer that cannot tolerate a corrupt document at all should key on the exit
 code, which reaches it without being parsed.
 
+What the Asks could not do this advance (§ 16, Delivery) goes to stderr, one
+line per fact, and never moves the exit code.
+
 ### The code comes from the run's own state, never from its status
 
 The code is computed from exactly four fields of the advance result:
@@ -3613,9 +3616,9 @@ There are two lock files in the state directory and they are not the same thing.
 `.state.lock` serialises read-modify-writes of the engine state document and of
 the Ask store beside it (§ 16), and its holders are every writer of either: the
 board, `deny`, `approve` when it writes state, and the advance's three regions,
-which are its spend mark, its end-of-run write and the try record after a
-`notify` send. The three are sequential and never nested, and `notify` runs in
-none of them. They have different lifetimes and different holders.
+which are its spend mark, its end-of-run write and the try record after each
+`notify` try (§ 16). The three are sequential and never nested, and `notify`
+runs in none of them. They have different lifetimes and different holders.
 
 Neither collapses into the other. The state lock is non-reentrant, and the board
 takes it around a call that writes the state document, so the run lock cannot be
@@ -4789,3 +4792,44 @@ audit store keeps its `ask.raised` record.
 Ask, only its closing `superseded` or `expired` event, until it is delivered.
 An answered Ask, or one that lapsed silently, has nothing due. An advance with
 nothing due sends no message.
+
+### Delivery
+
+Delivery is at least once. An advance runs `notify` up to three times for its
+one message, 500 ms and then 2 s apart, and stops at the first try that
+delivers. These are constants, not settings. The long tail is the next advance.
+
+Each try goes on every Ask in the message, under each entry's own `seq`, with
+its time, its outcome and its exit code: `delivered` with `0`, `failed` with
+the code (`null` for a command that could not start or was killed by a
+signal), or `timeout` with `null`. Its time is the advance's clock moved on by
+the time the tries took.
+
+The next advance sends every entry still undelivered again, with the same Ask
+id and the same `seq`. So does an advance after one that stopped between
+recording an Ask and sending it. A receiver drops a duplicate by (`id`, `seq`).
+Two advances can both send one entry: each records its try under that entry's
+one `seq`, and the Ask's event seqs stay unique.
+
+`notify` runs with the run lock held and no state lock, so a `notify` that
+hangs to its timeout never blocks an `approve`, a `deny` or any other writer of
+the state. Its whole process group is killed at the timeout, and when warpline
+itself exits, an interrupted advance included.
+
+Nothing about delivery changes what a run decides or its exit code. Each way
+the Asks fall short is one line on stderr, built from Ask ids, a key path, a
+cause, a file path and fixed phrases, and nothing about Asks reaches stdout:
+
+| Fact | Line |
+|---|---|
+| A message no try delivered | `warpline advance: notify did not deliver Ask <ids> after 3 tries. The next advance sends it again.` |
+| `ask.raised` refused by the audit store | `warpline advance: the audit store could not record <n> Ask(s), so none of them was raised or sent. The decision still waits.` |
+| An unusable `notify` block | `warpline advance: notify is set but unusable at <key>, so no Ask was raised or sent.` |
+| An unreadable Ask store | `warpline advance: <path> cannot be read (<cause>), so no Ask was raised or sent.` The file is left as it was. |
+| A fault in the Ask pass | `warpline advance: the Asks could not be updated, so none was raised or sent.` |
+| A try that could not be recorded | `warpline advance: a notify try could not be recorded on its Ask, so the next advance sends it again.` |
+
+A library host reads the same facts on `AdvanceResult.asks`: `undelivered`
+(the Ask ids), `unrecorded` (a count), `skipped` (`null`, or the reason with
+its key path, or its cause and file path) and `tries_unrecorded`. A dry run and
+an advance skipped for quiet hours report nothing there.
