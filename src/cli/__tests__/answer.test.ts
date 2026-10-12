@@ -536,4 +536,23 @@ describe('every Answer refusal is named, in its fixed order, and writes nothing'
       'digest mismatch',
     )
   })
+
+  test('a run that fails two checks names the first in the fixed order', async () => {
+    const ask = askFor('p')
+    rewriteAsk(ask.id, { expires_at: new Date(Date.now() - 60_000).toISOString() })
+    const wrong = (ask.digest[0] === '0' ? '1' : '0') + ask.digest.slice(1, 12)
+    await refused(form('approve p').answer(ask.nonce, wrong), 'expired')
+  })
+
+  test("the nonce of another scope's open Ask is refused as unknown", async () => {
+    const p = askFor('p')
+    expect(askFor('sender').nonce).not.toBe(p.nonce)
+    for (const argv of [
+      form('approve sender --content').answer(p.nonce, prefix(p)),
+      ['approve', 'sender', '--nonce', p.nonce, '--digest', prefix(p), '--principal', 'ops'],
+    ]) {
+      await refused(argv, 'unknown')
+    }
+    expect(askById(p.id).state).toBe('open')
+  })
 })
