@@ -4562,13 +4562,20 @@ never a value from the file.
 
 `warpline approve`, `warpline deny`, `warpline resolve` and `warpline revoke`
 read this file when `--principal` is given, and record a hand edit first, as
-`warpline principal` does. Without the flag they do not read it, with two
-exceptions. `warpline approve --standing` always reads it, since it requires
+`warpline principal` does. The forms that read `asks.json` are the exception:
+an Answer through `approve <plugin>`, and every form of
+`approve <plugin> --content`, `deny <plugin>`, `deny --standing` and `renew`.
+They judge `--principal` and `--via` on the file as read, and record a hand
+edit of those same bytes just before their first audit record, never by a
+second read. So a command they refuse leaves the audit store as it was
+(§ 16), and one they carry out records the edit before anything it does.
+Without the flag the verbs do not read the file, with two exceptions.
+`warpline approve --standing` always reads it, since it requires
 `--principal` and checks `--holder` against it too. `warpline revoke --holder`
 reads it to check the holder, with or without `--principal` (§ 9).
-`warpline renew` always reads it, since it requires `--principal`. Each
-records a hand edit first. A revoke goes through even when that record cannot
-be written (§ 9).
+`warpline renew` always reads it, since it requires `--principal`. The forms
+outside that exception record a hand edit first. A revoke goes through even
+when that record cannot be written (§ 9).
 
 An advance reads this file only when the standing grants file holds a grant
 (§ 9), and records a hand edit first, as `warpline principal` does. A record it
@@ -5050,8 +5057,9 @@ An Answer that does not match its Ask is refused by name. Each refusal exits
 (the short prefix prints `prefix shorter than 12:` and its sentence), never a
 typed value, and writes nothing: the state document, the session
 grant file, the standing grants file, `asks.json` and the audit store are as
-they were. This holds after a hand edit of preferences.json too: the next
-command that acts records the edit (§ 6).
+they were. This holds after a hand edit of preferences.json or
+principals.json too, and for a refused `--principal`, `--via` or bare form:
+the next command that acts records the edit (§ 6, § 15).
 
 | Reason | When |
 |---|---|

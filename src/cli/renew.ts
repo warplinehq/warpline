@@ -50,7 +50,7 @@ import {
   type AnswerForm,
   type Ask,
 } from '../lib/asks.js'
-import { judgePrincipal, requirePrincipal, standingRegistry } from '../lib/principals.js'
+import { judgePrincipal, observeRegistry, readPrincipal, standingRegistry } from '../lib/principals.js'
 import {
   readStandingStore,
   renewStanding,
@@ -156,11 +156,12 @@ export async function run(argv: string[]): Promise<number> {
 
   return await withStateLockAt(lockPath, async (): Promise<number> => {
     // Checked in the hold, so a principal disabled while this waited is refused.
-    const actor = await requirePrincipal(values.principal, 'active-human')
+    // Judged without recording: a hand edit goes on the record only once this acts.
+    const actor = await readPrincipal(values.principal, 'active-human')
     if ('refused' in actor) return refuse(`--principal: ${actor.refused}.`)
     // The flag was present above, so the check resolved an id.
     if (actor.id === null) throw new Error('unreachable: --principal resolved no id')
-    // The registry the check recorded. A second read could see a hand edit the store never did.
+    // The registry the check judged, recorded below before the first audit record.
     const view = standingRegistry(actor.loaded)
 
     const read = await readStandingStore()
@@ -221,6 +222,8 @@ export async function run(argv: string[]): Promise<number> {
     // The notify this command judged goes on the record before anything is written.
     const observed = await observePreferences(notify.loaded, statePath)
     if (observed !== null) return refuse(`${observed.refused}.`)
+    const registryObserved = await observeRegistry(actor.loaded, statePath)
+    if (registryObserved !== null) return refuse(`--principal: ${registryObserved.refused}.`)
 
     // The Answer is on the record, and its Ask closed, before the renewal's own record.
     if (answered !== null) {

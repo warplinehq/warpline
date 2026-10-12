@@ -109,7 +109,7 @@ import {
   type IssueRefusal,
 } from '../runtime/approval-gate.js'
 import { appendAudit } from '../lib/audit-log.js'
-import { judgePrincipal, requirePrincipal } from '../lib/principals.js'
+import { judgePrincipal, observeRegistry, readPrincipal, requirePrincipal } from '../lib/principals.js'
 import {
   ANSWER_REFUSAL_TEXT,
   asksPath,
@@ -304,7 +304,8 @@ async function approveContent(
 
   return await withStateLockAt(lockPath, async () => {
     // Checked in the hold, so a principal disabled while this waited is refused.
-    const actor = await requirePrincipal(values.principal, 'active')
+    // Judged without recording: a hand edit goes on the record only once this acts.
+    const actor = await readPrincipal(values.principal, 'active')
     if ('refused' in actor) {
       process.stderr.write(`approve: --principal: ${actor.refused}. Nothing was approved.\n`)
       return 1
@@ -534,6 +535,8 @@ async function approveContent(
     // The notify this command judged goes on the record before anything is written.
     const observed = await observePreferences(notify.loaded, statePath)
     if (observed !== null) return refuseObserve(observed.refused, 'written')
+    const registryObserved = actor.id === null ? null : await observeRegistry(actor.loaded, statePath)
+    if (registryObserved !== null) return refuseObserve(`--principal: ${registryObserved.refused}`, 'written')
 
     if (found !== null && answer !== null && who !== null) {
       const rec = await recordAnswer(statePath, found.ask, {
@@ -1079,23 +1082,33 @@ export async function run(argv: string[]): Promise<number> {
       liveDigest: () => proposalFingerprint(state, name, manifests.get(name)!),
       notify: notify.inUse,
     })
-    let answered: { ask: Ask; principal: string; via: string | null; evidence: string | null } | null = null
+    let answered: {
+      ask: Ask
+      principal: string
+      via: string | null
+      evidence: string | null
+      registry: Parameters<typeof observeRegistry>[0]
+    } | null = null
     if (answer === null) {
       for (const name of positionals) {
         const open = openAskFor(asks.store, [name], now, formFor(name))
         if (open !== undefined) return refuseBare(open)
       }
     } else {
-      const who = answerer(await requirePrincipal(values.principal, 'active'), answer)
-      if ('refused' in who) {
-        process.stderr.write(`approve: ${who.refused} Nothing was written.\n`)
+      // Judged without recording: a hand edit goes on the record only once this acts.
+      const actor = await readPrincipal(values.principal, 'active')
+      const who = answerer(actor, answer)
+      // The second test only narrows: answerer admits only a principal it judged.
+      if ('refused' in who || !('loaded' in actor)) {
+        const why = 'refused' in who ? who.refused : '--principal is required on an Answer.'
+        process.stderr.write(`approve: ${why} Nothing was written.\n`)
         return 1
       }
       // Exactly one plugin: parseAnswerFlags refused any other count. The
       // branch is the one gate-first picks, so the Ask must be of its kind.
       const found = checkAnswer(asks.store, answer, positionals[0]!, now, formFor(positionals[0]!))
       if ('refused' in found) return refuseAnswer(found.refused)
-      answered = { ask: found.ask, ...who, evidence: answer.evidence }
+      answered = { ask: found.ask, ...who, evidence: answer.evidence, registry: actor.loaded }
     }
     // The notify this command judged goes on the record once, before its first write.
     let observed = false
@@ -1109,6 +1122,8 @@ export async function run(argv: string[]): Promise<number> {
       if (answered === null) return null
       const refusedObserve = await observeOnce('written')
       if (refusedObserve !== null) return refusedObserve
+      const registryObserved = await observeRegistry(answered.registry, statePath)
+      if (registryObserved !== null) return refuseObserve(`--principal: ${registryObserved.refused}`, 'written')
       const rec = await recordAnswer(statePath, answered.ask, {
         answer: 'approve',
         principal: answered.principal,

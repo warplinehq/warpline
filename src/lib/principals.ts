@@ -12,6 +12,10 @@
  * before anything uses what was read. `readRegistry` is for readers that write
  * nothing, and it never touches the store.
  *
+ * A command that must write nothing when it refuses judges with
+ * `readPrincipal` and records those same bytes with `observeRegistry` just
+ * before its first audit record, so a refusal leaves the store as it was.
+ *
  * Refusal phrases name key paths and schema facts, never a value from the
  * file. A principal's key is never in a phrase or in the view the gate takes.
  *
@@ -20,7 +24,7 @@
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
-import { AuditAppendError, observeAuthorityFile } from './audit-log.js'
+import { observeAuthorityFile, observeRefusal } from './audit-log.js'
 import { engineStatePath, principalsPath } from './paths.js'
 
 export const PRINCIPAL_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/
@@ -162,13 +166,48 @@ export async function requirePrincipal(
   try {
     loaded = await loadRegistry(statePath)
   } catch (err) {
-    const phrase = 'the audit store could not record a change to principals.json'
-    return { refused: err instanceof AuditAppendError ? `${phrase}: ${err.reason}` : phrase, cause: 'audit' }
+    return observeRefusal('principals.json', err)
   }
   if ('refused' in loaded) return { refused: loaded.refused, cause: 'registry' }
 
   const judged = judgePrincipal(loaded.registry, flag, rule)
   return 'refused' in judged ? judged : { id: judged.id, loaded }
+}
+
+/**
+ * `requirePrincipal`'s judgment without the observation: it reads the file
+ * and records nothing. A caller that admits records the bytes it was given
+ * with `observeRegistry` before its first audit record.
+ */
+export async function readPrincipal(
+  flag: string | undefined,
+  rule: PrincipalRule,
+): Promise<{ id: null } | { id: string; loaded: Loaded } | { refused: string; cause: PrincipalRefusalCause }> {
+  if (flag === undefined) return { id: null }
+  if (flag === '') return { refused: 'an empty id names no principal', cause: 'empty' }
+
+  const loaded = await readRegistry()
+  if ('refused' in loaded) return { refused: loaded.refused, cause: 'registry' }
+
+  const judged = judgePrincipal(loaded.registry, flag, rule)
+  return 'refused' in judged ? judged : { id: judged.id, loaded }
+}
+
+/**
+ * Record the bytes `readPrincipal` judged, never a second read a hand edit
+ * could land between. Null once recorded (or when nothing changed), else the
+ * shared refusal.
+ */
+export async function observeRegistry(
+  loaded: Loaded,
+  statePath: string = engineStatePath(),
+): Promise<null | { refused: string; cause: 'audit' }> {
+  try {
+    await observeAuthorityFile(statePath, 'principal_registry.observed', loaded.bytes, registryEntries(loaded.registry))
+  } catch (err) {
+    return observeRefusal('principals.json', err)
+  }
+  return null
 }
 
 /**

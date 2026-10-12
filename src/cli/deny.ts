@@ -72,7 +72,7 @@ import {
   type AnswerRefusal,
   type Ask,
 } from '../lib/asks.js'
-import { judgePrincipal, requirePrincipal } from '../lib/principals.js'
+import { judgePrincipal, observeRegistry, readPrincipal, requirePrincipal } from '../lib/principals.js'
 import { readStandingStore } from '../runtime/approval-gate.js'
 import { findPendingGate, loadPluginManifests, proposalFingerprint } from '../runtime/engine.js'
 import { emitDenialRecorded, emitGateInvalidated } from '../board/engine-events.js'
@@ -327,9 +327,13 @@ export async function run(argv: string[]): Promise<number> {
     const grantId = values.standing
     return await withStateLockAt(lockPath, async () => {
       // Checked in the hold, so a principal disabled while this waited is refused.
-      const who = answerer(await requirePrincipal(values.principal, 'active'), answer)
-      if ('refused' in who) {
-        process.stderr.write(`deny: ${who.refused} Nothing was written.\n`)
+      // Judged without recording: a hand edit goes on the record only once this acts.
+      const actor = await readPrincipal(values.principal, 'active')
+      const who = answerer(actor, answer)
+      // The second test only narrows: answerer admits only a principal it judged.
+      if ('refused' in who || !('loaded' in actor)) {
+        const why = 'refused' in who ? who.refused : '--principal is required on an Answer.'
+        process.stderr.write(`deny: ${why} Nothing was written.\n`)
         return 1
       }
       const asks = await readAsks(statePath)
@@ -348,6 +352,8 @@ export async function run(argv: string[]): Promise<number> {
       // The notify this command judged goes on the record before the Answer.
       const observed = await observePreferences(notify.loaded, statePath)
       if (observed !== null) return refuseObserve(observed.refused, 'written')
+      const registryObserved = await observeRegistry(actor.loaded, statePath)
+      if (registryObserved !== null) return refuseObserve(`--principal: ${registryObserved.refused}`, 'written')
       const rec = await recordAnswer(statePath, found.ask, {
         answer: 'deny',
         principal: who.principal,
@@ -477,7 +483,8 @@ export async function run(argv: string[]): Promise<number> {
   // Nothing that waits on a human is in here. The loop decides and prints; the
   // board events go out after the lock is released, below.
   const early = await withStateLockAt(lockPath, async (): Promise<number | null> => {
-    const actor = await requirePrincipal(values.principal, 'active')
+    // Judged without recording: a hand edit goes on the record only once this acts.
+    const actor = await readPrincipal(values.principal, 'active')
     if ('refused' in actor) {
       process.stderr.write(`deny: --principal: ${actor.refused}. Nothing was denied.\n`)
       return 1
@@ -528,6 +535,8 @@ export async function run(argv: string[]): Promise<number> {
       // The notify this command judged goes on the record before the Answer.
       const observed = await observePreferences(notify.loaded, statePath)
       if (observed !== null) return refuseObserve(observed.refused, 'written')
+      const registryObserved = actor.id === null ? null : await observeRegistry(actor.loaded, statePath)
+      if (registryObserved !== null) return refuseObserve(`--principal: ${registryObserved.refused}`, 'written')
       // On the record, and the Ask closed, before any denial is decided or recorded.
       const rec = await recordAnswer(statePath, found.ask, {
         answer: 'deny',
@@ -617,11 +626,13 @@ export async function run(argv: string[]): Promise<number> {
 
     if (recorded.length === 0) return 0
 
-    // A bare deny records the notify it judged before its first denial record.
-    // An Answer already recorded it with the Answer.
+    // A bare deny records the notify and the registry it judged before its
+    // first denial record. An Answer already recorded them with the Answer.
     if (answer === null) {
       const observed = await observePreferences(notify.loaded, statePath)
       if (observed !== null) return refuseObserve(observed.refused, 'denied')
+      const registryObserved = actor.id === null ? null : await observeRegistry(actor.loaded, statePath)
+      if (registryObserved !== null) return refuseObserve(`--principal: ${registryObserved.refused}`, 'denied')
     }
 
     // Each denial is on the audit record before the state document changes,
