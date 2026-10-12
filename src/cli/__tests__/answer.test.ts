@@ -13,6 +13,7 @@
  * unreadable-store table is built from it, one row per form and per typing.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { randomBytes } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { join } from 'node:path'
@@ -442,5 +443,13 @@ describe('every Answer refusal is named, in its fixed order, and writes nothing'
     const r = await capture(form('approve p').answer(ask.nonce, prefix(ask).toUpperCase()))
     expect(r.code).toBe(0)
     expect(askById(ask.id).state).toBe('answered')
+  })
+
+  test('a nonce that names no Ask on that scope refuses as unknown', async () => {
+    // builder holds no Ask at all.
+    expect(storedAsks().filter((a) => a.scope === 'builder')).toEqual([])
+    const nonce = randomBytes(16).toString('hex')
+    const digest = randomBytes(6).toString('hex')
+    await refused(['approve', 'builder', '--nonce', nonce, '--digest', digest, '--principal', 'ops'], 'unknown')
   })
 })
