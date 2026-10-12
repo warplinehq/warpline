@@ -267,6 +267,7 @@ const ROWS: Row[] = [
   { argv: ['revoke'], code: 0 },
   { argv: ['deny', 'mailer'], code: 0 },
   { argv: ['deny', '--remove', 'mailer'], code: 0 },
+  { argv: ['approvals'], code: 0 },
   { argv: ['approve', 'sender', '--content', '--not-after', '2099-01-01T00:00'], code: 0 },
   {
     argv: ['resolve', 'sender', '--not-shipped', EFFECT_ID],
