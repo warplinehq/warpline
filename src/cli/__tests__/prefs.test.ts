@@ -318,3 +318,78 @@ describe('concurrent prefs set', () => {
     expect(ofType(SET).map((l) => l.data.key).sort()).toEqual(['retention.days', 'review_gate'])
   })
 })
+
+describe('prefs set notify', () => {
+  /** An argv entry the operator typed. It may be a webhook secret, so no refusal may repeat it. */
+  const SECRET = 'SECRET-ARGV-SENTINEL'
+
+  test('prefs set notify with an empty argv exits 1, writes nothing, records nothing, and names notify.argv', async () => {
+    const before = await snapshotHome(home.root)
+
+    const { code, stderr } = await capture(() => main(['prefs', 'set', 'notify', '{"argv":[],"timeout_ms":1}']))
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('notify.argv')
+    expect(await snapshotHome(home.root)).toEqual(before)
+    expect(ofType(SET)).toHaveLength(0)
+  })
+
+  test('each unusable block is refused by its key path and never echoed', async () => {
+    const refusals: [Record<string, unknown>, string][] = [
+      [{ argv: [] }, 'notify.argv'],
+      [{ argv: ['', SECRET] }, 'notify.argv.0'],
+      [{ argv: [SECRET], [`bogus-${SECRET}`]: 1 }, 'notify'],
+      [{ argv: [SECRET], timeout_ms: 0 }, 'notify.timeout_ms'],
+      [{ argv: [SECRET], timeout_ms: 300001 }, 'notify.timeout_ms'],
+      [{ argv: [SECRET], reminders_ms: [2, 1] }, 'notify.reminders_ms'],
+    ]
+    for (const [block, keyPath] of refusals) {
+      const before = await snapshotHome(home.root)
+
+      const { code, stdout, stderr } = await prefs('set', 'notify', JSON.stringify(block))
+
+      expect(code).toBe(1)
+      expect(stderr).toContain(keyPath)
+      expect(stdout + stderr).not.toContain(SECRET)
+      expect(await snapshotHome(home.root)).toEqual(before)
+      expect(ofType(SET)).toHaveLength(0)
+    }
+  })
+
+  test('a valid block is written and recorded with key notify', async () => {
+    const block = { argv: ['/usr/local/bin/notify-me', '--channel', 'ops'], timeout_ms: 5000 }
+
+    const { code, stderr } = await prefs('set', 'notify', JSON.stringify(block))
+
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    const bytes = readFileSync(prefsFile())
+    expect((JSON.parse(bytes.toString('utf-8')) as { notify: unknown }).notify).toEqual(block)
+    const sets = ofType(SET)
+    expect(sets).toHaveLength(1)
+    expect(sets[0]!.data).toEqual({ key: 'notify', old: null, new: sha(bytes) })
+  })
+
+  test('prefs set notify null unsets it', async () => {
+    expect((await prefs('set', 'notify', JSON.stringify({ argv: ['/bin/echo'] }))).code).toBe(0)
+
+    const { code } = await prefs('set', 'notify', 'null')
+
+    expect(code).toBe(0)
+    const file = JSON.parse(readFileSync(prefsFile(), 'utf-8')) as Record<string, unknown>
+    expect('notify' in file).toBe(true)
+    expect(file.notify).toBeNull()
+    expect(ofType(SET).map((l) => l.data.key)).toEqual(['notify', 'notify'])
+  })
+
+  test('a sub-key with no block set names notify.argv', async () => {
+    const before = await snapshotHome(home.root)
+
+    const { code, stderr } = await prefs('set', 'notify.timeout_ms', '5000')
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('notify.argv')
+    expect(await snapshotHome(home.root)).toEqual(before)
+    expect(ofType(SET)).toHaveLength(0)
+  })
+})

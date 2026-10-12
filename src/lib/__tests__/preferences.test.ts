@@ -18,6 +18,8 @@ import {
   writePreferences,
   type Preferences,
 } from '../preferences.js'
+// A namespace, so a missing export fails the cases that read it, not the file.
+import * as preferences from '../preferences.js'
 
 const DEFAULT_RETENTION = { days: 30, keep_per_plugin: 20, max_bytes: 104857600 }
 
@@ -183,5 +185,91 @@ describe('preferences retention policy', () => {
       keep_per_plugin: 3,
       max_bytes: 1024,
     })
+  })
+})
+
+describe('the notify block', () => {
+  let dir: string
+  let prefsPath: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'warpline-prefs-notify-'))
+    prefsPath = join(dir, 'preferences.json')
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  test('a block holding only argv parses with its defaults', () => {
+    expect(preferences.parseNotify({ argv: ['/bin/notify', '--quiet'] })).toEqual({
+      notify: {
+        argv: ['/bin/notify', '--quiet'],
+        timeout_ms: 10000,
+        include_content: false,
+        reminders_ms: [3600000, 14400000],
+      },
+    })
+  })
+
+  test('notify absent or null is unset', () => {
+    expect(preferences.parseNotify(undefined)).toEqual({ notify: null })
+    expect(preferences.parseNotify(null)).toEqual({ notify: null })
+  })
+
+  test('an unusable notify block degrades: the file still reads, and the block names its key path', async () => {
+    const SECRET = 'SECRET-ARGV-SENTINEL'
+    const VALUE = 'BOGUS-VALUE-SENTINEL'
+    const cases: [unknown, string][] = [
+      [{ argv: [] }, 'notify.argv'],
+      [{ argv: ['', SECRET] }, 'notify.argv.0'],
+      [{ argv: [SECRET], bogus: VALUE }, 'notify.bogus'],
+      [{ argv: [SECRET], timeout_ms: 0 }, 'notify.timeout_ms'],
+      [{ argv: [SECRET], reminders_ms: [2, 1] }, 'notify.reminders_ms'],
+      ['x', 'notify'],
+    ]
+    for (const [block, keyPath] of cases) {
+      await writeFile(prefsPath, JSON.stringify({ review_gate: false, notify: block }), 'utf-8')
+
+      const prefs = await readPreferences(prefsPath)
+      const answer = preferences.parseNotify(prefs.notify)
+
+      expect(prefs.review_gate).toBe(false)
+      expect(answer).toEqual({ unusable: keyPath })
+      expect(JSON.stringify(answer)).not.toContain(SECRET)
+      expect(JSON.stringify(answer)).not.toContain(VALUE)
+    }
+  })
+
+  test('every other key still fails closed', async () => {
+    for (const body of [{ review_gate: 'yes' }, { surprise: 1 }]) {
+      await writeFile(prefsPath, JSON.stringify(body), 'utf-8')
+      const err = await readPreferences(prefsPath).then(
+        () => null,
+        (e: unknown) => e as Error,
+      )
+      expect(err?.name).toBe('PreferencesInvalidError')
+    }
+    // A usable block beside a bad key: the file is still refused, for the bad
+    // key alone, so the block neither rescues the file nor is blamed for it.
+    await writeFile(prefsPath, JSON.stringify({ review_gate: 'yes', notify: { argv: ['x'] } }), 'utf-8')
+    const err = await readPreferences(prefsPath).then(
+      () => null,
+      (e: unknown) => e as preferences.PreferencesInvalidError,
+    )
+    expect(err?.name).toBe('PreferencesInvalidError')
+    expect(err?.reason).toContain('review_gate')
+    expect(err?.reason).not.toContain('notify')
+  })
+
+  test('the defaults carry no notify key', () => {
+    expect('notify' in preferences.DEFAULT_PREFERENCES).toBe(false)
+    // The bytes a home that never sets notify reads and writes, as they were
+    // before the block existed.
+    expect(JSON.stringify(preferences.PreferencesSchema.parse({}))).toBe(
+      '{"max_sends_per_day":20,"review_gate":true,"quiet_hours":null,' +
+        '"retention":{"days":30,"keep_per_plugin":20,"max_bytes":104857600}}',
+    )
+    expect(preferences.parseNotify(preferences.DEFAULT_PREFERENCES.notify)).toEqual({ notify: null })
   })
 })
