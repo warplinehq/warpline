@@ -80,6 +80,14 @@ authoring. Dynamic lineage is a hypothesis until a flow needs it.
 | `notice` | An event the operator should see and need not act on. | **seen** | Acknowledged: leaves the open list, kept in history. |
 | `chore` | A self-directed task (`action_type: 'self_directed'`): work done outside warpline. | **done** | Asserts the outside work happened; the task completes. |
 
+A stored Ask ([runtime-spec.md § 16](runtime-spec.md)) carries one of four
+kinds of its own, and all four are the `approval` kind above: `parked_result`
+(a gated result) and `renewal` have severity `warning`, `missing_grant` (a skip
+for want of a Grant) and `content` (content waiting to be approved) have
+`info`. Severity is derived from the kind and never stored. A renewal Ask is
+about a standing grant rather than a plugin: its scope is the grant's id, its
+plugin is `null`, and it is answered with **renew** or **deny**.
+
 *seen* and *done* are deliberately distinct verbs: *done* claims something
 happened in the world, *seen* never does.
 

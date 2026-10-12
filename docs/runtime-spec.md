@@ -4687,3 +4687,48 @@ advance sends it again.
 A dry run and an advance skipped for quiet hours raise and send nothing. So
 does an advance whose `notify` block is unusable, and everything else it does
 is unchanged.
+
+### The four kinds
+
+Every kind is raised in the end-of-run hold above, from the state document
+that hold just wrote.
+
+| Kind | Raised when | `scope` | `plugin` | `digest` | `expires_at` | Severity |
+|---|---|---|---|---|---|---|
+| `parked_result` | A supervised plugin's result waits in `pending_gates`, unapplied, inside the gate ceiling, for a plugin this advance loaded. | the plugin | the plugin | the plugin's proposal fingerprint | the earlier of the gate ceiling (`run_completed_at` plus the earlier of `ttl_hours` and 23 hours, the rule `approve` refuses an expired gate on) and `raised_at` plus 23 hours | `warning` |
+| `missing_grant` | A session-class plugin declaring side effects is skipped for want of a Grant. | the plugin | the plugin | the plugin's proposal fingerprint | `raised_at` plus 23 hours | `info` |
+| `content` | A content-class plugin is refused at the content gate on a standing an Answer can settle, and its producer's current Output carries its bytes inline. | the consumer | the consumer | the producer's proposal fingerprint, the value `warpline approve --content` records | `raised_at` plus 23 hours | `info` |
+| `renewal` | A live standing grant's renewal deadline is before its hard maximum and at most 23 hours away, read at the advance's instant with the registry the advance read. | the grant's id | `null` | sha256 over the grant's stored fields, in the order the standing grants file writes them, scopes sorted. `period_start` is one of them, so a renew moves it. | the earlier of the grant's next expiry and `raised_at` plus 23 hours | `warning` |
+
+Severity is derived from the kind and never stored. The entries of one message
+are ordered `warning` before `info`, then oldest `raised_at` first, then by id.
+
+A content Ask is raised for four standings: no approval on file, `spent`,
+`outside_window` and `content_moved`. Two standings raise nothing.
+`before_window` is already approved, and its window has not opened yet.
+`indeterminate` is a fire marked and never confirmed, and `warpline resolve`
+settles it, which is not an Answer. The standing is the one the content gate
+read for the fire decision, carried on its verdict. Nothing reads the approval
+a second time to decide whether to ask. A content Ask also needs bytes
+`approve --content` could bind: the producer is loaded, and its last Output is
+current, not erased, and carries `body` rather than `path`. Otherwise nothing is
+raised.
+
+Parked results are read from the state document the hold just wrote, so a gate
+an earlier advance parked is asked about as well as one parked now. They are
+the gates the advance counts as waiting, read at one wall-clock instant,
+because a gate's own clocks are wall-clock reads. The advance's clock (`now`,
+for a library host) drives each Ask's `raised_at` and every expiry comparison.
+
+There is at most one open Ask per scope. Where one plugin carries more than one
+decision, the first of these is asked about: its parked result, then its
+content, then its missing Grant. That is the order `warpline approve` answers
+them in. A renewal Ask's scope is a grant id, so it never shares one with a
+plugin.
+
+With `notify.include_content` set, the `parked_result` entry carries the
+plugin's own inline Output body, and the `content` entry carries the
+producer's, each only while that Output is current, not erased and inline.
+Every other entry carries `content: null`. With it unset, no entry carries
+`content` at all. No other text a plugin or a model wrote ever reaches a
+message or a summary, a result's `summary` and its error messages included.

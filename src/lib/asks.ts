@@ -24,7 +24,7 @@
  * **The file holds live nonces.** It is written owner-only, atomically, and
  * synced, so a lost write cannot hand back a nonce already consumed.
  */
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
@@ -193,7 +193,57 @@ export function askSummary(kind: AskKind, plugin: string | null): string {
   }
 }
 
+/**
+ * How urgently a kind wants an Answer. Derived from the kind each time it is
+ * read, and never stored: a parked result and a standing grant due for
+ * renewal each lose something when their clock runs out, so they come first.
+ */
+export function askSeverity(kind: AskKind): 'warning' | 'info' {
+  switch (kind) {
+    case 'parked_result':
+    case 'renewal':
+      return 'warning'
+    case 'missing_grant':
+    case 'content':
+      return 'info'
+  }
+}
+
+/**
+ * The digest a renewal Ask binds: sha256 over the grant's stored fields, in
+ * the key order the standing grants file is written in, with the scopes
+ * sorted as they are written. `period_start` is one of them, so a renew moves
+ * it. Plain fields in, so this module never reads the gate.
+ */
+export function renewalDigest(g: {
+  id: string
+  holder: string
+  issuer: string
+  scopes: readonly string[]
+  issued_at: string
+  period_start: string
+  period_ms: number
+  hard_max_ms: number
+}): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        id: g.id,
+        holder: g.holder,
+        issuer: g.issuer,
+        scopes: [...g.scopes].sort(),
+        issued_at: g.issued_at,
+        period_start: g.period_start,
+        period_ms: g.period_ms,
+        hard_max_ms: g.hard_max_ms,
+      }),
+    )
+    .digest('hex')
+}
+
 const decisionKey = (kind: string, scope: string, digest: string): string => `${kind}\0${scope}\0${digest}`
+
+const severityRank = (kind: AskKind): number => (askSeverity(kind) === 'warning' ? 0 : 1)
 
 /**
  * One pass over the decisions seen now. A scope with no open Ask raises one,
@@ -278,6 +328,14 @@ export async function advanceAsks(
       })
     }
   }
+
+  // Warning before info, then the oldest Ask, then the id, so one message reads the same way the list does.
+  entries.sort(
+    (x, y) =>
+      severityRank(x.kind) - severityRank(y.kind) ||
+      Date.parse(x.raised_at) - Date.parse(y.raised_at) ||
+      (x.id < y.id ? -1 : x.id > y.id ? 1 : 0),
+  )
 
   return { store: { min_reader_version: ASKS_READER_VERSION, asks }, entries, unrecorded, changed }
 }

@@ -127,10 +127,12 @@ import {
 } from '../board/engine-events.js'
 import { readPreferencesFile, isQuietHours, parseNotify } from '../lib/preferences.js'
 import {
+  ASK_MAX_AGE_MS,
   advanceAsks,
   askMessage,
   readAsks,
   recordTry,
+  renewalDigest,
   writeAsks,
   type AskDecision,
   type AskEntry,
@@ -912,6 +914,12 @@ export type EvalResult =
    * never a verdict: a caller that acts on `due` alone never invokes a
    * content-class plugin without a content authority. Only `plan` supplies
    * `dueAtEarlierLevel`, so only `plan` ever sees it.
+   *
+   * `contentStanding` is present exactly when the `unapproved` entry refused a
+   * content-class plugin. It carries the standing the one read above found,
+   * and it is how the advance tells which of them an Answer can settle without
+   * reading the authority a second time. `refusal` cannot: three standings
+   * arrive with no refusal at all.
    */
   | {
       due: false
@@ -919,6 +927,7 @@ export type EvalResult =
       detail: string
       refusal?: RefusalReason
       mayFireIfReproducedBy?: string
+      contentStanding?: ApprovalStanding['standing']
     }
 
 /** Everything `evaluatePlugin` needs that is not the plugin itself. */
@@ -1357,8 +1366,10 @@ function mergePendingGates(disk: PendingGate[], parked: PendingGate[], now: numb
 }
 
 /**
- * How many gates are still waiting on a human: the unapplied gates among what
- * `mergePendingGates` keeps at `now` with nothing parked.
+ * The gates still waiting on a human: the unapplied gates among what
+ * `mergePendingGates` keeps at `now` with nothing parked. Two readers, the
+ * count below and the parked-result Asks, so the gates an advance reports and
+ * the gates it asks about are one set.
  *
  * Counted over what the merge keeps, not over the raw array, so both arms of
  * the advance count one set. That is also why a gate past the ceiling is not
@@ -1373,8 +1384,22 @@ function mergePendingGates(disk: PendingGate[], parked: PendingGate[], now: numb
  * counting it would page `--strict` on every tick until the ceiling drops it.
  * A manifest that failed to load already reports as `failed`.
  */
+function waitingGates(gates: PendingGate[], now: number, loaded: ReadonlyMap<string, unknown>): PendingGate[] {
+  return mergePendingGates(gates, [], now).filter((g) => g.applied_at === null && loaded.has(g.plugin))
+}
+
+/** How many gates are still waiting on a human. */
 function standingGateCount(gates: PendingGate[], now: number, loaded: ReadonlyMap<string, unknown>): number {
-  return mergePendingGates(gates, [], now).filter((g) => g.applied_at === null && loaded.has(g.plugin)).length
+  return waitingGates(gates, now, loaded).length
+}
+
+/**
+ * How long a parked result stays answerable after its run completed: the
+ * plugin's own TTL, capped at {@link GATE_MAX_AGE_MS}. One rule, read where a
+ * gate is applied and where its Ask's clock is set.
+ */
+function gateCeilingMs(manifest: PluginManifest): number {
+  return Math.min(manifest.ttl_hours * 60 * 60 * 1000, GATE_MAX_AGE_MS)
 }
 
 /**
@@ -2435,6 +2460,9 @@ export async function evaluatePlugin(
         detail,
         ...(refusal === undefined ? {} : { refusal }),
         ...(mayFireIfReproducedBy === undefined ? {} : { mayFireIfReproducedBy }),
+        ...(gate.reason === 'unapproved' && manifest.approval_class === 'content'
+          ? { contentStanding: contentStanding.standing }
+          : {}),
       }
     }
   }
@@ -3380,8 +3408,21 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
                 if (ev.refusal !== undefined) {
                   refused_plugins.push({ plugin: pluginName, reason: ev.refusal })
                 }
-                // A session-class plugin skipped here waits on a Grant.
-                if (!contentClass) askSeen.push({ kind: 'missing_grant', plugin: pluginName })
+                // A session-class plugin skipped here waits on a Grant. A
+                // content-class one waits on its content only where an Answer
+                // can settle it: a window that has not opened is already
+                // approved, and a fire nobody confirmed is settled by
+                // `warpline resolve`, which is not an Answer.
+                if (!contentClass) {
+                  askSeen.push({ kind: 'missing_grant', plugin: pluginName })
+                } else if (
+                  ev.contentStanding === 'none' ||
+                  ev.contentStanding === 'spent' ||
+                  ev.contentStanding === 'outside_window' ||
+                  ev.contentStanding === 'content_moved'
+                ) {
+                  askSeen.push({ kind: 'content', plugin: pluginName })
+                }
                 plugin_entries.push({
                   plugin: pluginName,
                   status: entryStatus,
@@ -4148,18 +4189,93 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // code. A fault leaves the decision waiting, and the next advance raises
       // it. Every digest is drawn from `merged`, the document an Answer verb
       // re-reads, so the raise and the Answer's recompute see one input.
+      //
+      // The wall clock, read once, for the count returned below and the parked
+      // results asked about here. A gate's clocks are wall-clock reads and so
+      // is the merge's, so the gates asked about are the gates the count
+      // reports. The injected `approvalNow` still drives each Ask's own
+      // `raised_at`, reminders and expiry.
+      const gateNow = Date.now()
       let pass: { entries: AskEntry[] } | null = null
       if (!dryRun && notifyCfg !== null) {
         try {
           const read = await readAsks(stateDir)
           if (read.readable) {
-            const decisions: AskDecision[] = askSeen.map(({ kind, plugin }) => ({
-              kind,
-              scope: plugin,
-              plugin,
-              digest: proposalFingerprint(merged, plugin, plugins.get(plugin)!),
-              clock: null,
-            }))
+            // Inline approved bytes, or null: a current Output that still
+            // carries its body is the only content an Answer could have read.
+            const inlineBody = (plugin: string): string | null => {
+              const run = merged.plugin_runs[plugin]
+              const out = run?.last_output
+              return out !== undefined && out.erased_at === undefined && out.body !== undefined && lastOutputIsCurrent(run)
+                ? out.body
+                : null
+            }
+            const asked = (body: string | null): string | null => (notifyCfg.include_content ? body : null)
+            // One decision per scope, first wins: the parked result, then
+            // content, then a missing Grant, the order `approve` answers in.
+            const byScope = new Map<string, AskDecision>()
+            for (const g of waitingGates(merged.pending_gates, gateNow, plugins)) {
+              if (byScope.has(g.plugin)) continue
+              const manifest = plugins.get(g.plugin)!
+              byScope.set(g.plugin, {
+                kind: 'parked_result',
+                scope: g.plugin,
+                plugin: g.plugin,
+                digest: proposalFingerprint(merged, g.plugin, manifest),
+                clock: g.run_completed_at === null ? null : Date.parse(g.run_completed_at) + gateCeilingMs(manifest),
+                content: asked(inlineBody(g.plugin)),
+              })
+            }
+            for (const { kind, plugin } of askSeen.filter((s) => s.kind === 'content')) {
+              const producer = plugins.get(plugin)?.dependencies[0]
+              if (byScope.has(plugin) || producer === undefined || !plugins.has(producer)) continue
+              const body = inlineBody(producer)
+              if (body === null) continue
+              byScope.set(plugin, {
+                kind,
+                scope: plugin,
+                plugin,
+                digest: proposalFingerprint(merged, producer, plugins.get(producer)!),
+                clock: null,
+                content: asked(body),
+              })
+            }
+            for (const { kind, plugin } of askSeen.filter((s) => s.kind === 'missing_grant')) {
+              if (byScope.has(plugin)) continue
+              byScope.set(plugin, {
+                kind,
+                scope: plugin,
+                plugin,
+                digest: proposalFingerprint(merged, plugin, plugins.get(plugin)!),
+                clock: null,
+                content: null,
+              })
+            }
+            // A standing grant is its own scope. Read with the advance's own
+            // clock and registry snapshot; with no snapshot there is no grant.
+            const renewals: AskDecision[] = []
+            if (registry !== null) {
+              const listing = await listStandingGrants({ now: approvalNow, registry })
+              if (listing.readable) {
+                for (const g of listing.grants) {
+                  if (
+                    g.state === 'live' &&
+                    g.renewal_deadline < g.hard_max_at &&
+                    g.renewal_deadline - approvalNow <= ASK_MAX_AGE_MS
+                  ) {
+                    renewals.push({
+                      kind: 'renewal',
+                      scope: g.id,
+                      plugin: null,
+                      digest: renewalDigest(g),
+                      clock: g.next_expiry,
+                      content: null,
+                    })
+                  }
+                }
+              }
+            }
+            const decisions: AskDecision[] = [...byScope.values(), ...renewals]
             const next = await advanceAsks(stateDir, read.store, { decisions, now: approvalNow })
             if (next.changed) await writeAsks(stateDir, next.store)
             pass = next
@@ -4171,7 +4287,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // The gates still waiting, counted from the document this advance just
       // wrote. Re-applying the ceiling rule to it drops nothing the merge
       // kept, short of a gate crossing the ceiling in the same instant.
-      return { standing: standingGateCount(merged.pending_gates, Date.now(), plugins), askPass: pass }
+      return { standing: standingGateCount(merged.pending_gates, gateNow, plugins), askPass: pass }
     })
 
     // 9. Write run log
@@ -4830,7 +4946,7 @@ export async function applyPendingGate(
     )
   }
 
-  const ceilingMs = Math.min(manifest.ttl_hours * 60 * 60 * 1000, GATE_MAX_AGE_MS)
+  const ceilingMs = gateCeilingMs(manifest)
   const ageMs = now - new Date(completedAt).getTime()
   if (ageMs > ceilingMs) {
     return discard(
