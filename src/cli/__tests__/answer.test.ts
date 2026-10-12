@@ -612,6 +612,18 @@ describe('every Answer refusal is named, in its fixed order, and writes nothing'
     await refused(form('approve p').answer(ask.nonce, wrong), 'expired')
   })
 
+  test('a plugin Ask answered through renew or deny --standing refuses as digest mismatch', async () => {
+    const ask = askFor('p')
+    expect(ask.kind).toBe('missing_grant')
+    for (const argv of [
+      ['renew', 'p', '--nonce', ask.nonce, '--digest', prefix(ask), '--principal', 'ops'],
+      ['deny', '--standing', 'p', '--nonce', ask.nonce, '--digest', prefix(ask), '--principal', 'ops'],
+    ]) {
+      await refused(argv, 'digest mismatch')
+    }
+    expect(askById(ask.id).state).toBe('open')
+  })
+
   test("the nonce of another scope's open Ask is refused as unknown", async () => {
     const p = askFor('p')
     expect(askFor('sender').nonce).not.toBe(p.nonce)
