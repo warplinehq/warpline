@@ -250,6 +250,21 @@ describe('a decision becomes a recorded Ask whose message reaches notify', () =>
     expect(byScope).toEqual({ soon: iso(T0 + 2 * HOUR), late: iso(T0 + 23 * HOUR) })
   })
 
+  test('a decision whose own clock has run out raises nothing, at its clock and after it', async () => {
+    const out = await pass(
+      empty(),
+      [
+        { ...missingGrant('past'), clock: T0 - 1 },
+        { ...missingGrant('now'), clock: T0 },
+        { ...missingGrant('later'), clock: T0 + 1 },
+      ],
+      T0,
+    )
+    expect(out.store.asks.map((a) => [a.scope, a.expires_at])).toEqual([['later', iso(T0 + 1)]])
+    expect(auditRecords('ask.raised').map((r) => (r.data as { scope: string }).scope)).toEqual(['later'])
+    expect(out.entries.map((e) => e.scope)).toEqual(['later'])
+  })
+
   test('the summary is a fixed sentence for each kind, built from the plugin name only', () => {
     expect(askSummary('missing_grant', 'mailer')).toBe(
       'mailer declares side effects and holds no Grant, so it did not run. Approve or deny it.',

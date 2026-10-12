@@ -684,6 +684,42 @@ describe('one open Ask per scope, on a schedule, until it expires', () => {
     expect(shape(messages[2]!)).toEqual([[fresh[0]!.id, 1, 'raised']])
   })
 
+  test('a parked result past its plugin TTL is asked about once, and the Grant it lacks is asked about instead', async () => {
+    // No dependency, so no re-run of another plugin can discard its gate.
+    writeFixture(
+      'parker',
+      manifestOf('parker', { autonomy_level: 'supervised', side_effects: ['creates_issue'], ttl_hours: 2 }),
+      resultHandler(),
+    )
+    await gate.mergeGrant(['parker'], {}, sessionPath())
+    const stub = await notifyStub(home, 'ok')
+    setNotify(prefsPath(), { argv: stub.argv })
+
+    const t0 = Date.now()
+    const first = await advance(t0)
+    expect(first.plugin_states.get('parker')).toBe('gated')
+    expect(open().filter((a) => a.scope === 'parker').map((a) => a.kind)).toEqual(['parked_result'])
+    await gate.revokeApproval(sessionPath())
+
+    // Past the 2-hour TTL, inside the 23-hour gate ceiling. `force` evaluates
+    // parker, so its missing-Grant decision is seen.
+    for (let i = 0; i < 5; i++) await advance(t0 + 3 * HOUR + i * 5 * MIN, { force: true })
+
+    const raised = auditOf('ask.raised').filter((l) => l.data.scope === 'parker')
+    expect(raised.filter((l) => l.data.kind === 'parked_result')).toHaveLength(1)
+    expect(raised.filter((l) => l.data.kind === 'missing_grant')).toHaveLength(1)
+
+    const stored = asks()!.asks
+    expect(stored.filter((a) => Date.parse(a.expires_at as string) <= Date.parse(a.raised_at as string))).toEqual([])
+    const parked = stored.filter((a) => a.scope === 'parker' && a.kind === 'parked_result')
+    expect(parked).toHaveLength(1)
+    expect(parked[0]!.events.map((e) => e.event)).toEqual(['raised', 'expired'])
+    expect(open().filter((a) => a.scope === 'parker').map((a) => a.kind)).toEqual(['missing_grant'])
+
+    const sent = (stub.messages() as Message[]).flatMap((m) => m.entries).filter((e) => e.id === parked[0]!.id)
+    expect(sent.map((e) => e.event)).toEqual(['raised', 'expired'])
+  })
+
   test('no raise, reminder, supersede, expiry or send writes an Answer, a Grant, a content approval or a renewal, for any kind of Ask', async () => {
     await writeThreeDecisions()
     await seedRegistry()
