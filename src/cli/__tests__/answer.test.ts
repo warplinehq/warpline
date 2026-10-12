@@ -14,7 +14,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { randomBytes } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, readFileSync, writeFileSync } from 'node:fs'
 import { userInfo } from 'node:os'
 import { join } from 'node:path'
 import { liveGrantScopes } from '../../runtime/approval-gate.js'
@@ -85,6 +85,22 @@ const askById = (id: string): StoredAsk => storedAsks().find((a) => a.id === id)
 const prefix = (ask: StoredAsk): string => ask.digest.slice(0, 12)
 
 const snap = (): Promise<string[]> => snapshotHome(vh.home)
+
+/**
+ * Give `p` a second side effect, so its live proposal digest moves. A manifest
+ * is imported once per path in a process, so the moved copy lives in a fresh
+ * plugin root that `WARPLINE_PLUGINS_DIR` points every later verb at.
+ */
+function moveP(): void {
+  const root = join(vh.home, `plugins-moved-${randomBytes(4).toString('hex')}`)
+  cpSync(join(vh.home, 'plugins'), root, { recursive: true })
+  const file = join(root, 'p', 'manifest.ts')
+  const text = readFileSync(file, 'utf-8')
+  const moved = text.replace('"side_effects":["creates_issue"]', '"side_effects":["creates_issue","sends_email"]')
+  expect(moved).not.toBe(text)
+  writeFileSync(file, moved)
+  process.env.WARPLINE_PLUGINS_DIR = root
+}
 
 async function ok(argv: string[]): Promise<{ stdout: string; stderr: string }> {
   const r = await capture(argv)
@@ -183,6 +199,7 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  delete process.env.WARPLINE_PLUGINS_DIR
   restoreSpies()
   vh.cleanup()
 })
@@ -452,4 +469,17 @@ describe('every Answer refusal is named, in its fixed order, and writes nothing'
     const digest = randomBytes(6).toString('hex')
     await refused(['approve', 'builder', '--nonce', nonce, '--digest', digest, '--principal', 'ops'], 'unknown')
   })
+
+  test(
+    'an Answer to a superseded Ask refuses as superseded',
+    async () => {
+      const old = askFor('p')
+      moveP()
+      await ok(['advance'])
+      expect(askById(old.id).state).toBe('superseded')
+      expect(askFor('p').id).not.toBe(old.id)
+      await refused(form('approve p').answer(old.nonce, prefix(old)), 'superseded')
+    },
+    SLOW,
+  )
 })
