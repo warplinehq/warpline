@@ -78,6 +78,13 @@ function askFor(scope: string): StoredAsk {
   return found[0]!
 }
 
+/** Rewrite the stored Ask with this id, the way a later clock or an advance would leave it. */
+function rewriteAsk(id: string, patch: Partial<StoredAsk>): void {
+  const store = JSON.parse(readFileSync(asksFile(), 'utf-8')) as { asks: StoredAsk[] }
+  store.asks = store.asks.map((a) => (a.id === id ? { ...a, ...patch } : a))
+  writeFileSync(asksFile(), JSON.stringify(store))
+}
+
 /** The stored Ask with this id, in whatever state it is now. */
 const askById = (id: string): StoredAsk => storedAsks().find((a) => a.id === id)!
 
@@ -482,4 +489,21 @@ describe('every Answer refusal is named, in its fixed order, and writes nothing'
     },
     SLOW,
   )
+
+  test('an Answer to an expired Ask refuses as expired, whether or not an advance marked it', async () => {
+    const ask = askFor('p')
+    const answer = form('approve p').answer(ask.nonce, prefix(ask))
+
+    // Past its expiry, still open: no advance has marked it.
+    rewriteAsk(ask.id, { expires_at: new Date(Date.now() - 60_000).toISOString(), state: 'open' })
+    await refused(answer, 'expired')
+
+    // Marked expired, its expiry still ahead: the state alone refuses.
+    rewriteAsk(ask.id, {
+      expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+      state: 'expired',
+      closed_at: new Date().toISOString(),
+    })
+    await refused(answer, 'expired')
+  })
 })
