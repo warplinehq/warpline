@@ -22,6 +22,7 @@
  * rewriting the file in place.
  */
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -33,7 +34,8 @@ import { denialFingerprint, proposalFingerprint, runAdvance, type AdvanceOptions
 import { readEngineState } from '../engine-state-store.js'
 import * as gate from '../approval-gate.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
-import { capture } from '../../cli/__tests__/helpers/verb-home.js'
+import { auditRecords, capture, failAppendOnce, makeVerbHome, restoreSpies, type VerbHome } from '../../cli/__tests__/helpers/verb-home.js'
+import { testFixturesDir } from '../../../test-utils/fixtures.js'
 import { notifyStub, setNotify } from '../../../test-utils/notify-stub.js'
 
 const REAL_PATHS = _getPaths()
@@ -773,5 +775,223 @@ describe('one open Ask per scope, on a schedule, until it expires', () => {
 
     await advance(T0 + 10 * MIN)
     expect(stub.invocations()).toBe(1)
+  })
+})
+
+// -- Delivery that outlives a broken notify -------------------------------------
+
+/** The bin entry, the path a scheduler runs. */
+const ENTRY = testFixturesDir(import.meta.url, '../../bin/warpline.ts')
+
+/** Poll until `check` holds, or throw after `ms`. */
+async function until(check: () => boolean, ms: number, what: string): Promise<void> {
+  const deadline = Date.now() + ms
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    await new Promise<void>((resolve) => setTimeout(resolve, 20))
+  }
+}
+
+/**
+ * Each case drives `warpline advance` in process over `makeVerbHome()`: `p` is
+ * skipped for want of a Grant and `sender` waits on content `builder` made, so
+ * every advance holds two decisions. The exit code a broken `notify` must not
+ * move is read off a twin home that has no `notify` at all.
+ */
+describe('delivery outlives a broken notify', () => {
+  let vh: VerbHome
+  const vhPrefs = (): string => join(vh.home, 'preferences.json')
+  const vhAsksFile = (): string => join(vh.home, 'state', 'asks.json')
+  const vhAsks = (): StoredAsk[] =>
+    existsSync(vhAsksFile()) ? (JSON.parse(readFileSync(vhAsksFile(), 'utf-8')) as { asks: StoredAsk[] }).asks : []
+  const vhOpen = (): StoredAsk[] => vhAsks().filter((a) => a.state === 'open')
+  const lines = (stderr: string, needle: string): string[] => stderr.split('\n').filter((l) => l.includes(needle))
+
+  /** Point the home and the board's paths at `h`, so the verbs and the advance read one home. */
+  const use = (h: VerbHome): void => {
+    _setHome(h.home)
+    _setPaths(null)
+  }
+
+  /** The exit code the same advance gives with `notify` unset, off a fresh twin home. */
+  async function twinExit(): Promise<number> {
+    const twin = makeVerbHome()
+    try {
+      use(twin)
+      return (await capture(['advance'])).code
+    } finally {
+      twin.cleanup()
+      use(vh)
+    }
+  }
+
+  beforeEach(() => {
+    vh = makeVerbHome()
+    use(vh)
+  })
+
+  afterEach(() => {
+    restoreSpies()
+    vh.cleanup()
+  })
+
+  test('a notify that always fails leaves every try on the Ask, one stderr line naming it, and the exit code a run without notify gives', async () => {
+    const baseline = await twinExit()
+    const stub = await notifyStub(vh.home, 'fail', { exitCode: 3 })
+    setNotify(vhPrefs(), { argv: stub.argv })
+
+    const { code, stdout, stderr } = await capture(['advance'])
+
+    expect(code).toBe(baseline)
+    expect(stub.invocations()).toBe(3)
+    const open = vhOpen()
+    expect(open.map((a) => a.scope).sort()).toEqual(['p', 'sender'])
+    for (const a of open) {
+      expect(a.tries.map(({ seq, outcome, exit_code }) => ({ seq, outcome, exit_code }))).toEqual([
+        { seq: 1, outcome: 'failed', exit_code: 3 },
+        { seq: 1, outcome: 'failed', exit_code: 3 },
+        { seq: 1, outcome: 'failed', exit_code: 3 },
+      ])
+    }
+    const said = stderr.split('\n').filter((l) => l.startsWith('warpline advance: notify did not deliver Ask'))
+    expect(said).toHaveLength(1)
+    for (const a of open) {
+      expect(said[0]).toContain(a.id)
+      expect(stdout).not.toContain(a.id)
+    }
+  })
+
+  test('the next advance sends the undelivered Ask again with the same id and seq', async () => {
+    const failing = await notifyStub(vh.home, 'fail', { exitCode: 3 })
+    setNotify(vhPrefs(), { argv: failing.argv })
+    await capture(['advance'])
+    const ids = vhOpen()
+      .map((a) => a.id)
+      .sort()
+    expect(ids).toHaveLength(2)
+
+    const ok = await notifyStub(vh.home, 'ok')
+    setNotify(vhPrefs(), { argv: ok.argv })
+    await capture(['advance'])
+
+    const messages = ok.messages() as Array<{ entries: Array<{ id: string; seq: number }> }>
+    expect(messages).toHaveLength(1)
+    expect(messages[0]!.entries.map((e) => e.id).sort()).toEqual(ids)
+    for (const e of messages[0]!.entries) expect(e.seq).toBe(1)
+    for (const a of vhAsks().filter((x) => ids.includes(x.id))) expect(a.tries.at(-1)!.outcome).toBe('delivered')
+  })
+
+  test('an Ask recorded and never sent is sent by the next advance', async () => {
+    const ok = await notifyStub(vh.home, 'ok')
+    setNotify(vhPrefs(), { argv: ok.argv })
+    await capture(['advance'])
+    expect(ok.messages()).toHaveLength(1)
+
+    // What a process killed between record and send leaves: the Asks, no try.
+    const file = JSON.parse(readFileSync(vhAsksFile(), 'utf-8')) as { asks: StoredAsk[] }
+    for (const a of file.asks) a.tries = []
+    writeFileSync(vhAsksFile(), JSON.stringify(file))
+    const ids = file.asks.map((a) => a.id).sort()
+
+    await capture(['advance'])
+
+    const messages = ok.messages() as Array<{ entries: Array<{ id: string; seq: number }> }>
+    expect(messages).toHaveLength(2)
+    expect(messages[1]!.entries.map((e) => e.id).sort()).toEqual(ids)
+    for (const e of messages[1]!.entries) expect(e.seq).toBe(1)
+  })
+
+  test('a hanging notify never holds the state lock against approve', async () => {
+    const stub = await notifyStub(vh.home, 'hang')
+    setNotify(vhPrefs(), { argv: stub.argv, timeout_ms: 1500 })
+
+    // The library call, so no output capture is installed while approve's runs.
+    const advancing = runAdvance()
+    await until(() => existsSync(stub.startedPath), 5000, 'notify to start')
+
+    const started = Date.now()
+    const approved = await capture(['approve', 'builder'])
+    const took = Date.now() - started
+
+    expect(approved.code).toBe(0)
+    expect(took).toBeLessThan(1000)
+    await advancing
+    const tried = vhAsks().filter((a) => a.tries.length > 0)
+    expect(tried.length).toBeGreaterThan(0)
+    for (const a of tried) expect(a.tries[0]).toMatchObject({ outcome: 'timeout', exit_code: null })
+  })
+
+  test('an interrupted advance takes its notify down with it', async () => {
+    const stub = await notifyStub(vh.home, 'hang', { grandchild: true })
+    setNotify(vhPrefs(), { argv: stub.argv, timeout_ms: 60000 })
+
+    // An explicit env: a bun child spawned with the default one sees this process's env as it started.
+    const child = spawn(process.execPath, [ENTRY, 'advance'], {
+      env: { WARPLINE_HOME: vh.home, PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+      stdio: 'ignore',
+    })
+    const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+      child.on('exit', (code, signal) => resolve({ code, signal }))
+    })
+    await until(() => existsSync(stub.startedPath), 15000, 'notify to start')
+
+    child.kill('SIGTERM')
+    const { code, signal } = await exited
+
+    expect(signal).toBeNull()
+    expect(code).toBe(130)
+    const alive = (): boolean => spawnSync('pgrep', ['-f', `sleep ${stub.marker}`]).status !== 1
+    await until(() => !alive(), 3000, 'the notify group to go').catch(() => {})
+    expect(spawnSync('pgrep', ['-f', `sleep ${stub.marker}`]).status).toBe(1)
+  })
+
+  test('an unusable notify block raises and sends nothing, says so once, and keeps the exit code', async () => {
+    const baseline = await twinExit()
+    setNotify(vhPrefs(), { argv: [] })
+
+    const { code, stdout, stderr } = await capture(['advance'])
+
+    expect(code).toBe(baseline)
+    expect(lines(stderr, 'notify.argv')).toHaveLength(1)
+    expect(stdout).not.toContain('notify.argv')
+    expect(existsSync(vhAsksFile())).toBe(false)
+    expect(auditRecords(vh.home, 'preferences.observed').length).toBeGreaterThan(0)
+  })
+
+  test('an unreadable asks.json raises and sends nothing, says so naming the file, and keeps the exit code', async () => {
+    const baseline = await twinExit()
+    const stub = await notifyStub(vh.home, 'ok')
+    setNotify(vhPrefs(), { argv: stub.argv })
+    writeFileSync(vhAsksFile(), '{')
+
+    const { code, stderr } = await capture(['advance'])
+
+    expect(code).toBe(baseline)
+    const said = lines(stderr, vhAsksFile())
+    expect(said).toHaveLength(1)
+    expect(said[0]).toContain('corrupt')
+    expect(readFileSync(vhAsksFile(), 'utf-8')).toBe('{')
+    expect(stub.invocations()).toBe(0)
+  })
+
+  test('an ask.raised the store refuses is not raised or sent, and the run says so with its exit code unchanged', async () => {
+    const baseline = await twinExit()
+    const stub = await notifyStub(vh.home, 'ok')
+    setNotify(vhPrefs(), { argv: stub.argv })
+    const spy = failAppendOnce('ask.raised')
+
+    const { code, stderr } = await capture(['advance'])
+
+    expect(spy.trips()).toBe(1)
+    expect(code).toBe(baseline)
+    expect(code).not.toBe(70)
+    // Two decisions, one refused: one Ask stored, and only it sent.
+    const stored = vhAsks()
+    expect(stored).toHaveLength(1)
+    expect(auditRecords(vh.home, 'ask.raised').map((r) => r.id)).toEqual([stored[0]!.id])
+    const messages = stub.messages() as Array<{ entries: Array<{ id: string }> }>
+    expect(messages.flatMap((m) => m.entries.map((e) => e.id))).toEqual([stored[0]!.id])
+    expect(lines(stderr, 'the audit store could not record')).toHaveLength(1)
+    expect(lines(stderr, 'Ask')).toHaveLength(1)
   })
 })

@@ -384,6 +384,28 @@ describe('tries', () => {
     const again = recordTry(pruned, out.entries, t)
     expect(again.asks.map((a) => [a.scope, a.tries.length])).toEqual([['a', 2]])
   })
+
+  // The held-out edge of SPEC R3: two advances racing to send one undelivered
+  // Ask may both send. Each records its try under the entry's one seq, and the
+  // Ask's event seqs stay unique, so a receiver drops the duplicate by (id, seq).
+  test('two deliveries of one Ask both record their tries under one seq, and its event seqs stay unique', async () => {
+    const out = await pass(empty(), [missingGrant()], T0)
+    const first = { at: iso(T0 + 1000), outcome: 'delivered' as const, exit_code: 0 }
+    const second = { at: iso(T0 + 2000), outcome: 'delivered' as const, exit_code: 0 }
+
+    const both = recordTry(recordTry(out.store, out.entries, first), out.entries, second)
+    const ask = both.asks[0]!
+    expect(ask.tries).toEqual([
+      { seq: 1, ...first },
+      { seq: 1, ...second },
+    ])
+    const seqs = ask.events.map((e) => e.seq)
+    expect(new Set(seqs).size).toBe(seqs.length)
+
+    const next = await pass(both, [missingGrant()], T0 + 3000)
+    expect(next.entries).toEqual([])
+    expect(next.store.asks[0]!.events.map((e) => e.seq)).toEqual([1])
+  })
 })
 
 describe('severity, order and the renewal digest', () => {
