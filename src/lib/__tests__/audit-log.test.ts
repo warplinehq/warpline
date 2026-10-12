@@ -158,11 +158,37 @@ describe('audit store: what it refuses writes nothing and echoes nothing', () =>
     })
   }
 
-  for (const kind of ['ask.raised', 'ask.answered', 'handoff.tried']) {
+  for (const kind of ['ask.answered', 'handoff.tried']) {
     test(`the pending kind ${kind}, whose schema admits nothing yet`, async () => {
       await refuses(() => anyAppend(statePath, kind, {}))
     })
   }
+
+  const raised = {
+    id: 'a1b2c3d4e5f6',
+    kind: 'missing_grant',
+    scope: 'mailer',
+    plugin: 'mailer',
+    digest: HEX_A,
+    raised_at: '2030-01-01T00:00:00.000Z',
+    expires_at: '2030-01-01T23:00:00.000Z',
+  }
+
+  test('ask.raised appends its seven fields, and refuses a nonce or a summary', async () => {
+    await lift()
+    await anyAppend(statePath, 'ask.raised', raised)
+    const last = JSON.parse(segmentLines().at(-1)!) as { type: string; data: unknown }
+    expect(last.type).toBe('warpline.audit.ask.raised')
+    expect(last.data).toEqual(raised)
+
+    const renewal = { ...raised, kind: 'renewal', plugin: null, scope: 'a1b2c3d4e5f6' }
+    await anyAppend(statePath, 'ask.raised', renewal)
+    expect((JSON.parse(segmentLines().at(-1)!) as { data: unknown }).data).toEqual(renewal)
+
+    await refuses(() => anyAppend(statePath, 'ask.raised', { ...raised, nonce: '0123456789abcdef0123456789abcdef' }))
+    await refuses(() => anyAppend(statePath, 'ask.raised', { ...raised, summary: 'mailer ran.' }))
+    await refuses(() => anyAppend(statePath, 'ask.raised', { ...raised, kind: 'bogus' }))
+  })
 
   const renewed = { id: 'a1b2c3d4e5f6', holder: 'ci', principal: 'ops', renewal_deadline: '2030-01-02T00:00:00.000Z' }
 
@@ -1658,7 +1684,7 @@ describe('the walk reads only what it carries', () => {
 
   test('a pending kind carrying data is passed over', async () => {
     const { seq } = await intent('mailer', 'run-77')
-    appendRelinked(auditDir, 'warpline.audit.ask.raised', { plugin: 'mailer', question: 'send it?' })
+    appendRelinked(auditDir, 'warpline.audit.handoff.tried', { plugin: 'mailer', question: 'send it?' })
 
     expect(await audit.openIntents(statePath)).toStrictEqual([{ seq, plugin: 'mailer', run_id: 'run-77', effect_id: null }])
   })
