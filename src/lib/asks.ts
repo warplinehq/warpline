@@ -274,8 +274,10 @@ function closingEvent(a: Ask): AskEvent | null {
  * 3. **Each decision.** An open Ask with the same kind and digest is
  *    unchanged. One that differs is superseded, but only once the new Ask's
  *    `ask.raised` is on the record. With no open Ask, a scope expired in this
- *    pass waits for the next one, and a scope whose most recently closed Ask
- *    was answered with a deny of the same kind and digest is not asked again.
+ *    pass waits for the next one, and a renewal whose most recently closed Ask
+ *    was a renewal answered with a deny of the same digest is not asked again:
+ *    a renewal's no has no other record, while a plugin's no is its denial,
+ *    so a plugin decision that arrives after a deny Answer is asked again.
  *    A decision whose own clock is at or before now raises nothing.
  * 4. **Reminders.** An open Ask whose decision is seen, or whose scope was not
  *    looked at, gets one `reminder` when more reminder points have passed
@@ -348,7 +350,9 @@ export async function advanceAsks(
       const last = asks
         .filter((a) => a.scope === d.scope && a.closed_at !== null)
         .reduce<Ask | null>((x, a) => (x === null || Date.parse(a.closed_at!) >= Date.parse(x.closed_at!) ? a : x), null)
-      if (last?.state === 'answered' && last.answer === 'deny' && last.kind === d.kind && last.digest === d.digest) continue
+      // Only a renewal's no has no other record. A plugin's no is its denial, which keeps
+      // the decision from arriving, so one that arrives was not denied.
+      if (last?.kind === 'renewal' && d.kind === 'renewal' && last.state === 'answered' && last.answer === 'deny' && last.digest === d.digest) continue
     }
     // Its subject can no longer be answered, so an Ask for it would expire on arrival.
     if (d.clock !== null && d.clock <= now) continue

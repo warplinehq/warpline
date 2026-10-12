@@ -650,7 +650,9 @@ export async function run(argv: string[]): Promise<number> {
         })
       } catch {
         process.stderr.write(
-          `The audit store could not record the denial of ${denial.plugin}. Nothing was denied.\n`,
+          answer === null
+            ? `The audit store could not record the denial of ${denial.plugin}. Nothing was denied.\n`
+            : `The audit store could not record the denial of ${denial.plugin}, so nothing was denied. The Answer is on the record, and the next advance asks again.\n`,
         )
         return 1
       }

@@ -4806,11 +4806,14 @@ stops above a plugin, its Ask is not closed, not superseded and keeps its
 reminders. The same holds for a renewal Ask while the standing grants file
 cannot be read.
 
-**A denied decision is not asked again.** A scope whose most recently closed
-Ask was answered `deny`, with the same kind and digest as the decision now,
-raises nothing. A decision answered `approve`, `approve_content` or `renew`
-whose effect did not take is still waiting, so the next advance raises a fresh
-Ask for it.
+**A renewal answered no is not asked again.** A renewal scope whose most
+recently closed Ask was a renewal answered `deny`, with the same digest as the
+decision now, raises nothing, because `deny --standing` writes no other record
+of the no. For the other kinds the denial record stops the asking: a denied
+plugin is skipped as `denied` (§ 10), so no decision for it reaches the pass.
+A `deny` whose denial was not written is still waiting, and the next advance
+raises a fresh Ask for it, as for a decision answered `approve`,
+`approve_content` or `renew` whose effect did not take.
 
 **Closed Asks leave the file 23 hours after they close.** The first advance at
 or after `closed_at` plus 23 hours drops a closed Ask from `asks.json`. The
@@ -5035,10 +5038,12 @@ When the audit store refuses `ask.answered`, the command prints
 `1` with every file as it was. When the store cannot be read or written at
 step 2, it exits `1` saying the audit record names an Answer whose effect was
 not written. When the effect fails after step 2, the decision is still
-waiting. The Ask is answered with `approve` or `approve_content`, so the next
-advance raises a fresh Ask for it with a new nonce. A parked result refused at
-apply prints its usual line, and a line saying the Answer is on the record and
-the parked result was not applied, and exits `1`.
+waiting for every Answer but a renewal's `deny`. The Ask is answered, so the
+next advance raises a fresh Ask for it with a new nonce. A parked result
+refused at apply prints its usual line, and a line saying the Answer is on the
+record and the parked result was not applied, and exits `1`. A `deny` whose
+denial could not be recorded prints that nothing was denied, that the Answer
+is on the record, and that the next advance asks again, and exits `1`.
 
 **The Answer record.** `ask.answered` carries the Ask's id, kind, scope,
 digest and `raised_at`; `answer`, `approve`, `approve_content`, `deny` or `renew`;
