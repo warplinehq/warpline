@@ -19,8 +19,14 @@
  * that moment.
  *
  * Order, inside one state-lock hold: check the renewer, read the standing
- * grants file, run the transform, append `grant.renewed`, and only then write
- * the file. A failed append renews nothing.
+ * grants file, read `asks.json`, run the transform, append `grant.renewed`,
+ * and only then write the file. A failed append renews nothing.
+ *
+ * **A renew can answer a renewal Ask**, with the flags `approve` takes and the
+ * same check. The live digest is the stored grant's, so a grant renewed since
+ * the Ask was raised refuses as `digest mismatch`. `ask.answered` is on the
+ * record before `grant.renewed`. A bare renew refuses while a renewal Ask is
+ * open on the grant, and every form refuses when `asks.json` cannot be read.
  *
  * Never terminates the process — it returns a code to the dispatcher.
  */
@@ -30,7 +36,18 @@ import { parseArgs } from 'node:util'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
 import { appendAudit } from '../lib/audit-log.js'
 import { engineStatePath } from '../lib/paths.js'
-import { requirePrincipal, standingRegistry } from '../lib/principals.js'
+import {
+  ANSWER_REFUSAL_TEXT,
+  asksPath,
+  checkAnswer,
+  openAskFor,
+  parseAnswerFlags,
+  readAsks,
+  recordAnswer,
+  renewalDigest,
+  type Ask,
+} from '../lib/asks.js'
+import { judgePrincipal, requirePrincipal, standingRegistry } from '../lib/principals.js'
 import {
   readStandingStore,
   renewStanding,
@@ -40,9 +57,16 @@ import {
 } from '../runtime/approval-gate.js'
 
 export const USAGE = `Usage: warpline renew <grant-id> --principal <human-id>
+       warpline renew <grant-id> --nonce <hex> --digest <hex> --principal <human-id> [--via <id>] [--evidence <ref>]
 
 Restarts a live standing grant's renewal period from now. The hard maximum never moves.
 A lapsed grant is never renewed; the refusal says whether the lapse is final or can still clear.
+
+Answering a renewal Ask (the same flags approve takes):
+  --nonce <hex>     The Ask's nonce, from the notify message.
+  --digest <hex>    A prefix of the Ask's digest, at least 12 hex characters.
+  --via <id>        The registered machine that relayed the Answer.
+  --evidence <ref>  A reference token for the decision.
 `
 
 /** The one re-issue sentence, word for word wherever a final lapse is named. */
@@ -84,12 +108,18 @@ function renewRefusalText(refusal: RenewRefusal, grant?: StandingGrant): string 
 }
 
 export async function run(argv: string[]): Promise<number> {
-  let values: { principal?: string }
+  let values: { principal?: string; nonce?: string; digest?: string; via?: string; evidence?: string }
   let positionals: string[]
   try {
     ;({ values, positionals } = parseArgs({
       args: argv,
-      options: { principal: { type: 'string' } },
+      options: {
+        principal: { type: 'string' },
+        nonce: { type: 'string' },
+        digest: { type: 'string' },
+        via: { type: 'string' },
+        evidence: { type: 'string' },
+      },
       allowPositionals: true,
       strict: true,
     }))
@@ -109,6 +139,10 @@ export async function run(argv: string[]): Promise<number> {
     process.stderr.write(`renew: ${sentence} Nothing was renewed.\n`)
     return 1
   }
+  // The Answer flags, checked before anything is read.
+  const parsedAnswer = parseAnswerFlags(values, [id])
+  if ('refused' in parsedAnswer) return refuse(parsedAnswer.refused)
+  const answer = parsedAnswer.answer
   if (values.principal === undefined) {
     return refuse('--principal is required: a named human renews a standing grant.')
   }
@@ -130,6 +164,42 @@ export async function run(argv: string[]): Promise<number> {
     if (!read.readable) return refuse('the standing grants file cannot be read.')
 
     const now = Date.now()
+
+    // -- The Ask ---------------------------------------------------------
+    // Read in this hold, bare or answering. A store that cannot be read is
+    // never read as "no Asks".
+    const asks = await readAsks(statePath)
+    if (!asks.readable) {
+      process.stderr.write(`renew: ${asksPath(statePath)} cannot be read (${asks.cause}). Nothing was renewed.\n`)
+      return 1
+    }
+    let answered: { ask: Ask; via: string | null; evidence: string | null } | null = null
+    if (answer === null) {
+      const open = openAskFor(asks.store, [id], now)
+      if (open !== undefined) {
+        return refuse(
+          `${id} has an open Ask, ${open.id}, so a bare renew cannot answer it. Read it with ` +
+            `'warpline approvals show ${open.id}', then answer it with its --nonce and --digest.`,
+        )
+      }
+    } else {
+      let via: string | null = null
+      if (answer.via !== null) {
+        // The registry the --principal check read, never a second read.
+        const judged = judgePrincipal(actor.loaded.registry, answer.via, 'active-machine')
+        if ('refused' in judged) return refuse(`--via: ${judged.refused}.`)
+        via = judged.id
+      }
+      // The grant as it stands now: one renewed since the Ask was raised has moved its digest.
+      const stored = read.store.grants.find((g) => g.id === id)
+      const found = checkAnswer(asks.store, answer, id, now, {
+        kinds: ['renewal'],
+        liveDigest: () => (stored === undefined ? null : renewalDigest(stored)),
+      })
+      if ('refused' in found) return refuse(`refused (${found.refused}): ${ANSWER_REFUSAL_TEXT[found.refused]}`)
+      answered = { ask: found.ask, via, evidence: answer.evidence }
+    }
+
     const change = renewStanding(read.store, id, actor.id, now, view)
     if ('refused' in change) {
       return refuse(`${renewRefusalText(change.refused, read.store.grants.find((g) => g.id === id))}.`)
@@ -140,6 +210,25 @@ export async function run(argv: string[]): Promise<number> {
     const hardMax = iso(hardMaxAt)
     // A renewal near the hard maximum sets a deadline past it, and the grant lapses at the earlier.
     const nextExpiry = iso(Math.min(now + grant.period_ms, hardMaxAt))
+
+    // The Answer is on the record, and its Ask closed, before the renewal's own record.
+    if (answered !== null) {
+      const rec = await recordAnswer(statePath, answered.ask, {
+        answer: 'renew',
+        principal: actor.id,
+        via: answered.via,
+        evidence: answered.evidence,
+        answeredAt: Date.now(),
+      })
+      if ('refused' in rec) {
+        return refuse(
+          rec.refused === 'audit'
+            ? 'the audit store could not record this Answer.'
+            : `${asksPath(statePath)} could not be read or written after the Answer was recorded, so its Ask ` +
+                `is still open. The audit record names an Answer whose effect was not written.`,
+        )
+      }
+    }
 
     try {
       await appendAudit(statePath, 'grant.renewed', {

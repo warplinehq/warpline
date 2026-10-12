@@ -4926,10 +4926,19 @@ not raise a renewal Ask for that grant while its digest is unchanged, because
 the most recently closed Ask on that scope was answered `deny` with the same
 kind and digest (see One open Ask per scope, reminders and expiry above).
 
+`warpline renew <grant-id>` answers a renewal Ask yes, with the same flags.
+Its `--principal` must still be an active human, and `--via` an active machine
+judged against the same read of `principals.json`, so a machine cannot renew
+its own grant by relaying the Answer. The decision as it stands now is the
+renewal digest of the stored grant, so a grant renewed since the Ask was raised
+has moved its `period_start` and the Answer refuses as `digest mismatch`.
+`ask.answered` with `answer: 'renew'` precedes `grant.renewed` and the write of
+the standing grants file.
+
 **A no costs what a yes costs.** Every Answer form takes the same flags and
 refuses the same missing ones: `--nonce`, `--digest` and `--principal` are
-required on `approve`, `deny` and `deny --standing` alike, and `--via` and
-`--evidence` are optional on each. `deny` needs no flag, confirmation or step
+required on `approve`, `deny`, `renew` and `deny --standing` alike, and `--via`
+and `--evidence` are optional on each. `deny` needs no flag, confirmation or step
 that `approve` does not.
 
 An Answer carries four flags beside the form's own:
@@ -4961,18 +4970,18 @@ Ask on that plugin is refused as `unknown` (see Refusals below), never run as
 the bare form, so a nonce carried from another plugin's Ask is unknown here.
 
 **A bare form refuses while an Ask is open.** `approve <plugin>`, on either
-gate, `approve <plugin> --content` and `deny <plugin>` exit `1` with nothing
-written while an Ask on that plugin is `open` and has not reached its
-`expires_at`. The line
+gate, `approve <plugin> --content`, `deny <plugin>` and `renew <grant-id>`
+exit `1` with nothing written while an Ask on that plugin or grant is `open`
+and has not reached its `expires_at`. The line
 names the Ask's id and `warpline approvals show <id>`, never its nonce. With no
 open Ask, for example with `notify` unset, every form behaves as it did before
 Asks existed.
 
 **An unreadable store refuses every form.** Every named and `--content` form
-of `approve`, and every form of `deny` but `--list` and `--remove`, bare or
-answering, reads `asks.json` under the state lock. When it cannot be read, the
+of `approve`, every form of `deny` but `--list` and `--remove`, and every
+`renew`, bare or answering, reads `asks.json` under the state lock. When it cannot be read, the
 command prints `<verb>: <path> cannot be read (<cause>). Nothing was
-written.`, with the cause `corrupt`, `newer reader` or `io`, and exits `1`.
+written.` (`Nothing was renewed.` from `renew`), with the cause `corrupt`, `newer reader` or `io`, and exits `1`.
 It is never read as "no Asks", because a bare form must never slip past an
 open Ask the command could not see.
 
@@ -4983,8 +4992,8 @@ Answer:
 2. reads `asks.json` fresh and marks the Ask `answered`, with `closed_at` and
    `answer`, written and synced, so its nonce is spent;
 3. writes the effect, with its own record where it has one (`grant.issued`,
-   `content_approval.issued`, `denial.recorded`). `deny --standing` has no
-   effect to write.
+   `content_approval.issued`, `denial.recorded`, `grant.renewed`).
+   `deny --standing` has no effect to write.
 
 When the audit store refuses `ask.answered`, the command prints
 `The audit store could not record this Answer. Nothing was written.` and exits
@@ -4997,7 +5006,7 @@ apply prints its usual line, and a line saying the Answer is on the record and
 the parked result was not applied, and exits `1`.
 
 **The Answer record.** `ask.answered` carries the Ask's id, kind, scope,
-digest and `raised_at`; `answer`, `approve`, `approve_content` or `deny`;
+digest and `raised_at`; `answer`, `approve`, `approve_content`, `deny` or `renew`;
 `principal`, the `--principal` given; `via`, the `--via` given or `null` when
 answered directly; `os_user`, the account that ran the command, or `unknown`,
 recorded beside the principal and never as one; `evidence`, or `null` when
@@ -5009,6 +5018,7 @@ reminder's. The answer instant is the same one the Ask's `closed_at` records.
 
 An Answer that does not match its Ask is refused by name. Each refusal exits
 `1`, prints `<verb>: refused (<reason>): <sentence> Nothing was written.`
+(`Nothing was renewed.` from `renew`)
 (the short prefix prints `prefix shorter than 12:` and its sentence), never a
 typed value, and writes nothing: the state document, the session
 grant file, the standing grants file, `asks.json` and the audit store are as
