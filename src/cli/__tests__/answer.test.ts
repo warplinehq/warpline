@@ -709,6 +709,25 @@ describe('deny answers an Ask, and costs what approve costs', () => {
     await refused(answer, 'nonce reused')
     expect(auditRecords(vh.home, 'ask.answered')).toHaveLength(1)
   })
+
+  test('a deny whose denial could not be recorded is asked again on the next advance', async () => {
+    const ask = askFor('p')
+    const fail = failAppendOnce('denial.recorded')
+    const r = await capture(form('deny p').answer(ask.nonce, prefix(ask)))
+    expect(fail.trips()).toBe(1)
+    expect(r.code).toBe(1)
+    expect(r.stderr).toContain(
+      'The audit store could not record the denial of p, so nothing was denied. The Answer is on the record, and the next advance asks again.',
+    )
+    expect(askById(ask.id)).toMatchObject({ state: 'answered', answer: 'deny' })
+    expect(Object.keys(denials())).not.toContain('p')
+
+    await ok(['advance'])
+    const again = askFor('p')
+    expect(again.kind).toBe('missing_grant')
+    expect(again.id).not.toBe(ask.id)
+    expect(again.nonce).not.toBe(ask.nonce)
+  })
 })
 
 describe('renew and deny --standing answer a renewal Ask', () => {

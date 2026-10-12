@@ -648,18 +648,24 @@ describe('the lifecycle', () => {
     expect(eventsOf(unlisted.store)).toEqual(['raised', 'reminder'])
   })
 
-  test('a deny with the same digest is never raised again, and an approve whose effect did not land is', async () => {
+  test('only a renewal answered no is not asked again; a plugin decision seen again after a deny is, like an approve whose effect did not land', async () => {
     const answered = (over: Partial<Ask>): AskStore => storeOf(stored({ state: 'answered', closed_at: iso(T0), ...over }))
+    const renewalAsk = { kind: 'renewal', scope: GRANT, plugin: null, summary: askSummary('renewal', null) } as const
+    const renewal: AskDecision = { kind: 'renewal', scope: GRANT, plugin: null, digest: HEX_A, clock: null }
 
-    const denied = await pass(answered({ answer: 'deny' }), [missingGrant()], T0 + MIN)
-    expect(denied.store.asks.map((a) => a.state)).toEqual(['answered'])
-    expect(denied.entries).toEqual([])
+    const standing = await pass(answered({ ...renewalAsk, answer: 'deny' }), [renewal], T0 + MIN)
+    expect(standing.store.asks.map((a) => a.state)).toEqual(['answered'])
+    expect(standing.entries).toEqual([])
     expect(auditRecords('ask.raised')).toHaveLength(0)
+
+    // A plugin's no is its denial record; a decision that still arrives was not denied.
+    const denied = await pass(answered({ answer: 'deny' }), [missingGrant()], T0 + MIN)
+    expect(denied.store.asks.map((a) => a.state)).toEqual(['answered', 'open'])
 
     const approved = await pass(answered({ answer: 'approve' }), [missingGrant()], T0 + MIN)
     expect(approved.store.asks.map((a) => a.state)).toEqual(['answered', 'open'])
 
-    const moved = await pass(answered({ answer: 'deny', digest: HEX_B }), [missingGrant()], T0 + MIN)
+    const moved = await pass(answered({ ...renewalAsk, answer: 'deny', digest: HEX_B }), [renewal], T0 + MIN)
     expect(moved.store.asks.map((a) => a.state)).toEqual(['answered', 'open'])
   })
 
