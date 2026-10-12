@@ -3971,16 +3971,16 @@ The set is closed. A kind outside it cannot be written.
 | `principal_registry.observed` | The principal registry changed without a warpline command. |
 | `preference.set` | A preference key is about to be set by a warpline command. |
 | `preferences.observed` | The preferences file changed without a warpline command. |
-| `ask.raised` | An Ask raised. |
+| `ask.raised` | An Ask is about to be stored (§ 16): its `id`, `kind`, `scope`, `plugin` (null for a standing grant's renewal), `digest`, `raised_at` and `expires_at`. Never its nonce or its summary. |
 | `ask.answered` | An Ask answered. |
 | `handoff.tried` | A handoff tried. |
 | `segment.opened` | The first line of a segment file. One opened by `warpline audit pass-over` names each line it passed over, by its position and sha256, as `passed_over`. |
 | `segment.sealed` | The last line of a segment file that is full or old. |
 | `checkpoint.recorded` | The head as it stood, so it can be exported and checked later. |
 
-Nothing writes `ask.raised`, `ask.answered` or `handoff.tried` yet. Their
-schema admits nothing, so an append under any of them is refused
-until the work that writes them lands and defines their fields. The last three
+Nothing writes `ask.answered` or `handoff.tried` yet. Their schema admits
+nothing, so an append under either of them is refused until the work that
+writes them lands and defines their fields. The last three
 kinds in the table are written by the store itself, never by a caller.
 
 Each `grants` entry on a `fire.intent` names its `issuer`. A session window's
@@ -4600,3 +4600,55 @@ A plugin secret in warpline's environment never reaches it.
 A hand-edited block that is unusable degrades instead of refusing the file
 (§ 6). Keep secrets out of `argv`, which `ps` shows to every user on the
 machine. Put them in the script's own configuration instead.
+
+### The Ask store
+
+Each Ask lives in `asks.json`, beside `engine-state.json` in the state
+directory. The file is written owner-only (`0600`), atomically, and synced
+after each write, because it holds live nonces: a lost write could hand back a
+nonce already used. The file is `{ "min_reader_version": 1, "asks": [...] }`.
+A missing file holds no Asks. A file that is not JSON, not an object, whose
+`asks` is not an array, or holding any Ask that does not parse is `corrupt`. A
+`min_reader_version` above this build's, read before any other field, is
+`newer reader`. Any other read error is `io`. An unreadable store is never read
+as "no Asks". A key this build does not know is ignored.
+
+| Field | Meaning |
+|---|---|
+| `id` | 12 lowercase hex, unique in the file. It names the Ask wherever the Ask is listed. |
+| `nonce` | 32 lowercase hex, drawn apart from the id. It is the single-use token an Answer presents, and no command prints it. |
+| `kind` | What the run waits on: `parked_result`, `missing_grant`, `content` or `renewal`. |
+| `scope` | The plugin the Ask is about, or for a renewal the standing grant's id. |
+| `plugin` | The plugin, or `null` for a renewal. |
+| `digest` | 64 lowercase hex naming exactly what the Ask is about. |
+| `summary` | A fixed sentence for the kind (below). |
+| `raised_at` | When the Ask was raised. |
+| `expires_at` | The earlier of the moment the thing asked about stops being answerable and 23 hours after `raised_at`. |
+| `state` | `open`, `answered`, `superseded` or `expired`. |
+| `closed_at` | When the Ask left `open`, or `null`. |
+| `answer` | `approve`, `approve_content`, `renew` or `deny` once answered, else `null`. |
+| `events` | Each lifecycle event, `{ seq, event, at }`, with `event` one of `raised`, `reminder`, `expired` or `superseded`. `seq` counts from 1 within the Ask. |
+| `tries` | Each attempt to deliver an event, `{ seq, at, outcome, exit_code }`, with `outcome` one of `delivered`, `failed` or `timeout`. |
+
+The summary is built from the kind and the plugin name only. Nothing a plugin
+or a model wrote can reach it:
+
+| Kind | Summary |
+|---|---|
+| `missing_grant` | `<plugin> declares side effects and holds no Grant, so it did not run. Approve or deny it.` |
+| `parked_result` | `<plugin> ran and its result is parked for review. Approve or deny it.` |
+| `content` | `<plugin> is waiting for its content to be approved. Approve or deny it.` |
+| `renewal` | `A standing grant is due for renewal. Renew it or deny it.` |
+
+An Ask goes on the audit record as `ask.raised` (§ 14) before it is stored.
+When the audit store refuses that record, the Ask is not stored and nothing is
+sent for it. While an Ask is open with the same kind and digest, nothing new
+is raised for its scope.
+
+An event is due until a try with outcome `delivered` is recorded for its
+`seq`. Every due event goes to `notify` in one message,
+`{ "entries": [...] }`. Each entry holds `id`, `seq`, `event`, `kind`,
+`scope`, `plugin`, `digest`, `nonce`, `summary`, `raised_at` and
+`expires_at`, and `content` only when `notify.include_content` is `true`. A
+retry resends an event under its own `seq`, so a receiver drops a duplicate by
+(`id`, `seq`).

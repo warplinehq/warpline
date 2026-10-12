@@ -83,6 +83,12 @@ export const AUDIT_KINDS = [
 /** Written by this module only, never by a caller. */
 export const INTERNAL_KINDS = ['segment.opened', 'segment.sealed', 'checkpoint.recorded'] as const
 
+/** What an Ask waits on a human for: a parked result, a missing Grant, content to approve, a standing grant to renew. */
+export const ASK_KINDS = ['parked_result', 'missing_grant', 'content', 'renewal'] as const
+
+/** How an Ask can be answered. */
+export const ASK_ANSWERS = ['approve', 'approve_content', 'renew', 'deny'] as const
+
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export type EmitKind = Exclude<AuditKind, (typeof INTERNAL_KINDS)[number]>
 
@@ -96,9 +102,10 @@ const Urn = z.string().regex(/^urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
  * ADMISSION rule (`PLUGIN_NAME` / `isPluginName` in schemas/plugin-name.ts),
  * which is stricter. The gate keeps its own copy of this one,
  * `CARRIED_PLUGIN_NAME` / `isCarriedPluginName` inside approval-gate.ts;
- * audit-log.test.ts holds the two copies in agreement.
+ * audit-log.test.ts holds the two copies in agreement. The Ask store reads
+ * this one, so it holds no copy of its own.
  */
-const CarriedPluginName = z.string().min(1).max(255).regex(/^[^\x00-\x1f\x7f/\\]+$/)
+export const CarriedPluginName = z.string().min(1).max(255).regex(/^[^\x00-\x1f\x7f/\\]+$/)
 const RunId = z.string().regex(/^[0-9A-Za-z][0-9A-Za-z._:-]{0,127}$/)
 const PrincipalId = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/)
 const PrefKey = z.string().regex(/^[a-z_]+(\.[a-z_]+)?$/)
@@ -108,6 +115,10 @@ const SemVer = z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za
 const Scope = z.union([z.literal('*'), CarriedPluginName])
 /** A standing grant id: 12 lowercase hex, the rule the gate's `newStandingId` makes. */
 const GrantId = z.string().regex(/^[0-9a-f]{12}$/)
+/** An Ask id: 12 lowercase hex, drawn apart from the Ask's nonce. */
+const AskId = z.string().regex(/^[0-9a-f]{12}$/)
+/** What an Ask is about: a plugin, or a standing grant by its id. */
+const AskScope = z.union([GrantId, CarriedPluginName])
 /**
  * One live grant that covered a fire. A session entry is one window and names
  * whoever last named its scope, or null; a standing entry always names the
@@ -257,9 +268,19 @@ const DATA = {
     changed: z.literal('unknown'),
     editor: z.literal('unknown'),
   }),
+  // Never the Ask's nonce or its summary: the nonce answers the Ask, and the
+  // record outlives it.
+  'ask.raised': z.strictObject({
+    id: AskId,
+    kind: z.enum(ASK_KINDS),
+    scope: AskScope,
+    plugin: CarriedPluginName.nullable(),
+    digest: Hex,
+    raised_at: Iso,
+    expires_at: Iso,
+  }),
   // Pending: nothing may be written under these until the work that defines
   // them lands and replaces the schema.
-  'ask.raised': z.never(),
   'ask.answered': z.never(),
   'handoff.tried': z.never(),
 } as const satisfies Record<AuditKind, z.ZodType>
