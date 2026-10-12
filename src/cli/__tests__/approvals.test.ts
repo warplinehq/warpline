@@ -11,7 +11,6 @@
  * prints one.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { notifyStub, setNotify } from '../../../test-utils/notify-stub.js'
@@ -349,28 +348,43 @@ describe('warpline approvals show', () => {
     expectNoNonce(r.stdout)
   })
 
-  test('content that is not UTF-8 prints its digest, size and path, never its bytes', async () => {
-    const blob = join(vh.home, 'blob.bin')
-    const bytes = Buffer.from([0xff, 0xfe, 0x00, 0x41])
-    writeFileSync(blob, bytes)
+  // T-27-30: the Ask binds `path:<string>`, never the file's bytes, so show prints the path and reads nothing.
+  const showPathOutput = async (path: string) => {
     writePlugin(
-      'blob',
-      { autonomy_level: 'supervised', outputs: { blob: { type: 'text' } } },
-      outputHandler(`{ type: 'blob', format: 'text', path: ${JSON.stringify(blob)} }`),
+      'pather',
+      { autonomy_level: 'supervised', outputs: { file: { type: 'text' } } },
+      outputHandler(`{ type: 'file', format: 'text', path: ${JSON.stringify(path)} }`),
     )
     await withNotify()
     await capture(['advance'])
-    const a = openAsk('parked_result', 'blob')
+    return capture(['approvals', 'show', openAsk('parked_result', 'pather').id])
+  }
 
-    const r = await capture(['approvals', 'show', a.id])
+  test('a path Output prints its path and that the Ask does not bind its bytes, never the file', async () => {
+    const file = join(vh.home, 'out.md')
+    writeFileSync(file, 'PATH-FILE-SENTINEL\n')
+
+    const r = await showPathOutput(file)
     expect(r.code).toBe(0)
-    expect(r.stdout).toContain(createHash('sha256').update(bytes).digest('hex'))
-    expect(r.stdout).toContain('4 bytes')
-    expect(r.stdout).toContain(blob)
-    expect(r.stdout).not.toContain('ÿ')
-    expect(r.stdout).not.toContain('�')
-    expect(r.stdout).not.toContain('\u0000')
+    expect(r.stdout).toContain(file)
+    expect(r.stdout).toContain('not read')
+    expect(r.stdout).not.toContain('PATH-FILE-SENTINEL')
+    expect(r.stdout).not.toContain('==== begin content ====')
     expectNoNonce(r.stdout)
+  })
+
+  test('a path Output naming a FIFO returns at once, because show never opens it', async () => {
+    const fifo = join(vh.home, 'out.fifo')
+    expect(Bun.spawnSync(['mkfifo', fifo]).exitCode).toBe(0)
+
+    const r = await Promise.race([
+      showPathOutput(fifo),
+      new Promise<'hung'>((res) => setTimeout(() => res('hung'), 5000)),
+    ])
+    expect(r).not.toBe('hung')
+    if (r === 'hung') return
+    expect(r.code).toBe(0)
+    expect(r.stdout).toContain(fifo)
   })
 
   test('control characters a plugin wrote are escaped', async () => {
