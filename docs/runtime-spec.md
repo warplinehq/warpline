@@ -2209,16 +2209,17 @@ applied while it is unapplied, carries both `run_started_at` and
 (step 3), and has not expired (step 4). Age is measured from
 `run_completed_at` against the earlier of the plugin's `ttl_hours` and 23
 hours, and a gate exactly at that ceiling can still be applied. Steps 1 to 4
-below are its refusals, in order. The advance's count of waiting gates (§ 13),
-its parked-result Asks (§ 16) and `approve`'s choice of which decision an
-Answer answers read the same predicate. The count reads it at the wall clock
-when the advance's hold writes, the Asks at the later of that clock and the
-advance's own (§ 16), and `approve` at the wall clock when it runs. Time only
-takes a gate from applicable to not, so no Ask is raised for a gate the count
-does not treat as waiting.
+below are its refusals, in order. Between steps 1 and 2, a gate missing either
+clock (`unclocked`) is refused as expired, and nothing is written. The
+advance's count of waiting gates (§ 13), its parked-result Asks (§ 16) and
+`approve`'s choice of which decision an Answer answers read the same predicate.
+The count reads it at the wall clock when the advance's hold writes, the Asks at
+the later of that clock and the advance's own (§ 16), and `approve` at the wall
+clock when it runs. Time only takes a gate from applicable to not, so no Ask is
+raised for a gate the count does not treat as waiting.
 
-A bare `warpline approve <plugin>`
-takes the apply path whenever the plugin has an unapplied gate, so steps 2 to 4
+A bare `warpline approve <plugin>` takes the apply path whenever the plugin has
+an unapplied gate and no Ask its form answers is open (§ 16), so steps 2 to 4
 refuse and discard one that can no longer be applied, and no Grant is written.
 An Answer takes it only for a gate that can still be applied (§ 16, Answers).
 What that does, in order, all decided before anything is written:
@@ -2304,14 +2305,6 @@ never accepted, so there is no accepted run to hold the work back; the `gated`
 entry existed to stop the effects re-firing during the hold, and the hold is
 over.
 
-**An Answer drops a dead gate and keeps the entry.** An Answer to the plugin's
-`missing_grant` Ask, given while an unapplied gate that can no longer be applied
-is on file, removes that gate from `pending_gates` in the same hold, after the
-Answer is recorded. It writes a `notice` naming its reason (`gate_expired` for
-an expiry, `gate_invalidated` otherwise), leaves `plugin_runs[plugin]` as it
-is, `last_output` included, and then merges the Grant. It is the drop the gate
-ceiling would make later, made when the operator answers.
-
 The delete takes `last_output` with it, and that loss is permanent. The pointer
 lives inside the entry, and the carry-forward described in § `last_output` works
 by reading the entry it is about to overwrite — with no entry there is nothing
@@ -2390,6 +2383,14 @@ and the apply was overwritten.
 
 A **superseded** denial does not hold the entry. It is already stale, so the
 plugin becoming due again is the correct outcome and the delete goes ahead.
+
+**An Answer drops a dead gate and keeps the entry.** An Answer to the plugin's
+`missing_grant` Ask, given while an unapplied gate that can no longer be applied
+is on file, removes that gate from `pending_gates` in the same hold, after the
+Answer is recorded. It writes a `notice` naming its reason (`gate_expired` for
+an expiry, `gate_invalidated` otherwise), leaves `plugin_runs[plugin]` as it
+is, `last_output` included, and then merges the Grant. It is the drop the gate
+ceiling would make later, made when the operator answers.
 
 #### Denying a parked result discards it
 
