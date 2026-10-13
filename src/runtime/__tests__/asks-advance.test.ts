@@ -858,7 +858,7 @@ describe('a gate that can no longer be applied is not waiting', () => {
   const heldGate = (doc: Doc): Doc['pending_gates'][number] => doc.pending_gates.find((g) => g.plugin === 'held')!
   const earlier = (at: unknown): string => new Date(Date.parse(at as string) - 3 * HOUR).toISOString()
 
-  const ROWS: Array<{ label: string; kill: (doc: Doc) => void }> = [
+  const ROWS: Array<{ label: string; kill: (doc: Doc) => void; lagMs?: number }> = [
     {
       // Three hours pass for every plugin, so no dependency moves and only the TTL kills the gate.
       label: 'past its plugin TTL',
@@ -882,6 +882,19 @@ describe('a gate that can no longer be applied is not waiting', () => {
         doc.plugin_runs.builder!.last_run_at = new Date().toISOString()
       },
     },
+    {
+      // The ceiling falls between the advance's clock and the wall clock at the hold, as it does for an advance that runs ten seconds across a gate's ceiling.
+      label: 'past its ceiling by the wall clock but not by the advance clock',
+      lagMs: 10_000,
+      kill: (doc) => {
+        for (const run of Object.values(doc.plugin_runs)) run.last_run_at = earlier(run.last_run_at)
+        const g = heldGate(doc)
+        const shift = Date.now() - 2 * HOUR - 2_000 - Date.parse(g.run_completed_at as string)
+        for (const key of ['run_started_at', 'run_completed_at', 'created_at']) {
+          g[key] = new Date(Date.parse(g[key] as string) + shift).toISOString()
+        }
+      },
+    },
   ]
 
   for (const row of ROWS) {
@@ -892,7 +905,8 @@ describe('a gate that can no longer be applied is not waiting', () => {
       setNotify(prefsPath(), { argv: stub.argv })
 
       // No `force`: each kill leaves `held` stale on its own, so it is evaluated and refused for want of a Grant.
-      const result = await advance(Date.now())
+      // A host's injected `now` trails the wall clock by however long its advance has run, and `lagMs` stands in for that.
+      const result = await advance(Date.now() - (row.lagMs ?? 0))
       expect(result.plugin_states.get('held')).toBe('skipped')
 
       const raised = auditOf('ask.raised').filter((l) => l.data.scope === 'held')
