@@ -21,6 +21,7 @@ import { notifyStub, setNotify } from '../../../test-utils/notify-stub.js'
 import {
   auditRecords,
   capture,
+  failAppendOnce,
   makeVerbHome,
   restoreSpies,
   seedPrincipals,
@@ -384,6 +385,24 @@ describe('the bare form beside a gate it cannot apply', () => {
       expect(r.stderr).toContain(ask.id)
       expect(r.stderr).toContain(`warpline approvals show ${ask.id}`)
       expect(r.stderr).not.toContain(ask.nonce)
+      expect(await snapshotHome(vh.home)).toEqual(before)
+    },
+    SLOW,
+  )
+})
+
+describe('an Answer beside a gate it cannot apply is on the record before the gate is dropped', () => {
+  test(
+    'a refused ask.answered beside a gate it cannot apply refuses the Answer, drops no gate and writes nothing',
+    async () => {
+      const { ask } = await parkQThenKill('ttl')
+      const before = await snapshotHome(vh.home)
+      // The Answer is on the record before its effect, the dead gate's drop included, so a refused record leaves the gate, the board and the state as they were.
+      const fail = failAppendOnce('ask.answered')
+      const r = await capture(answerApprove('q', ask))
+      expect(fail.trips()).toBe(1)
+      expect(r.code).not.toBe(0)
+      expect(r.stdout).not.toContain('Discarded the parked result for q')
       expect(await snapshotHome(vh.home)).toEqual(before)
     },
     SLOW,
