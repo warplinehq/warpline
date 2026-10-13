@@ -564,7 +564,13 @@ describe('every waited-on decision raises an Ask, one message per advance', () =
   })
 
   test('a plugin with a parked result and no Grant is asked about its parked result only', async () => {
-    await writeThreeDecisions()
+    // The forced advance re-runs every plugin, so a dependency under the gate would move and the gate could no longer be applied; with none, its parked result keeps the scope.
+    writeFixture(
+      'reviewed',
+      manifestOf('reviewed', { autonomy_level: 'supervised', side_effects: ['creates_issue'], ttl_hours: 2 }),
+      resultHandler(),
+    )
+    await gate.mergeGrant(['reviewed'], {}, sessionPath())
     // Parked with notify unset, so the next advance sees both decisions at once.
     await advance(Date.now())
     expect((await state()).pending_gates.map((g) => g.plugin)).toEqual(['reviewed'])
@@ -812,6 +818,92 @@ describe('one open Ask per scope, on a schedule, until it expires', () => {
     await advance(T0 + 10 * MIN)
     expect(stub.invocations()).toBe(1)
   })
+})
+
+describe('a gate that can no longer be applied is not waiting', () => {
+  const HELD = manifestOf('held', {
+    autonomy_level: 'supervised',
+    side_effects: ['creates_issue'],
+    ttl_hours: 2,
+    dependencies: ['builder'],
+    outputs: { note: { type: 'text' } },
+  })
+
+  type Doc = {
+    plugin_runs: Record<string, Record<string, unknown>>
+    pending_gates: Array<Record<string, unknown> & { plugin: string; run_id: string }>
+  }
+
+  /** `held` parks its result under a session Grant with notify unset, then the Grant is revoked. */
+  async function parkHeld(): Promise<void> {
+    writeFixture(
+      'builder',
+      BUILDER,
+      resultHandler({ summary: 'built', artifacts_produced: [{ type: 'brief', format: 'json', body: '{}' }] }),
+    )
+    writeFixture('held', HELD, resultHandler({ artifacts_produced: [{ type: 'note', format: 'text', body: 'held note' }] }))
+    await gate.mergeGrant(['held'], {}, sessionPath())
+    const parked = await advance(Date.now())
+    expect(parked.plugin_states.get('held')).toBe('gated')
+    await gate.revokeApproval(sessionPath())
+  }
+
+  /** Rewrite the raw state document through `fn`. */
+  function editState(fn: (doc: Doc) => void): void {
+    const doc = JSON.parse(readFileSync(statePath(), 'utf-8')) as Doc
+    fn(doc)
+    writeFileSync(statePath(), JSON.stringify(doc))
+  }
+
+  const heldGate = (doc: Doc): Doc['pending_gates'][number] => doc.pending_gates.find((g) => g.plugin === 'held')!
+  const earlier = (at: unknown): string => new Date(Date.parse(at as string) - 3 * HOUR).toISOString()
+
+  const ROWS: Array<{ label: string; kill: (doc: Doc) => void }> = [
+    {
+      // Three hours pass for every plugin, so no dependency moves and only the TTL kills the gate.
+      label: 'past its plugin TTL',
+      kill: (doc) => {
+        for (const run of Object.values(doc.plugin_runs)) run.last_run_at = earlier(run.last_run_at)
+        const g = heldGate(doc)
+        for (const key of ['run_started_at', 'run_completed_at', 'created_at']) g[key] = earlier(g[key])
+      },
+    },
+    {
+      // The record a later run of `held` leaves when it failed: a failed run parks nothing.
+      label: 'superseded by a later run',
+      kill: (doc) => {
+        doc.plugin_runs.held!.run_id = `${heldGate(doc).run_id}-later`
+        doc.plugin_runs.held!.status = 'failed'
+      },
+    },
+    {
+      label: 'a dependency re-ran',
+      kill: (doc) => {
+        doc.plugin_runs.builder!.last_run_at = new Date().toISOString()
+      },
+    },
+  ]
+
+  for (const row of ROWS) {
+    test(`${row.label}: no parked-result Ask is raised, the missing Grant is, and the gate is not counted`, async () => {
+      await parkHeld()
+      editState(row.kill)
+      const stub = await notifyStub(home, 'ok')
+      setNotify(prefsPath(), { argv: stub.argv })
+
+      // No `force`: each kill leaves `held` stale on its own, so it is evaluated and refused for want of a Grant.
+      const result = await advance(Date.now())
+      expect(result.plugin_states.get('held')).toBe('skipped')
+
+      const raised = auditOf('ask.raised').filter((l) => l.data.scope === 'held')
+      expect(raised.map((l) => l.data.kind)).toEqual(['missing_grant'])
+      expect(open().filter((a) => a.scope === 'held').map((a) => a.kind)).toEqual(['missing_grant'])
+      expect(result.pending_gates).toBe(0)
+      const onFile = (await state()).pending_gates.filter((g) => g.plugin === 'held')
+      expect(onFile).toHaveLength(1)
+      expect(onFile[0]!.applied_at).toBeNull()
+    })
+  }
 })
 
 // -- Delivery that outlives a broken notify -------------------------------------
