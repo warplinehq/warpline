@@ -2214,8 +2214,11 @@ its parked-result Asks (§ 16) and `approve`'s choice of which decision an
 Answer answers read the same predicate, each at one clock, so none of them
 treats as waiting a gate `approve` would refuse.
 
-`warpline approve <plugin>` applies the parked gate when one is live. What that
-does, in order, all decided before anything is written:
+A bare `warpline approve <plugin>`
+takes the apply path whenever the plugin has an unapplied gate, so steps 2 to 4
+refuse and discard one that can no longer be applied, and no Grant is written.
+An Answer takes it only for a gate that can still be applied (§ 16, Answers).
+What that does, in order, all decided before anything is written:
 
 0. **Already denied** — `denials[plugin]` exists and its fingerprint still
    matches the live proposal. Refused, and nothing is written. `deny` and
@@ -2297,6 +2300,14 @@ entry is deleted, which leaves it due on the next advance. The parked result was
 never accepted, so there is no accepted run to hold the work back; the `gated`
 entry existed to stop the effects re-firing during the hold, and the hold is
 over.
+
+**An Answer drops a dead gate and keeps the entry.** An Answer to the plugin's
+`missing_grant` Ask, given while an unapplied gate that can no longer be applied
+is on file, removes that gate from `pending_gates` in the same hold, after the
+Answer is recorded. It writes a `notice` naming its reason (`gate_expired` for
+an expiry, `gate_invalidated` otherwise), leaves `plugin_runs[plugin]` as it
+is, `last_output` included, and then merges the Grant. It is the drop the gate
+ceiling would make later, made when the operator answers.
 
 The delete takes `last_output` with it, and that loss is permanent. The pointer
 lives inside the entry, and the carry-forward described in § `last_output` works
@@ -4806,7 +4817,9 @@ its plugin's `ttl_hours`, one a later run superseded, and one computed before a
 dependency re-ran all fail the one predicate (§ 10, Applying a gate). Each stays
 on file until the gate ceiling drops it, no `parked_result` Ask is raised for
 it, and the plugin's other decision, a missing Grant for example, is asked
-about instead.
+about instead. That missing-Grant Ask is answered through `approve <plugin>`
+with its nonce, and the Answer drops the dead gate before it merges the Grant
+(Answers below).
 
 **A decision that vanished lapses silently.** Its plugin was evaluated this
 advance and no longer waits on a human, or for a renewal Ask its grant is gone
@@ -4945,8 +4958,8 @@ for the plugin named:
 
 | Form | Answers | Effect |
 |---|---|---|
-| `approve <plugin>` with a parked result waiting | `parked_result` | the parked result is applied |
-| `approve <plugin>` with none waiting | `missing_grant` | a session Grant is merged |
+| `approve <plugin>` with a parked result it can still apply (§ 10) | `parked_result` | the parked result is applied |
+| `approve <plugin>` with none it can still apply | `missing_grant` | an unapplied gate it cannot apply is dropped, with its notice, and a session Grant is merged |
 | `approve <plugin> --content --not-after <w>` | `content` | the content approval is written |
 
 `warpline deny` answers the same three kinds no, and a renewal:
@@ -5025,7 +5038,10 @@ Ask's id and `warpline approvals show <id>`, never its nonce. An Answer is
 checked against the same conditions, so a bare form never refuses unless the
 Ask's nonce would answer it. An Ask whose decision vanished or moved, or a
 `parked_result` Ask whose gate is gone, holds no bare form back, though it
-stays `open` until its `expires_at`. With `notify` unset or unusable no Ask is
+stays `open` until its `expires_at`. For `approve <plugin>`,
+beside a gate it can no longer apply, the form answers the missing Grant: a
+bare one refuses while that Ask is open, and with none open it reaches the gate
+and refuses it as § 10 says, writing no Grant. With `notify` unset or unusable no Ask is
 open: every form behaves as it did before Asks existed, and an Answer is
 refused as `unknown`. A `preferences.json` that cannot be read, or does not
 parse, counts as `notify` set.

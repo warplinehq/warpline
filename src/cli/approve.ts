@@ -90,6 +90,7 @@ import {
   denialStanding,
   eraseIfReleased,
   findPendingGate,
+  gateApplicable,
   lastOutputIsCurrent,
   loadPluginManifests,
   proposalFingerprint,
@@ -128,6 +129,7 @@ import {
   type PreferencesRead,
 } from '../lib/asks.js'
 import { pathsForStateFile, withStateLockAt } from '../board/state-manager.js'
+import { emitGateInvalidated } from '../board/engine-events.js'
 import { resolveWallClock } from '../lib/wall-clock.js'
 import {
   EngineStateInvalidError,
@@ -1052,22 +1054,23 @@ export async function run(argv: string[]): Promise<number> {
       return 1
     }
 
-    // A LIVE gate, not merely a gate. `findPendingGate` returns already-applied
-    // markers on purpose, and branching on that predicate is what decides which
-    // of the two gates the operator meant — so a spent marker used to route
-    // every `approve <plugin>` into the apply path, where it was refused. For
-    // as long as the marker lived (up to the 24h ceiling) the Grant verb was
-    // unreachable by name, which stranded any operator whose Grant expired
-    // after an apply: the plugin was skipped as `unapproved` every advance and
-    // the only gesture that still worked was `--all`, a wider authority than
-    // was asked for. A marker's job is to stop a second APPLY re-recording a
-    // result, which `applyPendingGate` enforces on its own `applied_at` check;
-    // it was never permission-to-run.
-    const liveGate = (name: string) => {
+    // A gate is live while it can still be applied, by the predicate the
+    // engine raised its Ask on, so an Answer is checked against the decision
+    // the engine asked about: beside a dead gate that is the missing Grant. A
+    // bare form keeps reaching any unapplied gate, so `applyPendingGate`
+    // refuses and discards a dead one and no bare gesture becomes a Grant.
+    // An applied marker is neither: it stops a second apply re-recording a
+    // result, and was never permission-to-run.
+    const unappliedGate = (name: string) => {
       const g = findPendingGate(state, name)
       return g !== undefined && g.applied_at === null ? g : undefined
     }
-    const gated = positionals.filter((name) => liveGate(name) !== undefined)
+    const liveGate = (name: string) => {
+      const g = unappliedGate(name)
+      return g !== undefined && gateApplicable(state, g, manifests.get(name)!, now).applicable ? g : undefined
+    }
+    const gateFor = (name: string) => (answer === null ? unappliedGate(name) : liveGate(name))
+    const gated = positionals.filter((name) => gateFor(name) !== undefined)
 
     // -- The Ask -----------------------------------------------------------
     // Read in this hold, bare or answering, before either gate is answered. A
@@ -1192,7 +1195,7 @@ export async function run(argv: string[]): Promise<number> {
         // Re-found each time: a preceding apply may have rewritten the array,
         // and an apply this loop already performed leaves a marker rather than
         // a live gate — so a repeated name applies once and is skipped after.
-        const gate = liveGate(name)
+        const gate = gateFor(name)
         if (gate === undefined) continue
         // Not a guard: every positional was checked against `manifests` above,
         // before anything was written, so an absence here is a broken invariant
@@ -1359,6 +1362,23 @@ export async function run(argv: string[]): Promise<number> {
     // already judged is the one the Grant names.
     const refusedAnswer = await recordTheAnswer()
     if (refusedAnswer !== null) return refusedAnswer
+    // The gate could no longer be applied, so the Answer drops it the way the
+    // gate ceiling would later, and keeps the run record and its Output. A
+    // live gate never gets here: the dispatch above applied it.
+    const dead = answered === null ? undefined : unappliedGate(positionals[0]!)
+    const verdict = dead === undefined ? undefined : gateApplicable(state, dead, manifests.get(dead.plugin)!, now)
+    if (dead !== undefined && verdict !== undefined && !verdict.applicable && verdict.reason !== 'already_applied') {
+      const name = dead.plugin
+      // An unclocked gate is refused as an expiry by apply too.
+      const reason = verdict.reason === 'unclocked' ? 'expired' : verdict.reason
+      state.pending_gates = state.pending_gates.filter((g) => g !== dead)
+      await writeEngineState(state, statePath)
+      await emitGateInvalidated(name, dead.run_id, reason).catch(() => {})
+      process.stdout.write(
+        `Discarded the parked result for ${name} from run ${dead.run_id}: ${verdict.detail}\n` +
+          `Its run record stands, and the Grant below lets ${name} run again on the next advance.\n`,
+      )
+    }
     // A bare Grant records the notify read inside the grant path, after its
     // principal check. An Answer already recorded it with the Answer.
     return await writeSessionGrant(
