@@ -2203,6 +2203,17 @@ there is nothing to migrate, because the real result was never recorded.
 
 #### Applying a gate
 
+**One predicate says whether a gate can still be applied.** A gate can be
+applied while it is unapplied, carries both `run_started_at` and
+`run_completed_at`, is not superseded (step 2), has no dependency that moved
+(step 3), and has not expired (step 4). Age is measured from
+`run_completed_at` against the earlier of the plugin's `ttl_hours` and 23
+hours, and a gate exactly at that ceiling can still be applied. Steps 1 to 4
+below are its refusals, in order. The advance's count of waiting gates (§ 13),
+its parked-result Asks (§ 16) and `approve`'s choice of which decision an
+Answer answers read the same predicate, each at one clock, so none of them
+treats as waiting a gate `approve` would refuse.
+
 `warpline approve <plugin>` applies the parked gate when one is live. What that
 does, in order, all decided before anything is written:
 
@@ -3351,8 +3362,8 @@ Two consequences worth stating plainly:
 
 `warpline advance --strict` promotes an advance to `1` while any approval gate
 is still waiting on a human, **or** when a content approval refused a fire. A
-waiting gate is one the state document still holds unapplied for a plugin the
-advance loaded (`pending_gates`, § 13), whichever advance parked it: the advance
+waiting gate is one the state document holds that can still be applied (§ 10,
+Applying a gate), for a plugin the advance loaded (`pending_gates`, § 13), whichever advance parked it: the advance
 that parks it counts it, and so does every later advance until it is applied or
 dropped. Use it where a gate
 waiting on a human is itself the thing you want paged about — a fleet that is
@@ -3795,7 +3806,7 @@ file's own age.
 | `status` | `"complete"` \| `"partial"` \| `"failed"` | The advance's own status. **Not the exit code.** |
 | `skipped_reason` | string \| null | `null` when the advance ran. `"quiet_hours"` when it returned early because a quiet window was active. |
 | `gated` | integer | How many plugins this advance parked at an approval gate. `0` on every later advance while the same gate still waits: `pending_gates` counts that. |
-| `pending_gates` | integer | How many approval gates are waiting on a human: entries in the state document's `pending_gates` (§ 10) with no `applied_at`, whichever advance parked them. A gate applied and kept as a spent marker is not counted. Nor is a gate for a plugin this advance did not load, one uninstalled or renamed since it parked: `approve` and `deny` both refuse a name with no loaded manifest, so no command can clear it, and it would page `--strict` on every tick until the ceiling drops it. Counted from the document this advance wrote, or on a skipped advance from the one it read, since that advance writes none. Either way a gate past the gate ceiling (§ 10, `pending_gates`) is not counted, because the next write drops it. |
+| `pending_gates` | integer | How many approval gates are waiting on a human: entries in the state document's `pending_gates` (§ 10) that can still be applied (§ 10, Applying a gate), whichever advance parked them. A gate applied and kept as a spent marker is not counted. Nor is a gate for a plugin this advance did not load, one uninstalled or renamed since it parked: `approve` and `deny` both refuse a name with no loaded manifest, so no command can clear it, and it would page `--strict` on every tick until the ceiling drops it. Counted from the document this advance wrote, or on a skipped advance from the one it read, since that advance writes none. Either way a gate that can no longer be applied is not counted: one past its plugin's ceiling, one a later run superseded, or one whose dependency re-ran. |
 | `failed` | integer | How many plugins ended failed, manifests that would not load included. |
 | `refused` | integer | How many plugins holding a content approval were not fired: the approval stopped applying (`indeterminate`, `outside_window`, `content_moved`), or the spend mark's own state I/O failed and nothing was sent (`mark_unavailable`, `mark_uncertain`) (§ 5). The **count only**: the reasons are plugin-derived and reach a reader through `warpline advance --json`, never through this file. An unmarked closed binding the sweep keeps because its content is still held (§ 10, "Expiry and deletion") counts here on every advance until that content is erased. A confirmed one reads `spent` and is not counted. |
 | `pruned` | integer | How many run records this advance's retention prune removed. Always `0` on a skipped advance, which returns above the prune. |
@@ -4718,7 +4729,7 @@ that hold just wrote.
 
 | Kind | Raised when | `scope` | `plugin` | `digest` | `expires_at` | Severity |
 |---|---|---|---|---|---|---|
-| `parked_result` | A supervised plugin's result waits in `pending_gates`, unapplied, inside the gate ceiling, for a plugin this advance loaded. | the plugin | the plugin | the plugin's proposal fingerprint | the earlier of the gate ceiling (`run_completed_at` plus the earlier of `ttl_hours` and 23 hours, the rule `approve` refuses an expired gate on) and `raised_at` plus 23 hours | `warning` |
+| `parked_result` | A supervised plugin's result waits in `pending_gates` and can still be applied (§ 10, Applying a gate), for a plugin this advance loaded. | the plugin | the plugin | the plugin's proposal fingerprint | the earlier of the gate ceiling (`run_completed_at` plus the earlier of `ttl_hours` and 23 hours, the rule `approve` refuses an expired gate on) and `raised_at` plus 23 hours | `warning` |
 | `missing_grant` | A session-class plugin declaring side effects is skipped for want of a Grant. | the plugin | the plugin | the plugin's proposal fingerprint | `raised_at` plus 23 hours | `info` |
 | `content` | A content-class plugin is refused at the content gate on a standing an Answer can settle, and its producer's current Output carries its bytes inline. | the consumer | the consumer | the producer's proposal fingerprint, the value `warpline approve --content` records | `raised_at` plus 23 hours | `info` |
 | `renewal` | A live standing grant's renewal deadline is before its hard maximum and at most 23 hours away, read at the advance's instant with the registry the advance read. | the grant's id | `null` | sha256 over the grant's stored fields, in the order the standing grants file writes them, scopes sorted. `period_start` is one of them, so a renew moves it. | the earlier of the grant's next expiry and `raised_at` plus 23 hours | `warning` |
@@ -4739,9 +4750,10 @@ raised.
 
 Parked results are read from the state document the hold just wrote, so a gate
 an earlier advance parked is asked about as well as one parked now. They are
-the gates the advance counts as waiting, read at one wall-clock instant,
-because a gate's own clocks are wall-clock reads. The advance's clock (`now`,
-for a library host) drives each Ask's `raised_at` and every expiry comparison.
+the gates the advance counts as waiting, by the one predicate (§ 10, Applying a
+gate), read at the advance's clock (`now`, for a library host), which also
+drives each Ask's `raised_at` and every expiry comparison. The count itself is
+read at the wall clock when the hold writes.
 
 There is at most one open Ask per scope. Where one plugin carries more than one
 decision, the first of these is asked about: its parked result, then its
@@ -4786,12 +4798,15 @@ decision is still waiting, the next advance raises a new Ask for it, with a new
 id and a new nonce. An Ask that expires before its next reminder point sends
 only the `expired` entry.
 
-**No Ask is raised for a decision whose own clock has run out.** A parked
-result past its plugin's `ttl_hours` can no longer be applied: `approve` would
-refuse it and discard its gate as **Expired** (§ 10). So it is not asked about
-while its gate is still on file, and the plugin's other decision, a missing
-Grant for example, is asked about instead. No Ask is ever raised with an
-`expires_at` at or before its `raised_at`.
+**No Ask is raised for a decision whose own clock has run out.** No Ask is
+ever raised with an `expires_at` at or before its `raised_at`.
+
+**A parked gate that can no longer be applied is not asked about.** A gate past
+its plugin's `ttl_hours`, one a later run superseded, and one computed before a
+dependency re-ran all fail the one predicate (§ 10, Applying a gate). Each stays
+on file until the gate ceiling drops it, no `parked_result` Ask is raised for
+it, and the plugin's other decision, a missing Grant for example, is asked
+about instead.
 
 **A decision that vanished lapses silently.** Its plugin was evaluated this
 advance and no longer waits on a human, or for a renewal Ask its grant is gone

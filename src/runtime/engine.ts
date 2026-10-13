@@ -440,11 +440,13 @@ export interface AdvanceResult {
    */
   pruned: number
   /**
-   * How many approval gates the state document holds unapplied when this
-   * advance returns, whichever advance parked them: as written on the normal
-   * arm, and as read on the quiet-hours arm, which writes no document. Only
-   * gates for a plugin this advance loaded count, since no command can clear
-   * any other.
+   * How many approval gates the state document holds that can still be
+   * applied when this advance returns, whichever advance parked them: as
+   * written on the normal arm, and as read on the quiet-hours arm, which
+   * writes no document. Not merely unapplied: a gate past its plugin's
+   * ceiling, superseded by a later run, or computed before a dependency
+   * re-ran waits on nobody, since `approve` would refuse it. Only gates for a
+   * plugin this advance loaded count, since no command can clear any other.
    *
    * Not `gated_plugins.length`. That is this advance's parks only, and it reads
    * `0` on every later advance while the same gate still waits on a human.
@@ -1404,31 +1406,35 @@ function mergePendingGates(disk: PendingGate[], parked: PendingGate[], now: numb
 }
 
 /**
- * The gates still waiting on a human: the unapplied gates among what
- * `mergePendingGates` keeps at `now` with nothing parked. Two readers, the
- * count below and the parked-result Asks, so the gates an advance reports and
- * the gates it asks about are one set.
- *
- * Counted over what the merge keeps, not over the raw array, so both arms of
- * the advance count one set. That is also why a gate past the ceiling is not
- * counted on the quiet-hours arm, which writes no document to drop it from:
- * the next write that does would drop it.
+ * The gates still waiting on a human: those in `state` that can still be
+ * applied at `now` ({@link gateApplicable}), for a plugin this advance loaded.
+ * Two readers, the count below and the parked-result Asks, so the gates an
+ * advance reports and the gates it asks about are one set, and it is the set
+ * `approve` could apply.
  *
  * An applied gate is kept only as a spent marker, so a second `approve` finds
- * it and refuses. It waits on nobody, so it is not counted.
+ * it and refuses. It waits on nobody, so it is not counted. Nor is a dead one:
+ * past its plugin's ceiling, superseded by a later run, or computed before a
+ * dependency re-ran. It stays on file until the merge drops it, and `approve`
+ * would refuse it, so counting it would page `--strict` for a gate nobody can
+ * apply. The predicate's ceiling is at most the merge's floor, so a gate the
+ * merge would drop is never counted either.
  *
  * Nor is a gate for a plugin this advance did not load. `approve` and `deny`
  * both refuse a name with no loaded manifest, so no command can clear it, and
  * counting it would page `--strict` on every tick until the ceiling drops it.
  * A manifest that failed to load already reports as `failed`.
  */
-function waitingGates(gates: PendingGate[], now: number, loaded: ReadonlyMap<string, unknown>): PendingGate[] {
-  return mergePendingGates(gates, [], now).filter((g) => g.applied_at === null && loaded.has(g.plugin))
+function waitingGates(state: EngineState, now: number, loaded: ReadonlyMap<string, PluginManifest>): PendingGate[] {
+  return state.pending_gates.filter((g) => {
+    const manifest = loaded.get(g.plugin)
+    return manifest !== undefined && gateApplicable(state, g, manifest, now).applicable
+  })
 }
 
 /** How many gates are still waiting on a human. */
-function standingGateCount(gates: PendingGate[], now: number, loaded: ReadonlyMap<string, unknown>): number {
-  return waitingGates(gates, now, loaded).length
+function standingGateCount(state: EngineState, now: number, loaded: ReadonlyMap<string, PluginManifest>): number {
+  return waitingGates(state, now, loaded).length
 }
 
 /**
@@ -1438,6 +1444,66 @@ function standingGateCount(gates: PendingGate[], now: number, loaded: ReadonlyMa
  */
 function gateCeilingMs(manifest: PluginManifest): number {
   return Math.min(manifest.ttl_hours * 60 * 60 * 1000, GATE_MAX_AGE_MS)
+}
+
+/** Whether a parked gate can still be applied, and if not, the first reason it cannot. */
+export type GateVerdict =
+  | { applicable: true }
+  | {
+      applicable: false
+      reason: 'already_applied' | 'unclocked' | 'superseded' | 'dependency_moved' | 'expired'
+      detail: string
+    }
+
+/**
+ * Whether a parked gate can still be applied at `now`. The one answer every
+ * gate reader shares: `applyPendingGate`'s refusals, the count of waiting
+ * gates, the parked-result Asks, and `approve`'s choice of which decision an
+ * Answer answers. Readers that asked this four ways disagreed about one gate.
+ *
+ * Refusals in apply order, the first one found wins: applied, missing a clock,
+ * superseded by a later run of the plugin, a dependency that re-ran after the
+ * gated run started, and past the earlier of `ttl_hours` and
+ * {@link GATE_MAX_AGE_MS} from completion. One boundary: a gate exactly at its
+ * ceiling can still be applied. One clock per call: `now` is the only clock
+ * read. Pure: no write, no lock.
+ */
+export function gateApplicable(state: EngineState, gate: PendingGate, manifest: PluginManifest, now: number): GateVerdict {
+  if (gate.applied_at !== null) return { applicable: false, reason: 'already_applied', detail: gate.applied_at }
+  if (gate.run_started_at === null || gate.run_completed_at === null) {
+    return { applicable: false, reason: 'unclocked', detail: 'the gate carries no record of when its run happened' }
+  }
+  // Identity, never order. An entry with no `run_id` predates the field and supersedes nothing.
+  const latest = state.plugin_runs[gate.plugin]?.run_id
+  if (latest !== undefined && latest !== gate.run_id) {
+    return {
+      applicable: false,
+      reason: 'superseded',
+      detail: `'${gate.plugin}' ran again after this result was parked, so it is no longer the plugin's latest run`,
+    }
+  }
+  const startedMs = new Date(gate.run_started_at).getTime()
+  const moved = manifest.dependencies.filter((dep) => {
+    const last = state.plugin_runs[dep]?.last_run_at
+    return last !== undefined && new Date(last).getTime() > startedMs
+  })
+  if (moved.length > 0) {
+    return {
+      applicable: false,
+      reason: 'dependency_moved',
+      detail: `dependency ${moved.join(', ')} re-ran after this run started, so the parked result was computed against inputs that have moved`,
+    }
+  }
+  const ceilingMs = gateCeilingMs(manifest)
+  const ageMs = now - new Date(gate.run_completed_at).getTime()
+  if (ageMs > ceilingMs) {
+    return {
+      applicable: false,
+      reason: 'expired',
+      detail: `the gate expired — it is ${Math.round(ageMs / 3_600_000)}h old, past the ${Math.round(ceilingMs / 3_600_000)}h ceiling for this plugin`,
+    }
+  }
+  return { applicable: true }
 }
 
 /**
@@ -3013,7 +3079,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // stand whether or not this advance looked, and a detector must see a
       // gate that waits all night. Counted from the document this advance
       // read, because this arm writes none.
-      const quietPendingGates = standingGateCount(state.pending_gates, Date.now(), plugins)
+      const quietPendingGates = standingGateCount(state, Date.now(), plugins)
       // `pruned: 0` and it is honest: the prune runs below this guard, so a
       // skipped advance reclaims nothing. Nothing looked, so nothing went.
       //
@@ -4236,11 +4302,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // it. Every digest is drawn from `merged`, the document an Answer verb
       // re-reads, so the raise and the Answer's recompute see one input.
       //
-      // The wall clock, read once, for the count returned below and the parked
-      // results asked about here. A gate's clocks are wall-clock reads and so
-      // is the merge's, so the gates asked about are the gates the count
-      // reports. The injected `approvalNow` still drives each Ask's own
-      // `raised_at`, reminders and expiry.
+      // The wall clock, read once, for the count returned below and nothing
+      // else. The Ask pass reads gates through the same predicate at
+      // `approvalNow`, the instant each Ask is raised at, so a gate is asked
+      // about exactly while `approve` could apply it at that instant.
       const gateNow = Date.now()
       let pass: { entries: AskEntry[]; unrecorded: number } | null = null
       let skip: AskReport['skipped'] = null
@@ -4262,12 +4327,10 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // One decision per scope, first wins: the parked result, then
             // content, then a missing Grant, the order `approve` answers in.
             const byScope = new Map<string, AskDecision>()
-            for (const g of waitingGates(merged.pending_gates, gateNow, plugins)) {
+            for (const g of waitingGates(merged, approvalNow, plugins)) {
               if (byScope.has(g.plugin)) continue
               const manifest = plugins.get(g.plugin)!
               const clock = g.run_completed_at === null ? null : Date.parse(g.run_completed_at) + gateCeilingMs(manifest)
-              // Past its TTL the gate can no longer be applied, so the plugin's other decision is the one waiting.
-              if (clock !== null && clock <= approvalNow) continue
               byScope.set(g.plugin, {
                 kind: 'parked_result',
                 scope: g.plugin,
@@ -4343,9 +4406,8 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
         }
       }
       // The gates still waiting, counted from the document this advance just
-      // wrote. Re-applying the ceiling rule to it drops nothing the merge
-      // kept, short of a gate crossing the ceiling in the same instant.
-      return { standing: standingGateCount(merged.pending_gates, gateNow, plugins), askPass: pass, askSkip: skip }
+      // wrote, by the one predicate: a dead gate it still holds is not counted.
+      return { standing: standingGateCount(merged, gateNow, plugins), askPass: pass, askSkip: skip }
     })
 
     // 9. Write run log
@@ -4811,7 +4873,10 @@ export function findPendingGate(state: EngineState, plugin: string): PendingGate
  * a parked result mints no Grant" true by structure rather than by test: there
  * is no code path from here to a grant write.
  *
- * Four refusals, all checked BEFORE anything is written:
+ * Four refusals, all decided by {@link gateApplicable} in its order and BEFORE
+ * anything is written, so a gate this refuses is one the advance neither
+ * counts as waiting nor asks about (a gate missing a clock is refused as
+ * expired and nothing is written):
  *
  *   - **already applied** — the gate carries an `applied_at`. Nothing is
  *     written at all, so a double `approve` cannot double-record.
@@ -4832,7 +4897,8 @@ export function findPendingGate(state: EngineState, plugin: string): PendingGate
  *     {@link GATE_MAX_AGE_MS} from its completion.
  *
  * Expiry is decided HERE, as a state transition this function makes, rather
- * than inferred by whatever is rendering the gate. That is what stops an
+ * than inferred by whatever is rendering the gate. The predicate only answers;
+ * the discard is this function's write. That is what stops an
  * approval and an expiry racing into a double apply: there is one place that
  * decides, and it decides while holding the state it is about to write.
  *
@@ -4877,17 +4943,7 @@ export async function applyPendingGate(
   },
 ): Promise<GateApplyOutcome> {
   const now = opts.now ?? Date.now()
-
-  if (gate.applied_at !== null) {
-    return { outcome: 'already_applied', applied_at: gate.applied_at }
-  }
-
-  // Narrowing, not a guard against real input: a gate reaching here has both
-  // clocks, because one without them is discarded at read time.
-  const { run_started_at: startedAt, run_completed_at: completedAt } = gate
-  if (startedAt === null || completedAt === null) {
-    return { outcome: 'refused', reason: 'expired', detail: 'the gate carries no record of when its run happened' }
-  }
+  const verdict = gateApplicable(state, gate, manifest, now)
 
   const discard = async (
     reason: 'dependency_moved' | 'expired',
@@ -5000,42 +5056,34 @@ export async function applyPendingGate(
     return { outcome: 'refused', reason, detail }
   }
 
-  const priorApprovedEntry = state.plugin_runs[gate.plugin]
-  // Before the two refusals below, because both delete the entry, and this
-  // entry is a later run's record. Identity, never order.
-  if (priorApprovedEntry?.run_id !== undefined && priorApprovedEntry.run_id !== gate.run_id) {
-    state.pending_gates = state.pending_gates.filter((g) => g !== gate)
-    await writeEngineState(state, opts.statePath)
-    await emitGateInvalidated(gate.plugin, gate.run_id, 'superseded', opts.eventsPath).catch(() => {
-      /* a discard notice that cannot be written must not undo the discard */
-    })
-    return {
-      outcome: 'refused',
-      reason: 'superseded',
-      detail: `'${gate.plugin}' ran again after this result was parked, so it is no longer the plugin's latest run`,
+  if (!verdict.applicable) {
+    switch (verdict.reason) {
+      case 'already_applied':
+        return { outcome: 'already_applied', applied_at: verdict.detail }
+      // A gate reaching here has both clocks, because one without them is
+      // discarded at read time. Refused as expired, and nothing is written.
+      case 'unclocked':
+        return { outcome: 'refused', reason: 'expired', detail: verdict.detail }
+      // Not a discard: both of those delete the entry, and here the entry is a
+      // later run's record, which is kept. Only the gate goes.
+      case 'superseded':
+        state.pending_gates = state.pending_gates.filter((g) => g !== gate)
+        await writeEngineState(state, opts.statePath)
+        await emitGateInvalidated(gate.plugin, gate.run_id, 'superseded', opts.eventsPath).catch(() => {
+          /* a discard notice that cannot be written must not undo the discard */
+        })
+        return { outcome: 'refused', reason: 'superseded', detail: verdict.detail }
+      case 'dependency_moved':
+      case 'expired':
+        return discard(verdict.reason, verdict.detail)
     }
   }
 
+  // The verdict refused a gate missing either clock, so both are set here.
+  const startedAt = gate.run_started_at!
+  const completedAt = gate.run_completed_at!
+  const priorApprovedEntry = state.plugin_runs[gate.plugin]
   const startedMs = new Date(startedAt).getTime()
-  const moved = manifest.dependencies.filter((dep) => {
-    const last = state.plugin_runs[dep]?.last_run_at
-    return last !== undefined && new Date(last).getTime() > startedMs
-  })
-  if (moved.length > 0) {
-    return discard(
-      'dependency_moved',
-      `dependency ${moved.join(', ')} re-ran after this run started, so the parked result was computed against inputs that have moved`,
-    )
-  }
-
-  const ceilingMs = gateCeilingMs(manifest)
-  const ageMs = now - new Date(completedAt).getTime()
-  if (ageMs > ceilingMs) {
-    return discard(
-      'expired',
-      `the gate expired — it is ${Math.round(ageMs / 3_600_000)}h old, past the ${Math.round(ceilingMs / 3_600_000)}h ceiling for this plugin`,
-    )
-  }
 
   // Overwrite the `gated` entry IN PLACE: same anchor, real terminal status,
   // and the Output pointer the run already carried. `last_run_at` is the gate's
