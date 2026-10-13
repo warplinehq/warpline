@@ -2211,8 +2211,11 @@ applied while it is unapplied, carries both `run_started_at` and
 hours, and a gate exactly at that ceiling can still be applied. Steps 1 to 4
 below are its refusals, in order. The advance's count of waiting gates (§ 13),
 its parked-result Asks (§ 16) and `approve`'s choice of which decision an
-Answer answers read the same predicate, each at one clock, so none of them
-treats as waiting a gate `approve` would refuse.
+Answer answers read the same predicate. The count reads it at the wall clock
+when the advance's hold writes, the Asks at the later of that clock and the
+advance's own (§ 16), and `approve` at the wall clock when it runs. Time only
+takes a gate from applicable to not, so no Ask is raised for a gate the count
+does not treat as waiting.
 
 A bare `warpline approve <plugin>`
 takes the apply path whenever the plugin has an unapplied gate, so steps 2 to 4
@@ -4761,10 +4764,15 @@ raised.
 
 Parked results are read from the state document the hold just wrote, so a gate
 an earlier advance parked is asked about as well as one parked now. They are
-the gates the advance counts as waiting, by the one predicate (§ 10, Applying a
-gate), read at the advance's clock (`now`, for a library host), which also
-drives each Ask's `raised_at` and every expiry comparison. The count itself is
-read at the wall clock when the hold writes.
+read by the one predicate (§ 10, Applying a gate) at the later of two clocks:
+the advance's clock (`now`, for a library host), which also drives each Ask's
+`raised_at` and every expiry comparison, and the wall clock when the hold
+writes, which the count of waiting gates reads (§ 13). A gate dead at the
+advance's clock could get no Ask and would hold its scope against the plugin's
+other decision, and one dead at the wall clock would be asked about after
+`approve` already refuses it. So every gate asked about is counted, and when the
+advance's clock is not ahead of the wall clock, as on every CLI advance, the
+gates asked about are the gates counted.
 
 There is at most one open Ask per scope. Where one plugin carries more than one
 decision, the first of these is asked about: its parked result, then its

@@ -1408,9 +1408,11 @@ function mergePendingGates(disk: PendingGate[], parked: PendingGate[], now: numb
 /**
  * The gates still waiting on a human: those in `state` that can still be
  * applied at `now` ({@link gateApplicable}), for a plugin this advance loaded.
- * Two readers, the count below and the parked-result Asks, so the gates an
- * advance reports and the gates it asks about are one set, and it is the set
- * `approve` could apply.
+ * Two readers: the count below, at the wall clock when the hold writes, and
+ * the parked-result Asks, at the later of that and the advance's own clock. A
+ * gate only stops being applicable as time passes, so every gate asked about
+ * is counted, and when the advance's clock is not ahead of the wall clock
+ * (every CLI advance) the gates asked about are the gates counted.
  *
  * An applied gate is kept only as a spent marker, so a second `approve` finds
  * it and refuses. It waits on nobody, so it is not counted. Nor is a dead one:
@@ -4302,10 +4304,13 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
       // it. Every digest is drawn from `merged`, the document an Answer verb
       // re-reads, so the raise and the Answer's recompute see one input.
       //
-      // The wall clock, read once, for the count returned below and nothing
-      // else. The Ask pass reads gates through the same predicate at
-      // `approvalNow`, the instant each Ask is raised at, so a gate is asked
-      // about exactly while `approve` could apply it at that instant.
+      // The wall clock, read once at the hold. The count below reads gates at
+      // it. The Ask pass reads them at the later of it and `approvalNow`: a gate
+      // dead at `approvalNow` gets no Ask from `advanceAsks` yet would hold its
+      // scope against the plugin's other decision, and one dead at the wall
+      // clock would be asked about after `approve` already refuses it. Only
+      // expiry reads the clock and time only moves it one way, so the later
+      // clock is the stricter one.
       const gateNow = Date.now()
       let pass: { entries: AskEntry[]; unrecorded: number } | null = null
       let skip: AskReport['skipped'] = null
@@ -4327,7 +4332,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             // One decision per scope, first wins: the parked result, then
             // content, then a missing Grant, the order `approve` answers in.
             const byScope = new Map<string, AskDecision>()
-            for (const g of waitingGates(merged, approvalNow, plugins)) {
+            for (const g of waitingGates(merged, Math.max(approvalNow, gateNow), plugins)) {
               if (byScope.has(g.plugin)) continue
               const manifest = plugins.get(g.plugin)!
               const clock = g.run_completed_at === null ? null : Date.parse(g.run_completed_at) + gateCeilingMs(manifest)
