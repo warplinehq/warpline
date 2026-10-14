@@ -114,7 +114,8 @@ Judgment, input a model wrote, for example the work a dependency handed off. It
 is declared only, never derived from the dependency graph, and the engine never
 reads it, so an advance fires or skips such a plugin exactly as it would without
 it. A manifest that sets it with no declared side effect is refused at load,
-with an error naming the field.
+with an error naming the field. `warpline plan` flags such a plugin under each
+session or standing grant that would let it fire (§ 9).
 
 **The key in the plain-object `plugin_runs` and `denials` records is the plugin
 DIRECTORY name,** and the loader holds the directory to the same rules before it
@@ -1456,6 +1457,25 @@ frozen batch will go out, so a column answering with the wrong file is a worse
 failure than the disagreement-by-one-comparison the preview is otherwise built
 to avoid. Reading the record here decides nothing: previewing is not firing, and
 the fire decision is still read at exactly one call site inside the engine.
+
+**`warpline plan` flags a Judgment-fed effect under a blanket grant.** Under a
+due plugin whose manifest declares `judgment_fed_effects: true`, after its
+side-effect lines, `plan` prints one line per live grant that would authorise
+the fire, in the gate's order: session entries first (`*`, then the plugin's
+own window), then standing grants by id. The two shapes:
+
+```text
+    judgment_fed_effects: ⚠ fires on a Judgment under session grant (digest-sender)
+    judgment_fed_effects: ⚠ fires on a Judgment under standing grant 3f9a0c5e1b2d (holder ci-bot)
+```
+
+A session scope prints with the same escape as the standing section
+(`### Standing grants` below), so a control byte prints as `\xNN`. There is no
+line for a content-class plugin, whose content approval is the authority; none
+for a plugin no live grant covers, which is not due, and whose side-effect line
+already says it would be skipped; and none for a plugin that does not declare
+the field. The lines come from the same grant read as the `approved:` marker,
+so the two cannot disagree, and the advance never reads the field.
 
 ### Who reads the grant, and who mints a capability
 

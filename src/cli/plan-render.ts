@@ -24,6 +24,7 @@
  * would break byte identity the moment two renders straddled a minute
  * boundary — which is exactly the guarantee this command sells.
  */
+import type { CoveringGrant } from '../runtime/approval-gate.js'
 import type { LoadFailure, NotDueReason } from '../runtime/engine.js'
 
 // ── Model ──
@@ -47,6 +48,13 @@ export interface PlanEntry {
    * that this run will.
    */
   llmHandoff?: boolean
+  /**
+   * Present only when the manifest declares `judgment_fed_effects: true` and
+   * at least one live grant covers the plugin, holding those grants in the
+   * gate's order. Absent otherwise, so every other entry renders
+   * byte-identically.
+   */
+  judgmentFedUnder?: readonly CoveringGrant[]
   /**
    * Present only when the preview lists the plugin as due on a condition it
    * cannot check, and absent otherwise, so every other entry renders
@@ -194,6 +202,13 @@ const visible = (scope: string): string =>
     ch === '\\' ? '\\\\' : `\\x${ch.charCodeAt(0).toString(16).padStart(2, '0')}`,
   )
 
+/** Judgment vocabulary, in the register of the `llm_handoff` line. */
+function judgmentFedLine(grant: CoveringGrant): string {
+  return grant.kind === 'session'
+    ? `${SUB_INDENT}judgment_fed_effects: ⚠ fires on a Judgment under session grant (${visible(grant.scope)})`
+    : `${SUB_INDENT}judgment_fed_effects: ⚠ fires on a Judgment under standing grant ${grant.id} (holder ${grant.holder})`
+}
+
 /** The standing section, in the order the model gives it. No cause is shown for an unreadable file. */
 function standingLines(view: StandingView | undefined): string[] {
   if (view === undefined) return []
@@ -291,6 +306,7 @@ export function renderPlan(model: PlanModel, now: number): string {
         continue
       }
       lines.push(...sideEffectLines(entry))
+      for (const g of entry.judgmentFedUnder ?? []) lines.push(judgmentFedLine(g))
     }
     lines.push('')
   }

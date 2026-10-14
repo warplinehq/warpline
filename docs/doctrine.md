@@ -128,7 +128,7 @@ it is picked up. Two surfaces carry that, at two moments:
 
 | Surface | Moment | Shows |
 |---|---|---|
-| `warpline plan` | before the run | which plugins are due, in what order, their declared side effects and whether a grant covers them, and which plugins may hand judgment to the LLM |
+| `warpline plan` | before the run | which plugins are due, in what order, their declared side effects and whether a grant covers them, and which plugins may hand judgment to the LLM, and which side effects would fire on a Judgment under a session or standing grant |
 | the `[needs-llm]` handoff | after the run, before an LLM picks it up | one task sentence plus a pre-resolved context payload |
 
 Side-Effect Approval above rests on the first surface. Deciding once, with the

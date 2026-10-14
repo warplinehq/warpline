@@ -237,6 +237,10 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
           const manifest = manifests.get(name)
           if (!manifest) continue
           const evaluation = await evaluatePlugin(name, manifest, { ...ctx, dueAtEarlierLevel, heldAtEarlierLevel }, now)
+          // The one grant read, shared by the `approved` marker and the
+          // judgment-fed flag so the two cannot disagree.
+          const covering =
+            manifest.approval_class === 'content' ? null : await grantsCovering(name, { now, approvalPath, registry })
           const entry = {
             plugin: name,
             level,
@@ -276,12 +280,19 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
             // plugin a standing grant covers. `plan` reads it without recording
             // it, because a preview writes nothing.
             approved:
-              manifest.approval_class === 'content'
+              covering === null
                 ? approvalStanding(state, name, manifests, now).standing === 'live'
-                : (await grantsCovering(name, { now, approvalPath, registry })).length > 0,
+                : covering.length > 0,
           }
+          // Set only when declared and covered, so every other entry and its
+          // render are byte-identical to before. Due entries only: a not-due
+          // entry carries no flag.
+          const flag =
+            manifest.judgment_fed_effects === true && covering !== null && covering.length > 0
+              ? { judgmentFedUnder: covering }
+              : {}
           if (evaluation.due) {
-            due.push(entry)
+            due.push({ ...entry, ...flag })
             dueThisLevel.push(name)
           } else if (evaluation.mayFireIfReproducedBy !== undefined) {
             // The preview over-states here, as it does for a failed dependency
@@ -292,6 +303,7 @@ export async function buildPlanModel(now: number, profile?: RunProfile): Promise
             // authorise exactly the fire the condition describes.
             due.push({
               ...entry,
+              ...flag,
               approved: true,
               condition: `may fire if '${evaluation.mayFireIfReproducedBy}' re-produces the approved bytes this advance`,
             })

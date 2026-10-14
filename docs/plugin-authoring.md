@@ -157,6 +157,16 @@ It is a declaration only. Nothing derives it from your dependencies, and it
 changes nothing a run fires or skips. With `side_effects: []` the manifest is
 refused at load, and the error names the field.
 
+`warpline plan` shows one line under your plugin per session or standing grant
+that would let it fire:
+
+```text
+    judgment_fed_effects: ⚠ fires on a Judgment under session grant (my-plugin)
+```
+
+That way an operator sees before the run that a blanket grant covers an effect
+fed by a model.
+
 ### handler.ts
 
 ```typescript
