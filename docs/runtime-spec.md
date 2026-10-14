@@ -80,6 +80,7 @@ drift from the code. Edit the schema, not the table.
 | `approval_class` | `session` \| `content` | no | `"session"` |
 | `side_effects` | (`sends_email` \| `creates_issue` \| `writes_db` \| `external_api` \| `modifies_file`)[] | no | `[]` |
 | `llm_handoff` | boolean | no | `false` |
+| `judgment_fed_effects` | boolean | no | `false` |
 | `secrets` | string[] | no | `[]` |
 | `ttl_hours` | number | yes | — |
 | `dependencies` | string[] | no | `[]` |
@@ -107,6 +108,13 @@ is permission, not a promise: a declaring plugin that returns `success` records
 run is recorded `failed` with an error naming the field (see § 3). The
 free-text `capabilities` array never counts as this declaration, whatever it
 holds.
+
+`judgment_fed_effects` declares that the plugin's side effects fire on a
+Judgment, input a model wrote, for example the work a dependency handed off. It
+is declared only, never derived from the dependency graph, and the engine never
+reads it, so an advance fires or skips such a plugin exactly as it would without
+it. A manifest that sets it with no declared side effect is refused at load,
+with an error naming the field.
 
 **The key in the plain-object `plugin_runs` and `denials` records is the plugin
 DIRECTORY name,** and the loader holds the directory to the same rules before it

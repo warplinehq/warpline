@@ -40,6 +40,7 @@ const MANIFEST: PluginManifest = {
   approval_class: 'session',
   // Declared, so the classifier cases below are the declared rows.
   llm_handoff: true,
+  judgment_fed_effects: false,
   side_effects: [],
   ttl_hours: 24,
   dependencies: [],

@@ -45,6 +45,7 @@ export const manifest = PluginManifestSchema.parse({
   autonomy_level: 'autonomous', // autonomous | supervised | manual
   side_effects: [],             // sends_email | creates_issue | writes_db | external_api | modifies_file
   llm_handoff: false,           // true if the handler may return a [needs-llm] handoff
+  judgment_fed_effects: false,  // true if a side effect fires on a Judgment; needs a declared side effect
   ttl_hours: 6,                 // engine skips re-runs while the last success is fresher than this
   schedule: 'on_run',           // on_run | daily | weekly | manual
   timeout_ms: 30_000,           // per-attempt budget; a timeout is fatal, never retried
@@ -144,6 +145,17 @@ says what the handler does. The free-text `capabilities` list does not count.
 `warpline plan` shows the declaration as a line under your plugin, so an
 operator sees before the run that it may hand work to the LLM. The full rule
 is in [needs-llm-contract.md](needs-llm-contract.md#declaring-the-handoff).
+
+#### `judgment_fed_effects` — whether a side effect fires on a Judgment
+
+Optional, `false` by default. Set it to `true` when your plugin declares a side
+effect and what that effect sends, writes or creates comes from a Judgment, for
+example when you depend on a plugin that hands off and ship what the model
+wrote.
+
+It is a declaration only. Nothing derives it from your dependencies, and it
+changes nothing a run fires or skips. With `side_effects: []` the manifest is
+refused at load, and the error names the field.
 
 ### handler.ts
 

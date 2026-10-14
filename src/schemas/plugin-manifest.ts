@@ -218,6 +218,19 @@ export const PluginManifestSchema = z.object({
   llm_handoff: z.boolean().default(false),
 
   /**
+   * Whether this plugin's declared side effects fire on a Judgment: input a
+   * model wrote, such as what a dependency that handed off produced.
+   *
+   * Declared only. Nothing derives it from the dependency graph, and the
+   * engine never reads it, so a plugin fires or is skipped exactly as it would
+   * without it. A manifest that sets it with no declared side effect is refused
+   * by the rule below, because it would describe an effect that does not exist.
+   *
+   * Defaulted rather than optional, so an existing manifest reads `false`.
+   */
+  judgment_fed_effects: z.boolean().default(false),
+
+  /**
    * Environment variable keys this plugin requires to do its work.
    *
    * Names only. **Warpline holds no credential value.** The names are resolved
@@ -287,9 +300,10 @@ export const PluginManifestSchema = z.object({
   min_tier: z.enum(['normal', 'degraded', 'extended', 'suspended']).default('normal'),
 })
   /**
-   * What `approval_class: 'content'` additionally requires of the manifest that
-   * declares it. The file's first object-level rule, because these are the
-   * first constraints here that read more than one field.
+   * The object-level rules, of two kinds. The judgment-fed rule applies to
+   * every class, so it sits above the content-class early return; below it is
+   * what `approval_class: 'content'` additionally requires of the manifest that
+   * declares it. These are the constraints here that read more than one field.
    *
    * It lives on the schema and NOT in the loader, so every reader validates
    * under one rule. A manifest imported by `cli/approve.ts`, `cli/deny.ts` or
@@ -302,6 +316,17 @@ export const PluginManifestSchema = z.object({
    * not a repair instruction.
    */
   .superRefine((manifest, ctx) => {
+    if (manifest.judgment_fed_effects && manifest.side_effects.length === 0) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['judgment_fed_effects'],
+        message:
+          '`judgment_fed_effects` requires at least one declared side effect — ' +
+          'the field says a side effect fires on a Judgment, and a plugin ' +
+          'declaring none has no effect for it to describe',
+      })
+    }
+
     if (manifest.approval_class !== 'content') return
 
     if (manifest.side_effects.length === 0) {

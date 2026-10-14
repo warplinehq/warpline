@@ -46,6 +46,7 @@ function makeManifest(name: string, sideEffects: string[]): PluginManifest {
     autonomy_level: 'supervised',
     approval_class: 'session',
     llm_handoff: false,
+    judgment_fed_effects: false,
     side_effects: sideEffects as PluginManifest['side_effects'],
     ttl_hours: 24,
     dependencies: [],
