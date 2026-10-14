@@ -94,12 +94,11 @@ refused and recorded `failed`.
 
 **Both arms are emitted together**, and `skillHandoff` from
 `warpline/unstable-result` is what emits them. It sets `needs_llm` and prefixes
-the summary in the same call, writing the context path into the summary
-resolved against the home so the scanner has a path it can open. The string arm
-is what the shipped scanner reads today; teaching it to read the field instead
-is a change to the skill and to this document, and is deliberately not done
-here. Until it is, a result that carried only the field would be one the runtime
-calls `delegated` and the scanner never picks up.
+the summary in the same call. The scanner reads the Handoff record described
+below, which takes `task` and `context_path` from the field when the result
+carries it and from the summary otherwise, so a result carrying either arm
+alone is found. The summary keeps the context path resolved against the home,
+so a person reading a run log sees where the payload is.
 
 ## Declaring the handoff
 
@@ -179,6 +178,9 @@ again. The new record is written first, so a plugin never ends with no open
 record. No lock is taken, so two writers racing can leave two open records
 until that plugin's next handoff.
 
+The `needs-llm` scanner finds handoffs by listing this directory, and it
+ignores superseded records.
+
 A record that cannot be written fails the plugin. Its result becomes
 `status: 'failed'` with summary `<plugin>: handoff not recorded`, and
 `errors[0]` is a `dependency_unavailable` with `retryable: false` naming the
@@ -198,13 +200,15 @@ that an orchestrating Claude session runs. The loop:
 1. Deterministic pass: the engine runs due plugins. The v0.1 entry point is
    programmatic — a host calls `runAdvance()`, exported from the package root.
    To see what a run *would* do without running it, `warpline plan` prints the
-   same due-set read-only. Some results come back `delegated`.
+   same due-set read-only. Each declared handoff becomes an open Handoff
+   record, and a `warpline run` artifact for one still reads `delegated`.
 2. The orchestrating session (a human-invoked Claude Code session, a scheduled
-   agent, or a skill that wraps the engine) scans run artifacts / board events
-   for `[needs-llm]` summaries. That scanner ships as the `needs-llm` skill in
-   the `warpline` Claude Code plugin: it globs the run artifacts under the
-   warpline home, keeps the ones whose status is `delegated`, and reads the
-   payload named after `Context:` in the summary.
+   agent, or a skill that wraps the engine) scans for open Handoff records.
+   That scanner ships as the `needs-llm` skill in the `warpline` Claude Code
+   plugin: it globs `<home>/handoffs/*.json`, keeps the records whose `state`
+   is `open`, and reads each one's `task` and `context_path`. A relative path
+   joins the home and an absolute one is used as is. A missing `handoffs/`
+   means there is nothing to do.
 3. For each, it dispatches the matching companion skill with the payload. The
    skill does the judgment work (drafting, triage, synthesis) and writes its
    output through whatever gate the host requires.
@@ -240,9 +244,9 @@ for one plugin's handoffs. It sits under a **scanner**, and the two are not the
 same thing:
 
 - **`needs-llm`** is the generic scanner. One skill, plugin-agnostic: it finds
-  every `delegated` run regardless of which plugin emitted it, and routes each
-  handoff to the consumer named after the emitting plugin. It reads only paths
-  resolving inside the warpline home.
+  every open Handoff record regardless of which plugin emitted it, and routes
+  each handoff to the consumer named after the emitting plugin. It reads only
+  paths resolving inside the warpline home.
 - **`feed-triage`** is the shipped example of a consumer. It takes the payload
   the scanner resolved and writes its judgment to one declared path,
   `<warpline home>/state/feed-triage.judgment.md` — a file, not a side effect

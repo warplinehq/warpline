@@ -185,8 +185,8 @@ so "no inline model" stays convention, held by review.
   manifest (`llm_handoff: true`), and `warpline plan` prints that declaration
   before anything runs. A handoff from a plugin that did not declare it is
   refused. A model call inside a handler stays invisible to the runtime, so
-  "no inline model" is a review convention, not a check. The handoff itself is
-  visible in every run artifact.
+  "no inline model" is a review convention, not a check. Every handoff is also
+  an open Handoff record under the home, which the `needs-llm` skill finds.
 - **The consumer is whoever you have.** The contract names a status and a
   payload path. Anything that reads them can consume the handoff: an
   interactive Claude Code session, a headless invocation under cron, an
