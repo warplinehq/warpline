@@ -1,6 +1,6 @@
 ---
 name: feed-triage
-description: Judge the new entries in a warpline feed-triage [needs-llm] handoff — one line per entry on what it is about and whether it warrants follow-up. Use when picking up a delegated feed-triage run.
+description: Judge the new entries in a warpline feed-triage [needs-llm] handoff — one line per entry on what it is about and whether it warrants follow-up. Use when picking up an open feed-triage Handoff.
 ---
 
 # feed-triage companion skill
@@ -12,9 +12,10 @@ judgment.
 
 ## Input
 
-The path named after `Context:` in a `feed-triage` handoff summary, resolved
-inside the warpline home. It holds an object with a `new_entries` array whose
-items carry a title, a link and a publication date:
+The payload at the `context_path` of an open `feed-triage` Handoff record,
+resolved inside the warpline home by the `needs-llm` scanner. It holds an
+object with a `new_entries` array whose items carry a title, a link and a
+publication date:
 
 ```json
 {

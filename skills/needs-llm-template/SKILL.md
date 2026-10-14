@@ -11,9 +11,10 @@ math. Your job is ONLY the part that needs judgment.
 
 ## Input
 
-A `[needs-llm]` handoff produced by the plugin, found in a run artifact
-(`<home>/runs/<run_id>.json`) or board event. The summary after the
-`[needs-llm]` prefix carries the task and a pointer to the context payload.
+A `[needs-llm]` handoff produced by the plugin, found as an open Handoff
+record under the home's `handoffs/` directory by the `needs-llm` scanner. The
+scanner hands this skill the record's `task` and the payload at its
+`context_path`.
 
 TODO: document the exact payload shape your plugin emits, with an example.
 

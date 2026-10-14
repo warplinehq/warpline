@@ -259,12 +259,13 @@ export interface InvokePluginOptions {
  * predicate is exactly how that comes back.
  *
  * It reads FIELD-OR-PREFIX: the structured `needs_llm` field, or the older
- * `[needs-llm]` summary prefix. Both, because the prefix arm cannot be retired
- * yet — the scanner that finds handoffs ships as a Claude Code skill, outside
- * this package and outside `bun test`'s reach, and it reads the summary string.
- * Dropping the prefix would move the same disagreement one layer out, where
- * nothing here can see it. A `skipped` status is still required by both arms:
- * the field alone must not make a successful result delegated. *
+ * `[needs-llm]` summary prefix. Both, because a handler that writes only the
+ * prefix (hand-rolled, or written before the field existed) is still a
+ * handoff, and the Handoff record takes its task and context path from
+ * whichever arm the result carries. Dropping the prefix arm would turn those
+ * handlers' handoffs into plain skips. A `skipped` status is still required by
+ * both arms: the field alone must not make a successful result delegated.
+ *
  * It never reads the manifest. The manifest's `llm_handoff` bit composes with
  * it at exactly one site, the refusal in the retry loop, which rewrites an
  * undeclared handoff to a failed result before either classifier runs.

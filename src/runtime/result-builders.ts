@@ -109,23 +109,18 @@ export function skillFailure(
  *
  * **Dual-emit, and that is the whole reason this is a builder.** The structured
  * `needs_llm` field is what a plugin author can construct without string
- * surgery, and the runtime classifies on it. The `[needs-llm] ` summary prefix
- * is what the scanner reads — and that scanner ships as a Claude Code skill,
- * outside this package and outside `bun test`'s reach. A builder that wrote the
- * field and dropped the prefix would produce a result the runtime calls
- * delegated and the scanner never picks up: the same two-classifiers-disagreeing
- * failure `isHandoff` exists to prevent, one layer further out where nothing
- * here can see it. Teaching the scanner to read the field is deliberately not
- * done here; until it is, both arms ship together.
+ * surgery, and the runtime classifies on it. It is also what the Handoff record
+ * reads first. The `[needs-llm] ` summary prefix keeps the summary
+ * self-describing in run logs, and keeps a reader of the summary alone working.
  *
  * `contextPath` is RELATIVE to the warpline home — the schema refuses anything
  * else, so that the payload resolves inside the home by construction. The
- * summary carries it RESOLVED, because the summary is the only channel the
- * scanner has and a bare relative path there would leave it guessing at a base.
+ * summary carries it RESOLVED, because a person reading a run log has no base
+ * to resolve a relative path against.
  *
  * `task` carries no terminating punctuation: the summary form documented in
- * `docs/needs-llm-contract.md` supplies the period, and the scanner splits on
- * `Context: ` to find the payload.
+ * `docs/needs-llm-contract.md` supplies the period, and the Handoff record
+ * splits a prefix-only summary on `Context: ` to find the payload.
  */
 export function skillHandoff(
   task: string,

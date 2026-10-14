@@ -175,13 +175,15 @@ export class ZeroHandoffError extends Error {
 /**
  * The token substituted into the consumer prompt: the discovery seam.
  *
- * The prompt is handed the absolute path of the run log the advance returned,
- * because the discovery skill's own glob is blind to an advance — it filters
- * the home's run artifacts for a delegated status that only the manual-run
- * path writes, and the pipeline path deliberately writes a combined log
- * instead. A consumer launched with this token UNSUBSTITUTED therefore has no
- * discovery path at all: it finds nothing, writes nothing, and fails the
- * grader on both handoff artifacts with nothing in the output naming why.
+ * The prompt is handed the absolute path of the run log the advance returned.
+ * When the method was registered, the discovery skill's glob was blind to an
+ * advance: it filtered the home's run artifacts for a delegated status that
+ * only the manual-run path wrote. The shipped skill now reads Handoff records,
+ * which an advance writes, but the measured method keeps handing the consumer
+ * the run-log path, so every run stays comparable with the registered ones. A
+ * consumer launched with this token UNSUBSTITUTED therefore has no discovery
+ * path at all: it finds nothing, writes nothing, and fails the grader on both
+ * handoff artifacts with nothing in the output naming why.
  */
 export const RUN_LOG_PLACEHOLDER = '{{RUN_LOG_PATH}}'
 

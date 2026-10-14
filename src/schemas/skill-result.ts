@@ -296,10 +296,10 @@ export const SkillResultSchema = z.object({
   undo_instruction: z.string().optional(),
   /**
    * The judgment work this result hands off, structured rather than spelled
-   * into the summary. Emitted TOGETHER with the `[needs-llm]` summary prefix,
-   * never instead of it — the scanner that ships as a Claude Code skill reads
-   * the summary string, and a result carrying only this field is one the
-   * runtime calls delegated and the scanner never picks up.
+   * into the summary. `skillHandoff` emits it together with the `[needs-llm]`
+   * summary prefix. The Handoff record an advance or `warpline run` writes
+   * takes `task` and `context_path` from this field when it is present, so a
+   * result carrying it alone is still found.
    *
    * Optional, never nullable: an absent optional is omitted by
    * Zod and dropped by `JSON.stringify`, so a plugin that delegated nothing
