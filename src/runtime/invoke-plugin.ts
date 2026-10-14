@@ -267,8 +267,11 @@ export interface InvokePluginOptions {
  * It never reads the manifest. The manifest's `llm_handoff` bit composes with
  * it at exactly one site, the refusal in the retry loop, which rewrites an
  * undeclared handoff to a failed result before either classifier runs.
+ *
+ * Exported for the engine's Handoff write, and re-exported by no public entry
+ * point.
  */
-function isHandoff(result: SkillResult | null): boolean {
+export function isHandoff(result: SkillResult | null): boolean {
   if (result?.status !== 'skipped') return false
   return result.needs_llm !== undefined || (result.summary?.startsWith('[needs-llm]') ?? false)
 }

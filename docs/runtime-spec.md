@@ -38,14 +38,14 @@ written into a home no scheduled run reads is visible at the moment it is made.
 The plugin root and the home are independent. A supplied root may sit outside
 the home, inside it, or be exactly `<home>/plugins`; nothing requires the two to
 be disjoint. What does not move is everything the home derives: `state/`,
-`runs/`, `events.jsonl`, the session-approval grant, and `config/<plugin>.json`
-all stay under `warplineHome()` whatever plugin root an advance is given. A
+`runs/`, `handoffs/`, `events.jsonl`, the session-approval grant, and
+`config/<plugin>.json` all stay under `warplineHome()` whatever plugin root an advance is given. A
 root that is absent, is not a directory, cannot be read, or is the empty string
 is refused before the advance writes anything.
 
 A library host runs another home with `AdvanceOptions.home`. For that advance,
 handler calls included, everything the home derives moves with it: `state/`,
-`runs/`, `logs/`, `events.jsonl`, the run lock, `preferences.json`, the
+`runs/`, `handoffs/`, `logs/`, `events.jsonl`, the run lock, `preferences.json`, the
 session-approval grant, `standing-grants.json`, `principals.json`, the audit
 store and `config/<plugin>.json`. The plugin root follows the rule above, with
 `<home>/plugins` as its last step. The scope is the advance's own async work,
@@ -512,6 +512,13 @@ parked, because a `failed` result never is (§ 9). The plugin entry and
 `plugin_runs` read `failed` there too, with the refusal in the summary. It is
 never `delegated`.
 
+A declared handoff from an advance whose Handoff record cannot be written is
+replaced by a fresh failed result: `summary` `<name>: handoff not recorded`,
+`errors[0]` a `dependency_unavailable` with `retryable: false`, and an empty
+`artifacts_produced`. The plugin entry and `plugin_runs` read `failed`, and it
+is never parked. See [needs-llm-contract.md](needs-llm-contract.md) § The
+Handoff record.
+
 ### Attempt status
 
 Each entry in `attempts[]` carries its own terminal status, from a five-value
@@ -774,7 +781,7 @@ set is closed — an unlisted value fails validation rather than being dropped.
 | Status | Meaning |
 |--------|---------|
 | `completed` | The handler ran and returned a result the engine accepted |
-| `failed` | The handler threw, returned a failed result, returned a `[needs-llm]` handoff its manifest does not declare (`llm_handoff`), or the plugin's manifest never loaded |
+| `failed` | The handler threw, returned a failed result, returned a `[needs-llm]` handoff its manifest does not declare (`llm_handoff`), returned a declared handoff whose Handoff record could not be written, or the plugin's manifest never loaded |
 | `skipped` | The plugin was not due — fresh, filtered, locked, without a session Grant, or holding a declared dependency whose last run failed |
 | `gated` | Supervised: the handler ran, its result did not fail, and the result was parked pending a human answer |
 | `denied` | A human answered no, and the answer still applies to what is being proposed |

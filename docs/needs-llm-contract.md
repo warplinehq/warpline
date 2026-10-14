@@ -135,6 +135,55 @@ prints it under the plugin, before anything runs:
     llm_handoff: may hand judgment to the LLM ([needs-llm])
 ```
 
+## The Handoff record
+
+Every declared handoff an advance makes is written as one JSON file,
+`<home>/handoffs/<run_id>.<plugin>.json`, by `writeHandoff` in `handoffs.ts`.
+The record's `id` is that file's name without `.json`. A plugin hands off at
+most once per run, so the run and the plugin name the record.
+
+Its fields:
+
+- `min_reader_version`: `1`. A reader refuses a record whose number is higher.
+- `id`: `<run_id>.<plugin>`.
+- `run_id`: the run that handed off.
+- `plugin`: the plugin that handed off.
+- `task`: what judgment is asked for.
+- `context_path`: the payload's path, or `null` when the handoff names none.
+- `created_at`: when the record was written.
+- `state`: `open` or `superseded`.
+- `closed_at`: `null` while the record is open.
+
+`task` and `context_path` come from the structured `needs_llm` field when the
+result carries it. Otherwise they come from the summary: `task` is the text
+after the `[needs-llm]` prefix up to `Context: `, with its final period
+dropped, and `context_path` is the text after `Context: `. The path is copied
+as written. It is never resolved or judged here, and a record never holds the
+payload's bytes.
+
+The record is written right after the plugin returns and before the review
+gate, so a handoff that parks is recorded too. `isHandoff` in
+`invoke-plugin.ts` decides what is a handoff, and by then an undeclared handoff
+has been refused, so it writes no record. A dry run writes none, and
+`warpline plan` writes none.
+
+A newer handoff for the same plugin marks every older open record of that
+plugin `superseded` and sets its `closed_at`. A superseded record never opens
+again. The new record is written first, so a plugin never ends with no open
+record. No lock is taken, so two writers racing can leave two open records
+until that plugin's next handoff.
+
+A record that cannot be written fails the plugin. Its result becomes
+`status: 'failed'` with summary `<plugin>: handoff not recorded`, and
+`errors[0]` is a `dependency_unavailable` with `retryable: false` naming the
+error code. It is not parked, a plugin depending on it is skipped as
+`dependency_failed`, and the exit code counts it. The `fire.outcome` audit
+record of a plugin declaring a side effect still reads `skipped`, because it
+records what the handler returned, and the record is warpline's act afterwards.
+A content-class plugin whose Handoff record cannot be written is a failed fire,
+so its approval is left `indeterminate`, as
+[runtime-spec.md](runtime-spec.md) § 10 describes.
+
 ## Who consumes the handoff
 
 A **companion skill** — a Claude Code skill (see `skills/needs-llm-template/`)

@@ -46,7 +46,8 @@ import { acquireLock, releaseLock, startHeartbeat } from './lock.js'
 import { JsonlRunLogger } from '../lib/jsonl-logger.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
 import { isPluginName } from '../schemas/plugin-name.js'
-import { admitManifest, invokePlugin, redirectPluginOutput, releasePluginOutput } from './invoke-plugin.js'
+import { admitManifest, invokePlugin, isHandoff, redirectPluginOutput, releasePluginOutput } from './invoke-plugin.js'
+import { handoffFields, handoffNotRecorded, writeHandoff } from '../lib/handoffs.js'
 import type { CapabilityGrantWitness, DependencyRun } from './capabilities.js'
 
 /**
@@ -3874,7 +3875,7 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
             return
           }
 
-          const { result, retried } = invocationResult
+          let { result, retried } = invocationResult
 
           // The outcome closes the intent, one attempt and no retry. A store
           // that cannot take it leaves the intent open for the next advance to
@@ -3889,6 +3890,29 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
               })
             } catch {
               audit_failures.push({ plugin: pluginName, kind: 'fire.outcome', intent_seq: intentSeq })
+            }
+          }
+
+          // A declared handoff becomes a Handoff record here, above the
+          // supervised split, so a handoff that parks is recorded too. Never on
+          // a dry run, which still invokes effect-free plugins. After the invoke
+          // `isHandoff` already means declared, because an undeclared handoff
+          // came back failed. The directory is the home's, derived from the
+          // state file path as the version stamp below derives it, and never
+          // from the process home.
+          //
+          // A record that cannot be written turns the result into the fixed
+          // failed result, and the code below records it as any failed run:
+          // not parked, `plugin_runs` failed, dependents held, counted by the
+          // exit code. So a content-class handoff whose record fails is a failed
+          // fire, and its approval stays unconfirmed. The `fire.outcome` above
+          // still says `skipped`, which is right. It records what the handler
+          // returned, and the record is warpline's act afterwards.
+          if (!dryRun && isHandoff(result)) {
+            try {
+              await writeHandoff(join(dirname(dirname(stateDir)), 'handoffs'), handoffFields(run_id, pluginName, result))
+            } catch (err) {
+              result = handoffNotRecorded(pluginName, err)
             }
           }
 
