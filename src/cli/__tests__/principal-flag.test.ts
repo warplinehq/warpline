@@ -562,11 +562,13 @@ describe('no verb reads the account running it', () => {
   async function readsOfTheAccount(entries: string[], root: string, re: RegExp): Promise<string[]> {
     const closure = new Map<string, string>()
     for (const entry of entries) for (const [file, source] of await walkImports(entry)) closure.set(file, source)
-    const out: string[] = []
+    const out: Array<[string, number, string]> = []
     for (const [file, source] of closure) {
-      for (const [n, code] of codeLines(source)) if (re.test(code)) out.push(`${relative(root, file)}:${n}: ${code.trim()}`)
+      for (const [n, code] of codeLines(source)) if (re.test(code)) out.push([relative(root, file), n, code.trim()])
     }
-    return out.sort()
+    // By file, then line as a number: a string sort puts line 106 before line 55.
+    out.sort(([fa, na], [fb, nb]) => (fa < fb ? -1 : fa > fb ? 1 : na - nb))
+    return out.map(([file, n, code]) => `${file}:${n}: ${code}`)
   }
 
   /**
