@@ -137,10 +137,10 @@ prints it under the plugin, before anything runs:
 
 ## The Handoff record
 
-Every declared handoff an advance makes is written as one JSON file,
-`<home>/handoffs/<run_id>.<plugin>.json`, by `writeHandoff` in `handoffs.ts`.
-The record's `id` is that file's name without `.json`. A plugin hands off at
-most once per run, so the run and the plugin name the record.
+Every declared handoff an advance or `warpline run` makes is written as one
+JSON file, `<home>/handoffs/<run_id>.<plugin>.json`, by `writeHandoff` in
+`handoffs.ts`. The record's `id` is that file's name without `.json`. A plugin
+hands off at most once per run, so the run and the plugin name the record.
 
 Its fields:
 
@@ -161,11 +161,17 @@ dropped, and `context_path` is the text after `Context: `. The path is copied
 as written. It is never resolved or judged here, and a record never holds the
 payload's bytes.
 
-The record is written right after the plugin returns and before the review
-gate, so a handoff that parks is recorded too. `isHandoff` in
+An advance writes the record right after the plugin returns and before the
+review gate, so a handoff that parks is recorded too. `isHandoff` in
 `invoke-plugin.ts` decides what is a handoff, and by then an undeclared handoff
 has been refused, so it writes no record. A dry run writes none, and
 `warpline plan` writes none.
+
+`warpline run` writes the record before its `delegated` run artifact, which is
+otherwise unchanged. A record it cannot write fails the run with the result an
+advance gets, described below: `ok: false`, and the artifact reads `failed`. `warpline run` takes no lock, so
+a manual run racing an advance of the same plugin can leave two open records
+until that plugin's next handoff.
 
 A newer handoff for the same plugin marks every older open record of that
 plugin `superseded` and sets its `closed_at`. A superseded record never opens

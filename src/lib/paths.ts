@@ -86,6 +86,14 @@ export function runsDir(): string {
 }
 
 /**
+ * Directory holding one Handoff record per `[needs-llm]` handoff, named by run
+ * id and plugin. Internal: `paths-public.ts` does not re-export it.
+ */
+export function handoffsDir(): string {
+  return path.join(warplineHome(), 'handoffs')
+}
+
+/**
  * The DEFAULT plugin root (<name>/manifest.ts + handler.ts under it):
  * `WARPLINE_PLUGINS_DIR` when set, otherwise `<home>/plugins`.
  *

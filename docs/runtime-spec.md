@@ -479,6 +479,7 @@ Timeout vs. retry interaction:
 | handler returns `skipped` + `[needs-llm]` summary prefix, from a plugin declaring `llm_handoff: true` | `delegated` | `false` | `false` |
 | handler returns `skipped` + a `needs_llm` field, from a plugin declaring `llm_handoff: true`          | `delegated` | `false` | `false` |
 | handler returns either handoff, from a plugin that does not declare `llm_handoff`                    | `failed`    | `false` | `false` |
+| handler returns a declared handoff and its Handoff record cannot be written (`warpline run`)         | `failed`    | `false` | `false` |
 
 `delegated` (2026-08-19): a `[needs-llm]` handoff is a successful dispatch to a
 companion LLM skill, not a failure. `deriveRunStatus()` in `invoke-plugin.ts` is
@@ -519,6 +520,12 @@ replaced by a fresh failed result: `summary` `<name>: handoff not recorded`,
 is never parked. See [needs-llm-contract.md](needs-llm-contract.md) § The
 Handoff record.
 
+`warpline run` writes the record before the run artifact. A record it cannot
+write replaces the result the same way, rewrites the last attempt to `failed`
+with that error, and sets `final_error`. The artifact persists as `failed`, and
+`warpline run` reports `ok: false`. A caller of `invokePlugin` that passes its
+own `runsDir` gets the record in a `handoffs/` directory beside that directory.
+
 ### Attempt status
 
 Each entry in `attempts[]` carries its own terminal status, from a five-value
@@ -538,7 +545,9 @@ and contributes no `final_error`, even when the handoff result populates
 `errors[]`: the dispatch succeeded, so there is no failure to attribute. A
 handoff from a plugin that does not declare `llm_handoff` is rewritten before
 either level classifies it, so both read `failed`, and the attempt's `error`
-carries the refusal message.
+carries the refusal message. A declared handoff whose Handoff record cannot be
+written is rewritten after the loop, so its last attempt reads `failed` with
+the record's error, and the run and its attempts still agree.
 
 Consumers should treat the set as open and not assume four members. The
 persisted artifact types this field as a plain string for that reason.
@@ -677,6 +686,10 @@ A run whose plugin returned a `[needs-llm]` handoff without declaring
 `final_error` naming the field. It never persists as `delegated`, so nothing
 that selects run artifacts by the `delegated` status picks it up. § 3
 describes the refusal.
+
+A `warpline run` whose declared handoff could not be recorded persists with
+`status: 'failed'` and a `final_error` naming the Handoff record. It never
+persists as `delegated`.
 
 A `RunArtifact` also carries an optional `plugin_entries`, kept only for
 backward compatibility with an older combined engine-run shape. Nothing writes

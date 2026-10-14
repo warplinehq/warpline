@@ -30,10 +30,11 @@
  *     `plan` would refuse is refused here too, and nothing runs.
  *   - Handler output is validated by Zod (SkillResultSchema.safeParse).
  */
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { format } from 'node:util'
-import { pluginsDir, pluginConfigPath } from '../lib/paths.js'
+import { handoffsDir, pluginsDir, pluginConfigPath } from '../lib/paths.js'
+import { handoffFields, handoffNotRecorded, writeHandoff } from '../lib/handoffs.js'
 import { dropLateWrite } from '../lib/exit-after-flush.js'
 import { loadPluginConfig, PluginConfigError } from '../lib/plugin-config.js'
 import { resolvePluginArgs } from '../schemas/plugin-config.js'
@@ -992,11 +993,32 @@ export async function invokePlugin(
   // skip there by leaving `persistArtifact` undefined.
   // -------------------------------------------------------------------
   if (options.persistArtifact) {
-    const artifactStatus = deriveRunStatus({
+    let artifactStatus = deriveRunStatus({
       cancelled,
       timed_out: timedOut,
       result: finalResult,
     })
+    // A delegated run's Handoff record is written here, before the artifact and
+    // outside the catch below that swallows artifact errors: a swallowed record
+    // failure would lose the only way a separate process finds the handoff. A
+    // caller that redirects its runs directory gets the record beside it, never
+    // in the process home, the same leak the `runsDir` option's comment records.
+    // On failure the result becomes the fixed failed result an advance uses, and
+    // the last attempt is rewritten so the run and its attempts cannot disagree.
+    if (artifactStatus === 'delegated' && finalResult !== null) {
+      try {
+        await writeHandoff(
+          options.runsDir ? join(dirname(options.runsDir), 'handoffs') : handoffsDir(),
+          handoffFields(runId, pluginName, finalResult),
+        )
+      } catch (err) {
+        finalResult = handoffNotRecorded(pluginName, err)
+        finalErr = finalResult.errors[0]?.message ?? null
+        const last = attempts.length - 1
+        attempts[last] = { ...attempts[last]!, status: 'failed', error: finalErr }
+        artifactStatus = 'failed'
+      }
+    }
     const artifact: RunArtifact = {
       run_id: runId,
       plugin: pluginName,
