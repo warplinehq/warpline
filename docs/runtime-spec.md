@@ -1552,6 +1552,12 @@ plugin that declares a side effect is parked exactly as before, and its record
 is written too. A content-class plugin never reaches the exception, because it
 declares at least one effect.
 
+**Its Output reaches its dependents unreviewed.** An Output the handoff's result
+carries is published to `plugin_runs`, and a dependent reads it in the same
+advance, before anyone has reviewed it. A dependent that declares a side effect
+still needs its own approval before it runs, and the review gate treats that
+dependent's result as it treats any other plugin's.
+
 **A plugin declaring `approval_class: 'content'` is not promoted.** One conjunct
 on the promotion condition, and nothing else about it changes: every other
 plugin behaves exactly as before, `review_gate: false` included.

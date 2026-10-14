@@ -66,6 +66,39 @@ const SUCCESS = `export async function handler() {
 }
 `
 
+const OUTPUT_BODY = '{"draft":"unreviewed"}'
+
+/** A declared handoff that also carries a `brief` Output, so there is something to read downstream. */
+const HANDOFF_WITH_OUTPUT = `export async function handler() {
+  return {
+    status: 'skipped',
+    phases_completed: [],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'Summarise the brief',
+    needs_llm: { task: 'Summarise the brief', context_path: 'state/brief.json' },
+    artifacts_produced: [{ type: 'brief', format: 'json', body: ${JSON.stringify(OUTPUT_BODY)} }],
+    schema_version: 1,
+  }
+}
+`
+
+/** Serialises `prod`'s Output as this dependent saw it, so the assertion is on what it read. */
+const READS_PROD = `export async function handler(manifest, args, signal, capabilities) {
+  return {
+    status: 'success',
+    phases_completed: [],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: JSON.stringify({ seen: capabilities.dependencies.lastOutput(capabilities.caller, 'prod') }),
+    artifacts_produced: [],
+    schema_version: 1,
+  }
+}
+`
+
 describe('an advance writes one Handoff record per declared handoff', () => {
   let home: TwoAdvanceHome
   let handoffs: string
@@ -233,5 +266,34 @@ describe('under the review gate, an effect-free handoff does not stop its level'
     expect(consumer!.status).toBe('gated')
     expect(r.gated_plugins).toEqual(['consumer'])
     expect((await readOpenHandoffs(join(home.root, 'handoffs'))).open.map((h) => h.plugin)).toEqual(['prod'])
+  })
+
+  // The review gate does not hold back an exempt handoff's Output, by
+  // decision. This case pins it, so that narrowing the exemption to handoffs
+  // with no Output, the alternative that was declined, cannot land silently.
+  test('the Output of an effect-free handoff reaches its dependent unreviewed, and a dependent declaring a side effect still parks', async () => {
+    home = await createTwoAdvanceHome({ preferences: { review_gate: true } })
+    await home.writePlugin('prod', { outputs: { brief: {} }, llmHandoff: true, handlerBody: HANDOFF_WITH_OUTPUT })
+    await home.writePlugin('consumer', { dependencies: ['prod'], sideEffects: ['sends_email'], handlerBody: READS_PROD })
+    _setHome(home.root)
+    await grantApproval('consumer', 60 * 60_000, join(home.root, '.session-approval'))
+
+    const r = await home.advance()
+
+    const prod = (await home.persistedRun('prod')) as Record<string, unknown>
+    expect(prod.status).toBe('skipped')
+    expect(prod.last_output).toMatchObject({ type: 'brief', body: OUTPUT_BODY })
+
+    // What the consumer saw, not what the state file holds.
+    const consumer = await home.entryFor(r.run_log_path, 'consumer')
+    expect(consumer).not.toBeNull()
+    expect(consumer!.status).toBe('gated')
+    expect((JSON.parse(consumer!.result_summary) as { seen: unknown }).seen).toMatchObject({ type: 'brief', body: OUTPUT_BODY })
+
+    expect(r.gated_plugins).toEqual(['consumer'])
+    const state = JSON.parse(readFileSync(home.statePath, 'utf-8')) as {
+      pending_gates: { run_id: string; plugin: string }[]
+    }
+    expect(state.pending_gates.filter((g) => g.run_id === r.run_id).map((g) => g.plugin)).toEqual(['consumer'])
   })
 })
