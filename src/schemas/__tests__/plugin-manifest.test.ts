@@ -366,3 +366,29 @@ describe('llm_handoff', () => {
     expect(parsed.llm_handoff).toBe(false)
   })
 })
+
+describe('judgment_fed_effects', () => {
+  test('defaults to false when absent', () => {
+    expect(PluginManifestSchema.parse(validManifest).judgment_fed_effects).toBe(false)
+  })
+
+  test('with one declared side effect it loads and reads true', () => {
+    expect(PluginManifestSchema.parse({ ...validManifest, judgment_fed_effects: true }).judgment_fed_effects).toBe(true)
+  })
+
+  test('with no declared side effect it is refused, naming the field', () => {
+    // Session class: this is what shows the rule runs above the content-class early return.
+    const input = { ...validManifest, side_effects: [], judgment_fed_effects: true }
+    expect(issuePaths(input)).toEqual(['judgment_fed_effects'])
+    expect(issueText(input)).toContain('requires at least one declared side effect')
+  })
+
+  test('a content-class manifest declaring it with no side effect reports both rules', () => {
+    const input = { ...contentBase, side_effects: [], judgment_fed_effects: true }
+    expect(issuePaths(input)).toEqual(['judgment_fed_effects', 'side_effects'])
+  })
+
+  test('a non-boolean value is refused, naming the field', () => {
+    expect(issuePaths({ ...validManifest, judgment_fed_effects: 'yes' })).toEqual(['judgment_fed_effects'])
+  })
+})

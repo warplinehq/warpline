@@ -36,6 +36,9 @@
  * supervised cases, which need the review gate on or a manifest declaring
  * supervised, and a dry run through the same home. Each defaults to what the
  * fixture did before them.
+ *
+ * `judgmentFedEffects` was added for the load rule on that field. It is absent
+ * by default, so every existing fixture's manifest stays byte-identical.
  */
 import { mkdir, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -79,6 +82,12 @@ export interface TwoAdvanceHome {
        * handing-off fixture must say so explicitly or the runtime refuses it.
        */
       llmHandoff?: boolean
+      /**
+       * Whether the manifest declares `judgment_fed_effects`. Absent by
+       * default, so a fixture that never sets it writes the manifest it wrote
+       * before the field existed.
+       */
+      judgmentFedEffects?: boolean
       /** The manifest's `autonomy_level`. `autonomous` by default. */
       autonomyLevel?: 'autonomous' | 'supervised'
       handlerBody: string
@@ -161,6 +170,7 @@ export async function createTwoAdvanceHome(
         autonomy_level: opts.autonomyLevel ?? 'autonomous',
         side_effects: opts.sideEffects ?? [],
         llm_handoff: opts.llmHandoff ?? false,
+        ...(opts.judgmentFedEffects === undefined ? {} : { judgment_fed_effects: opts.judgmentFedEffects }),
         // Near-zero, so the second advance finds every plugin due again. A TTL
         // that held them fresh would make every arm pass for a reason that has
         // nothing to do with what is under test.
