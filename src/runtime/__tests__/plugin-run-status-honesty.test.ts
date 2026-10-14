@@ -48,7 +48,9 @@
  * recorded `failed` and is not parked, so nobody is asked to approve a run
  * that did nothing. A declared handoff from a plugin that declares no side
  * effect is not parked either: it is recorded `skipped` and the advance goes
- * on. A `partial` result is parked as a success is. Each case first checks
+ * on. A `partial` result is parked as a success is. A plain `skipped` result,
+ * one with neither the prefix nor the field, is parked as a success is, even
+ * from a plugin declaring `llm_handoff: true`. Each case first checks
  * that supervision engaged at all, because without it every other assertion
  * would pass for the wrong reason.
  */
@@ -128,6 +130,40 @@ export async function handler(manifest, args, signal, capabilities) {
       errors: [],
       data_freshness: {},
       summary: 'prod returned partial',
+      artifacts_produced: [],
+      schema_version: 1,
+    }
+  }
+  return {
+    status: 'success',
+    phases_completed: ['prod'],
+    phases_failed: [],
+    errors: [],
+    data_freshness: {},
+    summary: 'prod produced',
+    artifacts_produced: [{ type: 'brief', format: 'json', body: '{"advance":1}' }],
+    schema_version: 1,
+  }
+}
+`
+}
+
+/**
+ * Produces on advance 1; on advance 2, once the marker exists, returns a plain
+ * skip that is not a handoff: no `needs_llm` field and no `[needs-llm]` prefix.
+ */
+function skipProducer(marker: string): string {
+  return `
+import { existsSync } from 'node:fs'
+export async function handler(manifest, args, signal, capabilities) {
+  if (existsSync(${JSON.stringify(marker)})) {
+    return {
+      status: 'skipped',
+      phases_completed: [],
+      phases_failed: [],
+      errors: [],
+      data_freshness: {},
+      summary: 'nothing to do',
       artifacts_produced: [],
       schema_version: 1,
     }
@@ -391,6 +427,38 @@ for (const supervision of ['review_gate', 'supervised'] as const) {
         pending_gates: { run_id: string; plugin_result: { status: string } }[]
       }
       expect(state.pending_gates.filter((g) => g.run_id === r2.run_id).map((g) => g.plugin_result.status)).toEqual(['partial'])
+    })
+
+    // Only a declared handoff, never any `skipped`, is exempt from the park.
+    // Widening the exemption's handoff test to "the result is skipped" is the
+    // mutation this case exists to catch. The fixture declares
+    // `llm_handoff: true` so the exemption cannot pass by keying on the
+    // manifest's declaration instead of the result.
+    test(`[${supervision}] a plain skipped result from an effect-free plugin is still parked`, async () => {
+      await home.writePlugin('prod', {
+        outputs: { brief: {} },
+        autonomyLevel,
+        llmHandoff: true,
+        handlerBody: skipProducer(home.marker),
+      })
+
+      const r1 = await home.advance()
+      // CONTROL: supervision engaged, so advance 1's success was parked.
+      expect(r1.gated_plugins).toEqual(['prod'])
+
+      await home.setMarker()
+      const r2 = await home.advance()
+
+      // Asserted first, so a skip that stopped parking fails here, on the
+      // status it was recorded with instead.
+      expect(((await home.persistedRun('prod')) as Record<string, unknown>).status).toBe('gated')
+      expect(r2.gated_plugins).toEqual(['prod'])
+      const state = JSON.parse(await readFile(home.statePath, 'utf-8')) as {
+        pending_gates: { run_id: string; plugin_result: { status: string } }[]
+      }
+      expect(state.pending_gates.filter((g) => g.run_id === r2.run_id).map((g) => g.plugin_result.status)).toEqual(['skipped'])
+      // A plain skip is not a handoff, so no record is written.
+      expect(existsSync(join(home.root, 'handoffs'))).toBe(false)
     })
   })
 }
