@@ -25,6 +25,7 @@ import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 import { codeLines, walkImports } from '../../../test-utils/import-walk.js'
 import { readOpenHandoffs, writeHandoff } from '../../lib/handoffs.js'
 import * as auditLog from '../../lib/audit-log.js'
+import * as fsAtomic from '../../lib/fs-atomic.js'
 
 let root: string
 let statePath: string
@@ -532,6 +533,73 @@ describe('warpline deny', () => {
     expect(result.code).toBe(1)
     expect(result.stderr).toContain('Nothing was denied')
     expect(await recordBytes('run-a.render-issue')).toBe(bytes)
+    expect(await rawState()).toBe(before)
+  })
+
+  test('9l: a Handoff record that reads but is not a record stops the denial, and nothing is denied', async () => {
+    await seedGateFor('render-issue', null)
+    // Readable bytes, so the EINVAL arm runs, not the read failure 9i covers.
+    await mkdir(handoffsAt(), { recursive: true })
+    await writeFile(join(handoffsAt(), 'run-a.render-issue.json'), '{"not":"a record"}')
+    const before = await rawState()
+
+    const { code, stderr } = await capture(['render-issue'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(
+      'deny: the Handoff record run-a.render-issue could not be closed (EINVAL), so nothing was denied.',
+    )
+    expect(await rawState()).toBe(before)
+    expect(await recordBytes('run-a.render-issue')).toBe('{"not":"a record"}')
+  })
+
+  test('9m: a Handoff record that cannot be rewritten stops the denial, and nothing is denied', async () => {
+    await seedGateFor('render-issue', null)
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'render-issue', task: 'render it', context_path: null })
+    const bytes = await recordBytes('run-a.render-issue')
+    const before = await rawState()
+
+    // Read BEFORE `spyOn`: afterwards the namespace property is the mock.
+    const real = fsAtomic.atomicWriteJson
+    const spy = spyOn(fsAtomic, 'atomicWriteJson').mockImplementation((async (
+      path: string,
+      value: unknown,
+      opts?: { mode?: number },
+    ) => {
+      if (path.startsWith(handoffsAt())) throw Object.assign(new Error('write refused'), { code: 'EACCES' })
+      return real(path, value, opts)
+    }) as typeof fsAtomic.atomicWriteJson)
+    let result: { code: number; stdout: string; stderr: string }
+    try {
+      result = await capture(['render-issue'])
+    } finally {
+      spy.mockRestore()
+    }
+
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain(
+      'deny: the Handoff record run-a.render-issue could not be closed (EACCES), so nothing was denied.',
+    )
+    expect(await recordBytes('run-a.render-issue')).toBe(bytes)
+    expect(await rawState()).toBe(before)
+  })
+
+  test('9n: a record withdrawn for an earlier plugin stays withdrawn when a later one cannot be closed', async () => {
+    await seedGateFor('render-issue', null)
+    // A second live gate, run-b, for the second plugin named.
+    const state = await readState()
+    state.pending_gates.push({ ...state.pending_gates[0], plugin: 'digest-sender', run_id: 'run-b' })
+    await writeFile(statePath, JSON.stringify(state))
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'render-issue', task: 'render it', context_path: null })
+    await mkdir(join(handoffsAt(), 'run-b.digest-sender.json'), { recursive: true })
+    const before = await rawState()
+
+    const { code, stderr } = await capture(['render-issue', 'digest-sender'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('deny: the Handoff record run-b.digest-sender could not be closed (EISDIR)')
+    // No rollback: the direction where nothing answers a run the operator tried to deny.
+    expect(JSON.parse(await recordBytes('run-a.render-issue')).state).toBe('withdrawn')
     expect(await rawState()).toBe(before)
   })
 
