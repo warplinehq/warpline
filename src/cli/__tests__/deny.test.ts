@@ -11,7 +11,7 @@
  * denial never touches the session approval file, and no gesture can mute more
  * than the plugins the operator named.
  */
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
+import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join, relative } from 'node:path'
@@ -23,6 +23,8 @@ import * as gate from '../../runtime/approval-gate.js'
 import { denialFingerprint } from '../../runtime/engine.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 import { codeLines, walkImports } from '../../../test-utils/import-walk.js'
+import { readOpenHandoffs, writeHandoff } from '../../lib/handoffs.js'
+import * as auditLog from '../../lib/audit-log.js'
 
 let root: string
 let statePath: string
@@ -424,6 +426,113 @@ describe('warpline deny', () => {
     expect(
       events.some((e) => JSON.parse(e.metadata_json ?? '{}').event === 'gate_invalidated'),
     ).toBe(false)
+  })
+
+  // The gate's stored result shape is not what deny reads: the record alone
+  // stands for the handoff, and the run id joins the two. `render-issue`
+  // declares a side effect, the only kind of plugin whose handoff parks.
+  // `seedGateFor` always parks run `run-a`.
+  const handoffsAt = (): string => join(root, 'handoffs')
+  const recordBytes = (id: string): Promise<string> => readFile(join(handoffsAt(), `${id}.json`), 'utf-8')
+  const openIds = async (): Promise<{ open: string[]; unreadable: string[] }> => {
+    const read = await readOpenHandoffs(handoffsAt())
+    return { open: read.open.map((h) => h.id), unreadable: read.unreadable }
+  }
+
+  test('9g: denying a live parked handoff withdraws the Handoff record of that run, and no other', async () => {
+    await seedGateFor('render-issue', null)
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'render-issue', task: 'render it', context_path: null })
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'quiet-plugin', task: 'say it', context_path: null })
+    const quiet = await recordBytes('run-a.quiet-plugin')
+
+    const { code, stdout } = await capture(['render-issue'])
+
+    const record = JSON.parse(await recordBytes('run-a.render-issue'))
+    expect(record.state).toBe('withdrawn')
+    expect(code).toBe(0)
+    expect(record.closed_at).toBe((await readState()).denials['render-issue'].denied_at)
+    expect(await openIds()).toEqual({ open: ['run-a.quiet-plugin'], unreadable: [] })
+    expect(await recordBytes('run-a.quiet-plugin')).toBe(quiet)
+    expect(stdout).toContain('Its Handoff record run-a.render-issue was withdrawn.')
+  })
+
+  test('9h: denying against a spent marker leaves the Handoff record of that run open', async () => {
+    // An applied marker is a result the operator accepted, and a later denial
+    // answers the standing proposal, so the handoff of that run stays answerable.
+    await seedGateFor('render-issue', new Date(Date.now() - 10_000).toISOString())
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'render-issue', task: 'render it', context_path: null })
+    const bytes = await recordBytes('run-a.render-issue')
+
+    const { code, stdout } = await capture(['render-issue'])
+
+    expect(code).toBe(0)
+    expect(await recordBytes('run-a.render-issue')).toBe(bytes)
+    expect((await openIds()).open).toEqual(['run-a.render-issue'])
+    expect(stdout).not.toContain('Handoff record')
+  })
+
+  test('9i: a Handoff record that cannot be closed stops the denial, and nothing is denied', async () => {
+    await seedGateFor('render-issue', null)
+    // A directory stands for a record that cannot be read. Not chmod, which uid 0 ignores.
+    await mkdir(join(handoffsAt(), 'run-a.render-issue.json'), { recursive: true })
+    const before = await rawState()
+
+    const { code, stderr } = await capture(['render-issue'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(
+      'deny: the Handoff record run-a.render-issue could not be closed (EISDIR), so nothing was denied.',
+    )
+    // No denial, and the gate is still live.
+    expect(await rawState()).toBe(before)
+  })
+
+  test('9j: a Handoff record already superseded is left as it is, and a newer open one stays open', async () => {
+    await seedGateFor('render-issue', null)
+    // A manual run that handed off after the parked one.
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'render-issue', task: 'render it', context_path: null })
+    await writeHandoff(handoffsAt(), { run_id: 'run-b', plugin: 'render-issue', task: 'render it again', context_path: null })
+    expect(JSON.parse(await recordBytes('run-a.render-issue')).state).toBe('superseded')
+    const a = await recordBytes('run-a.render-issue')
+    const b = await recordBytes('run-b.render-issue')
+
+    const { code, stdout } = await capture(['render-issue'])
+
+    expect(code).toBe(0)
+    expect(await recordBytes('run-a.render-issue')).toBe(a)
+    expect(await recordBytes('run-b.render-issue')).toBe(b)
+    expect((await openIds()).open).toEqual(['run-b.render-issue'])
+    expect(stdout).not.toContain('Handoff record')
+  })
+
+  test('9k: a denial whose audit record cannot be written leaves the Handoff record open', async () => {
+    await seedGateFor('render-issue', null)
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'render-issue', task: 'render it', context_path: null })
+    const bytes = await recordBytes('run-a.render-issue')
+    const before = await rawState()
+
+    // Read BEFORE `spyOn`: afterwards the namespace property is the mock.
+    const real = auditLog.appendAudit
+    const spy = spyOn(auditLog, 'appendAudit').mockImplementation((async (
+      path: string,
+      kind: string,
+      data: unknown,
+      opts?: unknown,
+    ) => {
+      if (kind === 'denial.recorded') throw new Error('audit append refused')
+      return (real as (...args: unknown[]) => Promise<unknown>)(path, kind, data, opts)
+    }) as typeof auditLog.appendAudit)
+    let result: { code: number; stdout: string; stderr: string }
+    try {
+      result = await capture(['render-issue'])
+    } finally {
+      spy.mockRestore()
+    }
+
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain('Nothing was denied')
+    expect(await recordBytes('run-a.render-issue')).toBe(bytes)
+    expect(await rawState()).toBe(before)
   })
 
   test('10: denying the same plugin twice against an unchanged proposal writes nothing the second time', async () => {
