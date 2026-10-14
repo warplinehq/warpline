@@ -2705,7 +2705,8 @@ const HOME_DERIVED_OPTIONS = [
  *
  * Autonomy gating:
  *   manual     → always skipped (reason: "manual — requires explicit invocation")
- *   supervised → gated after execution (pending human approval), unless dryRun or the result failed
+ *   supervised → gated after execution (pending human approval), unless dryRun or the result failed,
+ *                or the result is a declared handoff from a plugin that declares no side effect
  *   autonomous → executed and completed/failed based on result
  *
  * Staleness:
@@ -3942,13 +3943,22 @@ export async function runAdvance(options: AdvanceOptions = {}): Promise<AdvanceR
           // `.parse()` time, which is a hard stop at import. So this arm cannot
           // be reached by a `supervised` plugin sneaking past the review gate —
           // such a manifest does not load at all.
+          //
+          // AND a declared handoff from a plugin that declares no side effect.
+          // Nothing it did could fire an effect, so a review would approve
+          // nothing, while the park would stop the level behind it. Its Handoff
+          // record, written above, is how the judgment it asks for gets picked
+          // up. A handoff from a plugin declaring a side effect still parks,
+          // because its effect may already have fired and that is what the
+          // review is for. A content-class plugin never reaches this, because
+          // its manifest declares at least one effect.
           const effectiveAutonomy =
             reviewGateActive &&
             manifest.autonomy_level === 'autonomous' &&
             manifest.approval_class !== 'content'
               ? 'supervised'
               : manifest.autonomy_level
-          if (effectiveAutonomy === 'supervised' && result.status !== 'failed') {
+          if (effectiveAutonomy === 'supervised' && result.status !== 'failed' && !(isHandoff(result) && manifest.side_effects.length === 0)) {
             if (dryRun) {
               // Dry-run: report "would pause here" and continue. On stderr like
               // the quiet-hours line above, even though `advance` cannot reach

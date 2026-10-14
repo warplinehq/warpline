@@ -796,7 +796,7 @@ set is closed — an unlisted value fails validation rather than being dropped.
 | `completed` | The handler ran and returned a result the engine accepted |
 | `failed` | The handler threw, returned a failed result, returned a `[needs-llm]` handoff its manifest does not declare (`llm_handoff`), returned a declared handoff whose Handoff record could not be written, or the plugin's manifest never loaded |
 | `skipped` | The plugin was not due — fresh, filtered, locked, without a session Grant, or holding a declared dependency whose last run failed |
-| `gated` | Supervised: the handler ran, its result did not fail, and the result was parked pending a human answer |
+| `gated` | Supervised: the handler ran, its result did not fail, and the result was parked pending a human answer. A declared handoff from a plugin declaring no side effect is never parked (§ 9) |
 | `denied` | A human answered no, and the answer still applies to what is being proposed |
 | `refused` | A human answered yes, and the conditions that yes was bound to no longer hold |
 
@@ -1501,7 +1501,8 @@ that the question cannot be skipped, not that the answer cannot be written.
 engine treats every `autonomous` plugin as `supervised` AFTER invocation: it
 runs, its result is parked in `pending_gates`, it is recorded `gated`, and the
 advance stops after its level. This is independent of the side-effect gate
-above — it applies whether or not the plugin declares any side effect.
+above — it applies whether or not the plugin declares any side effect, with the
+one exception for a handoff below.
 
 **A `failed` result is never parked.** This holds for a promoted plugin and for
 one declaring `autonomy_level: 'supervised'` alike, and in a dry run too. The
@@ -1511,6 +1512,17 @@ dead-man file. The advance does not stop after its level, and a plugin that
 declares it as a dependency is skipped with `dependency_failed`. There is
 nothing to review. The handler's side effects fired before any gate, and a park
 would have published the result's Output to `plugin_runs` all the same.
+
+**A declared handoff from a plugin that declares no side effect is never parked.**
+This holds under `review_gate: true` and for a plugin declaring
+`autonomy_level: 'supervised'` alike, and in a dry run, which reports no pause
+for it. The result takes the unsupervised path: its run log entry reads
+`completed`, `plugin_runs` reads `skipped`, nothing goes into `pending_gates`,
+and the advance goes on past its level, so a dependent runs as it would with
+`review_gate: false`. Its Handoff record is written either way. A handoff from a
+plugin that declares a side effect is parked exactly as before, and its record
+is written too. A content-class plugin never reaches the exception, because it
+declares at least one effect.
 
 **A plugin declaring `approval_class: 'content'` is not promoted.** One conjunct
 on the promotion condition, and nothing else about it changes: every other

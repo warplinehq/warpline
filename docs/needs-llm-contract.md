@@ -127,6 +127,13 @@ result is. It reads `failed` there too, with the refusal in its summary. The
 exact refusal is in
 [runtime-spec.md](runtime-spec.md) § 3.
 
+**A handoff from a plugin that declares no side effect never parks.** Under
+`review_gate: true`, or for a `supervised` plugin, it is recorded `skipped`,
+nothing is parked, and the advance goes on. Side effects stay gated wherever
+they fire: a plugin that declares one still needs a grant before it runs, and
+its handoff still parks. The rule is in
+[runtime-spec.md](runtime-spec.md) § 9.
+
 The declaration is also the pre-run half of the contract. `warpline plan`
 prints it under the plugin, before anything runs:
 
