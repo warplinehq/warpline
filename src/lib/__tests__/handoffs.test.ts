@@ -87,7 +87,7 @@ describe('a handoff becomes one open record the reader finds', () => {
     await lib.writeHandoff(dir, { run_id: 'run-1', plugin: 'prod', task: 'Summarise the brief', context_path: 'state/brief.json' }, T0)
 
     expect(readdirSync(dir)).toEqual(['run-1.prod.json'])
-    const expected = {
+    const expected: lib.Handoff = {
       min_reader_version: 1,
       id: 'run-1.prod',
       run_id: 'run-1',
