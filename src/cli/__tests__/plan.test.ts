@@ -1470,6 +1470,39 @@ describe('plan renders the approved column from the authorising mechanism', () =
     // plugin reads false" would also pass over a grant file that never loaded.
     expect(columnOf(model, SESSION)).toBe(true)
   })
+
+  test('a content-class plugin declaring judgment_fed_effects gets no flag under a wildcard grant, while its session-class sibling does', async () => {
+    await writeTrio()
+    await writePlugin(home, CONTENT, {
+      min_tier: 'suspended',
+      side_effects: ['sends_email'],
+      approval_class: 'content',
+      dependencies: [PRODUCER],
+      ttl_hours: 0.001,
+      judgment_fed_effects: true,
+    })
+    await writePlugin(home, SESSION, {
+      min_tier: 'suspended',
+      side_effects: ['sends_email'],
+      ttl_hours: 0.001,
+      judgment_fed_effects: true,
+    })
+    await seedApproval()
+    await grantApproval('*', 4 * 60 * 60 * 1000, join(home.root, '.session-approval'))
+
+    const model = await buildPlanModel(Date.now())
+
+    // The content approval is the authority here, so a live wildcard grant
+    // would not fire it and must not be named as if it would.
+    const content = [...model.due, ...model.notDue].find((e) => e.plugin === CONTENT)
+    expect(content).toBeDefined()
+    expect(content?.approved).toBe(true)
+    expect(content !== undefined && 'judgmentFedUnder' in content).toBe(false)
+    // Non-vacuity: the same grant, in the same home, flags the session class.
+    const session = model.due.find((e) => e.plugin === SESSION)
+    expect(session?.judgmentFedUnder).toHaveLength(1)
+    expect(session?.judgmentFedUnder?.[0]).toMatchObject({ kind: 'session', scope: '*' })
+  })
 })
 
 /**
@@ -1580,5 +1613,81 @@ describe('main([plan]) standing grants', () => {
     expect(stdout.split('\n')).toContain(UNREADABLE)
     expect(stdout.split('\n')).toContain('Session grant: none — plugins with side effects would be SKIPPED this run')
     expect(stdout).not.toContain('unless a live standing grant covers them')
+  })
+
+  describe('the judgment_fed_effects flag', () => {
+    const FLAG = '    judgment_fed_effects: ⚠ fires on a Judgment under '
+    const EFFECT = '    sends_email: ✓ approved'
+    const grantSession = () => grantApproval('p', 4 * 60 * 60 * 1000, join(home.root, '.session-approval'))
+    const declared = () => writePlugin(home, 'p', { side_effects: ['sends_email'], judgment_fed_effects: true })
+    /** The `n` lines right after the side-effect line. */
+    const after = (stdout: string, n: number): string[] => {
+      const lines = stdout.split('\n')
+      const at = lines.indexOf(EFFECT)
+      expect(at).toBeGreaterThan(-1)
+      return lines.slice(at + 1, at + 1 + n)
+    }
+    const standingId = (stdout: string): string => {
+      const first = grantLines(stdout)[0]
+      if (first === undefined) throw new Error('no standing grant line in stdout')
+      return first.trim().slice(0, 12)
+    }
+
+    test('a declared plugin under a session grant is flagged under its side effects, naming the scope', async () => {
+      await declared()
+      await grantSession()
+
+      const { code, stdout } = await capture(() => run([]))
+
+      expect(code).toBe(0)
+      expect(after(stdout, 1)).toEqual([`${FLAG}session grant (p)`])
+    })
+
+    test('a declared plugin under a standing grant is flagged, naming the grant and its holder', async () => {
+      await seedRegistry()
+      await issue(Date.now() - 60_000, DAY)
+      await declared()
+
+      const { code, stdout } = await capture(() => run([]))
+
+      expect(code).toBe(0)
+      expect(after(stdout, 1)).toEqual([`${FLAG}standing grant ${standingId(stdout)} (holder ci)`])
+    })
+
+    test('under a session and a standing grant, one flag per grant, session first', async () => {
+      await seedRegistry()
+      await issue(Date.now() - 60_000, DAY)
+      await declared()
+      await grantSession()
+
+      const { code, stdout } = await capture(() => run([]))
+
+      expect(code).toBe(0)
+      expect(after(stdout, 2)).toEqual([
+        `${FLAG}session grant (p)`,
+        `${FLAG}standing grant ${standingId(stdout)} (holder ci)`,
+      ])
+    })
+
+    test('no flag with no live grant', async () => {
+      await declared()
+
+      const { code, stdout } = await capture(() => run([]))
+
+      expect(code).toBe(0)
+      expect(stdout).toContain('    sends_email: ⚠ unapproved')
+      expect(stdout).not.toContain('judgment_fed_effects:')
+    })
+
+    test('no flag for an undeclared plugin under the same grant', async () => {
+      await writePlugin(home, 'p', { side_effects: ['sends_email'] })
+      await grantSession()
+
+      const { code, stdout } = await capture(() => run([]))
+
+      expect(code).toBe(0)
+      expect(stdout).toContain(EFFECT)
+      expect(stdout).not.toContain('judgment_fed_effects:')
+    })
   })
 })

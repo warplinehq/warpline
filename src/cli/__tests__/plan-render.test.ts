@@ -498,3 +498,51 @@ describe('renderPlan — standing grants', () => {
     expect(header(empty)).toBe(PLAIN_NONE)
   })
 })
+
+describe('renderPlan — the judgment-fed flag', () => {
+  test('a due entry carrying covering grants gets one flag line per grant, after its side effects, in the order given', () => {
+    const out = renderPlan(
+      makeModel({
+        due: [
+          due({
+            plugin: 'p',
+            sideEffects: ['sends_email'],
+            approved: true,
+            judgmentFedUnder: [
+              { kind: 'session', scope: '*', issuer: null },
+              { kind: 'standing', id: '3f9a0c5e1b2d', holder: 'ci', issuer: 'ops' },
+            ],
+          }),
+        ],
+      }),
+      NOW,
+    )
+
+    expect(out).toContain(
+      [
+        '  p (level 0)',
+        '    sends_email: ✓ approved',
+        '    judgment_fed_effects: ⚠ fires on a Judgment under session grant (*)',
+        '    judgment_fed_effects: ⚠ fires on a Judgment under standing grant 3f9a0c5e1b2d (holder ci)',
+      ].join('\n'),
+    )
+  })
+
+  test('a session scope in the flag prints through the control-byte escape', () => {
+    const out = renderPlan(
+      makeModel({
+        due: [
+          due({
+            plugin: 'p',
+            sideEffects: ['sends_email'],
+            judgmentFedUnder: [{ kind: 'session', scope: 'p\x1b[2J', issuer: null }],
+          }),
+        ],
+      }),
+      NOW,
+    )
+
+    expect(out).toContain('session grant (p\\x1b[2J)')
+    expect(out).not.toContain('\x1b')
+  })
+})
