@@ -209,3 +209,29 @@ describe('an advance writes one Handoff record per declared handoff', () => {
     expect((await readOpenHandoffs(handoffs)).open.map((h) => h.id)).toEqual([`${r2.run_id}.prod`])
   })
 })
+
+describe('under the review gate, an effect-free handoff does not stop its level', () => {
+  let home: TwoAdvanceHome
+
+  afterEach(async () => {
+    _setHome(null)
+    await home.cleanup()
+  })
+
+  test('an effect-free handoff does not stop its level: its dependent runs in the same advance', async () => {
+    home = await createTwoAdvanceHome({ preferences: { review_gate: true } })
+    await home.writePlugin('prod', { llmHandoff: true, handlerBody: BOTH })
+    await home.writePlugin('consumer', { dependencies: ['prod'], handlerBody: SUCCESS })
+
+    const r = await home.advance()
+
+    expect((await home.persistedRun('prod'))!.status).toBe('skipped')
+    expect((await home.entryFor(r.run_log_path, 'prod'))!.status).toBe('completed')
+    // It ran, and the review gate parked its success as any autonomous plugin's.
+    const consumer = await home.entryFor(r.run_log_path, 'consumer')
+    expect(consumer).not.toBeNull()
+    expect(consumer!.status).toBe('gated')
+    expect(r.gated_plugins).toEqual(['consumer'])
+    expect((await readOpenHandoffs(join(home.root, 'handoffs'))).open.map((h) => h.plugin)).toEqual(['prod'])
+  })
+})

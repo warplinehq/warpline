@@ -46,10 +46,14 @@
  * homes: the default `review_gate: true` and a manifest declaring
  * `autonomy_level: 'supervised'`. A failed result, the refusal included, is
  * recorded `failed` and is not parked, so nobody is asked to approve a run
- * that did nothing. Each case first checks that supervision engaged at all,
- * because without it every other assertion would pass for the wrong reason.
+ * that did nothing. A declared handoff from a plugin that declares no side
+ * effect is not parked either: it is recorded `skipped` and the advance goes
+ * on. A `partial` result is parked as a success is. Each case first checks
+ * that supervision engaged at all, because without it every other assertion
+ * would pass for the wrong reason.
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { _setHome } from '../../lib/paths.js'
@@ -333,35 +337,61 @@ for (const supervision of ['review_gate', 'supervised'] as const) {
       })
     }
 
-    // The other side of the same condition. Only a failed result skips the
-    // park: a declared handoff (`skipped`) and a `partial` result are parked
-    // exactly as a success is.
-    for (const kind of ['skipped', 'partial'] as const) {
-      test(`[${supervision}] a ${kind === 'skipped' ? 'declared handoff (skipped)' : 'partial result'} is still parked`, async () => {
-        await home.writePlugin('prod', {
-          outputs: { brief: {} },
-          autonomyLevel,
-          llmHandoff: kind === 'skipped',
-          handlerBody: kind === 'skipped' ? handoffProducer('prefix', home.marker) : partialProducer(home.marker),
-        })
-
-        const r1 = await home.advance()
-        // CONTROL: supervision engaged, so advance 1's success was parked.
-        expect(r1.gated_plugins).toEqual(['prod'])
-
-        await home.setMarker()
-        const r2 = await home.advance()
-
-        // Asserted first, so a result that stopped parking fails here, on the
-        // status it was recorded with instead.
-        expect(((await home.persistedRun('prod')) as Record<string, unknown>).status).toBe('gated')
-        expect(r2.gated_plugins).toEqual(['prod'])
-        const state = JSON.parse(await readFile(home.statePath, 'utf-8')) as {
-          pending_gates: { run_id: string; plugin_result: { status: string } }[]
-        }
-        expect(state.pending_gates.filter((g) => g.run_id === r2.run_id).map((g) => g.plugin_result.status)).toEqual([kind])
+    // The other side of the same condition. Only a failed result and an
+    // effect-free plugin's declared handoff skip the park: a `partial` result
+    // is parked exactly as a success is.
+    test(`[${supervision}] a declared handoff from an effect-free plugin is not parked`, async () => {
+      await home.writePlugin('prod', {
+        outputs: { brief: {} },
+        autonomyLevel,
+        llmHandoff: true,
+        handlerBody: handoffProducer('prefix', home.marker),
       })
-    }
+
+      const r1 = await home.advance()
+      // CONTROL: supervision engaged, so advance 1's success was parked.
+      expect(r1.gated_plugins).toEqual(['prod'])
+
+      await home.setMarker()
+      const r2 = await home.advance()
+
+      // Asserted first, so a handoff that still parks fails here, on the
+      // status it was recorded with instead.
+      expect(((await home.persistedRun('prod')) as Record<string, unknown>).status).toBe('skipped')
+      expect(r2.gated_plugins).toEqual([])
+      const state = JSON.parse(await readFile(home.statePath, 'utf-8')) as {
+        pending_gates: { run_id: string }[]
+      }
+      expect(state.pending_gates.filter((g) => g.run_id === r2.run_id)).toEqual([])
+      const prodEntry = await home.entryFor(r2.run_log_path, 'prod')
+      expect(prodEntry).not.toBeNull()
+      expect(prodEntry!.status).toBe('completed')
+    })
+
+    test(`[${supervision}] a partial result is still parked`, async () => {
+      await home.writePlugin('prod', {
+        outputs: { brief: {} },
+        autonomyLevel,
+        llmHandoff: false,
+        handlerBody: partialProducer(home.marker),
+      })
+
+      const r1 = await home.advance()
+      // CONTROL: supervision engaged, so advance 1's success was parked.
+      expect(r1.gated_plugins).toEqual(['prod'])
+
+      await home.setMarker()
+      const r2 = await home.advance()
+
+      // Asserted first, so a result that stopped parking fails here, on the
+      // status it was recorded with instead.
+      expect(((await home.persistedRun('prod')) as Record<string, unknown>).status).toBe('gated')
+      expect(r2.gated_plugins).toEqual(['prod'])
+      const state = JSON.parse(await readFile(home.statePath, 'utf-8')) as {
+        pending_gates: { run_id: string; plugin_result: { status: string } }[]
+      }
+      expect(state.pending_gates.filter((g) => g.run_id === r2.run_id).map((g) => g.plugin_result.status)).toEqual(['partial'])
+    })
   })
 }
 
@@ -399,5 +429,21 @@ describe('a supervised dry run', () => {
     expect(prodEntry!.status).toBe('failed')
     expect(prodEntry!.result_summary).toBe('prod returned failed')
     expect(((await home.persistedRun('prod')) as Record<string, unknown>).status).toBe('failed')
+  })
+
+  test('a supervised dry run of an effect-free handoff reports no pause', async () => {
+    await home.writePlugin('prod', {
+      outputs: { brief: {} },
+      autonomyLevel: 'supervised',
+      llmHandoff: true,
+      handlerBody: handoffProducer('prefix', home.marker),
+    })
+    await home.setMarker()
+    const r = await home.advance(undefined, { dryRun: true })
+    const prodEntry = await home.entryFor(r.run_log_path, 'prod')
+    expect(prodEntry).not.toBeNull()
+    expect(prodEntry!.status).toBe('completed')
+    expect(prodEntry!.result_summary).toBe('[needs-llm] summarise the brief')
+    expect(existsSync(join(home.root, 'handoffs'))).toBe(false)
   })
 })
