@@ -1,13 +1,15 @@
 /**
- * A resolved credential value reaches none of the four files an ADVANCE writes.
+ * A resolved credential value reaches none of the five files an ADVANCE writes.
  *
  * `invokePlugin` on its own has two sinks — the run artifact and `events.jsonl`
  * — and those are asserted next door in `secrets.test.ts`. Everything here is a
  * file only `runAdvance` produces: the engine's run log, `engine-state.json`'s
  * `plugin_runs[p].last_output` (an Output's inline body, straight into the
  * single state document), `engine-state.json`'s `pending_gates[].plugin_result`
- * (the WHOLE parked result, not a projection of it), and the daily JSONL run
- * log.
+ * (the WHOLE parked result, not a projection of it), the daily JSONL run
+ * log, and the Handoff record under the home's `handoffs/` directory, which
+ * copies `task` from the result. That record carries a context path and never
+ * the payload behind it.
  *
  * Every case proves the canary REACHED the sink before asserting it is absent.
  * Absence on its own is green when the credential never resolved, when the
@@ -28,6 +30,9 @@ import { createTestHome, type TestHome } from './helpers/create-test-home.js'
 
 /** A value no other string in this suite contains. */
 const CANARY = 'WL-CANARY-4e18b7fa9d30'
+
+/** Planted in a context payload file, so a record that copied the payload would hold it. */
+const PAYLOAD_SENTINEL = 'WL-PAYLOAD-SENTINEL-7c21e0'
 
 /** The declared name the fixtures resolve. */
 const KEY = 'WARPLINE_TEST_CANARY_ADVANCE'
@@ -59,10 +64,13 @@ async function withCanary(fn: () => Promise<void>): Promise<void> {
  * The schema refuses anything else, and a refusal drops the whole result into
  * the fabricated `failed` fallback — which carries no canary, so the absence
  * assertions would pass over a result that never held one.
+ *
+ * `handoff` declares `llm_handoff` and returns `skipped`, so the same result is
+ * a declared handoff an advance records. Nothing else changes.
  */
 async function writeLeakyPlugin(
   name: string,
-  opts: { supervised?: boolean } = {},
+  opts: { supervised?: boolean; handoff?: boolean } = {},
 ): Promise<void> {
   const dir = join(ctx.pluginsDir, name)
   await mkdir(dir, { recursive: true })
@@ -84,6 +92,7 @@ async function writeLeakyPlugin(
     min_tier: 'normal',
     max_retries: 1,
     retry_delay_ms: 1,
+    ...(opts.handoff ? { llm_handoff: true } : {}),
   }
   await writeFile(join(dir, 'manifest.ts'), `export const manifest = ${JSON.stringify(manifest)}`)
   await writeFile(
@@ -91,7 +100,7 @@ async function writeLeakyPlugin(
     `export async function handler() {
       const value = process.env[${JSON.stringify(KEY)}] ?? ''
       return {
-        status: 'success',
+        status: '${opts.handoff ? 'skipped' : 'success'}',
         phases_completed: ['${name}'],
         phases_failed: [],
         errors: [],
@@ -269,5 +278,58 @@ describe('a resolved credential reaches no file an advance writes', () => {
     ).rejects.toThrow(/cannot read plugin root/)
 
     expect(existsSync(logsDir)).toBe(false)
+  })
+
+  test('a Handoff record carries no resolved credential value', async () => {
+    const { runAdvance } = await import('../engine.js')
+    await writeLeakyPlugin('leak-handoff', { handoff: true })
+
+    await withCanary(async () => {
+      await runAdvance({
+        pluginsDir: ctx.pluginsDir,
+        stateDir: statePath,
+        runsDir: ctx.runsDir,
+        eventsPath,
+        logsDir,
+      })
+
+      // Presence: the credential reached the result's task and was scrubbed there.
+      const handoffs = join(ctx.root, 'handoffs')
+      const names = await readdir(handoffs)
+      expect(names).toHaveLength(1)
+      const raw = await readFile(join(handoffs, names[0]!), 'utf-8')
+      expect(JSON.parse(raw).task).toContain('[redacted]')
+
+      // Absence.
+      expect(raw).not.toContain(CANARY)
+    })
+  })
+
+  test('a Handoff record holds the context path and never the payload bytes', async () => {
+    const { runAdvance } = await import('../engine.js')
+    const payload = join(ctx.stateDir, 'entries.json')
+    await writeFile(payload, JSON.stringify({ entries: [PAYLOAD_SENTINEL] }))
+    await writeLeakyPlugin('leak-payload', { handoff: true })
+
+    await withCanary(async () => {
+      await runAdvance({
+        pluginsDir: ctx.pluginsDir,
+        stateDir: statePath,
+        runsDir: ctx.runsDir,
+        eventsPath,
+        logsDir,
+      })
+
+      // Presence: the record names the payload, and the payload holds the sentinel.
+      const handoffs = join(ctx.root, 'handoffs')
+      const names = await readdir(handoffs)
+      expect(names).toHaveLength(1)
+      const raw = await readFile(join(handoffs, names[0]!), 'utf-8')
+      expect(JSON.parse(raw).context_path).toBe('state/entries.json')
+      expect(await readFile(payload, 'utf-8')).toContain(PAYLOAD_SENTINEL)
+
+      // Absence.
+      expect(raw).not.toContain(PAYLOAD_SENTINEL)
+    })
   })
 })
