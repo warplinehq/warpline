@@ -157,8 +157,9 @@ Its fields:
 - `task`: what judgment is asked for.
 - `context_path`: the payload's path, or `null` when the handoff names none.
 - `created_at`: when the record was written.
-- `state`: `open` or `superseded`.
-- `closed_at`: `null` while the record is open.
+- `state`: `open`, `superseded` or `withdrawn`.
+- `closed_at`: `null` while the record is open, and the time it closed once it
+  is not.
 
 `task` and `context_path` come from the structured `needs_llm` field when the
 result carries it. Otherwise they come from the summary: `task` is the text
@@ -185,8 +186,28 @@ again. The new record is written first, so a plugin never ends with no open
 record. No lock is taken, so two writers racing can leave two open records
 until that plugin's next handoff.
 
-The `needs-llm` scanner finds handoffs by listing this directory, and it
-ignores superseded records.
+**A denied run's record is withdrawn.** `warpline deny` that discards a
+plugin's live parked result marks that run's record `withdrawn` and sets
+`closed_at` to the denial's time, through `withdrawHandoff` in `handoffs.ts`.
+Only a plugin that declares a side effect parks a handoff. This happens under
+the state lock with the denial, after its `denial.recorded` audit record and
+before the state document is written, so a deny that succeeds never leaves the
+denied run's record open. A record that exists but cannot be read or rewritten
+stops the deny: it exits `1` and nothing is denied. A record already closed is
+left as it is. If the state write fails after the close, the record stays
+withdrawn and the gate stays parked, and denying again completes it. A record
+withdrawn for an earlier plugin in the same command stays withdrawn when a
+later one fails. A deny that discards no live parked result (none was parked,
+or the gate is an applied marker) answers the plugin's standing proposal, not
+a run, and closes no record. A withdrawn record never opens again.
+
+**A reader acts only on an open record.** Every other state is closed.
+Supersede and withdraw each move only an open record, so two of them racing
+leave it closed in one state or the other. Adding a closed state does not raise
+`min_reader_version`, because no reader acts on one.
+
+The `needs-llm` scanner finds handoffs by listing this directory, and it keeps
+only open records.
 
 A record that cannot be written fails the plugin. Its result becomes
 `status: 'failed'` with summary `<plugin>: handoff not recorded`, and

@@ -6,9 +6,14 @@
  * record's natural key, and the filename stem is its id. A newer handoff for a
  * plugin supersedes that plugin's older open records.
  *
- * **It takes no lock.** That is safe only while supersede is the sole
- * rewriter of these files. Any later writer of a record must coordinate with
- * supersede before it writes one.
+ * **It takes no lock.** Two functions rewrite a record: the supersede pass in
+ * `writeHandoff`, and `withdrawHandoff`. Each moves only an `open` record to a
+ * closed state, and nothing writes `open` over a record that exists. So two of
+ * them racing leave the record closed: the race can change which closed state
+ * it ends in, never whether it is open. A later writer that records something
+ * a closed state must keep, a consumption, has to coordinate with both before
+ * it writes one, and must re-read `state` under that coordination so it never
+ * acts on a closed record.
  *
  * **It imports nothing from the runtime or the board, and resolves no home.**
  * Every function takes the directory from its caller: the engine derives it
@@ -28,6 +33,7 @@ import { atomicWriteJson } from './fs-atomic.js'
 import { isPluginName } from '../schemas/plugin-name.js'
 import { makeSkillError, type SkillResult } from '../schemas/skill-result.js'
 
+// A reader acts only on `open`, so adding a closed state does not raise this.
 export const HANDOFFS_READER_VERSION = 1
 
 // What makes a run id safe as half of a filename: no dot, no separator, no `..`.
@@ -44,7 +50,7 @@ const HandoffSchema = z.object({
   task: z.string(),
   context_path: z.string().nullable(),
   created_at: Iso,
-  state: z.enum(['open', 'superseded']),
+  state: z.enum(['open', 'superseded', 'withdrawn']),
   closed_at: Iso.nullable(),
 })
 
@@ -169,6 +175,32 @@ export async function writeHandoff(dir: string, input: HandoffInput, now = Date.
     // Two open records is the state a race already leaves; the next handoff reconciles them.
   }
   return record
+}
+
+/**
+ * Withdraw the open record of one run's handoff, at `closedAt`.
+ * A run id or plugin name the writer would refuse returns false before any path is built, since no record bears it.
+ * A missing record or directory returns false: the run handed off nothing.
+ * Any other read error is thrown with its errno `code` intact.
+ * A file that fails the checks `readRecord` applies throws with `code: 'EINVAL'`.
+ * A record that is not `open` returns false and is not written: a closed record is never rewritten.
+ * An open record is rewritten as `withdrawn` and the function returns true; a write error is thrown.
+ */
+export async function withdrawHandoff(dir: string, runId: string, plugin: string, closedAt: string): Promise<boolean> {
+  if (!RUN_ID.test(runId) || !isPluginName(plugin)) return false
+  const name = `${runId}.${plugin}.json`
+  try {
+    // Only to tell a missing record from an unreadable one; `readRecord` swallows the difference.
+    await readFile(join(dir, name))
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') return false
+    throw err
+  }
+  const r = await readRecord(dir, name)
+  if (!('record' in r)) throw Object.assign(new Error(`Handoff record ${name} is unreadable`), { code: 'EINVAL' })
+  if (r.record.state !== 'open') return false
+  await atomicWriteJson(join(dir, name), { ...r.raw, state: 'withdrawn', closed_at: closedAt })
+  return true
 }
 
 /** The open records, oldest first, and the names of files that could not be read. A missing directory is empty. */

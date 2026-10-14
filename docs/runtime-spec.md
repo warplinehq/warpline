@@ -2484,6 +2484,13 @@ accepted, and it is the only thing stopping a second `approve` from re-recording
 that result — so a later denial, which answers the standing proposal rather than
 that outcome, must not erase it.
 
+A parked result that was a handoff has a Handoff record, and
+`deny` withdraws it with the gate. That run's record goes from `open` to
+`withdrawn`, after the `denial.recorded` audit record and before the state
+write ([needs-llm-contract.md](needs-llm-contract.md)). A record that cannot be
+closed stops the command: `deny` exits `1` and nothing is denied. An applied
+marker's record stays open, for the reason the marker itself is kept.
+
 `deny` says so on stdout, because the consequence is not visible in the state
 file: taking the denial back re-opens the question rather than re-offering the
 run.

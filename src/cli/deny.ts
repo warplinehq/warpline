@@ -43,6 +43,10 @@
  * Every denial, and every removal of one, is on the audit record before the
  * state document changes.
  *
+ * Denying a live parked result that was a handoff withdraws that run's Handoff
+ * record too, after the audit record and before the state write. A record
+ * that cannot be closed stops the command, and nothing is denied.
+ *
  * **A deny can answer an Ask.** With `--nonce`, `--digest` and `--principal`
  * it answers the open parked-result, missing-Grant or content Ask on the one
  * plugin it names, through the same check `approve` runs, and needs nothing
@@ -84,7 +88,8 @@ import {
 } from '../runtime/engine-state-store.js'
 import { DenialSchema } from '../schemas/engine-state.js'
 import type { Denial, EngineState } from '../schemas/engine-state.js'
-import { engineStatePath, eventsJsonlPath, pluginsDir, preferencesPath } from '../lib/paths.js'
+import { engineStatePath, eventsJsonlPath, handoffsDir, pluginsDir, preferencesPath } from '../lib/paths.js'
+import { withdrawHandoff } from '../lib/handoffs.js'
 import { suggest } from './suggest.js'
 
 const USAGE = `Usage: warpline deny <plugin>... [options]
@@ -474,6 +479,7 @@ export async function run(argv: string[]): Promise<number> {
 
   const recorded: Denial[] = []
   const discarded: { plugin: string; runId: string }[] = []
+  const withdrawn: string[] = []
 
   // Same reason as `--remove`, and one of its own: this arm also filters
   // `state.pending_gates`, which the advance owns and rewrites wholesale. Both
@@ -658,6 +664,28 @@ export async function run(argv: string[]): Promise<number> {
       }
     }
 
+    // A parked handoff's record closes with its denial. It closes after the
+    // audit records, each of which names the run whose gate it discards, and
+    // before the state write. So a deny that succeeds never leaves the denied
+    // run's record open, and one that stops here has written no denial. A
+    // state write that fails after the close leaves a withdrawn record beside a
+    // live gate: the direction where nothing answers a run the operator tried
+    // to deny, and denying again completes it.
+    for (const d of discarded) {
+      try {
+        if (await withdrawHandoff(handoffsDir(), d.runId, d.plugin, denied_at)) withdrawn.push(`${d.runId}.${d.plugin}`)
+      } catch (err: unknown) {
+        // Only the code: a thrown message embeds absolute paths.
+        const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined
+        process.stderr.write(
+          `deny: the Handoff record ${d.runId}.${d.plugin} could not be closed (${typeof code === 'string' ? code : 'unknown'}), so nothing was denied.` +
+            (answer !== null ? ' The Answer is on the record.' : '') +
+            '\n',
+        )
+        return 1
+      }
+    }
+
     await writeEngineState(state, statePath)
     return null
   })
@@ -686,10 +714,12 @@ export async function run(argv: string[]): Promise<number> {
       ? `The parked result was discarded — taking the denial back will let ${denial.plugin} be ` +
         `asked fresh, not re-offer that run. `
       : ''
+    const id = gone === undefined ? undefined : `${gone.runId}.${gone.plugin}`
+    const closed = id !== undefined && withdrawn.includes(id) ? `Its Handoff record ${id} was withdrawn. ` : ''
     process.stdout.write(
       `Denied ${denial.plugin}: ${denial.reason}\n` +
         `It will not be asked about again while it proposes the same thing. ` +
-        `${dropped}No grant was written or cleared.\n`,
+        `${dropped}${closed}No grant was written or cleared.\n`,
     )
   }
 
