@@ -12,10 +12,11 @@
  * `test-utils/fixture-plugins`. Module resolution follows the symlink to its
  * real path, so each fixture's `../../../src/...` imports still resolve.
  */
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { describe, test, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { readOpenHandoffs } from '../../lib/handoffs.js'
 import { _setHome } from '../../lib/paths.js'
 import { PluginConfigSchema } from '../../schemas/plugin-config.js'
 import { testFixturesDir } from '../../../test-utils/fixtures.js'
@@ -632,5 +633,94 @@ describe('runPlugin — an unusable preferences file', () => {
     } finally {
       rmSync(prefsFile, { force: true })
     }
+  })
+})
+
+/**
+ * A manual run of a declared handoff writes the same Handoff record an advance
+ * does, beside the `delegated` artifact it already wrote. Each case gets its
+ * own home, so no case sees another's records.
+ */
+describe('runPlugin — a declared handoff', () => {
+  let h: string
+
+  beforeEach(() => {
+    h = mkdtempSync(join(tmpdir(), 'warpline-run-handoff-'))
+    symlinkSync(
+      testFixturesDir(import.meta.url, '../../../test-utils/fixture-plugins'),
+      join(h, 'plugins'),
+    )
+    _setHome(h)
+  })
+
+  afterEach(() => {
+    _setHome(home)
+    rmSync(h, { recursive: true, force: true })
+  })
+
+  const readJson = (path: string): Record<string, unknown> => JSON.parse(readFileSync(path, 'utf-8'))
+
+  test('a declared handoff writes one open Handoff record beside its unchanged delegated artifact', async () => {
+    const { payload, code } = await runPlugin(['needs-llm-plugin', 'run', '--json'])
+    expect(code).toBe(0)
+    expect(payload.ok).toBe(true)
+
+    const { open, unreadable } = await readOpenHandoffs(join(h, 'handoffs'))
+    expect(unreadable).toEqual([])
+    expect(open).toHaveLength(1)
+    const record = open[0]!
+    expect(record).toMatchObject({
+      plugin: 'needs-llm-plugin',
+      task: 'Triage 2 new feed entries',
+      context_path: '/tmp/payload.json',
+      state: 'open',
+      closed_at: null,
+    })
+    expect(record.id).toBe(`${record.run_id}.needs-llm-plugin`)
+
+    const artifact = readJson(join(h, 'runs', `${record.run_id}.json`))
+    expect(artifact.status).toBe('delegated')
+    expect(artifact.summary).toBe('[needs-llm] Triage 2 new feed entries. Context: /tmp/payload.json')
+    expect(artifact.final_error).toBeNull()
+    const attempts = artifact.attempts as Array<{ status: string; error: string | null }>
+    expect(attempts).toHaveLength(1)
+    expect(attempts[0]!.status).toBe('delegated')
+    expect(attempts[0]!.error).toBeNull()
+  })
+
+  test('a second run supersedes the first run record', async () => {
+    expect((await runPlugin(['needs-llm-plugin', 'run', '--json'])).payload.ok).toBe(true)
+    expect((await runPlugin(['needs-llm-plugin', 'run', '--json'])).payload.ok).toBe(true)
+
+    const dir = join(h, 'handoffs')
+    const files = readdirSync(dir).filter((n) => n.endsWith('.json')).sort()
+    expect(files).toHaveLength(2)
+    const { open } = await readOpenHandoffs(dir)
+    expect(open).toHaveLength(1)
+    const newer = open[0]!
+    const other = files.find((n) => n !== `${newer.id}.json`)!
+    const first = readJson(join(dir, other))
+    expect(first.state).toBe('superseded')
+    expect(Date.parse(first.created_at as string)).toBeLessThan(Date.parse(newer.created_at))
+  })
+
+  test('a Handoff record that cannot be written fails the run, and the artifact and its attempt agree', async () => {
+    // A regular file where the directory belongs: the write fails even when tests run as root.
+    writeFileSync(join(h, 'handoffs'), 'not a directory')
+    const { payload, code } = await runPlugin(['needs-llm-plugin', 'run', '--json'])
+    expect(code).toBe(0)
+    expect(payload.ok).toBe(false)
+    expect(payload.error).toContain('Handoff record could not be written')
+
+    const runs = readdirSync(join(h, 'runs')).filter((n) => n.endsWith('.json'))
+    expect(runs).toHaveLength(1)
+    const artifact = readJson(join(h, 'runs', runs[0]!))
+    expect(artifact.status).toBe('failed')
+    expect(artifact.summary).toBe('needs-llm-plugin: handoff not recorded')
+    expect(artifact.final_error).toContain('Handoff record could not be written')
+    const attempts = artifact.attempts as Array<{ status: string; error: string | null }>
+    expect(attempts).toHaveLength(1)
+    expect(attempts[0]!.status).toBe('failed')
+    expect(attempts[0]!.error).toBe(artifact.final_error as string)
   })
 })

@@ -1,10 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { invokePlugin, deriveRunStatus } from '../invoke-plugin.js'
 import { dropLateWrite } from '../../lib/exit-after-flush.js'
-import { _setHome, pluginConfigPath } from '../../lib/paths.js'
+import { _setHome, pluginConfigPath, warplineHome } from '../../lib/paths.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 // Fixture plugin directories live in a tmp dir to avoid polluting .warpline/plugins/
@@ -270,6 +271,21 @@ describe('invokePlugin', () => {
       await readFile(join(runsDir, 'delegated-artifact-test.json'), 'utf-8'),
     )
     expect(artifact.status).toBe('delegated')
+  })
+
+  test('Test 8c: a handoff record lands beside the runs directory the caller passed, never in the home', async () => {
+    await invokePlugin('llm-stub-plugin', {}, {
+      pluginsDir: tmpDir,
+      eventsPath: EVENTS_PATH,
+      runsDir: join(tmpDir, 'runs'),
+      persistArtifact: true,
+      runId: 'record-beside-runs',
+    }, { granted: false, reason: 'manual-run' })
+
+    const beside = join(tmpDir, 'handoffs', 'record-beside-runs.llm-stub-plugin.json')
+    expect(existsSync(beside)).toBe(true)
+    expect(JSON.parse(await readFile(beside, 'utf-8')).state).toBe('open')
+    expect(existsSync(join(warplineHome(), 'handoffs', 'record-beside-runs.llm-stub-plugin.json'))).toBe(false)
   })
 })
 
