@@ -488,6 +488,8 @@ describe('warpline deny', () => {
     await seedGateFor('render-issue', null)
     // A directory stands for a record that cannot be read. Not chmod, which uid 0 ignores.
     await mkdir(join(handoffsAt(), 'run-a.render-issue.json'), { recursive: true })
+    // A changed notify the bare form would observe, so the snapshot fails if the read moves after that write (WR-15).
+    await writeFile(join(root, 'preferences.json'), JSON.stringify({ notify: { command: ['/bin/true'] } }))
     const home = await snapshot(root)
     const audits = auditRecords(root, 'denial.recorded').length
 
