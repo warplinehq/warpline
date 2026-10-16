@@ -197,15 +197,23 @@ stops the deny: it exits `1` and nothing is denied. A record already closed is
 left as it is. If the state write fails after the close, the record stays
 withdrawn and the gate stays parked, and denying again completes it. A record
 withdrawn for an earlier plugin in the same command stays withdrawn when a
-later one fails. A deny that discards no live parked result (none was parked,
-or the gate is an applied marker) answers the plugin's standing proposal, not
-a run, and closes no record. A withdrawn record never opens again.
+later one fails. Either way the run was denied partway, and until a deny
+completes, `warpline approve` refuses to apply that gate. It reads the record
+under the state lock, through `readHandoff` in `handoffs.ts`. It exits `1`,
+applies nothing, and says the run was denied partway and to deny again. A
+parked result whose run has no record applies as before, and one whose record
+cannot be read is refused. A deny that discards no live parked result (none
+was parked, or the gate is an applied marker) answers the plugin's standing
+proposal, not a run, and closes no record. A withdrawn record never opens
+again.
 
 **A reader acts only on an open record.** Every other state is closed.
 A state this build never writes is closed too, and a reader reads it as closed,
 never as unreadable. Supersede and withdraw each move only an open record, so
-two of them racing leave it closed in one state or the other. Adding a closed
-state does not raise `min_reader_version`, because no reader acts on one.
+two of them racing leave it closed in one state or the other.
+`warpline approve` reads one closed state, `withdrawn`, and only to refuse.
+Adding a closed state does not raise `min_reader_version`, because no reader
+acts on a state it does not know.
 
 The `needs-llm` scanner finds handoffs by listing this directory, and it keeps
 only open records.

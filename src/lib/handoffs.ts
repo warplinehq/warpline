@@ -33,7 +33,7 @@ import { atomicWriteJson } from './fs-atomic.js'
 import { isPluginName } from '../schemas/plugin-name.js'
 import { makeSkillError, type SkillResult } from '../schemas/skill-result.js'
 
-// A reader acts only on `open`, so adding a closed state does not raise this.
+// Only `open` is acted on, and `withdrawn` only stops an approve, so adding a closed state does not raise this.
 export const HANDOFFS_READER_VERSION = 1
 
 // What makes a run id safe as half of a filename: no dot, no separator, no `..`.
@@ -179,28 +179,45 @@ export async function writeHandoff(dir: string, input: HandoffInput, now = Date.
 }
 
 /**
- * Withdraw the open record of one run's handoff, at `closedAt`.
- * A run id or plugin name the writer would refuse returns false before any path is built, since no record bears it.
- * A missing record or directory returns false: the run handed off nothing.
+ * One run's record file, read and validated through `readRecord`.
+ * A run id or plugin name the writer would refuse returns null before any path is built, since no record bears it.
+ * A missing record or directory returns null: the run handed off nothing.
  * Any other read error is thrown with its errno `code` intact.
  * A file that fails the checks `readRecord` applies throws with `code: 'EINVAL'`.
- * A record that is not `open` returns false and is not written: a closed record is never rewritten.
- * An open record is rewritten as `withdrawn` and the function returns true; a write error is thrown.
  */
-export async function withdrawHandoff(dir: string, runId: string, plugin: string, closedAt: string): Promise<boolean> {
-  if (!RUN_ID.test(runId) || !isPluginName(plugin)) return false
+async function readRunRecord(dir: string, runId: string, plugin: string): Promise<Extract<ReadRecord, { record: Handoff }> | null> {
+  if (!RUN_ID.test(runId) || !isPluginName(plugin)) return null
   const name = `${runId}.${plugin}.json`
   try {
     // Only to tell a missing record from an unreadable one; `readRecord` swallows the difference.
     await readFile(join(dir, name))
   } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') return false
+    if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') return null
     throw err
   }
   const r = await readRecord(dir, name)
   if (!('record' in r)) throw Object.assign(new Error(`Handoff record ${name} is unreadable`), { code: 'EINVAL' })
-  if (r.record.state !== 'open') return false
-  await atomicWriteJson(join(dir, name), { ...r.raw, state: 'withdrawn', closed_at: closedAt })
+  return r
+}
+
+/**
+ * One run's record, or null when the run handed off nothing.
+ * It throws as `readRunRecord` does, and never writes.
+ */
+export async function readHandoff(dir: string, runId: string, plugin: string): Promise<Handoff | null> {
+  return (await readRunRecord(dir, runId, plugin))?.record ?? null
+}
+
+/**
+ * Withdraw the open record of one run's handoff, at `closedAt`.
+ * The read rules are `readRunRecord`'s: no record returns false, and a record that cannot be read throws.
+ * A record that is not `open` returns false and is not written: a closed record is never rewritten.
+ * An open record is rewritten as `withdrawn` and the function returns true; a write error is thrown.
+ */
+export async function withdrawHandoff(dir: string, runId: string, plugin: string, closedAt: string): Promise<boolean> {
+  const r = await readRunRecord(dir, runId, plugin)
+  if (r === null || r.record.state !== 'open') return false
+  await atomicWriteJson(join(dir, r.name), { ...r.raw, state: 'withdrawn', closed_at: closedAt })
   return true
 }
 

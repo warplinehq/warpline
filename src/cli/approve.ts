@@ -74,6 +74,12 @@
  * answering, because "could not look" is never "no Ask". `--all` and
  * `--standing` issue grants and never read the store.
  *
+ * **A parked result denied partway is not applied.** When its run's Handoff
+ * record is withdrawn, a `deny` closed the record and stopped before writing
+ * the state document. `approve` refuses that gate and says to deny again. A
+ * run with no record applies as before, and a record that cannot be read
+ * refuses. The read imports nothing from `approval-gate.ts`.
+ *
  * Each of the four record-writing gestures (a session Grant, a standing grant,
  * a content approval and its withdrawal) is on the audit record before it takes
  * effect, and the records
@@ -139,7 +145,8 @@ import {
 } from '../runtime/engine-state-store.js'
 import type { Approval, EngineState } from '../schemas/engine-state.js'
 import type { PluginManifest } from '../schemas/plugin-manifest.js'
-import { engineStatePath, pluginsDir, preferencesPath, sessionApprovalPath, standingGrantsPath } from '../lib/paths.js'
+import { engineStatePath, handoffsDir, pluginsDir, preferencesPath, sessionApprovalPath, standingGrantsPath } from '../lib/paths.js'
+import { readHandoff } from '../lib/handoffs.js'
 import { suggest } from './suggest.js'
 import { escapeForOperator } from '../lib/escape.js'
 
@@ -1223,6 +1230,38 @@ export async function run(argv: string[]): Promise<number> {
             `${name} was denied at ${denial.denied_at} ('${denial.reason}') and that answer still ` +
               `matches this proposal. Nothing was applied and no grant was written — take the ` +
               `denial back first: warpline deny --remove ${name}\n`,
+          )
+          refused.push(name)
+          continue
+        }
+
+        // `deny` closes a parked handoff's record before it writes the state
+        // document, so a deny that stopped between the two leaves a withdrawn
+        // record beside this gate. Applying it would accept a run the operator
+        // was denying and leave a judgment request nothing routes, so it
+        // refuses and names the way out. It reads in this hold, the same one
+        // `deny` withdraws in, so the two cannot interleave. A run with no
+        // record applies as before; a record that cannot be read refuses,
+        // because could not look is never none. It sits before the Answer and
+        // the notify read, so a refusal records neither.
+        let handoff
+        try {
+          handoff = await readHandoff(handoffsDir(), gate.run_id, name)
+        } catch (err: unknown) {
+          // Only the code: a thrown message embeds absolute paths.
+          const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined
+          process.stderr.write(
+            `The Handoff record ${gate.run_id}.${name} could not be read (${typeof code === 'string' ? code : 'unknown'}), ` +
+              `so the parked result for ${name} was not applied. No grant was written.\n`,
+          )
+          refused.push(name)
+          continue
+        }
+        if (handoff?.state === 'withdrawn') {
+          process.stderr.write(
+            `The parked result for ${name} from run ${gate.run_id} was denied partway: its Handoff record is ` +
+              `withdrawn, but the gate is still parked. Nothing was applied and no grant was written. ` +
+              `Deny it again to finish: warpline deny ${name}\n`,
           )
           refused.push(name)
           continue

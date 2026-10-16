@@ -2299,6 +2299,14 @@ What that does, in order, all decided before anything is written:
    superseded denial does not block — it is already stale everywhere else. The
    refusal names the denial and says to take it back with
    `warpline deny --remove <plugin>`.
+
+   A gate whose run's Handoff record is `withdrawn` is refused next, and
+   nothing is written. Only a deny that stopped partway leaves that record
+   beside a parked gate: it closed the record and did not write the state
+   document. `approve` exits `1`, applies nothing, writes no grant, and says to
+   deny again, which finishes the denial. A run with no record applies as
+   before, and a record that cannot be read is refused
+   ([needs-llm-contract.md](needs-llm-contract.md)).
 1. **Already applied** (`applied_at` is set) — there is no *live* gate, so the
    verb does not enter this list at all. It prints a note naming the run whose
    result was already applied and then answers the Grant gate, granting the

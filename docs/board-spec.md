@@ -323,7 +323,7 @@ stated, not hidden.
 | `<home>/state/acknowledgements.json` | JSON object, `event_id → { acknowledged_at, action_taken }` | Board | Board, Engine |
 | `<home>/state/` engine state | `EngineStateSchema`: tasks, deferrals, per-plugin last run | Engine | Board |
 | `<home>/runs/` | one `RunArtifact` per run — [runtime-spec.md § 5](runtime-spec.md) | Engine | Board |
-| `<home>/handoffs/` | one JSON Handoff record per [needs-llm] handoff, `<run_id>.<plugin>.json`, reader-versioned — [needs-llm-contract.md](needs-llm-contract.md) | Engine (advance), `warpline run`, `warpline deny` (withdraws a denied run's record) | the `needs-llm` skill (open records only) |
+| `<home>/handoffs/` | one JSON Handoff record per [needs-llm] handoff, `<run_id>.<plugin>.json`, reader-versioned — [needs-llm-contract.md](needs-llm-contract.md) | Engine (advance), `warpline run`, `warpline deny` (withdraws a denied run's record) | the `needs-llm` skill (open records only), `warpline approve` (refuses a parked result whose run's record is withdrawn) |
 | `<home>/.session-approval` | the Grant — [runtime-spec.md § 9](runtime-spec.md) | `warpline approve` / Board approve | Engine, Board |
 | `<home>/state/asks.json` | JSON, owner-only, reader-versioned: the stored Asks — [runtime-spec.md § 16](runtime-spec.md) | Engine (raise, delivery tries), `warpline approve`, `warpline deny`, `warpline renew` (each marks an Ask answered) | Engine, `warpline approvals` (no lock), `warpline approve` (every named and `--content` form, under the state lock), `warpline deny` (every form but `--list` and `--remove`, under the state lock), `warpline renew` (every form, under the state lock) |
 
