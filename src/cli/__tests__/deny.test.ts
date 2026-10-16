@@ -603,7 +603,28 @@ describe('warpline deny', () => {
     expect(await rawState()).toBe(before)
   })
 
-  test('10: denying the same plugin twice against an unchanged proposal writes nothing the second time', async () => {
+  test('9o: a Handoff record in a state this build never writes is left as it is, and the denial goes through', async () => {
+    await seedGateFor('render-issue', null)
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'render-issue', task: 'render it', context_path: null })
+    // Stands for a record already closed in a state a later build adds.
+    const record = JSON.parse(await recordBytes('run-a.render-issue'))
+    record.state = 'consumed'
+    record.closed_at = new Date(Date.now() - 5_000).toISOString()
+    await writeFile(join(handoffsAt(), 'run-a.render-issue.json'), JSON.stringify(record, null, 2))
+    const bytes = await recordBytes('run-a.render-issue')
+
+    const { code, stdout, stderr } = await capture(['render-issue'])
+
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    expect(await recordBytes('run-a.render-issue')).toBe(bytes)
+    const state = await readState()
+    expect(state.pending_gates.some((g: { plugin: string }) => g.plugin === 'render-issue')).toBe(false)
+    expect(state.denials['render-issue']).toBeDefined()
+    expect(stdout).not.toContain('Handoff record')
+  })
+
+  test('10:denying the same plugin twice against an unchanged proposal writes nothing the second time', async () => {
     await capture(['render-issue'])
     const before = await rawState()
 

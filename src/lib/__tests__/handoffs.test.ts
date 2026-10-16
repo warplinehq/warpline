@@ -260,6 +260,41 @@ describe('the reader', () => {
   })
 })
 
+describe('a state this build never writes is closed', () => {
+  // `consumed` stands for a state a later build may add, and a reader acts only on `open`.
+  function writeConsumed(): string {
+    mkdirSync(dir)
+    writeFileSync(
+      join(dir, 'run-1.prod.json'),
+      JSON.stringify(
+        openRecord('run-1', 'prod', T0 + 5000, { state: 'consumed', closed_at: new Date(T0 + 6000).toISOString() }),
+        null,
+        2,
+      ),
+    )
+    return bytes('run-1.prod.json')
+  }
+
+  test('a record in a state this build never writes is neither open nor unreadable', async () => {
+    writeConsumed()
+    expect(await lib.readOpenHandoffs(dir)).toEqual({ open: [], unreadable: [] })
+  })
+
+  test('withdrawing a record in a state this build never writes returns false and leaves it as it is', async () => {
+    const before = writeConsumed()
+    expect(await lib.withdrawHandoff(dir, 'run-1', 'prod', new Date(T0 + 7000).toISOString())).toBe(false)
+    expect(bytes('run-1.prod.json')).toBe(before)
+  })
+
+  test('a record in a state this build never writes still holds the clock floor, and is never superseded', async () => {
+    const before = writeConsumed()
+    const rec = await write('run-2', 'prod', T0)
+    expect(rec.created_at).toBe(new Date(T0 + 5001).toISOString())
+    expect(bytes('run-1.prod.json')).toBe(before)
+    expect((await lib.readOpenHandoffs(dir)).open.map((h) => h.id)).toEqual(['run-2.prod'])
+  })
+})
+
 describe('a record that cannot be written', () => {
   test('handoffNotRecorded is a fixed failed result naming the act, with the errno code and no path', () => {
     const failed = lib.handoffNotRecorded(
