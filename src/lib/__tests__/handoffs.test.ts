@@ -295,6 +295,43 @@ describe('a state this build never writes is closed', () => {
   })
 })
 
+describe('the edge of the open-world state', () => {
+  // Any string is a state, '' included. A missing or non-string state is not a record.
+  function writeRecord(record: Record<string, unknown>): string {
+    mkdirSync(dir)
+    writeFileSync(join(dir, 'run-1.prod.json'), JSON.stringify(record, null, 2))
+    return bytes('run-1.prod.json')
+  }
+  const closedAt = new Date(T0 + 7000).toISOString()
+
+  test('a record with no state is unreadable, not open, and withdrawing it throws EINVAL and leaves it as it is', async () => {
+    const rec = openRecord('run-1', 'prod', T0)
+    delete rec.state
+    const before = writeRecord(rec)
+    expect(await lib.readOpenHandoffs(dir)).toEqual({ open: [], unreadable: ['run-1.prod.json'] })
+    const err = await lib.withdrawHandoff(dir, 'run-1', 'prod', closedAt).then(() => null, (e: unknown) => e)
+    expect((err as NodeJS.ErrnoException | null)?.code).toBe('EINVAL')
+    expect(bytes('run-1.prod.json')).toBe(before)
+  })
+
+  for (const state of [42, null]) {
+    test(`a record whose state is ${state} is unreadable, and withdrawing it throws EINVAL and leaves it as it is`, async () => {
+      const before = writeRecord(openRecord('run-1', 'prod', T0, { state }))
+      expect(await lib.readOpenHandoffs(dir)).toEqual({ open: [], unreadable: ['run-1.prod.json'] })
+      const err = await lib.withdrawHandoff(dir, 'run-1', 'prod', closedAt).then(() => null, (e: unknown) => e)
+      expect((err as NodeJS.ErrnoException | null)?.code).toBe('EINVAL')
+      expect(bytes('run-1.prod.json')).toBe(before)
+    })
+  }
+
+  test('a record whose state is the empty string reads as closed, and withdrawing it returns false and leaves it as it is', async () => {
+    const before = writeRecord(openRecord('run-1', 'prod', T0, { state: '' }))
+    expect(await lib.readOpenHandoffs(dir)).toEqual({ open: [], unreadable: [] })
+    expect(await lib.withdrawHandoff(dir, 'run-1', 'prod', closedAt)).toBe(false)
+    expect(bytes('run-1.prod.json')).toBe(before)
+  })
+})
+
 describe('a record that cannot be written', () => {
   test('handoffNotRecorded is a fixed failed result naming the act, with the errno code and no path', () => {
     const failed = lib.handoffNotRecorded(
