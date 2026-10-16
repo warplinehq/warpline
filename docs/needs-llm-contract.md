@@ -192,28 +192,33 @@ plugin's live parked result marks that run's record `withdrawn` and sets
 Only a plugin that declares a side effect parks a handoff. This happens under
 the state lock with the denial, after its `denial.recorded` audit record and
 before the state document is written, so a deny that succeeds never leaves the
-denied run's record open. A record that exists but cannot be read or rewritten
-stops the deny: it exits `1` and nothing is denied. A record already closed is
-left as it is. If the state write fails after the close, the record stays
-withdrawn and the gate stays parked, and denying again completes it. A record
-withdrawn for an earlier plugin in the same command stays withdrawn when a
-later one fails. Either way the run was denied partway, and until a deny
-completes, `warpline approve` refuses to apply that gate. It reads the record
-under the state lock, through `readHandoff` in `handoffs.ts`. It exits `1`,
-applies nothing, and says the run was denied partway and to deny again. A
-parked result whose run has no record applies as before, and one whose record
-cannot be read is refused. A deny that discards no live parked result (none
-was parked, or the gate is an applied marker) answers the plugin's standing
-proposal, not a run, and closes no record. A withdrawn record never opens
-again.
+denied run's record open. First, `deny` reads the record of every run it
+discards. A record that exists but cannot be read stops the deny there, before
+any `denial.recorded` audit record: it exits `1`, no denial is recorded, and
+the message names the file and says to deny again once it reads or is gone. A
+record that cannot be rewritten stops the deny after its audit records: it
+exits `1` and no denial is recorded. A record already closed is left as it is.
+A deny that discards no live parked result (none was parked, or the gate is an
+applied marker) answers the plugin's standing proposal, not a run, and closes
+no record. A withdrawn record never opens again.
+
+**The gate and the record answer different questions.** A parked result's
+gate says whether the operator has accepted the run's outcome. Its Handoff
+record says whether the run's judgment is still asked for. Each is read for its
+own question: `warpline approve` reads the gate and never a record, and the
+scanner reads the record and never the gate. A deny that stops between its two
+writes leaves the record withdrawn and the gate parked. That happens when a
+later plugin's record in the same command cannot be rewritten, or when the
+state write fails after the close. `deny` then names each record it withdrew,
+and each stays withdrawn. The gate is answered as any parked result is.
+Approving it applies the outcome and routes no judgment for that run. Denying
+it again records the denial.
 
 **A reader acts only on an open record.** Every other state is closed.
 A state this build never writes is closed too, and a reader reads it as closed,
 never as unreadable. Supersede and withdraw each move only an open record, so
-two of them racing leave it closed in one state or the other.
-`warpline approve` reads one closed state, `withdrawn`, and only to refuse.
-Adding a closed state does not raise `min_reader_version`, because no reader
-acts on a state it does not know.
+two of them racing leave it closed in one state or the other. Adding a closed
+state does not raise `min_reader_version`, because no reader acts on one.
 
 The `needs-llm` scanner finds handoffs by listing this directory, and it keeps
 only open records.

@@ -2299,14 +2299,6 @@ What that does, in order, all decided before anything is written:
    superseded denial does not block — it is already stale everywhere else. The
    refusal names the denial and says to take it back with
    `warpline deny --remove <plugin>`.
-
-   A gate whose run's Handoff record is `withdrawn` is refused next, and
-   nothing is written. Only a deny that stopped partway leaves that record
-   beside a parked gate: it closed the record and did not write the state
-   document. `approve` exits `1`, applies nothing, writes no grant, and says to
-   deny again, which finishes the denial. A run with no record applies as
-   before, and a record that cannot be read is refused
-   ([needs-llm-contract.md](needs-llm-contract.md)).
 1. **Already applied** (`applied_at` is set) — there is no *live* gate, so the
    verb does not enter this list at all. It prints a note naming the run whose
    result was already applied and then answers the Grant gate, granting the
@@ -2495,9 +2487,16 @@ that outcome, must not erase it.
 A parked result that was a handoff has a Handoff record, and
 `deny` withdraws it with the gate. That run's record goes from `open` to
 `withdrawn`, after the `denial.recorded` audit record and before the state
-write ([needs-llm-contract.md](needs-llm-contract.md)). A record that cannot be
-closed stops the command: `deny` exits `1` and nothing is denied. An applied
-marker's record stays open, for the reason the marker itself is kept.
+write ([needs-llm-contract.md](needs-llm-contract.md)). `deny` reads each such
+record before that audit record, and one that cannot be read stops the command
+there: `deny` exits `1`, records no denial, and names the file. A record that
+cannot be rewritten stops the command after the audit records, with exit `1`,
+and a state write can fail after the close. Either way no denial is recorded,
+and `deny` names each record it already withdrew, which stays withdrawn. The
+gate stays parked and is answered as any parked result is: `approve` reads the
+gate alone, so approving it applies the run and routes no judgment for it, and
+denying it again records the denial. An applied marker's record stays open,
+for the reason the marker itself is kept.
 
 `deny` says so on stdout, because the consequence is not visible in the state
 file: taking the denial back re-opens the question rather than re-offering the

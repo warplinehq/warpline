@@ -44,8 +44,11 @@
  * state document changes.
  *
  * Denying a live parked result that was a handoff withdraws that run's Handoff
- * record too, after the audit record and before the state write. A record
- * that cannot be closed stops the command, and nothing is denied.
+ * record too, after the audit record and before the state write. Every such
+ * record is read before anything is written, and one that cannot be read stops
+ * the command there. A deny that stops after a withdraw names each record it
+ * withdrew. The record stays withdrawn, and the gate stays parked for
+ * `approve` or a second `deny` to answer, as any parked result is.
  *
  * **A deny can answer an Ask.** With `--nonce`, `--digest` and `--principal`
  * it answers the open parked-result, missing-Grant or content Ask on the one
@@ -59,6 +62,7 @@
  * Never terminates the process — it returns a code to the dispatcher.
  */
 import { parseArgs } from 'node:util'
+import { join } from 'node:path'
 import { appendAudit } from '../lib/audit-log.js'
 import {
   ANSWER_REFUSAL_TEXT,
@@ -89,7 +93,7 @@ import {
 import { DenialSchema } from '../schemas/engine-state.js'
 import type { Denial, EngineState } from '../schemas/engine-state.js'
 import { engineStatePath, eventsJsonlPath, handoffsDir, pluginsDir, preferencesPath } from '../lib/paths.js'
-import { withdrawHandoff } from '../lib/handoffs.js'
+import { readHandoff, withdrawHandoff } from '../lib/handoffs.js'
 import { suggest } from './suggest.js'
 
 const USAGE = `Usage: warpline deny <plugin>... [options]
@@ -121,6 +125,25 @@ Answering an Ask (the same flags approve takes):
                   Answer and nothing else: the grant lapses at its renewal
                   deadline unless someone renews it.
 `
+
+/** A thrown error's errno code, or 'unknown'. Only the code, because a thrown message embeds absolute paths. */
+function errnoCode(err: unknown): string {
+  const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined
+  return typeof code === 'string' ? code : 'unknown'
+}
+
+/**
+ * The end of a deny that stopped: every record it already withdrew, which
+ * stays so, and an Answer it already recorded. It names no command, so no open
+ * Ask can make it a refused one.
+ */
+function stoppedTail(withdrawn: readonly string[], answered: boolean): string {
+  const records = withdrawn.map(
+    (id) =>
+      ` The Handoff record ${id} was withdrawn and stays withdrawn. Its parked result is still parked, and approve or deny answers it.`,
+  )
+  return records.join('') + (answered ? ' The Answer is on the record, and the next advance asks again.' : '')
+}
 
 /** A store that could not be read is never read as "no Asks". */
 function refuseUnreadableAsks(statePath: string, cause: string): number {
@@ -632,6 +655,24 @@ export async function run(argv: string[]): Promise<number> {
 
     if (recorded.length === 0) return 0
 
+    // Every record this command will close is read before anything is
+    // written. So a file that cannot be read appends no audit record for a
+    // denial that does not happen, and writes nothing at all in the bare form.
+    // The read decides only whether the command goes on.
+    for (const d of discarded) {
+      const id = `${d.runId}.${d.plugin}`
+      try {
+        await readHandoff(handoffsDir(), d.runId, d.plugin)
+      } catch (err: unknown) {
+        process.stderr.write(
+          `deny: the Handoff record ${id} could not be read (${errnoCode(err)}), so no denial was recorded.` +
+            (answer === null ? ' Nothing was written.' : stoppedTail([], true)) +
+            ` Deny again once ${join(handoffsDir(), `${id}.json`)} reads as a Handoff record or is no longer there.\n`,
+        )
+        return 1
+      }
+    }
+
     // A bare deny records the notify and the registry it judged before its
     // first denial record. An Answer already recorded them with the Answer.
     if (answer === null) {
@@ -664,29 +705,32 @@ export async function run(argv: string[]): Promise<number> {
       }
     }
 
-    // A parked handoff's record closes with its denial. It closes after the
-    // audit records, each of which names the run whose gate it discards, and
-    // before the state write. So a deny that succeeds never leaves the denied
-    // run's record open, and one that stops here has written no denial. A
-    // state write that fails after the close leaves a withdrawn record beside a
-    // live gate: the direction where nothing answers a run the operator tried
-    // to deny, and denying again completes it.
+    // A parked handoff's record closes after the audit records, each of which
+    // names the run whose gate it discards, and before the state write. So a
+    // deny that succeeds never leaves the denied run's record open. One that
+    // stops after a close leaves that record withdrawn beside a parked gate.
+    // That is the safe side, because nothing routes a run the operator tried
+    // to deny. The gate is then answered as any parked result is, so the
+    // failure lines name the record and no command.
     for (const d of discarded) {
       try {
         if (await withdrawHandoff(handoffsDir(), d.runId, d.plugin, denied_at)) withdrawn.push(`${d.runId}.${d.plugin}`)
       } catch (err: unknown) {
-        // Only the code: a thrown message embeds absolute paths.
-        const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined
         process.stderr.write(
-          `deny: the Handoff record ${d.runId}.${d.plugin} could not be closed (${typeof code === 'string' ? code : 'unknown'}), so nothing was denied.` +
-            (answer !== null ? ' The Answer is on the record.' : '') +
-            '\n',
+          `deny: the Handoff record ${d.runId}.${d.plugin} could not be closed (${errnoCode(err)}), so no denial was recorded.${stoppedTail(withdrawn, answer !== null)}\n`,
         )
         return 1
       }
     }
 
-    await writeEngineState(state, statePath)
+    try {
+      await writeEngineState(state, statePath)
+    } catch (err: unknown) {
+      process.stderr.write(
+        `deny: the state document could not be written (${errnoCode(err)}), so no denial was recorded.${stoppedTail(withdrawn, answer !== null)}\n`,
+      )
+      throw err
+    }
     return null
   })
   if (early !== null) return early

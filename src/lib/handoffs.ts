@@ -13,7 +13,10 @@
  * it ends in, never whether it is open. A later writer that records something
  * a closed state must keep, a consumption, has to coordinate with both before
  * it writes one, and must re-read `state` under that coordination so it never
- * acts on a closed record.
+ * acts on a closed record. A record's `state` alone says whether its run's
+ * judgment is still asked for. Whether the run's outcome is accepted is its
+ * gate's question, in the state document, and `approve` answers that one
+ * without reading a record.
  *
  * **It imports nothing from the runtime or the board, and resolves no home.**
  * Every function takes the directory from its caller: the engine derives it
@@ -33,7 +36,7 @@ import { atomicWriteJson } from './fs-atomic.js'
 import { isPluginName } from '../schemas/plugin-name.js'
 import { makeSkillError, type SkillResult } from '../schemas/skill-result.js'
 
-// Only `open` is acted on, and `withdrawn` only stops an approve, so adding a closed state does not raise this.
+// A reader acts only on `open`, so adding a closed state does not raise this.
 export const HANDOFFS_READER_VERSION = 1
 
 // What makes a run id safe as half of a filename: no dot, no separator, no `..`.
