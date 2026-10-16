@@ -202,9 +202,10 @@ or the gate is an applied marker) answers the plugin's standing proposal, not
 a run, and closes no record. A withdrawn record never opens again.
 
 **A reader acts only on an open record.** Every other state is closed.
-Supersede and withdraw each move only an open record, so two of them racing
-leave it closed in one state or the other. Adding a closed state does not raise
-`min_reader_version`, because no reader acts on one.
+A state this build never writes is closed too, and a reader reads it as closed,
+never as unreadable. Supersede and withdraw each move only an open record, so
+two of them racing leave it closed in one state or the other. Adding a closed
+state does not raise `min_reader_version`, because no reader acts on one.
 
 The `needs-llm` scanner finds handoffs by listing this directory, and it keeps
 only open records.

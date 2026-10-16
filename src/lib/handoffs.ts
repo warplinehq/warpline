@@ -50,7 +50,8 @@ const HandoffSchema = z.object({
   task: z.string(),
   context_path: z.string().nullable(),
   created_at: Iso,
-  state: z.enum(['open', 'superseded', 'withdrawn']),
+  // Any string: a reader acts only on `open` and reads every other state as closed, one a later build adds included.
+  state: z.string(),
   closed_at: Iso.nullable(),
 })
 
