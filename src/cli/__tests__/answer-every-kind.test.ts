@@ -11,11 +11,13 @@
  * on `builder`, because `p` can neither pass its TTL inside the 23-hour floor
  * nor have a dependency move.
  */
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { liveGrantScopes } from '../../runtime/approval-gate.js'
-import { sessionApprovalPath } from '../../lib/paths.js'
+import { handoffsDir, sessionApprovalPath } from '../../lib/paths.js'
+import * as stateStore from '../../runtime/engine-state-store.js'
+import { writeHandoff } from '../../lib/handoffs.js'
 import { renewalDigest } from '../../lib/asks.js'
 import { notifyStub, setNotify } from '../../../test-utils/notify-stub.js'
 import {
@@ -78,6 +80,7 @@ type StateDoc = {
   plugin_runs: Record<string, Record<string, unknown>>
   pending_gates: Gate[]
   approvals: Record<string, { fingerprint: string }>
+  denials: Record<string, unknown>
 }
 
 let vh: VerbHome
@@ -160,6 +163,54 @@ const answerApprove = (plugin: string, ask: StoredAsk, extra: string[] = []): st
   'ops',
   ...extra,
 ]
+
+/** The same Answer as `answerApprove`, through `deny`. */
+const answerDeny = (plugin: string, ask: StoredAsk, extra: string[] = []): string[] => [
+  'deny',
+  plugin,
+  '--nonce',
+  ask.nonce,
+  '--digest',
+  prefix(ask),
+  '--principal',
+  'ops',
+  ...extra,
+]
+
+/** The Handoff record file of `p`'s run `runId`. */
+const recordFile = (runId: string): string => join(handoffsDir(), `${runId}.p.json`)
+
+/** `p` parks a result under a Grant: the parked-result Ask and the run it parked. */
+async function parkP(): Promise<{ ask: StoredAsk; runId: string }> {
+  await ok(answerApprove('p', askFor('p')))
+  await ok(['advance'])
+  const ask = askFor('p')
+  expect(ask.kind).toBe('parked_result')
+  const gates = readState().pending_gates.filter((g) => g.plugin === 'p' && g.applied_at === null)
+  expect(gates).toHaveLength(1)
+  return { ask, runId: gates[0]!.run_id }
+}
+
+/** An Answer through deny whose state write fails after the withdraw, then one advance: the next parked-result Ask. */
+async function denyPartway(ask: StoredAsk, runId: string): Promise<StoredAsk> {
+  await writeHandoff(handoffsDir(), { run_id: runId, plugin: 'p', task: 'judge it', context_path: null })
+  const spy = spyOn(stateStore, 'writeEngineState').mockImplementation((async () => {
+    throw Object.assign(new Error('state write refused'), { code: 'EIO' })
+  }) as typeof stateStore.writeEngineState)
+  try {
+    await expect(capture(answerDeny('p', ask))).rejects.toThrow('state write refused')
+  } finally {
+    spy.mockRestore()
+  }
+  expect((JSON.parse(readFileSync(recordFile(runId), 'utf-8')) as { state: string }).state).toBe('withdrawn')
+  expect(askById(ask.id).state).toBe('answered')
+  expect(readState().pending_gates.some((g) => g.plugin === 'p' && g.run_id === runId && g.applied_at === null)).toBe(true)
+  await ok(['advance'])
+  const next = askFor('p')
+  expect(next.kind).toBe('parked_result')
+  expect(next.id).not.toBe(ask.id)
+  return next
+}
 
 /** `q`: `p`'s manifest with every field spelled out, a 2 h TTL, a dependency on `builder` and a `note` Output. */
 function writeQ(): void {
@@ -404,6 +455,82 @@ describe('an Answer beside a gate it cannot apply is on the record before the ga
       expect(r.code).not.toBe(0)
       expect(r.stdout).not.toContain('Discarded the parked result for q')
       expect(await snapshotHome(vh.home)).toEqual(before)
+    },
+    SLOW,
+  )
+})
+
+describe('a deny that stopped partway, with notify in use', () => {
+  test(
+    'the Answer to the next parked-result Ask through approve applies the run, and its withdrawn record is left as it is',
+    async () => {
+      const { ask, runId } = await parkP()
+      const next = await denyPartway(ask, runId)
+      const bytes = readFileSync(recordFile(runId), 'utf-8')
+      const answered = auditRecords(vh.home, 'ask.answered').length
+
+      const r = await capture(answerApprove('p', next))
+
+      expect({ code: r.code, stderr: r.stderr }).toMatchObject({ code: 0 })
+      expect(r.stdout).toContain(`Applied the parked result for p from run ${runId}`)
+      expect(readState().pending_gates.find((g) => g.run_id === runId)!.applied_at).not.toBeNull()
+      expect(askById(next.id)).toMatchObject({ state: 'answered', answer: 'approve' })
+      const records = auditRecords(vh.home, 'ask.answered')
+      expect(records.length).toBe(answered + 1)
+      expect(records.at(-1)).toMatchObject({ id: next.id, kind: 'parked_result' })
+      expect(readFileSync(recordFile(runId), 'utf-8')).toBe(bytes)
+    },
+    SLOW,
+  )
+
+  test(
+    'the Answer to the next parked-result Ask through deny records the denial, and closes no record again',
+    async () => {
+      const { ask, runId } = await parkP()
+      const next = await denyPartway(ask, runId)
+      const bytes = readFileSync(recordFile(runId), 'utf-8')
+
+      const r = await capture(answerDeny('p', next))
+
+      expect({ code: r.code, stderr: r.stderr }).toMatchObject({ code: 0 })
+      expect(askById(next.id)).toMatchObject({ state: 'answered', answer: 'deny' })
+      expect(readState().denials.p).toBeDefined()
+      expect(readState().pending_gates.some((g) => g.plugin === 'p' && g.applied_at === null)).toBe(false)
+      expect(readFileSync(recordFile(runId), 'utf-8')).toBe(bytes)
+      expect(r.stdout).not.toContain('Handoff record')
+    },
+    SLOW,
+  )
+
+  test(
+    'an Answer through deny beside a Handoff record that cannot be read records no denial, and a bare deny finishes once the file is gone',
+    async () => {
+      const { ask, runId } = await parkP()
+      mkdirSync(handoffsDir(), { recursive: true })
+      writeFileSync(recordFile(runId), '{"not":"a record"}')
+      const state = readFileSync(vh.statePath, 'utf-8')
+      const denials = auditRecords(vh.home, 'denial.recorded').length
+      const answered = auditRecords(vh.home, 'ask.answered').length
+
+      const r = await capture(answerDeny('p', ask))
+
+      expect(r.code).toBe(1)
+      expect(r.stderr).toContain(
+        `deny: the Handoff record ${runId}.p could not be read (EINVAL), so no denial was recorded. The Answer is on the record, and the next advance asks again. Deny again once ${recordFile(runId)} reads as a Handoff record or is no longer there.`,
+      )
+      expect(auditRecords(vh.home, 'denial.recorded').length).toBe(denials)
+      expect(auditRecords(vh.home, 'ask.answered').length).toBe(answered + 1)
+      expect(askById(ask.id).state).toBe('answered')
+      expect(readFileSync(vh.statePath, 'utf-8')).toBe(state)
+      expect(readFileSync(recordFile(runId), 'utf-8')).toBe('{"not":"a record"}')
+
+      // No Ask is open on `p` until the next advance, so the bare form is the one the line's remedy reaches.
+      rmSync(recordFile(runId))
+      const again = await capture(['deny', 'p'])
+
+      expect({ code: again.code, stderr: again.stderr }).toMatchObject({ code: 0 })
+      expect(readState().denials.p).toBeDefined()
+      expect(readState().pending_gates.some((g) => g.plugin === 'p' && g.applied_at === null)).toBe(false)
     },
     SLOW,
   )

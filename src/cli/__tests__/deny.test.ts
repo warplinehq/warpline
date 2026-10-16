@@ -26,6 +26,8 @@ import { codeLines, walkImports } from '../../../test-utils/import-walk.js'
 import { readOpenHandoffs, writeHandoff } from '../../lib/handoffs.js'
 import * as auditLog from '../../lib/audit-log.js'
 import * as fsAtomic from '../../lib/fs-atomic.js'
+import * as stateStore from '../../runtime/engine-state-store.js'
+import { auditRecords } from './helpers/verb-home.js'
 
 let root: string
 let statePath: string
@@ -67,7 +69,7 @@ const FIXTURES = [
   makeManifest('quiet-plugin', []),
 ]
 
-/** Run `deny`'s `run(argv)` with stdout/stderr captured. */
+/** Run `deny`'s `run(argv)` with stdout/stderr captured. A run that throws carries what it printed on the error. */
 async function capture(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   const realOut = process.stdout.write
   const realErr = process.stderr.write
@@ -85,6 +87,9 @@ async function capture(argv: string[]): Promise<{ code: number; stdout: string; 
     const { run } = await import('../deny.js')
     const code = await run(argv)
     return { code, stdout, stderr }
+  } catch (err) {
+    if (typeof err === 'object' && err !== null) Object.assign(err, { stdout, stderr })
+    throw err
   } finally {
     process.stdout.write = realOut
     process.stderr.write = realErr
@@ -439,6 +444,13 @@ describe('warpline deny', () => {
     const read = await readOpenHandoffs(handoffsAt())
     return { open: read.open.map((h) => h.id), unreadable: read.unreadable }
   }
+  // The three sentences deny's failure lines are built from, each for a record id such as `run-a.render-issue`.
+  const readLine = (id: string, code: string): string =>
+    `deny: the Handoff record ${id} could not be read (${code}), so no denial was recorded.`
+  const remedy = (id: string): string =>
+    `Deny again once ${join(handoffsAt(), id + '.json')} reads as a Handoff record or is no longer there.`
+  const stays = (id: string): string =>
+    ` The Handoff record ${id} was withdrawn and stays withdrawn. Its parked result is still parked, and approve or deny answers it.`
 
   test('9g: denying a live parked handoff withdraws the Handoff record of that run, and no other', async () => {
     await seedGateFor('render-issue', null)
@@ -476,16 +488,16 @@ describe('warpline deny', () => {
     await seedGateFor('render-issue', null)
     // A directory stands for a record that cannot be read. Not chmod, which uid 0 ignores.
     await mkdir(join(handoffsAt(), 'run-a.render-issue.json'), { recursive: true })
-    const before = await rawState()
+    const home = await snapshot(root)
+    const audits = auditRecords(root, 'denial.recorded').length
 
     const { code, stderr } = await capture(['render-issue'])
 
     expect(code).toBe(1)
-    expect(stderr).toContain(
-      'deny: the Handoff record run-a.render-issue could not be closed (EISDIR), so nothing was denied.',
-    )
-    // No denial, and the gate is still live.
-    expect(await rawState()).toBe(before)
+    expect(stderr).toContain(readLine('run-a.render-issue', 'EISDIR') + ' Nothing was written. ' + remedy('run-a.render-issue'))
+    // No denial, no audit record, and the gate is still live.
+    expect(await snapshot(root)).toEqual(home)
+    expect(auditRecords(root, 'denial.recorded').length).toBe(audits)
   })
 
   test('9j: a Handoff record already superseded is left as it is, and a newer open one stays open', async () => {
@@ -541,16 +553,25 @@ describe('warpline deny', () => {
     // Readable bytes, so the EINVAL arm runs, not the read failure 9i covers.
     await mkdir(handoffsAt(), { recursive: true })
     await writeFile(join(handoffsAt(), 'run-a.render-issue.json'), '{"not":"a record"}')
-    const before = await rawState()
+    const home = await snapshot(root)
+    const audits = auditRecords(root, 'denial.recorded').length
 
     const { code, stderr } = await capture(['render-issue'])
 
     expect(code).toBe(1)
-    expect(stderr).toContain(
-      'deny: the Handoff record run-a.render-issue could not be closed (EINVAL), so nothing was denied.',
-    )
-    expect(await rawState()).toBe(before)
+    expect(stderr).toContain(readLine('run-a.render-issue', 'EINVAL') + ' Nothing was written. ' + remedy('run-a.render-issue'))
+    expect(await snapshot(root)).toEqual(home)
+    expect(auditRecords(root, 'denial.recorded').length).toBe(audits)
     expect(await recordBytes('run-a.render-issue')).toBe('{"not":"a record"}')
+
+    // The remedy the line names, followed.
+    await rm(join(handoffsAt(), 'run-a.render-issue.json'))
+    const again = await capture(['render-issue'])
+
+    expect(again.code).toBe(0)
+    const state = await readState()
+    expect(state.denials['render-issue']).toBeDefined()
+    expect(state.pending_gates.some((g: { plugin: string }) => g.plugin === 'render-issue')).toBe(false)
   })
 
   test('9m: a Handoff record that cannot be rewritten stops the denial, and nothing is denied', async () => {
@@ -578,8 +599,9 @@ describe('warpline deny', () => {
 
     expect(result.code).toBe(1)
     expect(result.stderr).toContain(
-      'deny: the Handoff record run-a.render-issue could not be closed (EACCES), so nothing was denied.',
+      'deny: the Handoff record run-a.render-issue could not be closed (EACCES), so no denial was recorded.',
     )
+    expect(result.stderr).not.toContain('stays withdrawn')
     expect(await recordBytes('run-a.render-issue')).toBe(bytes)
     expect(await rawState()).toBe(before)
   })
@@ -591,15 +613,35 @@ describe('warpline deny', () => {
     state.pending_gates.push({ ...state.pending_gates[0], plugin: 'digest-sender', run_id: 'run-b' })
     await writeFile(statePath, JSON.stringify(state))
     await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'render-issue', task: 'render it', context_path: null })
-    await mkdir(join(handoffsAt(), 'run-b.digest-sender.json'), { recursive: true })
+    await writeHandoff(handoffsAt(), { run_id: 'run-b', plugin: 'digest-sender', task: 'send it', context_path: null })
+    const b = await recordBytes('run-b.digest-sender')
     const before = await rawState()
 
-    const { code, stderr } = await capture(['render-issue', 'digest-sender'])
+    // Read BEFORE `spyOn`: afterwards the namespace property is the mock.
+    const real = fsAtomic.atomicWriteJson
+    const spy = spyOn(fsAtomic, 'atomicWriteJson').mockImplementation((async (
+      path: string,
+      value: unknown,
+      opts?: { mode?: number },
+    ) => {
+      if (path.endsWith('run-b.digest-sender.json')) throw Object.assign(new Error('write refused'), { code: 'EACCES' })
+      return real(path, value, opts)
+    }) as typeof fsAtomic.atomicWriteJson)
+    let result: { code: number; stdout: string; stderr: string }
+    try {
+      result = await capture(['render-issue', 'digest-sender'])
+    } finally {
+      spy.mockRestore()
+    }
 
-    expect(code).toBe(1)
-    expect(stderr).toContain('deny: the Handoff record run-b.digest-sender could not be closed (EISDIR)')
+    expect(result.code).toBe(1)
+    expect(result.stderr).toContain(
+      'deny: the Handoff record run-b.digest-sender could not be closed (EACCES), so no denial was recorded.' +
+        stays('run-a.render-issue'),
+    )
     // No rollback: the direction where nothing answers a run the operator tried to deny.
     expect(JSON.parse(await recordBytes('run-a.render-issue')).state).toBe('withdrawn')
+    expect(await recordBytes('run-b.digest-sender')).toBe(b)
     expect(await rawState()).toBe(before)
   })
 
@@ -624,7 +666,63 @@ describe('warpline deny', () => {
     expect(stdout).not.toContain('Handoff record')
   })
 
-  test('10:denying the same plugin twice against an unchanged proposal writes nothing the second time', async () => {
+  test('9p: an unreadable Handoff record for a later plugin stops the deny before any record is withdrawn', async () => {
+    await seedGateFor('render-issue', null)
+    // A second live gate, run-b, for the second plugin named.
+    const state = await readState()
+    state.pending_gates.push({ ...state.pending_gates[0], plugin: 'digest-sender', run_id: 'run-b' })
+    await writeFile(statePath, JSON.stringify(state))
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'render-issue', task: 'render it', context_path: null })
+    await mkdir(join(handoffsAt(), 'run-b.digest-sender.json'), { recursive: true })
+    const a = await recordBytes('run-a.render-issue')
+    const home = await snapshot(root)
+    const audits = auditRecords(root, 'denial.recorded').length
+
+    const { code, stderr } = await capture(['render-issue', 'digest-sender'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(readLine('run-b.digest-sender', 'EISDIR') + ' Nothing was written.')
+    expect(await recordBytes('run-a.render-issue')).toBe(a)
+    expect((await openIds()).open).toContain('run-a.render-issue')
+    expect(await snapshot(root)).toEqual(home)
+    expect(auditRecords(root, 'denial.recorded').length).toBe(audits)
+  })
+
+  test('9q: a state write that fails after a withdraw names the withdrawn record, and the gate stays parked', async () => {
+    await seedGateFor('render-issue', null)
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'render-issue', task: 'render it', context_path: null })
+    const before = await rawState()
+
+    const spy = spyOn(stateStore, 'writeEngineState').mockImplementation((async () => {
+      throw Object.assign(new Error('state write refused'), { code: 'EIO' })
+    }) as typeof stateStore.writeEngineState)
+    let thrown: unknown
+    try {
+      thrown = await capture(['render-issue']).then(() => null, (e: unknown) => e)
+    } finally {
+      spy.mockRestore()
+    }
+
+    expect((thrown as Error).message).toBe('state write refused')
+    expect((thrown as { stderr: string }).stderr).toContain(
+      'deny: the state document could not be written (EIO), so no denial was recorded.' + stays('run-a.render-issue'),
+    )
+    expect(JSON.parse(await recordBytes('run-a.render-issue')).state).toBe('withdrawn')
+    expect(await rawState()).toBe(before)
+
+    // Denying again records the denial, and the record is never written twice.
+    const withdrawnBytes = await recordBytes('run-a.render-issue')
+    const again = await capture(['render-issue'])
+
+    expect(again.code).toBe(0)
+    const after = await readState()
+    expect(after.denials['render-issue']).toBeDefined()
+    expect(after.pending_gates.some((g: { plugin: string }) => g.plugin === 'render-issue')).toBe(false)
+    expect(await recordBytes('run-a.render-issue')).toBe(withdrawnBytes)
+    expect(again.stdout).not.toContain('Handoff record')
+  })
+
+  test('10: denying the same plugin twice against an unchanged proposal writes nothing the second time', async () => {
     await capture(['render-issue'])
     const before = await rawState()
 

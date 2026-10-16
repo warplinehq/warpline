@@ -25,6 +25,8 @@ describe('the needs-llm scanner skill', () => {
     const text = flat(skill())
     expect(text).toContain('handoffs/*.json')
     expect(text).toContain('"open"')
+    // The whole sentence, so a step that keeps another state beside `open` is seen.
+    expect(text).toContain('keep the ones whose `state` field is `"open"`.')
     expect(text).toContain('`superseded`')
     expect(text).toContain('nothing to do')
     expect(text).not.toContain('runs/*.json')

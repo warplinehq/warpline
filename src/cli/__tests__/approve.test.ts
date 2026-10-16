@@ -32,6 +32,7 @@ import { readEngineState } from '../../runtime/engine-state-store.js'
 import * as stateStore from '../../runtime/engine-state-store.js'
 import { writeHandoff } from '../../lib/handoffs.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
+import { codeLines } from '../../../test-utils/import-walk.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
 let root: string
@@ -744,15 +745,15 @@ export async function handler() {
     expect((await readState()).pending_gates[0].applied_at).not.toBeNull()
   })
 
-  // The gate's stored result shape is not what approve reads: the Handoff
-  // record alone stands for the handoff, and the run id joins the two.
-  // `gated-writer` declares a side effect, the only kind of plugin whose
-  // handoff parks. `seedGate` always parks run `run-a`.
+  // approve answers a parked result from its gate alone. These cases put a
+  // Handoff record beside the gate in each state a deny can leave, to show the
+  // apply never looks at it. `gated-writer` declares a side effect, the only
+  // kind of plugin whose handoff parks. `seedGate` always parks run `run-a`.
   const handoffsAt = () => join(root, 'handoffs')
   const recordBytes = (id: string) => readFile(join(root, 'handoffs', `${id}.json`), 'utf-8')
   const rawState = () => readFile(statePath, 'utf-8')
 
-  test('18c: a parked result whose run was denied partway is refused until the denial is finished, and denying again finishes it', async () => {
+  test('18c: a parked result whose run was denied partway is applied, and its withdrawn Handoff record is left as it is', async () => {
     await writeGatedPlugin('gated-writer')
     await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
     await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'gated-writer', task: 'judge it', context_path: null })
@@ -774,41 +775,24 @@ export async function handler() {
 
     const { code, stdout, stderr } = await capture('approve', ['gated-writer'])
 
-    expect(code).toBe(1)
-    expect(stderr).toContain(
-      'The parked result for gated-writer from run run-a was denied partway: its Handoff record is withdrawn, but the gate is still parked.',
-    )
-    expect(stderr).toContain('Deny it again to finish: warpline deny gated-writer')
-    expect(stdout).toBe('')
-    expect(await rawState()).toBe(before)
+    expect({ code, stderr }).toMatchObject({ code: 0 })
+    expect(stdout).toContain('Applied the parked result for gated-writer from run run-a')
+    expect((await readState()).pending_gates[0].applied_at).not.toBeNull()
     expect(await recordBytes('run-a.gated-writer')).toBe(withdrawn)
     expect(existsSync(approvalPath)).toBe(false)
     expect(existsSync(marker)).toBe(false)
-
-    const again = await capture('deny', ['gated-writer'])
-
-    expect(again.code).toBe(0)
-    const after = await readState()
-    expect(after.pending_gates.some((g: { plugin: string }) => g.plugin === 'gated-writer')).toBe(false)
-    expect(after.denials['gated-writer']).toBeDefined()
-    expect(await recordBytes('run-a.gated-writer')).toBe(withdrawn)
-    expect(again.stdout).not.toContain('Handoff record')
   })
 
-  test('18d: a parked result whose Handoff record cannot be read is not applied', async () => {
+  test('18d: a parked result whose Handoff record cannot be read is applied, and the file is left as it is', async () => {
     await writeGatedPlugin('gated-writer')
     await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
     await mkdir(handoffsAt(), { recursive: true })
     await writeFile(join(handoffsAt(), 'run-a.gated-writer.json'), '{"not":"a record"}')
-    const before = await rawState()
 
     const { code, stderr } = await capture('approve', ['gated-writer'])
 
-    expect(code).toBe(1)
-    expect(stderr).toContain(
-      'The Handoff record run-a.gated-writer could not be read (EINVAL), so the parked result for gated-writer was not applied. No grant was written.',
-    )
-    expect(await rawState()).toBe(before)
+    expect({ code, stderr }).toMatchObject({ code: 0 })
+    expect((await readState()).pending_gates[0].applied_at).not.toBeNull()
     expect(await recordBytes('run-a.gated-writer')).toBe('{"not":"a record"}')
     expect(existsSync(approvalPath)).toBe(false)
   })
@@ -841,6 +825,49 @@ export async function handler() {
     expect(code).toBe(0)
     expect((await readState()).pending_gates[0].applied_at).not.toBeNull()
     expect(await recordBytes('run-a.gated-writer')).toBe(bytes)
+  })
+
+  test('18g: a parked result is applied when the handoffs directory is not a directory', async () => {
+    await writeGatedPlugin('gated-writer')
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
+    // Every read under this path fails with ENOTDIR, so a read that fails
+    // closed anywhere on the apply path refuses here.
+    await writeFile(handoffsAt(), 'not a directory')
+
+    const { code, stderr } = await capture('approve', ['gated-writer'])
+
+    expect({ code, stderr }).toMatchObject({ code: 0 })
+    expect((await readState()).pending_gates[0].applied_at).not.toBeNull()
+    expect(await readFile(handoffsAt(), 'utf-8')).toBe('not a directory')
+  })
+
+  /**
+   * The code lines of `source` that name a handoff. The record's module, its
+   * readers, its directory accessor and its path all carry the word, so one
+   * predicate covers every form a read could come back in. Comments are not
+   * scanned. The scan reaches approve.ts alone, because engine.ts, which
+   * approve imports, writes records for an advance; 18c, 18d and 18g are the
+   * half that reaches whatever approve calls.
+   */
+  const handoffCode = (source: string): Array<[number, string]> =>
+    codeLines(source).filter(([, code]) => /handoff/i.test(code))
+
+  test('18h: approve.ts has no code line naming a Handoff record, its module, its directory or its path', async () => {
+    expect(handoffCode(await readFile(join(import.meta.dir, '..', 'approve.ts'), 'utf-8'))).toEqual([])
+  })
+
+  test('18i: the 18h scan flags every form a record read can come back in, and no comment', () => {
+    const fixture = [
+      "import { readHandoff } from '../lib/handoffs.js'",
+      "const { withdrawHandoff } = await import('../lib/handoffs.js')",
+      "import { handoffsDir } from '../lib/paths.js'",
+      "const dir = join(home, 'handoffs')",
+      '// the handoffs directory is not read here',
+      ' * readHandoff is named in a doc comment',
+      'await applyPendingGate(state, gate, manifest, opts)',
+    ].join('\n')
+
+    expect(handoffCode(fixture).map(([n]) => n)).toEqual([1, 2, 3, 4])
   })
 
   /**
