@@ -7,7 +7,7 @@
  * `export const manifest = {…}` with ZERO imports, which keeps them out of the
  * `warpline/schemas/*` resolution path entirely.
  */
-import { describe, test, expect, beforeEach, afterEach } from 'bun:test'
+import { describe, test, expect, beforeEach, afterEach, spyOn } from 'bun:test'
 import { mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
@@ -29,6 +29,8 @@ import {
 import type { EvalContext } from '../../runtime/engine.js'
 import { deriveHost } from '../../runtime/lock.js'
 import { readEngineState } from '../../runtime/engine-state-store.js'
+import * as stateStore from '../../runtime/engine-state-store.js'
+import { writeHandoff } from '../../lib/handoffs.js'
 import { snapshotHome } from '../../runtime/__tests__/helpers/snapshot-home.js'
 import type { PluginManifest } from '../../schemas/plugin-manifest.js'
 
@@ -76,10 +78,11 @@ const FIXTURES = [
  *
  * `resolve` goes through the dispatcher's `main`, not a module of its own: the
  * arm that routes it is part of what the cases below pin, and a command the
- * dispatcher does not know answers "Unknown command" there.
+ * dispatcher does not know answers "Unknown command" there. `deny` goes
+ * through `main` too, for the cases that answer a gate with both verbs.
  */
 async function capture(
-  mod: 'approve' | 'revoke' | 'resolve',
+  mod: 'approve' | 'revoke' | 'resolve' | 'deny',
   argv: string[],
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   const realOut = process.stdout.write
@@ -95,9 +98,9 @@ async function capture(
     return true
   }) as typeof process.stderr.write
   try {
-    if (mod === 'resolve') {
+    if (mod === 'resolve' || mod === 'deny') {
       const { main } = await import('../warpline.js')
-      const code = await main(['resolve', ...argv])
+      const code = await main([mod, ...argv])
       return { code, stdout, stderr }
     }
     const { run } = mod === 'approve' ? await import('../approve.js') : await import('../revoke.js')
@@ -739,6 +742,105 @@ export async function handler() {
     expect(code).toBe(0)
     expect(stdout.toLowerCase()).toContain('parked result')
     expect((await readState()).pending_gates[0].applied_at).not.toBeNull()
+  })
+
+  // The gate's stored result shape is not what approve reads: the Handoff
+  // record alone stands for the handoff, and the run id joins the two.
+  // `gated-writer` declares a side effect, the only kind of plugin whose
+  // handoff parks. `seedGate` always parks run `run-a`.
+  const handoffsAt = () => join(root, 'handoffs')
+  const recordBytes = (id: string) => readFile(join(root, 'handoffs', `${id}.json`), 'utf-8')
+  const rawState = () => readFile(statePath, 'utf-8')
+
+  test('18c: a parked result whose run was denied partway is refused until the denial is finished, and denying again finishes it', async () => {
+    await writeGatedPlugin('gated-writer')
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'gated-writer', task: 'judge it', context_path: null })
+    const before = await rawState()
+
+    // The residual a deny leaves when its state write fails after the close.
+    const spy = spyOn(stateStore, 'writeEngineState').mockImplementation((async () => {
+      throw Object.assign(new Error('state write refused'), { code: 'EIO' })
+    }) as typeof stateStore.writeEngineState)
+    try {
+      await expect(capture('deny', ['gated-writer'])).rejects.toThrow('state write refused')
+    } finally {
+      spy.mockRestore()
+    }
+
+    expect(JSON.parse(await recordBytes('run-a.gated-writer')).state).toBe('withdrawn')
+    expect(await rawState()).toBe(before)
+    const withdrawn = await recordBytes('run-a.gated-writer')
+
+    const { code, stdout, stderr } = await capture('approve', ['gated-writer'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(
+      'The parked result for gated-writer from run run-a was denied partway: its Handoff record is withdrawn, but the gate is still parked.',
+    )
+    expect(stderr).toContain('Deny it again to finish: warpline deny gated-writer')
+    expect(stdout).toBe('')
+    expect(await rawState()).toBe(before)
+    expect(await recordBytes('run-a.gated-writer')).toBe(withdrawn)
+    expect(existsSync(approvalPath)).toBe(false)
+    expect(existsSync(marker)).toBe(false)
+
+    const again = await capture('deny', ['gated-writer'])
+
+    expect(again.code).toBe(0)
+    const after = await readState()
+    expect(after.pending_gates.some((g: { plugin: string }) => g.plugin === 'gated-writer')).toBe(false)
+    expect(after.denials['gated-writer']).toBeDefined()
+    expect(await recordBytes('run-a.gated-writer')).toBe(withdrawn)
+    expect(again.stdout).not.toContain('Handoff record')
+  })
+
+  test('18d: a parked result whose Handoff record cannot be read is not applied', async () => {
+    await writeGatedPlugin('gated-writer')
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
+    await mkdir(handoffsAt(), { recursive: true })
+    await writeFile(join(handoffsAt(), 'run-a.gated-writer.json'), '{"not":"a record"}')
+    const before = await rawState()
+
+    const { code, stderr } = await capture('approve', ['gated-writer'])
+
+    expect(code).toBe(1)
+    expect(stderr).toContain(
+      'The Handoff record run-a.gated-writer could not be read (EINVAL), so the parked result for gated-writer was not applied. No grant was written.',
+    )
+    expect(await rawState()).toBe(before)
+    expect(await recordBytes('run-a.gated-writer')).toBe('{"not":"a record"}')
+    expect(existsSync(approvalPath)).toBe(false)
+  })
+
+  test('18e: a parked result whose Handoff record is open is applied, and the record stays open', async () => {
+    await writeGatedPlugin('gated-writer')
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'gated-writer', task: 'judge it', context_path: null })
+    const bytes = await recordBytes('run-a.gated-writer')
+
+    const { code, stdout } = await capture('approve', ['gated-writer'])
+
+    expect(code).toBe(0)
+    expect(stdout).toContain('Applied the parked result for gated-writer')
+    expect((await readState()).pending_gates[0].applied_at).not.toBeNull()
+    expect(await recordBytes('run-a.gated-writer')).toBe(bytes)
+  })
+
+  test('18f: a parked result whose Handoff record was superseded is applied', async () => {
+    await writeGatedPlugin('gated-writer')
+    await seedGate('gated-writer', { startedAgoMs: 60_000, completedAgoMs: 30_000 })
+    // A manual run that handed off after the parked one.
+    await writeHandoff(handoffsAt(), { run_id: 'run-a', plugin: 'gated-writer', task: 'judge it', context_path: null })
+    await writeHandoff(handoffsAt(), { run_id: 'run-b', plugin: 'gated-writer', task: 'judge it', context_path: null })
+    expect(JSON.parse(await recordBytes('run-a.gated-writer')).state).toBe('superseded')
+    const bytes = await recordBytes('run-a.gated-writer')
+
+    const { code } = await capture('approve', ['gated-writer'])
+
+    expect(code).toBe(0)
+    expect((await readState()).pending_gates[0].applied_at).not.toBeNull()
+    expect(await recordBytes('run-a.gated-writer')).toBe(bytes)
   })
 
   /**
