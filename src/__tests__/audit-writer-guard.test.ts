@@ -14,10 +14,12 @@
  * Lines whose text starts with `*` or `//` are dropped first.
  *
  * **What the store may import.** `node:*`, `zod`, `../schemas/run-log.js`,
- * `./host-identity.js` and `./assurance.js`, nothing else. The identity module
- * holds the machine identifier and the liveness probe the lock uses, and it
- * imports only `node:*`. The assurance seam holds the levels `ask.answered`
- * may carry, and it imports nothing. Cases below check both, so the store
+ * `./host-identity.js`, `./assurance.js` and `./pid-lock.js`, nothing else. The
+ * identity module holds the machine identifier and the liveness probe the lock
+ * uses, and it imports only `node:*`. The assurance seam holds the levels
+ * `ask.answered` may carry, and it imports nothing. The lock helpers hold the
+ * symlink lock and its holder rule, and import only `node:*` and the identity
+ * module. Cases below check all three, so the store
  * still reaches the runtime through nothing. The approval gate lives in the runtime, and a store that
  * could reach it would make this a graph walk instead of a line scan. The
  * specifier regex is the one the schema-module guard uses, so all four import
@@ -41,7 +43,7 @@ const JOINS_AUDIT = /\b(join|resolve)\(.*['"`]audit['"`]/
 const AUDIT_PATH = /['"`][^'"`]*\/audit(\/[^'"`]*)?['"`]/
 const SPECIFIER =
   /(?<![.\w])(?:(?:from|import)\s*["']|(?:import|require)\s*\(\s*["'`])([^"'`\n]+)["'`]/g
-const ALLOWED_SPECIFIER = /^(node:[a-z/_]+|zod|\.\.\/schemas\/run-log\.js|\.\/host-identity\.js|\.\/assurance\.js)$/
+const ALLOWED_SPECIFIER = /^(node:[a-z/_]+|zod|\.\.\/schemas\/run-log\.js|\.\/host-identity\.js|\.\/assurance\.js|\.\/pid-lock\.js)$/
 
 /** Every non-test `.ts` file under `src/` and `examples/`; empty throws. */
 function sourceFiles(): string[] {
@@ -160,6 +162,14 @@ describe('the store reaches nothing in the runtime or the board', () => {
     const specifiers = [...source.matchAll(SPECIFIER)].map((m) => m[1])
     expect(specifiers.length).toBeGreaterThan(0)
     expect(specifiers.filter((s) => !/^node:[a-z/_]+$/.test(s))).toEqual([])
+  })
+
+  test('the lock helpers import only node built-ins and the host identity', () => {
+    const source = readFileSync(join(REPO_ROOT, 'src/lib/pid-lock.ts'), 'utf8')
+    const specifiers = codeLines(source).flatMap(([, text]) => [...text.matchAll(SPECIFIER)].map((m) => m[1] as string))
+    // An empty list means the scan did not look, never that the module is clean.
+    expect(specifiers.length).toBeGreaterThan(0)
+    expect(specifiers.filter((s) => !/^(node:[a-z/_]+|\.\/host-identity\.js)$/.test(s))).toEqual([])
   })
 
   test('the assurance seam the store imports reaches nothing', () => {

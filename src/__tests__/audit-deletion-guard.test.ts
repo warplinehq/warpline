@@ -46,12 +46,12 @@ const DELETION = String.raw`\b(unlink|rm|rmdir|rename|truncate|ftruncate)(Sync)?
 const EXPECTED: Record<string, number> = {
   'src/board/state-manager.ts': 2,
   'src/cli/scaffold.ts': 2,
-  // The token-checked release (the end of a hold and the exit hook), a gone
-  // holder's lock removal under the break file, and the breaker's removal of
-  // its own break file.
-  'src/lib/audit-log.ts': 3,
   'src/lib/fs-atomic.ts': 3,
   'src/lib/jsonl-logger.ts': 1,
+  // The token-checked release (the end of a hold and the exit hook), a gone
+  // holder's lock removal under the break file, and the breaker's removal of
+  // its own break file. The audit store reaches all three through this module.
+  'src/lib/pid-lock.ts': 3,
   'src/runtime/approval-gate.ts': 1,
   'src/runtime/lock.ts': 1,
   'src/runtime/run-artifacts.ts': 2,
