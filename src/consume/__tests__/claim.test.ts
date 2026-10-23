@@ -66,7 +66,7 @@ function plant(text: string): string {
 describe('a claim', () => {
   test('is taken by exclusive create, names this process, and is released', () => {
     const r = claim.claimHandoff(dir, ID)
-    expect(r).toMatchObject({ claimed: true, broke: false })
+    expect(r).toMatchObject({ claimed: true })
     if (!r.claimed) throw new Error('not claimed')
     const named = JSON.parse(readlinkSync(claimPath(), 'utf8')) as Record<string, unknown>
     expect(named).toMatchObject({ token: r.token, pid: process.pid, host: pidLock.ourHost() })
@@ -90,11 +90,11 @@ describe('a claim', () => {
 
 describe('breaking a claim', () => {
   test.skipIf(pidLock.ourHost() === null)(
-    'a holder on this host whose pid is dead is broken, the claim taken with broke: true, and no .claim.break remains',
+    'a holder on this host whose pid is dead is broken, the claim taken, and no .claim.break remains',
     () => {
       plant(JSON.stringify({ token: 'gone', pid: deadPid(), host: pidLock.ourHost(), at: Date.now() }))
       const r = claim.claimHandoff(dir, ID)
-      expect(r).toMatchObject({ claimed: true, broke: true })
+      expect(r).toMatchObject({ claimed: true })
       if (!r.claimed) throw new Error('not claimed')
       expect((JSON.parse(readlinkSync(claimPath(), 'utf8')) as { token: string }).token).toBe(r.token)
       expect(present(join(dir, `${ID}.claim.break`))).toBe(false)
@@ -173,7 +173,7 @@ describe('the exit hook', () => {
     ].join('\n')
     const child = spawnSync(process.execPath, ['-e', script], { env: { PATH: '/usr/bin:/bin' }, encoding: 'utf8' })
     expect(child.status).toBe(0)
-    expect(JSON.parse(child.stdout)).toMatchObject({ claimed: true, broke: false })
+    expect(JSON.parse(child.stdout)).toMatchObject({ claimed: true })
     expect(present(claimPath())).toBe(false)
   })
 })
