@@ -16,7 +16,7 @@
  */
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withFakeClaude } from '../../../test-utils/fake-claude.js'
 import { withOpenAiStub } from '../../../test-utils/openai-stub.js'
@@ -42,6 +42,9 @@ const NEEDS_CLAUDE_CODE = 'consume.tools needs the claude-code renderer'
 const CAN_ENTER = 'the run_as user can enter the home'
 const CAN_READ = 'the run_as user can read the home'
 const UNCHECKED = 'whether the run_as user can reach the home could not be checked'
+const OS_CAN_ENTER = "the run_as user can enter the operator's OS home"
+const OS_CAN_READ = "the run_as user can read the operator's OS home"
+const OS_UNCHECKED = "whether the run_as user can reach the operator's OS home could not be checked"
 
 type Env = Record<string, string | undefined>
 
@@ -160,12 +163,64 @@ describe('the reachability probe', () => {
     return { runner, seen }
   }
   const HOME = '/srv/warpline-home'
+  const OS_HOME = '/Users/sentinel-operator'
+  const osHome = async () => OS_HOME
   const probe = (flag: string, path: string) => [runAs.SUDO_BIN, '-n', '-u', JUDGE, runAs.TEST_BIN, flag, path]
 
-  test('the control passes and both home probes say false: ok, after exactly the three probes in order', async () => {
+  test('the control passes and every home probe says false: ok, after the control, both probes on the home, then both on the OS home', async () => {
     const s = stub({ '-d': 0, '-x': 1, '-r': 1 })
-    expect(await runAs.judgeCannotEnterHome(JUDGE, HOME, s.runner)).toEqual({ ok: true })
+    expect(await runAs.judgeCannotEnterHome(JUDGE, HOME, s.runner, osHome)).toEqual({ ok: true })
+    expect(s.seen).toEqual([probe('-d', '/'), probe('-x', HOME), probe('-r', HOME), probe('-x', OS_HOME), probe('-r', OS_HOME)])
+  })
+
+  /** A runner answering a probe by its flag and path; anything not listed is a passing control or a false test. */
+  function byPath(codes: Record<string, number | null> = {}) {
+    const seen: string[][] = []
+    const runner: runAs.ProbeRunner = async (argv) => {
+      seen.push(argv)
+      const key = `${argv[5]} ${argv[6]}`
+      if (key in codes) return codes[key] ?? null
+      return argv[5] === '-d' ? 0 : 1
+    }
+    return { runner, seen }
+  }
+
+  test.each([
+    ['an enterable OS home', { [`-x ${OS_HOME}`]: 0 }, OS_CAN_ENTER],
+    ['a readable OS home', { [`-r ${OS_HOME}`]: 0 }, OS_CAN_READ],
+    ['an OS home -x that exits 2', { [`-x ${OS_HOME}`]: 2 }, OS_UNCHECKED],
+    ['an OS home -r that exits 2', { [`-r ${OS_HOME}`]: 2 }, OS_UNCHECKED],
+    ['an OS home probe that could not run', { [`-x ${OS_HOME}`]: null }, OS_UNCHECKED],
+  ] as const)('%s is refused by name, naming neither the path nor the user', async (_, codes, reason) => {
+    const s = byPath(codes)
+    const r = await runAs.judgeCannotEnterHome(JUDGE, HOME, s.runner, osHome)
+    expect(r).toEqual({ ok: false, reason })
+    expect(s.seen.slice(0, 3)).toEqual([probe('-d', '/'), probe('-x', HOME), probe('-r', HOME)])
+    for (const leak of [JUDGE, OS_HOME, 'sentinel-operator']) expect(JSON.stringify(r).includes(leak)).toBe(false)
+  })
+
+  test('a home inside the OS home still has both homes probed', async () => {
+    const inside = `${OS_HOME}/.warpline`
+    const s = byPath()
+    expect(await runAs.judgeCannotEnterHome(JUDGE, inside, s.runner, osHome)).toEqual({ ok: true })
+    expect(s.seen).toEqual([probe('-d', '/'), probe('-x', inside), probe('-r', inside), probe('-x', OS_HOME), probe('-r', OS_HOME)])
+  })
+
+  test('an OS home whose real path cannot be found is could-not-be-checked, never cannot-reach, and probes nothing there', async () => {
+    const s = byPath()
+    const r = await runAs.judgeCannotEnterHome(JUDGE, HOME, s.runner, async () => {
+      throw new Error(`ENOENT: ${OS_HOME}`)
+    })
+    expect(r).toEqual({ ok: false, reason: OS_UNCHECKED })
+    expect(JSON.stringify(r).includes('sentinel-operator')).toBe(false)
     expect(s.seen).toEqual([probe('-d', '/'), probe('-x', HOME), probe('-r', HOME)])
+  })
+
+  test('with no OS home given, the OS home probed is the real path of os.homedir()', async () => {
+    const s = byPath()
+    expect(await runAs.judgeCannotEnterHome(JUDGE, HOME, s.runner)).toEqual({ ok: true })
+    const real = realpathSync(homedir())
+    expect(s.seen.slice(3)).toEqual([probe('-x', real), probe('-r', real)])
   })
 
   test('a failed control is could-not-be-checked, never cannot-reach: a refused sudo exits 1 like a false test', async () => {
@@ -191,6 +246,40 @@ describe('the reachability probe', () => {
     expect(runAs.TEST_BIN).toBe(process.platform === 'darwin' ? '/bin/test' : '/usr/bin/test')
     expect(runAs.SUDO_BIN).toBe('/usr/bin/sudo')
   })
+})
+
+describe('the probe deadline', () => {
+  /** Whether `pid` is gone within `ms`; a killed child can sit unreaped for a moment. */
+  async function goneWithin(pid: number, ms: number): Promise<boolean> {
+    for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(25)) {
+      try {
+        process.kill(pid, 0)
+      } catch {
+        return true
+      }
+    }
+    return false
+  }
+
+  test('a probe still running at its deadline is killed and reads as could not run, so the Handoff is refused by name', async () => {
+    expect(typeof runAs.runProbe).toBe('function')
+    const dir = temp('warpline-run-as-hang-')
+    const hang = join(dir, 'hang')
+    writeFileSync(hang, ['#!/bin/sh', 'echo $$ > "$1"', 'exec sleep 30', ''].join('\n'))
+    chmodSync(hang, 0o755)
+
+    const pidFile = join(dir, 'pid')
+    const started = Date.now()
+    expect(await runAs.runProbe([hang, pidFile], 300)).toBeNull()
+    expect(Date.now() - started).toBeLessThan(3000)
+    expect(await goneWithin(Number(readFileSync(pidFile, 'utf-8')), 2000)).toBe(true)
+
+    // Through the probe: the control hangs, and the refusal is the fixed could-not-be-checked one.
+    const controlPid = join(dir, 'control-pid')
+    const r = await runAs.judgeCannotEnterHome(JUDGE, '/srv/warpline-home', () => runAs.runProbe([hang, controlPid], 300), async () => '/x')
+    expect(r).toEqual({ ok: false, reason: UNCHECKED })
+    expect(await goneWithin(Number(readFileSync(controlPid, 'utf-8')), 2000)).toBe(true)
+  }, 10_000)
 })
 
 describe('the argv', () => {
