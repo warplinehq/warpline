@@ -270,6 +270,58 @@ A content-class plugin whose Handoff record cannot be written is a failed fire,
 so its approval is left `indeterminate`, as
 [runtime-spec.md](runtime-spec.md) § 10 describes.
 
+## How `warpline consume` answers a record
+
+`warpline consume` reads an open record, sends one prompt to the configured
+provider, and writes the text that comes back as the Judgment. Each rule below
+is checked by `consumePass` in `pass.ts`.
+
+**The prompt.** With `context_path: null` the prompt is the `task` alone,
+byte for byte. Otherwise it is the `task`, a blank line, then the context
+file's text. The prompt is sent verbatim to the configured provider.
+
+**The context file.** A relative `context_path` joins the home, and an
+absolute one is used as written. Either way the path must resolve inside the
+home on the filesystem, symbolic links included, and the file is read only
+through that resolved path. The file must be UTF-8 and at most 8 MiB
+(`CONTEXT_MAX_BYTES`, under the claude CLI's 10 MB stdin limit). Otherwise the
+Handoff is refused by name, with no reservation and no model call, and the
+record stays `open`:
+
+- `the context path resolves outside the home`
+- `the context file is missing`
+- `the context file is not UTF-8`
+- `the context file is over 8 MiB`
+- `the context file could not be read (<code>)` for any other read error
+
+**The output path.** `output_path` must resolve inside the home on the
+filesystem, symbolic links included. Before a try is reserved, the deepest
+part of `<home>/<output_path>`'s directory that exists must resolve inside the
+home before any directory is made, and the directory is checked again once it
+is made. A path that resolves elsewhere is refused with `output_path resolves
+outside the home`, with no reservation and no model call, and nothing is made
+outside the home. The directory is checked a third time right before the
+write. If it has moved outside the home during the call, the try is `failed`
+with the same reason and nothing is written. warpline writes the Judgment
+there atomically, as the text's UTF-8 bytes.
+
+**A successful try.** The text is an answer only when it is non-empty after
+trimming and at most `consume.max_output_bytes` UTF-8 bytes. Text of exactly
+that many bytes is an answer. Otherwise the try is `failed` with reason `the
+text was empty` or `the text is over consume.max_output_bytes`, nothing is
+written, the record stays `open`, and the try's `handoff.tried` line still
+carries the text's byte count and sha256.
+
+**Max tries.** A try counts against `consume.max_tries` when its `outcome` is
+not `answered`, `recovered` or `discarded`. The count is read from the
+record's `tries` and stored nowhere else. Once a record has
+`consume.max_tries` counted tries, it is skipped with `the Handoff has used
+consume.max_tries tries`, with no model call. It is checked before the claim
+and again under it. The record stays `open`, and the pass exits `1` for it.
+
+No refusal or skip above reserves anything or adds a try, and a claim it
+took is released.
+
 ## Who consumes the handoff
 
 A **companion skill** — a Claude Code skill (see `skills/needs-llm-template/`)

@@ -16,8 +16,8 @@
  * a key path or an errno code, never a configuration value.
  */
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { mkdir, open, realpath } from 'node:fs/promises'
+import { dirname, isAbsolute, join, sep } from 'node:path'
 import { appendAudit, MODEL_ID, observeAuthorityFile } from '../lib/audit-log.js'
 import { atomicWriteText } from '../lib/fs-atomic.js'
 import { readHandoff, readOpenHandoffs, settleTry, type Handoff, type Try, type TryOutcome } from '../lib/handoffs.js'
@@ -136,12 +136,93 @@ async function recordTry(
   }
 }
 
-/** The prompt: the task, or the task, a blank line and the context file's text. */
-async function promptOf(h: Handoff): Promise<string> {
-  if (h.context_path === null) return h.task
-  const path = isAbsolute(h.context_path) ? h.context_path : join(warplineHome(), h.context_path)
-  return `${h.task}\n\n${await readFile(path, 'utf-8')}`
+/** The largest context file a try sends. Under the claude CLI's 10 MB stdin cap, so a prompt is never cut there. */
+export const CONTEXT_MAX_BYTES = 8 * 1024 * 1024
+
+const OUTSIDE_OUTPUT = 'output_path resolves outside the home'
+
+/** `p` through every link, when that lands on the home or below it; null when it lands elsewhere. Throws as `realpath` does. */
+async function resolveInside(home: string, p: string): Promise<string | null> {
+  const [h, r] = await Promise.all([realpath(home), realpath(p)])
+  return r === h || r.startsWith(h + sep) ? r : null
 }
+
+/**
+ * The context file's text, or a fixed reason. A relative path joins the home
+ * and an absolute one is used as written; either way the file is read only
+ * through its real path, and only when that is inside the home's.
+ */
+async function readContext(home: string, contextPath: string | null): Promise<{ text: string | null } | { reason: string }> {
+  if (contextPath === null) return { text: null }
+  let real: string | null
+  try {
+    real = await resolveInside(home, isAbsolute(contextPath) ? contextPath : join(home, contextPath))
+  } catch (err) {
+    return { reason: errnoOf(err) === 'ENOENT' ? 'the context file is missing' : `the context file could not be read (${errnoOf(err)})` }
+  }
+  if (real === null) return { reason: 'the context path resolves outside the home' }
+  let bytes: Buffer
+  try {
+    const fh = await open(real, 'r')
+    try {
+      if ((await fh.stat()).size > CONTEXT_MAX_BYTES) return { reason: 'the context file is over 8 MiB' }
+      bytes = await fh.readFile()
+    } finally {
+      await fh.close()
+    }
+  } catch (err) {
+    return { reason: `the context file could not be read (${errnoOf(err)})` }
+  }
+  // Grown since the stat: the bound is on what is sent.
+  if (bytes.length > CONTEXT_MAX_BYTES) return { reason: 'the context file is over 8 MiB' }
+  try {
+    return { text: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) }
+  } catch {
+    return { reason: 'the context file is not UTF-8' }
+  }
+}
+
+/**
+ * The Judgment's absolute path with its directory made, or a fixed reason.
+ * The deepest existing ancestor must resolve inside the home before anything
+ * is made, so a link out of the home never gets a directory made through it,
+ * and the made directory is checked again.
+ */
+async function prepareOutput(home: string, outputPath: string): Promise<{ target: string } | { reason: string }> {
+  const target = join(home, outputPath)
+  const parent = dirname(target)
+  try {
+    let ancestor = parent
+    for (;;) {
+      try {
+        if ((await resolveInside(home, ancestor)) === null) return { reason: OUTSIDE_OUTPUT }
+        break
+      } catch (err) {
+        if (errnoOf(err) !== 'ENOENT' || dirname(ancestor) === ancestor) throw err
+        ancestor = dirname(ancestor)
+      }
+    }
+    await mkdir(parent, { recursive: true })
+    if ((await resolveInside(home, parent)) === null) return { reason: OUTSIDE_OUTPUT }
+  } catch (err) {
+    return { reason: `the output directory could not be made (${errnoOf(err)})` }
+  }
+  return { target }
+}
+
+/** Why a renderer's text is not an answer, or null when it is. */
+function textProblem(text: string, maxBytes: number): string | null {
+  if (text.trim() === '') return 'the text was empty'
+  if (Buffer.byteLength(text, 'utf-8') > maxBytes) return 'the text is over consume.max_output_bytes'
+  return null
+}
+
+/** The tries counted against `consume.max_tries`: every one not answered, recovered or discarded. */
+function countedTries(h: Handoff): number {
+  return (h.tries ?? []).filter((t) => t.outcome !== 'answered' && t.outcome !== 'recovered' && t.outcome !== 'discarded').length
+}
+
+const MAX_TRIES_USED = 'the Handoff has used consume.max_tries tries'
 
 /** Answer the open Handoff records once, oldest first. `plugins` null means every plugin. */
 export async function consumePass(o: {
@@ -234,6 +315,10 @@ export async function consumePass(o: {
       result.refused.push({ id, reason: 'no cost basis under a spend cap: the model has no consume.prices entry' })
       continue
     }
+    if (countedTries(h) >= settings.max_tries) {
+      result.skipped.push({ id, reason: MAX_TRIES_USED })
+      continue
+    }
 
     const claimed = claimHandoff(dir, id)
     if (!claimed.claimed) {
@@ -256,13 +341,24 @@ export async function consumePass(o: {
         continue
       }
 
-      let prompt: string
-      try {
-        prompt = await promptOf(current)
-      } catch (err) {
-        result.refused.push({ id, reason: `the context file could not be read (${errnoOf(err)})` })
+      // Re-read under the claim: another consumer may have spent the last try since the listing.
+      if (countedTries(current) >= settings.max_tries) {
+        result.skipped.push({ id, reason: MAX_TRIES_USED })
         continue
       }
+      const home = warplineHome()
+      const context = await readContext(home, current.context_path)
+      if ('reason' in context) {
+        result.refused.push({ id, reason: context.reason })
+        continue
+      }
+      const prompt = context.text === null ? current.task : `${current.task}\n\n${context.text}`
+      const output = await prepareOutput(home, outputPath)
+      if ('reason' in output) {
+        result.refused.push({ id, reason: output.reason })
+        continue
+      }
+      const target = output.target
 
       let reservationId: string
       try {
@@ -304,8 +400,18 @@ export async function consumePass(o: {
           id,
           async () => {
             if (rendered.ok && rendered.text !== null) {
+              const problem = textProblem(rendered.text, settings.max_output_bytes)
+              if (problem !== null) return { try: await tryOf('failed', problem), close: false }
+              // Checked again at write time: the directory may have been swapped for a link out during the call.
+              let inside: boolean
+              try {
+                inside = (await resolveInside(home, dirname(target))) !== null
+              } catch (err) {
+                return { try: await tryOf('failed', `the output directory could not be resolved (${errnoOf(err)})`), close: false }
+              }
+              if (!inside) return { try: await tryOf('failed', OUTSIDE_OUTPUT), close: false }
               const t = await tryOf('answered', null)
-              await atomicWriteText(join(warplineHome(), outputPath), rendered.text)
+              await atomicWriteText(target, rendered.text)
               return { try: t, close: true }
             }
             return { try: await tryOf('failed', rendered.reason), close: false }
