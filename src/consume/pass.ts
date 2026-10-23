@@ -14,9 +14,17 @@
  * Model calls run outside `.consume.lock` and outside the record lock. Only
  * the reservation and the settle take a lock. Every reason is a fixed phrase,
  * a key path or an errno code, never a configuration value.
+ *
+ * A pass that breaks a dead holder's claim reconciles what that holder left
+ * before it tries. The holder's try is the latest reservation for the
+ * Handoff that no try on the record names. When its `handoff.tried` says
+ * `answered` and the file at `output_path` has the recorded sha256, the paid
+ * answer is marked `recovered`, with no call and no reservation. Anything else
+ * is that try appended as `failed`, with a `handoff.tried` written first when
+ * the holder died before its own, and it counts against `consume.max_tries`.
  */
 import { createHash } from 'node:crypto'
-import { mkdir, open, realpath } from 'node:fs/promises'
+import { mkdir, open, readFile, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, sep } from 'node:path'
 import { emitModelMismatch } from '../board/engine-events.js'
 import { appendAudit, MODEL_ID, observeAuthorityFile } from '../lib/audit-log.js'
@@ -35,7 +43,7 @@ import {
 } from './claude-code.js'
 import { CONSUME_API_KEY_ENV, expectedOpenAiBasis, renderOpenAi } from './openai.js'
 import { toMicroUp, type CostBasis, type Rendered } from './renderers.js'
-import { CONSUME_LOCK_NAME, reserve } from './spend.js'
+import { CONSUME_LOCK_NAME, reserve, unsettledReservation, type TriedLine } from './spend.js'
 
 type Entry = { id: string; reason: string }
 
@@ -230,6 +238,34 @@ const MAX_TRIES_USED = 'the Handoff has used consume.max_tries tries'
 
 const MISMATCH_REFUSED = 'the served model differs from the requested one'
 
+const STOPPED = 'the consumer holding the claim stopped'
+
+const CLOSED_DURING = 'the Handoff closed before the try ended'
+
+/** The sha256 of the file at `p` when it resolves inside the home, or null when it is missing, outside or unreadable. */
+async function shaInside(home: string, p: string): Promise<string | null> {
+  try {
+    const real = await resolveInside(home, p)
+    return real === null ? null : createHash('sha256').update(await readFile(real)).digest('hex')
+  } catch {
+    return null
+  }
+}
+
+const basisOf = (b: string): CostBasis => (b === 'reported' || b === 'computed' ? b : 'unknown')
+
+/** The record's try for a stopped holder's `handoff.tried` line, with the outcome and reason given. */
+const mirrorTry = (reservationId: string, t: TriedLine, outcome: TryOutcome, reason: string | null, at: number): Try => ({
+  at: new Date(at).toISOString(),
+  reservation_id: reservationId,
+  requested: t.requested,
+  served: t.served,
+  cost_micro_usd: t.cost_micro_usd,
+  cost_basis: basisOf(t.cost_basis),
+  outcome,
+  reason,
+})
+
 /** Answer the open Handoff records once, oldest first. `plugins` null means every plugin. */
 export async function consumePass(o: {
   plugins: readonly string[] | null
@@ -348,12 +384,83 @@ export async function consumePass(o: {
         continue
       }
 
+      const home = warplineHome()
+      let counted = countedTries(current)
+
+      // A dead holder's claim was broken: settle what it left before any try.
+      if (claimed.broke) {
+        let dead: Awaited<ReturnType<typeof unsettledReservation>>
+        try {
+          dead = await unsettledReservation(statePath, id, new Set((current.tries ?? []).map((t) => t.reservation_id)))
+        } catch {
+          result.refused.push({ id, reason: 'the audit store could not be read for the stopped consumer' })
+          continue
+        }
+        if (dead !== null) {
+          const { reservationId, tried } = dead
+          const paid =
+            tried !== null &&
+            tried.outcome === 'answered' &&
+            tried.sha256 !== null &&
+            (await shaInside(home, join(home, outputPath))) === tried.sha256
+          // The holder's own try, as `outcome`. With no `handoff.tried` from it, one is written first.
+          const deadTry = (outcome: Exclude<TryOutcome, 'recovered'>): Promise<Try> =>
+            tried === null
+              ? recordTry(
+                  statePath,
+                  id,
+                  reservationId,
+                  outcome,
+                  requested,
+                  null,
+                  { ok: false, text: null, served: null, cost_micro_usd: null, cost_basis: 'unknown', reason: STOPPED },
+                  null,
+                  now,
+                  STOPPED,
+                )
+              : Promise.resolve(mirrorTry(reservationId, tried, outcome, STOPPED, now()))
+          let settled: { state: string; try: Try }
+          try {
+            settled = paid
+              ? await settleTry(
+                  dir,
+                  id,
+                  async () => ({ try: mirrorTry(reservationId, tried!, 'recovered', null, now()), close: true }),
+                  async () => mirrorTry(reservationId, tried!, 'discarded', CLOSED_DURING, now()),
+                  now(),
+                )
+              : await settleTry(
+                  dir,
+                  id,
+                  async () => {
+                    const o = tried?.outcome
+                    return { try: await deadTry(o === 'refused' || o === 'discarded' ? o : 'failed'), close: false }
+                  },
+                  () => deadTry('discarded'),
+                  now(),
+                )
+          } catch (err) {
+            if (err instanceof TryNotRecorded) result.refused.push({ id, reason: 'the audit store could not record the try' })
+            else result.failed.push({ id, reason: `the try could not be settled (${errnoOf(err)})` })
+            continue
+          }
+          if (settled.try.outcome === 'recovered') {
+            result.answered.push(id)
+            continue
+          }
+          if (settled.state !== 'open') {
+            result.discarded.push(id)
+            continue
+          }
+          if (settled.try.outcome !== 'discarded') counted += 1
+        }
+      }
+
       // Re-read under the claim: another consumer may have spent the last try since the listing.
-      if (countedTries(current) >= settings.max_tries) {
+      if (counted >= settings.max_tries) {
         result.skipped.push({ id, reason: MAX_TRIES_USED })
         continue
       }
-      const home = warplineHome()
       const context = await readContext(home, current.context_path)
       if ('reason' in context) {
         result.refused.push({ id, reason: context.reason })

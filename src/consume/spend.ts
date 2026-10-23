@@ -61,6 +61,66 @@ export async function windowSpend(statePath: string, nowMs: number, windowSecond
   return sumWindow(records, nowMs, windowSeconds)
 }
 
+/** A `handoff.tried` line as reconcile reads it. */
+export type TriedLine = {
+  outcome: string
+  requested: string
+  served: string | null
+  cost_micro_usd: number | null
+  cost_basis: string
+  sha256: string | null
+}
+
+const isStringOrNull = (v: unknown): v is string | null => v === null || typeof v === 'string'
+
+/**
+ * The latest `handoff.reserved` for `handoff` whose id is not in `known` (the
+ * ids the record's tries already name), with the `handoff.tried` that names
+ * it, or null for that when there is none. Null when every reservation is
+ * known. A line that cannot be read throws, because could not look is never
+ * nothing to reconcile.
+ */
+export async function unsettledReservation(
+  statePath: string,
+  handoff: string,
+  known: ReadonlySet<string>,
+): Promise<{ reservationId: string; amountMicro: number; tried: TriedLine | null } | null> {
+  let latest: { reservationId: string; amountMicro: number } | null = null
+  const tries = new Map<string, TriedLine>()
+  for await (const l of readCompleteLines(statePath, 0)) {
+    const r = l.record
+    if ((r?.type !== RESERVED && r?.type !== TRIED) || r.data?.handoff !== handoff) continue
+    const id: unknown = r.data.reservation_id
+    if (typeof id !== 'string') throw new Error(UNREADABLE)
+    if (r.type === RESERVED) {
+      const amount: unknown = r.data.amount_micro_usd
+      if (!isMicro(amount)) throw new Error(UNREADABLE)
+      if (!known.has(id)) latest = { reservationId: id, amountMicro: amount }
+      continue
+    }
+    const d = r.data
+    if (
+      typeof d.outcome !== 'string' ||
+      typeof d.requested !== 'string' ||
+      !isStringOrNull(d.served) ||
+      (d.cost_micro_usd !== null && !isMicro(d.cost_micro_usd)) ||
+      typeof d.cost_basis !== 'string' ||
+      !isStringOrNull(d.sha256)
+    ) {
+      throw new Error(UNREADABLE)
+    }
+    tries.set(id, {
+      outcome: d.outcome,
+      requested: d.requested,
+      served: d.served,
+      cost_micro_usd: d.cost_micro_usd as number | null,
+      cost_basis: d.cost_basis,
+      sha256: d.sha256,
+    })
+  }
+  return latest === null ? null : { ...latest, tried: tries.get(latest.reservationId) ?? null }
+}
+
 export type ReserveOutcome = { reserved: true; reservationId: string; amountMicro: number } | { reserved: false; reason: string }
 
 /**

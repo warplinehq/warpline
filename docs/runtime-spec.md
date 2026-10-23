@@ -5321,7 +5321,8 @@ Each try is appended to the record's `tries` list, and never rewritten.
 `answered` closes the record. `failed` leaves it open for a later pass.
 `discarded` is a try that ended after the record closed. `refused` is a try
 whose served model differed under `consume.model_mismatch: refuse` (below); it
-leaves the record open.
+leaves the record open. `recovered` is an answer a stopped consumer paid for
+and wrote but did not mark (below); it closes the record.
 
 ### Model mismatch
 
@@ -5367,6 +5368,35 @@ cost is known in advance only when `consume.prices` has an entry for the
 requested model. With either cap set and no such entry, the Handoff is refused
 before any reservation or call. The `openai-compatible` renderer's retries are
 calls inside one try, under one reservation.
+
+### A consumer that stops
+
+A claim whose holder is dead on this host is broken, and the consumer that
+breaks it settles what that holder left before it tries. The holder's try is
+the latest `handoff.reserved` for the Handoff that no try on the record names.
+With none, the pass goes on as usual.
+
+When that reservation's `handoff.tried` says `answered` and the file at
+`<home>/<output_path>` exists with the sha256 that line records, the record is
+marked `answered` with a `recovered` try. It carries the reservation id, the
+models and the cost from that line. No call is made, no reservation is
+appended, and no `handoff.tried` is written: the dead holder's own line is the
+try's anchor.
+
+Anything else is a `failed` try with the reason `the consumer holding the claim
+stopped`: the file is missing, its sha256 differs, or the line said something
+other than `answered`. A holder that died before its `handoff.tried` (killed
+during the call) gets one written first, with outcome `failed`, a null cost and
+basis `unknown`, so the line still comes before the try. That try counts
+against `consume.max_tries`, and a normal try follows when one is left. A call
+killed before its `handoff.tried` keeps its full reservation in the window,
+since a null cost counts in full.
+
+A consumer killed after it wrote the Judgment but before it marked the record
+can leave that file behind a record that is then withdrawn or superseded. The
+file stays where it is, and nothing deletes it. It needs a kill within
+milliseconds of the write, and the record's state still says the judgment is
+no longer asked for.
 
 ### Running it
 
