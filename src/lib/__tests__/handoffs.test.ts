@@ -181,6 +181,17 @@ describe('the record carries where its Judgment goes', () => {
     // The directory itself is not a file under it. Its name is part of the fixed message, so there is no never-by-value check here.
     for (const bad of ['judgments', 'judgments/']) expect(messageOf(bad)).toContain('needs_llm.output_path')
   })
+
+  test.each(['judgments/.', 'judgments//.', 'judgments/./.'])(
+    'needs_llm.output_path %s names the judgments directory itself and is refused by name',
+    (output_path) => {
+      const parsed = NeedsLlmSchema.safeParse({ task: 't', context_path: 'state/a.json', output_path })
+      expect(parsed.success).toBe(false)
+      const message = parsed.error!.issues.map((i) => i.message).join('\n')
+      expect(message).toContain('needs_llm.output_path')
+      expect(message).not.toContain(output_path)
+    },
+  )
 })
 
 describe('supersede', () => {
