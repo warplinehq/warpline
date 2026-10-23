@@ -53,8 +53,11 @@ These operations require reasoning, creativity, or context that code cannot prov
   handoff without the declaration is refused: its run is recorded `failed` with
   an error naming the field, and it is never retried. The other half, that a
   plugin never calls a model inline, is convention. The runtime cannot see a
-  model call inside a handler that returns `success`, so review, and reading
-  the plugins you run, are what hold it.
+  model call inside a plugin handler that returns `success`, so review, and
+  reading the plugins you run, are what hold it. The engine itself reaches no
+  model, and that is a check: `no-model-in-engine.test.ts` scans every module
+  `warpline advance` and `warpline run` reach for a route to a model or to the
+  consumer.
 - Plugin review checklist: "Could this be a pure function?" If yes, it must be.
 
 ## Grey Areas
@@ -154,8 +157,11 @@ may hand judgment to the LLM. The declaration is enforced: a handoff from a
 plugin that did not declare it is refused.
 
 The limit is what the ledger can see. It shows what a plugin declares and what
-the runtime refuses. It cannot show a model call made inline inside a handler,
-so "no inline model" stays convention, held by review.
+the runtime refuses. It cannot show a model call made inline inside a plugin
+handler, so for plugins "no inline model" stays a convention, held by review.
+For the engine it is a check: `no-model-in-engine.test.ts` fails the suite when
+it finds a route to a model in any module `warpline advance` or `warpline run`
+reaches.
 
 ## Why the plugin hands off instead of calling a model
 
@@ -171,8 +177,9 @@ so "no inline model" stays convention, held by review.
   warpline is a bad judgment file. What warpline cannot bound is the
   consumer session's own authority — that belongs to the harness it runs in.
   Run automated consumers least-privilege: read the home, write judgment
-  files, nothing else. The claim is *relocates and narrows*, never
-  *prevents*.
+  files, nothing else. The scheduler recipe shows how for `warpline consume`
+  ([scheduler-recipe.md](scheduler-recipe.md#running-the-automated-judgment-consumer-with-less-privilege)).
+  The claim is *relocates and narrows*, never *prevents*.
 - **Determinism keeps the retry contract sound.** A delegated handoff is
   never retried; re-running the plugin re-derives it if the work is still
   outstanding. That is only safe because a re-run reproduces the same dedup
@@ -184,9 +191,11 @@ so "no inline model" stays convention, held by review.
 - **The boundary stays inspectable** — a plugin that hands off says so in its
   manifest (`llm_handoff: true`), and `warpline plan` prints that declaration
   before anything runs. A handoff from a plugin that did not declare it is
-  refused. A model call inside a handler stays invisible to the runtime, so
-  "no inline model" is a review convention, not a check. Every handoff is also
-  an open Handoff record under the home, which the `needs-llm` skill finds.
+  refused. A model call inside a plugin handler stays invisible to the
+  runtime, so for plugins "no inline model" is a review convention. For the
+  engine it is a check, held by `no-model-in-engine.test.ts`. Every handoff is
+  also an open Handoff record under the home: `warpline consume` answers the
+  ones that name an `output_path`, and the `needs-llm` skill finds the rest.
 - **The consumer is whoever you have.** The contract names a status and a
   payload path. Anything that reads them can consume the handoff: an
   interactive Claude Code session, a headless invocation under cron, an
@@ -194,3 +203,13 @@ so "no inline model" stays convention, held by review.
   model dependency, so the judgment half rides whatever the operator already
   pays for — a subscription session happens to be the cheapest for a solo
   operator, and nothing in the design assumes it.
+
+  warpline ships one consumer of its own, outside the engine:
+  `warpline consume`. It is a one-shot pass, tool-less by default, that
+  answers the open Handoff records naming an `output_path`. It writes the
+  Judgment itself, records every try with the model it asked for, the model
+  that served it and what it cost, and enforces the spend caps before any
+  call. The engine never invokes it: you schedule it, or run it by hand. Its
+  headless call cannot use a subscription login, so it needs an API key or
+  cloud provider credentials. An interactive session running the `needs-llm`
+  skill covers the records it leaves, and works under a subscription.

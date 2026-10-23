@@ -324,7 +324,16 @@ took is released.
 
 ## Who consumes the handoff
 
-A **companion skill** — a Claude Code skill (see `skills/needs-llm-template/`)
+Two consumers ship, and a record has exactly one of them:
+
+- **`warpline consume`**, the headless one, answers the open records that name
+  an `output_path`. It runs outside the engine, on a schedule or by hand, and
+  writes the Judgment itself (above, and `runtime-spec.md` § 17).
+- **The `needs-llm` skill**, the interactive one, takes the rest: the open
+  records with no `output_path` and no `<id>.claim` beside them. It routes each
+  one to a companion skill.
+
+A **companion skill** is a Claude Code skill (see `skills/needs-llm-template/`)
 that an orchestrating Claude session runs. The loop:
 
 1. Deterministic pass: the engine runs due plugins. The v0.1 entry point is
@@ -336,7 +345,9 @@ that an orchestrating Claude session runs. The loop:
    agent, or a skill that wraps the engine) scans for open Handoff records.
    That scanner ships as the `needs-llm` skill in the `warpline` Claude Code
    plugin: it globs `<home>/handoffs/*.json`, keeps the records whose `state`
-   is `open`, and reads each one's `task` and `context_path`. A relative path
+   is `open`, drops the ones that name an `output_path` or have a `<id>.claim`
+   beside them, since those are `warpline consume`'s, and reads each kept
+   one's `task` and `context_path`. A relative path
    joins the home and an absolute one is used as is. A missing `handoffs/`
    means there is nothing to do.
 3. For each, it dispatches the matching companion skill with the payload. The
@@ -374,9 +385,12 @@ for one plugin's handoffs. It sits under a **scanner**, and the two are not the
 same thing:
 
 - **`needs-llm`** is the generic scanner. One skill, plugin-agnostic: it finds
-  every open Handoff record regardless of which plugin emitted it, and routes
-  each handoff to the consumer named after the emitting plugin. It reads only
-  paths resolving inside the warpline home.
+  the open Handoff records regardless of which plugin emitted them, and routes
+  each handoff to the consumer named after the emitting plugin. It skips a
+  record that names an `output_path` or has a `<id>.claim` beside it: that one
+  is answered by `warpline consume`, the headless consumer that ships with
+  warpline, and the skill never races it. It reads only paths resolving inside
+  the warpline home.
 - **`feed-triage`** is the shipped example of a consumer. It takes the payload
   the scanner resolved and writes its judgment to one declared path,
   `<warpline home>/state/feed-triage.judgment.md` — a file, not a side effect
