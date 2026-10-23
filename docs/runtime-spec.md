@@ -5319,7 +5319,38 @@ Each try is appended to the record's `tries` list, and never rewritten.
 | `reason` | Why the try did not answer, as a fixed phrase, or null. |
 
 `answered` closes the record. `failed` leaves it open for a later pass.
-`discarded` is a try that ended after the record closed.
+`discarded` is a try that ended after the record closed. `refused` is a try
+whose served model differed under `consume.model_mismatch: refuse` (below); it
+leaves the record open.
+
+### Model mismatch
+
+A try mismatches when the renderer returned text and the served model is not
+exactly the requested one. The comparison is exact string inequality: a
+requested `x` served as `x-20261001` is a mismatch. A null served model, one
+the provider did not report or reported outside the model-id shape, is a
+mismatch too. A call that returned no text served nothing, so it is never a
+mismatch; it is a `failed` try.
+
+Every mismatch raises one board `notice` of severity `warning`, whose
+`metadata_json` is `{ "event": "model_mismatch", "handoff", "requested",
+"served" }` (board-spec § 5). Both model ids are escaped for a terminal. The
+notice carries no Judgment text and no other configuration value.
+
+Under `consume.model_mismatch: record`, the default, the try goes on as if the
+models matched, and an answered try writes the Judgment. Under `refuse`, no
+Judgment is written: the try is `refused`, its `handoff.tried` line says so,
+and the Handoff stays `open`. A `refused` try counts against
+`consume.max_tries`, so a Handoff that keeps being served another model stops
+being tried.
+
+Configure the exact served id. The `claude` CLI reports the dated id for an
+alias, so a requested alias mismatches on every call, and under `refuse` it is
+never answered. The check sees only what the provider reports: a gateway that
+restamps the served model hides a substitution from it.
+
+A notice that cannot be written leaves the try as it settled, and the pass
+reports the Handoff `unannounced`, which exits 1.
 
 ### Spend caps
 
@@ -5351,11 +5382,14 @@ There is no flag naming one Handoff and no dry run.
 `--json` writes one newline-terminated JSON document on stdout with these
 fields: `answered`, `discarded` and `held`, lists of record ids; `failed`,
 `refused` and `skipped`, lists of `{ "id", "reason" }`; `unreadable`, a list of
-record file names; and `refusal`, always `null` in a document, because a pass
-that could not run writes none. Without `--json` the command prints one line
-per Handoff: `answered <id>`, `failed <id>: <reason>`,
+record file names; `unannounced`, a list of record ids whose mismatch notice
+could not be written; and `refusal`, always `null` in a document, because a
+pass that could not run writes none. Without `--json` the command prints one
+line per Handoff: `answered <id>`, `failed <id>: <reason>`,
 `refused <id>: <reason>`, `skipped <id>: <reason>`, `discarded <id>`,
-`held <id>` or `unreadable <name>`, or `Nothing to do.` when there were none.
+`held <id>` or `unreadable <name>`, or `Nothing to do.` when there were none,
+and one more line, `unannounced <id>: the mismatch notice could not be
+written`, for each Handoff in `unannounced`.
 Neither form carries Judgment text or a configuration value: only record ids,
 fixed reasons and key paths.
 
@@ -5370,5 +5404,5 @@ on them without parsing the output.
 | Code | Meaning |
 |------|---------|
 | `0` | Every claimed Handoff was answered, or there was nothing to do. A Handoff another live consumer holds does not count. |
-| `1` | A try failed; a Handoff was refused, discarded or skipped; a cap left one open; a record was unreadable; or the pass could not run. A pass that could not run writes its reason to stderr and nothing to stdout, under `--json` too. |
+| `1` | A try failed; a Handoff was refused, discarded or skipped; a cap left one open; a record was unreadable; a mismatch notice could not be written; or the pass could not run. A pass that could not run writes its reason to stderr and nothing to stdout, under `--json` too. |
 | `2` | A usage error: an unknown flag, a positional argument, or a `--plugin` value that is not a plugin name. The usage goes to stderr, and nothing runs. |

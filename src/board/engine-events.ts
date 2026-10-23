@@ -12,6 +12,7 @@
  *   emitPluginSkipped() — plugin lifecycle: skipped
  *   emitPluginGated()   — plugin lifecycle: gated (awaiting approval)
  *   emitGateInvalidated() — a parked gate was discarded rather than applied
+ *   emitModelMismatch() — a consume try was served a model it did not ask for
  *
  * Design:
  *   The engine emits a structured event for every plugin lifecycle transition;
@@ -25,6 +26,7 @@
  */
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { escapeForOperator } from '../lib/escape.js'
 import { atomicWriteText } from '../lib/fs-atomic.js'
 import { eventsJsonlPath } from '../lib/paths.js'
 import type { BoardEvent } from '../schemas/board.js'
@@ -264,6 +266,49 @@ export const emitDenialRecorded = (
       severity: 'info',
       metadata_json: JSON.stringify({ event: 'denial_recorded', plugin, reason, fingerprint }),
     }),
+    eventsPath,
+  )
+
+/**
+ * Emit a notice that a `warpline consume` try was served a model other than
+ * the one it asked for, or a reply that named no model.
+ *
+ * Severity `warning`: a substitution is news the operator acts on, by pinning
+ * the exact served id or by setting `consume.model_mismatch` to `refuse`.
+ *
+ * Rides `type: 'notice'` with a `metadata_json` discriminator for the reason
+ * `emitGateInvalidated` states above: growing `BoardEventSchema.type` raises no
+ * compile error and a new member would be silently dropped from every board
+ * view by the hand-maintained `VISIBLE_TYPES` set. Any `notice` is already in
+ * that set.
+ *
+ * Both model ids are provider or operator text shown on a terminal, so both go
+ * through `escapeForOperator`. The event carries no Judgment text and no other
+ * configuration value. `run_id` is null: a consume pass is not an advance.
+ */
+export const emitModelMismatch = (
+  plugin: string,
+  handoff: string,
+  requested: string,
+  served: string | null,
+  eventsPath?: string,
+): Promise<void> =>
+  emitBoardEvent(
+    makeEvent(
+      'notice',
+      plugin,
+      `${plugin}: served ${escapeForOperator(served ?? 'no model')} for requested ${escapeForOperator(requested)}`,
+      null,
+      {
+        severity: 'warning',
+        metadata_json: JSON.stringify({
+          event: 'model_mismatch',
+          handoff,
+          requested: escapeForOperator(requested),
+          served: served === null ? null : escapeForOperator(served),
+        }),
+      },
+    ),
     eventsPath,
   )
 

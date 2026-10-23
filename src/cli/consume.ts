@@ -35,7 +35,8 @@ Options:
 
 Exit codes:
   0  every claimed Handoff was answered, or there was nothing to do
-  1  a try failed, a Handoff was refused, discarded or skipped, a record was unreadable, or the pass could not run
+  1  a try failed, a Handoff was refused, discarded or skipped, a record was unreadable,
+     a mismatch notice could not be written, or the pass could not run
   2  a usage error
 `
 
@@ -55,6 +56,7 @@ function render(r: PassResult, json: boolean): string {
     ...r.discarded.map((id) => `discarded ${id}`),
     ...r.held.map((id) => `held ${id}`),
     ...r.unreadable.map((name) => `unreadable ${name}`),
+    ...r.unannounced.map((id) => `unannounced ${id}: the mismatch notice could not be written`),
   ]
   return `${lines.length === 0 ? 'Nothing to do.' : lines.join('\n')}\n`
 }

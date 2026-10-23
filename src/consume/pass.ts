@@ -18,6 +18,7 @@
 import { createHash } from 'node:crypto'
 import { mkdir, open, realpath } from 'node:fs/promises'
 import { dirname, isAbsolute, join, sep } from 'node:path'
+import { emitModelMismatch } from '../board/engine-events.js'
 import { appendAudit, MODEL_ID, observeAuthorityFile } from '../lib/audit-log.js'
 import { atomicWriteText } from '../lib/fs-atomic.js'
 import { readHandoff, readOpenHandoffs, settleTry, type Handoff, type Try, type TryOutcome } from '../lib/handoffs.js'
@@ -47,13 +48,15 @@ export type PassResult = {
   /** A Handoff whose claim another live consumer holds. */
   held: string[]
   unreadable: string[]
+  /** A Handoff whose try was served another model, and whose board notice could not be written. */
+  unannounced: string[]
   /** Why the pass could not run at all, or null. */
   refusal: string | null
 }
 
 type Env = Readonly<Record<string, string | undefined>>
 
-/** 0 only when nothing needs eyes: no pass refusal and no failed, refused, skipped, discarded or unreadable entry. */
+/** 0 only when nothing needs eyes: no pass refusal and no failed, refused, skipped, discarded, unreadable or unannounced entry. */
 export function exitCodeFor(r: PassResult): 0 | 1 {
   const quiet =
     r.refusal === null &&
@@ -61,7 +64,8 @@ export function exitCodeFor(r: PassResult): 0 | 1 {
     r.refused.length === 0 &&
     r.skipped.length === 0 &&
     r.discarded.length === 0 &&
-    r.unreadable.length === 0
+    r.unreadable.length === 0 &&
+    r.unannounced.length === 0
   return quiet ? 0 : 1
 }
 
@@ -224,6 +228,8 @@ function countedTries(h: Handoff): number {
 
 const MAX_TRIES_USED = 'the Handoff has used consume.max_tries tries'
 
+const MISMATCH_REFUSED = 'the served model differs from the requested one'
+
 /** Answer the open Handoff records once, oldest first. `plugins` null means every plugin. */
 export async function consumePass(o: {
   plugins: readonly string[] | null
@@ -239,6 +245,7 @@ export async function consumePass(o: {
     discarded: [],
     held: [],
     unreadable: [],
+    unannounced: [],
     refusal: null,
   }
   const refuse = (refusal: string): PassResult => ({ ...result, refusal })
@@ -390,6 +397,8 @@ export async function consumePass(o: {
       })
       const served = rendered.served !== null && MODEL_ID.test(rendered.served) ? rendered.served : null
       const textBytes = rendered.text === null ? null : Buffer.from(rendered.text, 'utf-8')
+      // Exact inequality, and no reported model counts. A call that returned no text served nothing to compare.
+      const mismatch = rendered.ok && rendered.text !== null && served !== requested
       const tryOf = (outcome: Exclude<TryOutcome, 'recovered'>, reason: string | null) =>
         recordTry(statePath, id, reservationId, outcome, requested, served, rendered, textBytes, now, reason)
 
@@ -400,6 +409,7 @@ export async function consumePass(o: {
           id,
           async () => {
             if (rendered.ok && rendered.text !== null) {
+              if (mismatch && settings.model_mismatch === 'refuse') return { try: await tryOf('refused', MISMATCH_REFUSED), close: false }
               const problem = textProblem(rendered.text, settings.max_output_bytes)
               if (problem !== null) return { try: await tryOf('failed', problem), close: false }
               // Checked again at write time: the directory may have been swapped for a link out during the call.
@@ -424,8 +434,16 @@ export async function consumePass(o: {
         else result.failed.push({ id, reason: `the try could not be settled (${errnoOf(err)})` })
         continue
       }
+      if (mismatch) {
+        try {
+          await emitModelMismatch(h.plugin, id, requested, served)
+        } catch {
+          result.unannounced.push(id)
+        }
+      }
       if (settled.try.outcome === 'answered') result.answered.push(id)
       else if (settled.try.outcome === 'discarded') result.discarded.push(id)
+      else if (settled.try.outcome === 'refused') result.refused.push({ id, reason: settled.try.reason ?? MISMATCH_REFUSED })
       else result.failed.push({ id, reason: settled.try.reason ?? 'the renderer failed' })
     } finally {
       releaseClaim(dir, id, claimed.token)
