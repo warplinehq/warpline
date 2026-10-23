@@ -15,6 +15,7 @@
  * explicit parent env and never `process.env`.
  */
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
+import { ChildProcess, spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -37,6 +38,8 @@ const TEXT = 'the judgment'
 const MODEL = 'claude-opus-5'
 const FLOOR_VERSION = '2.1.305 (Claude Code)'
 const JUDGE = 'sentinel-judge'
+const ENTRY = join(import.meta.dir, '..', '..', 'bin', 'warpline.ts')
+const SHORT_DEADLINE = join(import.meta.dir, 'fixtures', 'short-deadline.ts')
 
 const NO_RUN_AS = 'consume.tools is set for this plugin and consume.run_as is not'
 const NEEDS_CLAUDE_CODE = 'consume.tools needs the claude-code renderer'
@@ -464,17 +467,69 @@ describe('the deadline', () => {
     expect(await goneWithin(await readPid(claudePid), 3000)).toBe(true)
   }, 15_000)
 
-  test('a sudo that ignores SIGTERM is killed after the grace, and the try settled at the deadline', async () => {
+  test('a sudo that ignores SIGTERM is killed after the grace', async () => {
     const dir = temp('warpline-run-as-grace-')
     const sudoPid = join(dir, 'sudo.pid')
     const sudo = script(dir, 'sudo', ['#!/bin/sh', "trap '' TERM", `echo $$ > '${sudoPid}'`, 'exec sleep 30'])
     useFakeSudo(sudo)
 
-    const started = Date.now()
     const r = await render(join(dir, 'claude'), 300, 1_000)
-    expect(Date.now() - started).toBeLessThan(1000)
     expect(r).toMatchObject({ ok: false, reason: 'the renderer did not answer in time' })
     expect(await goneWithin(await readPid(sudoPid), 4000)).toBe(true)
+  }, 15_000)
+
+  test('through the real bin, a renderer child that ignores SIGTERM is gone when warpline consume exits', async () => {
+    const home = await makeHome({ consume: { model: MODEL } })
+    const dir = temp('warpline-run-as-bin-')
+    const claudePid = join(dir, 'claude.pid')
+    script(dir, 'claude', [
+      '#!/bin/sh',
+      `if [ "$1" = "--version" ]; then echo '${FLOOR_VERSION}'; exit 0; fi`,
+      "trap '' TERM",
+      `echo $$ > '${claudePid}'`,
+      'exec sleep 30',
+    ])
+
+    // The bin entry runs as shipped and ends in exitAfterFlush's process.exit;
+    // the preload only shortens the 10-minute deadline.
+    const r = spawnSync(process.execPath, ['--preload', SHORT_DEADLINE, ENTRY, 'consume', '--json'], {
+      env: { WARPLINE_HOME: home, PATH: `${dir}:/usr/bin:/bin` },
+      encoding: 'utf-8',
+      timeout: 20_000,
+    })
+    expect(r.status).toBe(1)
+    expect(JSON.parse(r.stdout).failed).toEqual([{ id: ID, reason: 'the renderer did not answer in time' }])
+    expect(await goneWithin(await readPid(claudePid), 1_000)).toBe(true)
+  }, 30_000)
+
+  test('a SIGTERM refused after the deadline still waits for the exit or the SIGKILL', async () => {
+    const dir = temp('warpline-run-as-eperm-')
+    const claudePid = join(dir, 'claude.pid')
+    const claude = script(dir, 'claude', ['#!/bin/sh', `echo $$ > '${claudePid}'`, 'exec sleep 30'])
+    // Stands in for a kill the kernel refuses, as when sudo has exec'd the judge in its own place.
+    const realKill = ChildProcess.prototype.kill
+    spies.push(
+      spyOn(ChildProcess.prototype, 'kill').mockImplementation(function (this: ChildProcess, signal?: NodeJS.Signals | number) {
+        if (signal !== 'SIGTERM') return realKill.call(this, signal)
+        this.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM' }))
+        return false
+      }),
+    )
+
+    const started = Date.now()
+    const r = await cc.renderClaudeCode({
+      bin: claude,
+      model: MODEL,
+      prompt: 'p',
+      capMicro: null,
+      parentEnv: { PATH: '/usr/bin:/bin' },
+      timeoutMs: 300,
+      killGraceMs: 1_000,
+    })
+    const elapsed = Date.now() - started
+    await readPid(claudePid)
+    expect(elapsed).toBeGreaterThanOrEqual(1_000)
+    expect(r).toMatchObject({ ok: false, reason: 'the renderer did not answer in time' })
   }, 15_000)
 })
 
