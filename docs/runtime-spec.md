@@ -5261,8 +5261,8 @@ endpoint. A failure in any of these refuses the whole pass by name, and no
 Handoff is touched.
 
 For each record the pass first runs the refusals that need no claim: no model
-set for its plugin, no `output_path`, and an unknown cost basis under a spend
-cap (below). A refusal names its reason and adds no try. The pass then claims
+set for its plugin, no `output_path`, a tool opt-in that cannot run (below),
+and an unknown cost basis under a spend cap (below). A refusal names its reason and adds no try. The pass then claims
 the Handoff, and from there the claim is released however the try ends. One
 try runs in this order:
 
@@ -5271,7 +5271,8 @@ try runs in this order:
    reported. One found in any other state that is not `open` (withdrawn,
    superseded, or a state this build does not know) is skipped as no longer
    open.
-2. `handoff.reserved` is appended under `.consume.lock`.
+2. A tool-enabled try runs the `run_as` probes (below), and a refusal ends it
+   here. Then `handoff.reserved` is appended under `.consume.lock`.
 3. The renderer is called, outside every lock. The prompt is the task, or the
    task, a blank line and the context file's text.
 4. Under the record lock the record is re-read. While it is `open`,
@@ -5397,6 +5398,81 @@ can leave that file behind a record that is then withdrawn or superseded. The
 file stays where it is, and nothing deletes it. It needs a kill within
 milliseconds of the write, and the record's state still says the judgment is
 no longer asked for.
+
+### Tools and run_as
+
+A try is tool-less by default. A plugin gets tools only when
+`consume.tools.<plugin>` lists them, and then only the tools listed. The opt-in
+needs `consume.run_as` too: the OS account the try runs as. Two refusals run
+before the claim, with no reservation and no call. A tool entry with
+`consume.run_as` unset is refused as `consume.tools is set for this plugin and
+consume.run_as is not`, and one under the `openai-compatible` renderer as
+`consume.tools needs the claude-code renderer`. No refusal, try or report names
+the `run_as` value.
+
+The judge runs as that second user, stepped down to through sudo, and never as
+root. The kernel's permission check is the boundary. Claude's sandbox is
+defense in depth on top of it.
+
+**The probes.** Before every tool-enabled try, after the claim and before the
+reservation, the pass runs three probes as the `run_as` user. `<test>` is
+`/bin/test` on darwin and `/usr/bin/test` elsewhere, and `<home>` is the home's
+real path.
+
+1. `/usr/bin/sudo -n -u <run_as> <test> -d /`, the control, must exit 0.
+2. `/usr/bin/sudo -n -u <run_as> <test> -x <home>` must exit 1.
+3. `/usr/bin/sudo -n -u <run_as> <test> -r <home>` must exit 1.
+
+The control exists because sudo itself exits 1 when it refuses, the same code
+`test` uses for false. Without it, a refused sudo would read as cannot reach.
+A `-x` probe that exits 0 refuses the Handoff as `the run_as user can enter the
+home`, and a `-r` probe that exits 0 as `the run_as user can read the home`. A
+failed control, a missing sudo, a probe that could not start and any other exit
+refuse it as `whether the run_as user can reach the home could not be checked`.
+The probes stop at the first refusal. A refusal adds no try and no
+reservation, and the claim is released.
+
+**The command.** The try's child starts as
+
+```
+/usr/bin/sudo -n -u <run_as> --preserve-env=<names> <abs claude> <argv>
+```
+
+The spawn's env is the tool-less allowlist without `HOME`. `--preserve-env`
+names those variables and carries no value, so no credential is on the process
+table, and no `env` program runs. `-n` never prompts.
+
+**The sudoers rules.** The operator adds two, each naming one absolute binary
+with no argument pattern:
+
+```
+<operator> ALL=(<run_as>) NOPASSWD:SETENV: <abs claude>
+<operator> ALL=(<run_as>) NOPASSWD: <test>
+```
+
+`SETENV` lets the passed variables skip sudo's environment checks. That is
+acceptable only because `run_as` has less authority than the operator: what
+the variables can do, they do as a user with less reach.
+
+**The argv.** `-p --bare --tools <list> --allowedTools <list>
+--permission-prompts none --output-format json --model <model>
+--no-session-persistence --setting-sources '' --strict-mcp-config --settings
+<sandbox settings>`, then `--max-budget-usd` when a per-call cap is set, and
+last `--disallowedTools WebFetch WebSearch RemoteTrigger`, which takes every
+argument after it. `--tools` sets which tools exist and `--allowedTools`
+approves them, so the list goes to both. The sandbox settings are a fixed
+literal: sandbox on, no network host allowed, no unsandboxed command. No bypass
+permission mode is ever passed.
+
+**The cwd and HOME.** The child's cwd is a fresh `/tmp/warpline-judge-*`
+directory of mode 0755, owned by the operator, so the judge can enter it but
+not write it. It is removed after the call. The judge's HOME is its own, set by
+sudo, and the account needs a writable home for the CLI's own state.
+
+**What it protects.** The home must be mode 0700, or the probes refuse. Secrets
+outside the home are protected only by the operator's own permissions on them:
+the probes check the home and nothing else. Even with tools, the model writes
+no Judgment. Its text comes back as text, and warpline writes it.
 
 ### Running it
 

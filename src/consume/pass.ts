@@ -22,6 +22,10 @@
  * answer is marked `recovered`, with no call and no reservation. Anything else
  * is that try appended as `failed`, with a `handoff.tried` written first when
  * the holder died before its own, and it counts against `consume.max_tries`.
+ *
+ * A plugin with a `consume.tools` entry runs its tries with those tools, as
+ * the `consume.run_as` user, and only after a probe the kernel answers says
+ * that user cannot enter or read the home.
  */
 import { createHash } from 'node:crypto'
 import { mkdir, open, readFile, realpath } from 'node:fs/promises'
@@ -43,6 +47,7 @@ import {
 } from './claude-code.js'
 import { CONSUME_API_KEY_ENV, expectedOpenAiBasis, renderOpenAi } from './openai.js'
 import { toMicroUp, type CostBasis, type Rendered } from './renderers.js'
+import { judgeCannotEnterHome } from './run-as.js'
 import { CONSUME_LOCK_NAME, reserve, unsettledReservation, type TriedLine } from './spend.js'
 
 type Entry = { id: string; reason: string }
@@ -88,10 +93,21 @@ type Setup =
   | { renderer: Extract<ConsumeSettings['renderer'], 'openai-compatible'>; endpoint: string; apiKey: string | null }
 
 /** The one renderer switch. The setting is a closed enum, so an unhandled arm fails to compile. */
-function render(setup: Setup, o: { model: string; prompt: string; capMicro: number | null; settings: ConsumeSettings; parentEnv: Env }): Promise<Rendered> {
+function render(
+  setup: Setup,
+  o: { model: string; prompt: string; capMicro: number | null; settings: ConsumeSettings; parentEnv: Env; tools: readonly string[] | undefined },
+): Promise<Rendered> {
   switch (setup.renderer) {
     case 'claude-code':
-      return renderClaudeCode({ bin: setup.bin, model: o.model, prompt: o.prompt, capMicro: o.capMicro, parentEnv: o.parentEnv })
+      return renderClaudeCode({
+        bin: setup.bin,
+        model: o.model,
+        prompt: o.prompt,
+        capMicro: o.capMicro,
+        parentEnv: o.parentEnv,
+        tools: o.tools,
+        runAs: o.settings.run_as ?? null,
+      })
     case 'openai-compatible':
       return renderOpenAi({ endpoint: setup.endpoint, model: o.model, prompt: o.prompt, apiKey: setup.apiKey, prices: o.settings.prices })
     default: {
@@ -353,6 +369,16 @@ export async function consumePass(o: {
       result.refused.push({ id, reason: 'the Handoff names no output_path' })
       continue
     }
+    // The tool opt-in: the claude-code renderer, and a run_as user to run it as.
+    const tools = settings.tools[h.plugin]
+    if (tools !== undefined && setup.renderer !== 'claude-code') {
+      result.refused.push({ id, reason: 'consume.tools needs the claude-code renderer' })
+      continue
+    }
+    if (tools !== undefined && settings.run_as === undefined) {
+      result.refused.push({ id, reason: 'consume.tools is set for this plugin and consume.run_as is not' })
+      continue
+    }
     const basis: CostBasis = setup.renderer === 'claude-code' ? 'reported' : expectedOpenAiBasis(requested, settings.prices)
     if (capped && basis === 'unknown') {
       result.refused.push({ id, reason: 'no cost basis under a spend cap: the model has no consume.prices entry' })
@@ -474,6 +500,20 @@ export async function consumePass(o: {
       }
       const target = output.target
 
+      // Before every tool-enabled try: the run_as user must not reach the home.
+      if (tools !== undefined) {
+        let probed: Awaited<ReturnType<typeof judgeCannotEnterHome>>
+        try {
+          probed = await judgeCannotEnterHome(settings.run_as!, await realpath(home))
+        } catch {
+          probed = { ok: false, reason: 'whether the run_as user can reach the home could not be checked' }
+        }
+        if (!probed.ok) {
+          result.refused.push({ id, reason: probed.reason })
+          continue
+        }
+      }
+
       let reservationId: string
       try {
         const r = await reserve({
@@ -501,6 +541,7 @@ export async function consumePass(o: {
         capMicro: capPerCallMicro,
         settings,
         parentEnv: o.parentEnv,
+        tools,
       })
       const served = rendered.served !== null && MODEL_ID.test(rendered.served) ? rendered.served : null
       const textBytes = rendered.text === null ? null : Buffer.from(rendered.text, 'utf-8')

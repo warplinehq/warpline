@@ -5,7 +5,8 @@
  * The context goes in on stdin and never on argv, because argv is visible to
  * every local user. The child env is a literal allowlist, never a copy of the
  * caller's. The child's cwd and HOME are two fresh empty dirs under `/tmp`,
- * removed after the call. Nothing the model prints is executed or resolved as a
+ * removed after the call. A tool-enabled try runs as a second OS user through
+ * sudo (`run-as.ts`), in a fresh 0755 cwd, with the HOME sudo gives that user. Nothing the model prints is executed or resolved as a
  * path: the text goes back to the caller as text.
  *
  * `--bare` never reads a subscription login (OAuth and the keychain are out of
@@ -18,9 +19,10 @@
  */
 import { spawn } from 'node:child_process'
 import { accessSync, constants, statSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { toMicroUp, type Rendered } from './renderers.js'
+import { buildSudoArgv } from './run-as.js'
 
 /** The terminal reason that means the provider, not the arm. */
 export const API_ERROR_REASON = 'api_error'
@@ -147,6 +149,40 @@ export function buildToollessArgv(model: string, capMicro: number | null): strin
 }
 
 /**
+ * The tool-enabled argv. `--tools` sets which tools exist and `--allowedTools`
+ * approves them, so the list goes to both, and `--permission-prompts none`
+ * refuses anything else without asking. Every isolation piece of the tool-less
+ * argv stays, the sandbox settings are passed, no bypass permission mode is,
+ * and the removed tools come last because `--disallowedTools` takes every
+ * argument after it.
+ */
+export function buildToolArgv(model: string, capMicro: number | null, tools: readonly string[]): string[] {
+  const argv = [
+    '-p',
+    '--bare',
+    '--tools',
+    ...tools,
+    '--allowedTools',
+    ...tools,
+    '--permission-prompts',
+    'none',
+    '--output-format',
+    'json',
+    '--model',
+    model,
+    '--no-session-persistence',
+    '--setting-sources',
+    '',
+    '--strict-mcp-config',
+    '--settings',
+    JSON.stringify(ISOLATION_SETTINGS),
+  ]
+  if (capMicro !== null) argv.push('--max-budget-usd', (capMicro / 1e6).toFixed(6))
+  argv.push('--disallowedTools', ...ISOLATION_REMOVED_TOOLS)
+  return argv
+}
+
+/**
  * The child env, built up from nothing. PATH leads with the binary's own dir so
  * an npm-installed `claude` finds its `node`.
  */
@@ -224,14 +260,19 @@ export function readClaudeResult(
   }
 }
 
-/** A fresh empty cwd and HOME under `/tmp` for one child, both removed afterwards. */
-async function withScratch<T>(fn: (cwd: string, home: string) => Promise<T>): Promise<T> {
+/**
+ * Fresh empty dirs under `/tmp` for one child, all removed afterwards: a cwd
+ * and a HOME, or for a judge only a cwd of mode 0755, which the judge's user
+ * can enter. sudo gives the judge its own HOME, so none is made for it.
+ */
+async function withScratch<T>(judge: boolean, fn: (cwd: string, home: string | null) => Promise<T>): Promise<T> {
   // /tmp, not os.tmpdir(): on darwin that is a 0700 per-user dir another account cannot enter.
   const dirs: string[] = []
   try {
-    dirs.push(await mkdtemp(join('/tmp', 'warpline-consume-')))
-    dirs.push(await mkdtemp(join('/tmp', 'warpline-consume-')))
-    return await fn(dirs[0]!, dirs[1]!)
+    dirs.push(await mkdtemp(join('/tmp', judge ? 'warpline-judge-' : 'warpline-consume-')))
+    if (judge) await chmod(dirs[0]!, 0o755)
+    else dirs.push(await mkdtemp(join('/tmp', 'warpline-consume-')))
+    return await fn(dirs[0]!, dirs[1] ?? null)
   } finally {
     for (const d of dirs) await rm(d, { recursive: true, force: true })
   }
@@ -275,10 +316,10 @@ export async function probeClaudeVersion(
   bin: string,
   parentEnv: Readonly<Record<string, string | undefined>>,
 ): Promise<string | null> {
-  return withScratch(async (cwd, home) => {
+  return withScratch(false, async (cwd, home) => {
     const { stdout, timedOut } = await runChild(bin, ['--version'], {
       cwd,
-      env: buildConsumeEnv(parentEnv, home, dirname(bin)),
+      env: buildConsumeEnv(parentEnv, home!, dirname(bin)),
       stdin: '',
       timeoutMs: PROBE_TIMEOUT_MS,
     })
@@ -287,7 +328,11 @@ export async function probeClaudeVersion(
   })
 }
 
-/** One tool-less try. Stdout is read whatever the exit status. */
+/**
+ * One try, tool-less unless `tools` names some. A tool-enabled try runs as
+ * `runAs` through sudo, exactly as `buildSudoArgv` builds the command, and
+ * throws without one. Stdout is read whatever the exit status.
+ */
 export async function renderClaudeCode(o: {
   bin: string
   model: string
@@ -295,6 +340,8 @@ export async function renderClaudeCode(o: {
   capMicro: number | null
   parentEnv: Readonly<Record<string, string | undefined>>
   timeoutMs?: number
+  tools?: readonly string[]
+  runAs?: string | null
 }): Promise<Rendered> {
   const failed = (reason: string): Rendered => ({
     ok: false,
@@ -304,10 +351,23 @@ export async function renderClaudeCode(o: {
     cost_basis: 'unknown',
     reason,
   })
-  return withScratch(async (cwd, home) => {
-    const { stdout, timedOut } = await runChild(o.bin, buildToollessArgv(o.model, o.capMicro), {
+  const tools = o.tools ?? []
+  if (tools.length > 0 && !o.runAs) throw new Error('a tool-enabled try needs a run_as user')
+  return withScratch(tools.length > 0, async (cwd, home) => {
+    let env: Record<string, string>
+    let argv: string[]
+    if (home === null) {
+      env = buildConsumeEnv(o.parentEnv, '', dirname(o.bin))
+      // The judge's HOME is its own, set by sudo.
+      delete env.HOME
+      argv = buildSudoArgv(o.runAs!, Object.keys(env), o.bin, buildToolArgv(o.model, o.capMicro, tools))
+    } else {
+      env = buildConsumeEnv(o.parentEnv, home, dirname(o.bin))
+      argv = [o.bin, ...buildToollessArgv(o.model, o.capMicro)]
+    }
+    const { stdout, timedOut } = await runChild(argv[0]!, argv.slice(1), {
       cwd,
-      env: buildConsumeEnv(o.parentEnv, home, dirname(o.bin)),
+      env,
       stdin: o.prompt,
       timeoutMs: o.timeoutMs ?? CLAUDE_TIMEOUT_MS,
     })
