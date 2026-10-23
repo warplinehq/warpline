@@ -265,7 +265,7 @@ describe('a try that ended without settling', () => {
     expect(rec?.state).toBe('open')
     expect(rec?.tries?.map((t) => t.outcome)).toEqual(['failed', 'failed'])
     expect(rec?.tries?.map((t) => t.reason)).toEqual([UNSETTLED, UNSETTLED])
-    const ids = reserved(home).map((d) => d.reservation_id)
+    const ids = reserved(home).map((d) => d.reservation_id as string)
     expect(ids).toHaveLength(2)
     expect(rec?.tries?.map((t) => t.reservation_id)).toEqual(ids)
   })
