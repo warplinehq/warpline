@@ -44,7 +44,7 @@ function handoff(h: VerbHome, run: string, plugin: string): Promise<unknown> {
     plugin,
     task: 'Judge it',
     context_path: null,
-    output_path: `state/${run}.${plugin}.judgment.md`,
+    output_path: `judgments/${run}.${plugin}.judgment.md`,
   })
 }
 

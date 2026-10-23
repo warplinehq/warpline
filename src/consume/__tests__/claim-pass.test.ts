@@ -36,7 +36,7 @@ const OPENAI_MODEL = 'gpt-test'
 const TEXT = 'the judgment'
 const PLUGINS = ['alpha', 'bravo', 'charlie', 'delta', 'echo'] as const
 const ID = 'run-1.prod'
-const OUTPUT = 'state/prod.judgment.md'
+const OUTPUT = 'judgments/prod.judgment.md'
 const CHILD = join(import.meta.dir, 'fixtures', 'consume-child.ts')
 
 type Env = Record<string, string | undefined>
@@ -53,7 +53,7 @@ const temp = (prefix: string) => {
   return d
 }
 
-const outputOf = (plugin: string) => `state/${plugin}.judgment.md`
+const outputOf = (plugin: string) => `judgments/${plugin}.judgment.md`
 
 /** A temp home holding one open Handoff per plugin, `run-1`, and the given preferences. */
 async function makeHome(prefs: unknown, plugins: readonly string[] = PLUGINS): Promise<string> {
@@ -246,7 +246,7 @@ describe('a deny or a supersede that lands mid-call wins', () => {
   })
 
   test('a supersede that lands mid-call wins and no Judgment is written', async () => {
-    const output2 = 'state/prod-2.judgment.md'
+    const output2 = 'judgments/prod-2.judgment.md'
     let home = ''
     let sawClaim = false
     await withOpenAiStub(

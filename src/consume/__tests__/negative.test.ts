@@ -60,7 +60,7 @@ async function makeHome(plugins: string[], consume: Record<string, unknown>): Pr
       plugin,
       task: `Judge ${plugin}`,
       context_path: null,
-      output_path: `state/${plugin}.judgment.md`,
+      output_path: `judgments/${plugin}.judgment.md`,
     })
   }
   writeFileSync(join(h.home, 'preferences.json'), JSON.stringify({ review_gate: false, consume }))
@@ -153,7 +153,7 @@ describe('a claude-code pass that answers, mismatches and refuses leaks no text 
       refusedB = out.stdout.split('\n').find((l) => l.startsWith('refused run-1.b: '))?.slice('refused run-1.b: '.length)
     }
     expect(refusedB).toContain('can enter the home')
-    expect(readFileSync(join(h.home, 'state', 'a.judgment.md'), 'utf-8')).toBe(TEXT)
+    expect(readFileSync(join(h.home, 'judgments', 'a.judgment.md'), 'utf-8')).toBe(TEXT)
     expect(argvs.length).toBeGreaterThan(0)
     for (const argv of argvs) expect(argv[3]).toBe(RUN_AS)
     expect(readFileSync(join(dump, 'calls.txt'), 'utf-8').split('\n').filter(Boolean)).toHaveLength(1)
@@ -193,7 +193,7 @@ describe('an openai-compatible pass under a per-call cap leaks no text and no co
       expect(out.code).toBe(0)
       if (json) expect((JSON.parse(out.stdout) as { answered: string[] }).answered).toEqual(['run-1.c'])
       else expect(out.stdout.split('\n')).toContain('answered run-1.c')
-      expect(readFileSync(join(h.home, 'state', 'c.judgment.md'), 'utf-8')).toBe(TEXT)
+      expect(readFileSync(join(h.home, 'judgments', 'c.judgment.md'), 'utf-8')).toBe(TEXT)
       expect(stub.calls()).toBe(1)
       expect(stub.auth()).toEqual([`Bearer ${API_KEY}`])
       expect(mismatchNotices()).toHaveLength(1)

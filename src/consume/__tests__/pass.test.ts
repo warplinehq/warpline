@@ -29,7 +29,7 @@ import * as claim from '../claim.js'
 import * as pass from '../pass.js'
 
 const ID = 'run-1.prod'
-const OUTPUT = 'state/prod.judgment.md'
+const OUTPUT = 'judgments/prod.judgment.md'
 const TEXT = 'the judgment\r\nline two é'
 const MODEL = 'claude-opus-5'
 const FLOOR_VERSION = '2.1.305 (Claude Code)'

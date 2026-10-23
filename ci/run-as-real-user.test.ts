@@ -111,7 +111,7 @@ if (guard === 'fail') {
   const operator = process.env.WARPLINE_CI_OPERATOR!
   const PREFS = { consume: { model: 'claude-opus-5', tools: { prod: ['Read'] }, run_as: judge } }
   const ID = 'run-1.prod'
-  const OUTPUT = 'state/prod.judgment.md'
+  const OUTPUT = 'judgments/prod.judgment.md'
   const SECRET = 'WARPLINE_TEST_SECRET'
 
   /** A 0700 home under /tmp, which the judge can reach, holding one opted-in Handoff. */

@@ -31,7 +31,7 @@ import * as pass from '../pass.js'
 import * as runAs from '../run-as.js'
 
 const ID = 'run-1.prod'
-const OUTPUT = 'state/prod.judgment.md'
+const OUTPUT = 'judgments/prod.judgment.md'
 const TEXT = 'the judgment'
 const MODEL = 'claude-opus-5'
 const FLOOR_VERSION = '2.1.305 (Claude Code)'
@@ -72,7 +72,7 @@ async function makeHome(prefs: unknown, plugins: readonly string[] = ['prod'], i
       plugin,
       task: 'Judge it',
       context_path: null,
-      output_path: `state/${plugin}.judgment.md`,
+      output_path: `judgments/${plugin}.judgment.md`,
       ...input,
     })
   }

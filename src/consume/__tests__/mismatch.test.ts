@@ -27,7 +27,7 @@ import { withHome } from '../../lib/paths.js'
 import * as pass from '../pass.js'
 
 const ID = 'run-1.prod'
-const OUTPUT = 'state/prod.judgment.md'
+const OUTPUT = 'judgments/prod.judgment.md'
 const TEXT = 'the judgment, word for word'
 const FLOOR_VERSION = '2.1.305 (Claude Code)'
 const REFUSED_REASON = 'the served model differs from the requested one'
