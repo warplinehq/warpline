@@ -5415,21 +5415,31 @@ root. The kernel's permission check is the boundary. Claude's sandbox is
 defense in depth on top of it.
 
 **The probes.** Before every tool-enabled try, after the claim and before the
-reservation, the pass runs three probes as the `run_as` user. `<test>` is
-`/bin/test` on darwin and `/usr/bin/test` elsewhere, and `<home>` is the home's
-real path.
+reservation, the pass runs five probes as the `run_as` user. `<test>` is
+`/bin/test` on darwin and `/usr/bin/test` elsewhere, `<home>` is the home's
+real path, and `<os home>` is the real path of the operator's OS home, the
+home directory of the account consume runs as.
 
 1. `/usr/bin/sudo -n -u <run_as> <test> -d /`, the control, must exit 0.
 2. `/usr/bin/sudo -n -u <run_as> <test> -x <home>` must exit 1.
 3. `/usr/bin/sudo -n -u <run_as> <test> -r <home>` must exit 1.
+4. `/usr/bin/sudo -n -u <run_as> <test> -x <os home>` must exit 1.
+5. `/usr/bin/sudo -n -u <run_as> <test> -r <os home>` must exit 1.
 
-The control exists because sudo itself exits 1 when it refuses, the same code
-`test` uses for false. Without it, a refused sudo would read as cannot reach.
-A `-x` probe that exits 0 refuses the Handoff as `the run_as user can enter the
-home`, and a `-r` probe that exits 0 as `the run_as user can read the home`. A
-failed control, a missing sudo, a probe that could not start and any other exit
-refuse it as `whether the run_as user can reach the home could not be checked`.
-The probes stop at the first refusal. A refusal adds no try and no
+Both homes are probed even when the home is inside the OS home. The control
+exists because sudo itself exits 1 when it refuses, the same code `test` uses
+for false. Without it, a refused sudo would read as cannot reach. A `-x` probe
+that exits 0 refuses the Handoff as `the run_as user can enter the home`, and
+a `-r` probe that exits 0 as `the run_as user can read the home`. A failed
+control, a missing sudo, a probe that could not start and any other exit
+refuse it as `whether the run_as user can reach the home could not be
+checked`. On the OS home the same three refusals read `the run_as user can
+enter the operator's OS home`, `the run_as user can read the operator's OS
+home` and `whether the run_as user can reach the operator's OS home could not
+be checked`. An OS home that is not an absolute path, or whose real path
+cannot be found, is refused as that last one. A probe still running after 10
+seconds is killed and counts as one that could not start. No refusal names a
+path. The probes stop at the first refusal. A refusal adds no try and no
 reservation, and the claim is released.
 
 **The command.** The try's child starts as
@@ -5469,10 +5479,18 @@ directory of mode 0755, owned by the operator, so the judge can enter it but
 not write it. It is removed after the call. The judge's HOME is its own, set by
 sudo, and the account needs a writable home for the CLI's own state.
 
-**What it protects.** The home must be mode 0700, or the probes refuse. Secrets
-outside the home are protected only by the operator's own permissions on them:
-the probes check the home and nothing else. Even with tools, the model writes
-no Judgment. Its text comes back as text, and warpline writes it.
+**What it protects.** The `run_as` user must not be able to enter the home or
+the operator's OS home, or the probes refuse. Mode 0700 on each does it. On
+macOS a home directory is mode 0755 by default, so the tool opt-in does not run
+there until the operator runs `chmod 700 ~`. Secrets outside both are
+protected only by the operator's own permissions on them: the probes check the
+two homes and nothing else. Even with tools, the model writes no Judgment. Its
+text comes back as text, and warpline writes it.
+
+**The credential.** Opting a plugin into tools is a trust grant. The judge runs
+with the provider credential in its environment, and a file tool can read it,
+for example through `/proc/self/environ` on Linux, and put it in its Judgment
+text. Use a dedicated, spend-limited key for consume.
 
 ### Running it
 

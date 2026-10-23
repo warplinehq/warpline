@@ -223,6 +223,16 @@ describe('the reachability probe', () => {
     expect(s.seen.slice(3)).toEqual([probe('-x', real), probe('-r', real)])
   })
 
+  test.each([
+    ['empty', ''],
+    ['relative', 'relative'],
+  ])('an OS home that is %s is never resolved against the cwd: could-not-be-checked', async (_, dir) => {
+    expect(typeof runAs.realOsHome).toBe('function')
+    const s = byPath()
+    expect(await runAs.judgeCannotEnterHome(JUDGE, HOME, s.runner, () => runAs.realOsHome(dir))).toEqual({ ok: false, reason: OS_UNCHECKED })
+    expect(s.seen).toHaveLength(3)
+  })
+
   test('a failed control is could-not-be-checked, never cannot-reach: a refused sudo exits 1 like a false test', async () => {
     const s = stub({ '-d': 1, '-x': 1, '-r': 1 })
     expect(await runAs.judgeCannotEnterHome(JUDGE, HOME, s.runner)).toEqual({ ok: false, reason: UNCHECKED })

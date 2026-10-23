@@ -25,7 +25,7 @@
  *
  * A plugin with a `consume.tools` entry runs its tries with those tools, as
  * the `consume.run_as` user, and only after a probe the kernel answers says
- * that user cannot enter or read the home.
+ * that user cannot enter or read the home or the operator's OS home.
  */
 import { createHash } from 'node:crypto'
 import { mkdir, open, readFile, realpath } from 'node:fs/promises'

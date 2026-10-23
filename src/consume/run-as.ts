@@ -7,12 +7,15 @@
  * Claude's own sandbox is defense in depth on top of that.
  *
  * Before every tool-enabled try the probe asks the kernel, through `test`'s
- * `access()` run as that user, whether the user can enter or read the home.
- * Both must say no. Could not look never reads as cannot reach: a refused
- * sudo exits 1, the same code `test` uses for false, so a control probe that
- * must succeed runs first.
+ * `access()` run as that user, whether the user can enter or read the home,
+ * then the operator's OS home. Every answer must be no. Could not look never
+ * reads as cannot reach: a refused sudo exits 1, the same code `test` uses for
+ * false, so a control probe that must succeed runs first.
  */
 import { spawn } from 'node:child_process'
+import { realpath } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { isAbsolute } from 'node:path'
 
 /** The sudo the command runs through, by absolute path. */
 export const SUDO_BIN = '/usr/bin/sudo'
@@ -23,35 +26,70 @@ export const TEST_BIN = process.platform === 'darwin' ? '/bin/test' : '/usr/bin/
 /** Run one probe argv; its exit code, or null when it could not run or was killed. */
 export type ProbeRunner = (argv: string[]) => Promise<number | null>
 
-const runProbe: ProbeRunner = (argv) =>
+/** A probe is one `test` through sudo; this long only if a user lookup (NSS, PAM) hangs. */
+export const PROBE_DEADLINE_MS = 10_000
+
+/** The default runner: killed at the deadline and read as could not run. */
+export const runProbe = (argv: string[], deadlineMs = PROBE_DEADLINE_MS): Promise<number | null> =>
   new Promise((resolve) => {
     const child = spawn(argv[0]!, argv.slice(1), { env: { PATH: '/usr/bin:/bin' }, stdio: 'ignore' })
-    child.on('error', () => resolve(null))
-    child.on('close', (code) => resolve(code))
+    // SIGKILL, since sudo relays SIGTERM to its child and waits on it. Resolve now, not on close: a child stuck in the kernel may never close.
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      resolve(null)
+    }, deadlineMs)
+    child.on('error', () => {
+      clearTimeout(timer)
+      resolve(null)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      resolve(code)
+    })
   })
 
-const UNCHECKED = 'whether the run_as user can reach the home could not be checked'
+type Probed = { ok: true } | { ok: false; reason: string }
+
+const HOME = 'the home'
+const OS_HOME = "the operator's OS home"
+const unchecked = (name: string): Probed => ({ ok: false, reason: `whether the run_as user can reach ${name} could not be checked` })
+
+/** The real path of the operator's OS home. A relative one is refused: `realpath('')` is the cwd. */
+export async function realOsHome(dir = homedir()): Promise<string> {
+  if (!isAbsolute(dir)) throw new Error('the OS home is not an absolute path')
+  return realpath(dir)
+}
 
 /**
- * `{ ok: true }` only when the control probe exits 0 and both home probes exit
- * 1. Stops at the first refusal. No reason names the user.
+ * `{ ok: true }` only when the control probe exits 0 and both probes on the
+ * home, then both on the operator's OS home, exit 1. Stops at the first
+ * refusal. No reason names the user or a path.
  */
 export async function judgeCannotEnterHome(
   runAs: string,
   home: string,
   run: ProbeRunner = runProbe,
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+  osHome: () => Promise<string> = realOsHome,
+): Promise<Probed> {
   const probe = (...args: string[]) => run([SUDO_BIN, '-n', '-u', runAs, TEST_BIN, ...args])
-  if ((await probe('-d', '/')) !== 0) return { ok: false, reason: UNCHECKED }
-  for (const [flag, can] of [
-    ['-x', 'the run_as user can enter the home'],
-    ['-r', 'the run_as user can read the home'],
-  ] as const) {
-    const code = await probe(flag, home)
-    if (code === 0) return { ok: false, reason: can }
-    if (code !== 1) return { ok: false, reason: UNCHECKED }
+  const unreachable = async (dir: string, name: string): Promise<Probed> => {
+    for (const [flag, verb] of [['-x', 'enter'], ['-r', 'read']] as const) {
+      const code = await probe(flag, dir)
+      if (code === 0) return { ok: false, reason: `the run_as user can ${verb} ${name}` }
+      if (code !== 1) return unchecked(name)
+    }
+    return { ok: true }
   }
-  return { ok: true }
+  if ((await probe('-d', '/')) !== 0) return unchecked(HOME)
+  const inHome = await unreachable(home, HOME)
+  if (!inHome.ok) return inHome
+  let osDir: string
+  try {
+    osDir = await osHome()
+  } catch {
+    return unchecked(OS_HOME)
+  }
+  return unreachable(osDir, OS_HOME)
 }
 
 /**
