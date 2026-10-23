@@ -22,6 +22,7 @@ import { withFakeClaude } from '../../../test-utils/fake-claude.js'
 import { withOpenAiStub } from '../../../test-utils/openai-stub.js'
 import { auditRecords, restoreSpies } from '../../cli/__tests__/helpers/verb-home.js'
 import { writeHandoff, type HandoffInput } from '../../lib/handoffs.js'
+import { isProcessAlive } from '../../lib/host-identity.js'
 import { withHome } from '../../lib/paths.js'
 // The modules this file pins before they exist, read through the namespace so
 // each export is named where it is used, and so a spy replaces the binding
@@ -50,10 +51,19 @@ type Env = Record<string, string | undefined>
 
 const temps: string[] = []
 const spies: Array<{ mockRestore: () => void }> = []
+/** Every pid a deadline case read, killed after it whatever the case did. */
+const pids: number[] = []
 
 afterEach(() => {
   restoreSpies()
   for (const s of spies.splice(0)) s.mockRestore()
+  for (const p of pids.splice(0)) {
+    try {
+      process.kill(p, 'SIGKILL')
+    } catch {
+      // Already gone.
+    }
+  }
   for (const t of temps.splice(0)) rmSync(t, { recursive: true, force: true })
 })
 
@@ -363,6 +373,109 @@ describe('the pass wiring', () => {
     expect(probe).toHaveBeenCalledTimes(2)
     expect(render).toHaveBeenCalledTimes(2)
   })
+
+  test('a plugin named constructor with no consume.tools entry is answered tool-less with consume.model', async () => {
+    const id = 'run-1.constructor'
+    const home = await makeHome({ consume: { model: MODEL } }, ['constructor'])
+    const probe = spyOn(runAs, 'judgeCannotEnterHome')
+    const sudo = spyOn(runAs, 'buildSudoArgv')
+    spies.push(probe, sudo)
+    const r = await withClaude((env) => run(home, env))
+    expect(r).toEqual({ ...EMPTY, answered: [id] })
+    expect(JSON.parse(recordText(home, id)).tries.map((t: { requested: string }) => t.requested)).toEqual([MODEL])
+    expect(probe).not.toHaveBeenCalled()
+    expect(sudo).not.toHaveBeenCalled()
+  })
+})
+
+describe('the deadline', () => {
+  /** The pid written to `file`, once it is there; recorded so `afterEach` kills it. */
+  async function readPid(file: string, ms = 3000): Promise<number> {
+    for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(50)) {
+      const text = existsSync(file) ? readFileSync(file, 'utf-8').trim() : ''
+      if (text !== '') {
+        const pid = Number(text)
+        pids.push(pid)
+        return pid
+      }
+    }
+    throw new Error(`no pid was written to ${file}`)
+  }
+
+  /** Whether `pid` is gone within `ms`, read every 50 ms. */
+  async function goneWithin(pid: number, ms: number): Promise<boolean> {
+    for (const end = Date.now() + ms; Date.now() < end; await Bun.sleep(50)) {
+      if (!isProcessAlive(pid)) return true
+    }
+    return !isProcessAlive(pid)
+  }
+
+  function script(dir: string, name: string, lines: string[]): string {
+    const p = join(dir, name)
+    writeFileSync(p, [...lines, ''].join('\n'))
+    chmodSync(p, 0o755)
+    return p
+  }
+
+  /** Swap the sudo binary for `fake`, keeping the rest of the real argv. */
+  function useFakeSudo(fake: string): void {
+    // Read BEFORE `spyOn`: afterwards the namespace property is the mock.
+    const real = runAs.buildSudoArgv
+    spies.push(
+      spyOn(runAs, 'buildSudoArgv').mockImplementation((...args: Parameters<typeof runAs.buildSudoArgv>) => [
+        fake,
+        ...real(...args).slice(1),
+      ]),
+    )
+  }
+
+  const render = (bin: string, timeoutMs: number, killGraceMs: number) =>
+    cc.renderClaudeCode({
+      bin,
+      model: MODEL,
+      prompt: 'p',
+      capMicro: null,
+      parentEnv: { PATH: '/usr/bin:/bin' },
+      tools: ['Read'],
+      runAs: JUDGE,
+      timeoutMs,
+      killGraceMs,
+    })
+
+  test('a judge still running at the deadline gets SIGTERM, which sudo relays, and is gone', async () => {
+    const dir = temp('warpline-run-as-deadline-')
+    const claudePid = join(dir, 'claude.pid')
+    const claude = script(dir, 'claude', ['#!/bin/sh', `echo $$ > '${claudePid}'`, 'exec sleep 30'])
+    // Relays every SIGTERM, with no process-group test. Real sudo skips only a
+    // sender whose process group sudo or the command leads, and the test
+    // process is never in such a group (sudo exec_nopty.c signal_cb_nopty).
+    const sudo = script(dir, 'sudo', [
+      '#!/bin/bash',
+      'while [ "$#" -gt 0 ]; do case "$1" in --preserve-env=*) shift; break ;; esac; shift; done',
+      '"$@" &',
+      'child=$!',
+      `trap 'kill -TERM "$child"' TERM`,
+      'wait "$child"',
+    ])
+    useFakeSudo(sudo)
+
+    const r = await render(claude, 500, 5_000)
+    expect(r).toMatchObject({ ok: false, reason: 'the renderer did not answer in time' })
+    expect(await goneWithin(await readPid(claudePid), 3000)).toBe(true)
+  }, 15_000)
+
+  test('a sudo that ignores SIGTERM is killed after the grace, and the try settled at the deadline', async () => {
+    const dir = temp('warpline-run-as-grace-')
+    const sudoPid = join(dir, 'sudo.pid')
+    const sudo = script(dir, 'sudo', ['#!/bin/sh', "trap '' TERM", `echo $$ > '${sudoPid}'`, 'exec sleep 30'])
+    useFakeSudo(sudo)
+
+    const started = Date.now()
+    const r = await render(join(dir, 'claude'), 300, 1_000)
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(r).toMatchObject({ ok: false, reason: 'the renderer did not answer in time' })
+    expect(await goneWithin(await readPid(sudoPid), 4000)).toBe(true)
+  }, 15_000)
 })
 
 describe('the sudo spawn', () => {
