@@ -17,7 +17,7 @@
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
@@ -49,6 +49,9 @@ afterEach(() => {
 })
 
 const urn = () => `urn:uuid:${randomUUID()}`
+
+// A lock is a link whose text names no file, so `existsSync` reads it as absent even while held.
+const present = (p: string) => lstatSync(p, { throwIfNoEntry: false }) !== undefined
 
 /** One reservation appended through the store, stamped at `at`. Resolves its id. */
 async function reserved(amount: number, at = T0): Promise<string> {
@@ -117,7 +120,7 @@ describe('a reservation', () => {
     expect(last.data).toEqual({ reservation_id: r.reservationId, handoff: 'run-1.prod', amount_micro_usd: 50_000 })
 
     expect(await spend.windowSpend(statePath, Date.now(), HOUR)).toBe(50_000)
-    expect(existsSync(lockPath)).toBe(false)
+    expect(present(lockPath)).toBe(false)
   })
 
   test('with no cap at all is still appended, at zero', async () => {
@@ -205,7 +208,7 @@ describe('the window cap', () => {
     expect(r.reason).toContain('consume.max_usd_per_window')
     expect(r.reason).not.toMatch(/\d/)
     expect((await handoffRecords()).length).toBe(before)
-    expect(existsSync(lockPath)).toBe(false)
+    expect(present(lockPath)).toBe(false)
   })
 
   test('the window moves with the injected now', async () => {
@@ -221,7 +224,7 @@ describe('the window cap', () => {
     ])
     expect(results.filter((r) => r.reserved)).toHaveLength(1)
     expect(await handoffRecords()).toHaveLength(1)
-    expect(existsSync(lockPath)).toBe(false)
+    expect(present(lockPath)).toBe(false)
   })
 })
 
@@ -240,7 +243,7 @@ describe('write-ahead', () => {
       (e: unknown) => e,
     )
     expect((err as Error | null)?.message).toBe('append refused')
-    expect(existsSync(lockPath)).toBe(false)
+    expect(present(lockPath)).toBe(false)
     expect(await handoffRecords()).toHaveLength(0)
   })
 })
@@ -255,7 +258,7 @@ describe('could not look is never zero', () => {
     writeFileSync(join(dir, name), text.replace('"amount_micro_usd":50000', '"amount_micro_usd":1.5'))
 
     expect(await spend.reserve(opts())).toEqual({ reserved: false, reason: 'the spend window could not be read' })
-    expect(existsSync(lockPath)).toBe(false)
+    expect(present(lockPath)).toBe(false)
     const records = await handoffRecords()
     expect(records).toHaveLength(1)
     expect(() => spend.sumWindow(records, Date.now(), HOUR)).toThrow('the spend window could not be read')
