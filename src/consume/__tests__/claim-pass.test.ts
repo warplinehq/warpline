@@ -276,7 +276,7 @@ describe('a deny or a supersede that lands mid-call wins', () => {
 })
 
 describe('the claim adds no reader-visible state', () => {
-  test('HANDOFFS_READER_VERSION is still 1, and a claimed and settled record holds only the keys 29-05 documents', async () => {
+  test('HANDOFFS_READER_VERSION is still 1, and a claimed and settled record holds only its documented keys', async () => {
     expect(HANDOFFS_READER_VERSION).toBe(1)
     const home = await makeHome({ consume: { model: MODEL } }, ['prod'])
     await withClaude(0, async (env) => {

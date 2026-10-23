@@ -1,5 +1,5 @@
 /**
- * A consumer that stops, pinned through real kills (D-05, SPEC R7).
+ * A consumer that stops, pinned through real kills.
  *
  * A consumer killed between its Judgment write and its mark leaves the file,
  * its `handoff.tried` and its claim. The next consumer breaks the claim,
