@@ -24,9 +24,10 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { userInfo } from 'node:os'
 import { join } from 'node:path'
 import { auditRecords } from '../src/cli/__tests__/helpers/verb-home.js'
-import { buildConsumeEnv, CLAUDE_ENV_PASSTHROUGH } from '../src/consume/claude-code.js'
+import { buildConsumeEnv, CLAUDE_ENV_PASSTHROUGH, renderClaudeCode } from '../src/consume/claude-code.js'
 import { consumePass } from '../src/consume/pass.js'
 import { writeHandoff } from '../src/lib/handoffs.js'
+import { isProcessAlive } from '../src/lib/host-identity.js'
 import { withHome } from '../src/lib/paths.js'
 
 type Env = Readonly<Record<string, string | undefined>>
@@ -179,5 +180,56 @@ if (guard === 'fail') {
         rmSync(home, { recursive: true, force: true })
       }
     })
+
+    test('a judge still running at the deadline is gone after the grace', async () => {
+      const pidFile = `/tmp/warpline-r5-judge-${process.pid}-${Date.now()}.pid`
+      const ps = (args: string[]): number[] =>
+        (spawnSync('ps', args, { encoding: 'utf-8', env: { PATH: '/usr/bin:/bin' } }).stdout ?? '').trim().split(/\s+/).map(Number)
+      try {
+        // Not awaited: the judge is read while it is still alive.
+        const rendering = renderClaudeCode({
+          bin: '/opt/warpline-ci/bin/claude',
+          model: 'claude-opus-5',
+          prompt: `SLEEP:${pidFile}`,
+          capMicro: null,
+          parentEnv: { PATH: '/opt/warpline-ci/bin:/usr/bin:/bin' },
+          tools: ['Read'],
+          runAs: judge,
+          timeoutMs: 3_000,
+          killGraceMs: 2_000,
+        })
+        // Inside the 3 s deadline. A judge that never started proves nothing.
+        let judgePid = 0
+        for (const end = Date.now() + 2_500; judgePid === 0 && Date.now() < end; await Bun.sleep(50)) {
+          const text = existsSync(pidFile) ? readFileSync(pidFile, 'utf-8').trim() : ''
+          if (text !== '') judgePid = Number(text)
+        }
+        expect(judgePid).toBeGreaterThan(0)
+
+        // The relay's preconditions (sudo exec_nopty.c signal_cb_nopty): sudo stayed
+        // between this process and the judge, and this process's group is led by
+        // neither sudo nor the judge, so sudo passes the SIGTERM on.
+        const [ppid] = ps(['-o', 'ppid=,pgid=', '-p', String(judgePid)])
+        const [testPgid] = ps(['-o', 'pgid=', '-p', String(process.pid)])
+        expect(Number.isInteger(ppid) && ppid > 0).toBe(true)
+        expect(ppid).not.toBe(process.pid)
+        expect(testPgid).not.toBe(ppid)
+        expect(testPgid).not.toBe(judgePid)
+
+        expect(await rendering).toMatchObject({ ok: false, reason: 'the renderer did not answer in time' })
+        expect(existsSync(pidFile)).toBe(true)
+        // An EPERM from another user's live process reads as alive.
+        let gone = false
+        for (const end = Date.now() + 10_000; !gone && Date.now() < end; await Bun.sleep(50)) gone = !isProcessAlive(judgePid)
+        expect(gone).toBe(true)
+      } finally {
+        try {
+          // The judge owns it, so this may be refused in sticky /tmp.
+          rmSync(pidFile, { force: true })
+        } catch {
+          // Left for the runner's teardown.
+        }
+      }
+    }, 30_000)
   })
 }
