@@ -91,8 +91,11 @@ export function selectModelId(modelUsage: unknown, requested: string): string | 
  */
 export const CLAUDE_CLI_FLOOR = '2.1.305'
 
-/** A try that runs past this is killed, and fails with its cost unknown. */
+/** A try that runs past this is sent SIGTERM, and fails with its cost unknown. */
 export const CLAUDE_TIMEOUT_MS = 600_000
+
+/** How long a child sent SIGTERM at its deadline has before SIGKILL. */
+export const CHILD_KILL_GRACE_MS = 5_000
 
 /** `--version` answers at once; a hung one must not hang the pass. */
 const PROBE_TIMEOUT_MS = 30_000
@@ -279,34 +282,47 @@ async function withScratch<T>(judge: boolean, fn: (cwd: string, home: string | n
 }
 
 /**
- * Run one child to its end or its deadline. Past the deadline it is killed and
- * the call settles at once: a grandchild still holding stdout must not hold the
- * caller too.
+ * Run one child to its end or its deadline. At the deadline the child gets
+ * SIGTERM, and SIGKILL `graceMs` later if it has not closed. SIGTERM goes first
+ * because a tool-enabled child is sudo, which relays SIGTERM to the judge;
+ * SIGKILL cannot be relayed, so on its own it would end sudo and leave the
+ * judge running as another user the operator cannot signal. The call still
+ * settles at the deadline: a grandchild holding stdout must not hold the caller
+ * too. The kill timer is not unref'd, so a one-shot pass cannot exit before it
+ * fires.
  */
 function runChild(
   bin: string,
   argv: string[],
-  o: { cwd: string; env: Record<string, string>; stdin: string; timeoutMs: number },
+  o: { cwd: string; env: Record<string, string>; stdin: string; timeoutMs: number; graceMs: number },
 ): Promise<{ stdout: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
     let settled = false
+    let killTimer: ReturnType<typeof setTimeout> | undefined
     const settle = (timedOut: boolean) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       resolve({ stdout: Buffer.concat(chunks).toString('utf8'), timedOut })
     }
+    const ended = () => {
+      clearTimeout(killTimer)
+      settle(false)
+    }
     const child = spawn(bin, argv, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'ignore'] })
     const timer = setTimeout(() => {
-      child.kill('SIGKILL')
+      child.kill('SIGTERM')
+      killTimer = setTimeout(() => child.kill('SIGKILL'), o.graceMs)
       settle(true)
     }, o.timeoutMs)
     child.stdout.on('data', (c: Buffer) => chunks.push(c))
     // A child that exits without reading stdin breaks the pipe; its stdout still decides.
     child.stdin.on('error', () => {})
-    child.on('error', () => settle(false))
-    child.on('close', () => settle(false))
+    child.on('error', ended)
+    // A grandchild can hold stdout past the child's exit; a pid that exited is never signalled.
+    child.on('exit', () => clearTimeout(killTimer))
+    child.on('close', ended)
     child.stdin.end(o.stdin)
   })
 }
@@ -322,6 +338,7 @@ export async function probeClaudeVersion(
       env: buildConsumeEnv(parentEnv, home!, dirname(bin)),
       stdin: '',
       timeoutMs: PROBE_TIMEOUT_MS,
+      graceMs: CHILD_KILL_GRACE_MS,
     })
     const line = stdout.split('\n')[0]!.trim()
     return timedOut || line === '' ? null : line
@@ -340,6 +357,8 @@ export async function renderClaudeCode(o: {
   capMicro: number | null
   parentEnv: Readonly<Record<string, string | undefined>>
   timeoutMs?: number
+  /** How long after the deadline's SIGTERM the child is sent SIGKILL. */
+  killGraceMs?: number
   tools?: readonly string[]
   runAs?: string | null
 }): Promise<Rendered> {
@@ -370,6 +389,7 @@ export async function renderClaudeCode(o: {
       env,
       stdin: o.prompt,
       timeoutMs: o.timeoutMs ?? CLAUDE_TIMEOUT_MS,
+      graceMs: o.killGraceMs ?? CHILD_KILL_GRACE_MS,
     })
     if (timedOut) return failed('the renderer did not answer in time')
     let raw: unknown

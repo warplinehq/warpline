@@ -5278,7 +5278,10 @@ try runs in this order:
 4. The renderer is called, outside every lock. The prompt is the task, or the
    task, a blank line and the context file's text. A renderer that cannot run
    is a `failed` try with the reason `the renderer could not run (<code>)` and
-   no cost, settled as in step 5, and the pass goes on to the next Handoff.
+   no cost, settled as in step 5, and the pass goes on to the next Handoff. A
+   renderer child still running after 10 minutes is sent SIGTERM, and the try
+   is `failed` at once with the reason `the renderer did not answer in time`.
+   SIGKILL follows 5 seconds later if the child is still there.
 5. Under the record lock the record is re-read. While it is `open`,
    `handoff.tried` is appended, then the Judgment is written atomically to
    `<home>/<output_path>`, then the record gains the try and, when the try
@@ -5486,6 +5489,11 @@ reservation, and the claim is released.
 The spawn's env is the tool-less allowlist without `HOME`. `--preserve-env`
 names those variables and carries no value, so no credential is on the process
 table, and no `env` program runs. `-n` never prompts.
+
+At the deadline the child gets SIGTERM first, because sudo passes it on to the
+judge. SIGKILL would end sudo alone and leave the judge running as `run_as`,
+beyond the operator's reach. SIGKILL follows only if sudo is still there after
+the 5 second grace.
 
 **The sudoers rules.** The operator adds two, each naming one absolute binary
 with no argument pattern:

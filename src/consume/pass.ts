@@ -395,7 +395,8 @@ export async function consumePass(o: {
   handoffs: for (const h of open) {
     const id = h.id
     // Refusals that need no claim add no try.
-    const requested = settings.models[h.plugin] ?? settings.model
+    // Own entries only: a plugin named `constructor` must not read Object.prototype.
+    const requested = Object.hasOwn(settings.models, h.plugin) ? settings.models[h.plugin] : settings.model
     if (requested === undefined) {
       result.refused.push({ id, reason: 'consume.model is not set' })
       continue
@@ -406,7 +407,7 @@ export async function consumePass(o: {
       continue
     }
     // The tool opt-in: the claude-code renderer, and a run_as user to run it as.
-    const tools = settings.tools[h.plugin]
+    const tools = Object.hasOwn(settings.tools, h.plugin) ? settings.tools[h.plugin] : undefined
     if (tools !== undefined && setup.renderer !== 'claude-code') {
       result.refused.push({ id, reason: 'consume.tools needs the claude-code renderer' })
       continue
