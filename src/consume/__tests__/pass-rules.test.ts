@@ -16,15 +16,16 @@
  * temp dir. No case reaches a real provider: the fake `claude` answers, and
  * the pass is handed an explicit parent env.
  */
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withFakeClaude } from '../../../test-utils/fake-claude.js'
 import { auditRecords } from '../../cli/__tests__/helpers/verb-home.js'
 import { readHandoff, settleTry, writeHandoff, type HandoffInput, type TryOutcome } from '../../lib/handoffs.js'
 import { withHome } from '../../lib/paths.js'
+import * as claim from '../claim.js'
 import * as pass from '../pass.js'
 
 const ID = 'run-1.prod'
@@ -35,8 +36,10 @@ const FLOOR_VERSION = '2.1.305 (Claude Code)'
 type Env = Record<string, string | undefined>
 
 const dirs: string[] = []
+const spies: Array<{ mockRestore: () => void }> = []
 
 afterEach(() => {
+  for (const s of spies.splice(0)) s.mockRestore()
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })
 })
 
@@ -96,6 +99,8 @@ const run = (home: string, parentEnv: Env): Promise<pass.PassResult> =>
 const record = (home: string) => readHandoff(join(home, 'handoffs'), 'run-1', 'prod')
 const reserved = (home: string) => auditRecords(home, 'handoff.reserved').filter((d) => d.handoff === ID)
 const tried = (home: string) => auditRecords(home, 'handoff.tried').filter((d) => d.handoff === ID)
+/** Presence through lstat: a claim is a link whose text names no file, so `existsSync` reads it as gone. */
+const present = (p: string) => lstatSync(p, { throwIfNoEntry: false }) !== undefined
 const sha256 = (b: Buffer) => createHash('sha256').update(b).digest('hex')
 
 const EMPTY: pass.PassResult = {
@@ -361,6 +366,39 @@ describe('trying stops after consume.max_tries counted tries', () => {
       expect((await run(home, env)).answered).toEqual([ID])
       expect(calls()).toBe(1)
     })
+  })
+
+  test('a Handoff that has used consume.max_tries is skipped before it is claimed', async () => {
+    const home = await makeHome({ consume: { model: MODEL } })
+    for (let i = 0; i < 3; i++) await priorTry(home, 'failed')
+    const claims = spyOn(claim, 'claimHandoff')
+    spies.push(claims)
+    await withClaude({}, async (env) => {
+      expect((await run(home, env)).skipped).toEqual([{ id: ID, reason: 'the Handoff has used consume.max_tries tries' }])
+    })
+    expect(claims).not.toHaveBeenCalled()
+  })
+
+  test('the count is read again under the claim: a try that used the last one after the listing skips the Handoff with no call', async () => {
+    const home = await makeHome({ consume: { model: MODEL } })
+    await priorTry(home, 'failed')
+    await priorTry(home, 'failed')
+    // Another consumer's failed try lands between the listing and this pass's claim.
+    const real = claim.claimHandoff
+    const spy = spyOn(claim, 'claimHandoff').mockImplementation((dir: string, id: string) => {
+      const p = join(dir, `${id}.json`)
+      const rec = JSON.parse(readFileSync(p, 'utf-8')) as { tries: unknown[] }
+      writeFileSync(p, JSON.stringify({ ...rec, tries: [...rec.tries, rec.tries[0]] }))
+      return real(dir, id)
+    })
+    spies.push(spy)
+    await withClaude({}, async (env, calls) => {
+      const r = await run(home, env)
+      expect(r).toEqual({ ...EMPTY, skipped: [{ id: ID, reason: 'the Handoff has used consume.max_tries tries' }] })
+      expect(calls()).toBe(0)
+    })
+    expect(reserved(home)).toEqual([])
+    expect(present(join(home, 'handoffs', `${ID}.claim`))).toBe(false)
   })
 
   test('consume.max_tries is read from the settings: max_tries 1 skips after one failed try', async () => {
