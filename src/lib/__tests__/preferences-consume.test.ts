@@ -2,8 +2,8 @@
  * The `consume` block in preferences.json: the operator's settings for the
  * `consume` verb, judged apart from the file the way `notify` is.
  *
- * Money is USD exact to the micro-dollar (D-09), the tool opt-in is a map from
- * plugin to a tool list (D-12), and a window cap needs a per-call cap beside
+ * Money is USD exact to the micro-dollar, the tool opt-in is a map from
+ * plugin to a tool list, and a window cap needs a per-call cap beside
  * it, because the per-call cap is the amount a try reserves. Every refusal
  * names a key path and never the value, so each refused value here carries
  * `sentinel-7f3a` and no answer may repeat it.
@@ -17,7 +17,7 @@ import * as preferences from '../preferences.js'
 const SENTINEL = 'sentinel-7f3a'
 const PREFS_PATH = '/nonexistent/preferences.json'
 
-const DEFAULTS = {
+const DEFAULTS: preferences.ConsumeSettings = {
   renderer: 'claude-code',
   models: {},
   window_seconds: 86400,
@@ -64,7 +64,7 @@ describe('the consume block', () => {
   })
 
   test('a full block parses as written', () => {
-    const block = {
+    const block: preferences.ConsumeSettings = {
       renderer: 'openai-compatible',
       model: 'claude-opus-5',
       models: { prod: 'us.anthropic.claude-opus-4-8', 'ops-digest': 'opus[1m]' },
