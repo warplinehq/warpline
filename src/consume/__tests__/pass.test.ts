@@ -115,6 +115,7 @@ const EMPTY: pass.PassResult = {
   discarded: [],
   held: [],
   unreadable: [],
+  unannounced: [],
   refusal: null,
 }
 
