@@ -1049,8 +1049,8 @@ file-level read accepts each without judging it, and each is parsed on its own.
 An unusable `notify` block, an empty `argv` for example, does not refuse the
 file: the advance raises and sends no Ask, and nothing else changes (§ 16). The
 Answer verbs read the block too, and with it unset or unusable they treat no Ask
-as open (§ 16). An unusable `consume` block never stops an advance: the
-`consume` verb refuses its pass, naming the first failing key path (§ 17). An
+as open (§ 16). An unusable `consume` block never stops an advance:
+`warpline consume` refuses its pass, naming the first failing key path (§ 17). An
 unusable block is reported as unusable, never read as unset. An earlier build
 refuses a file carrying `notify` or `consume` as an unknown key, so remove it
 before downgrading.
@@ -4098,13 +4098,13 @@ The set is closed. A kind outside it cannot be written.
 | `preferences.observed` | The preferences file changed without a warpline command. |
 | `ask.raised` | An Ask is about to be stored (§ 16): its `id`, `kind`, `scope`, `plugin` (null for a standing grant's renewal), `digest`, `raised_at` and `expires_at`. Never its nonce or its summary. |
 | `ask.answered` | An Answer is about to close an Ask (§ 16): the Ask's `id`, `kind`, `scope`, `digest` and `raised_at`; the `answer`; `principal`, the registered id that answered, never null; `via`, the id it came through, or null; `os_user`, the account that ran the command, or `unknown` when it cannot be read or is not an account-name token, recorded beside the principal and never used as one; `evidence`, a bounded reference token with no whitespace, `?`, `&`, `=` or `@`, or null; `assurance`, always `asserted` in this release; and `decide_ms`, the ms from the Ask's `raised_at` to the Answer, never from a reminder. |
-| `handoff.reserved` | warpline consume is about to call a renderer: the reservation id, the Handoff record id and the amount set aside, in integer micro-USD. |
+| `handoff.reserved` | `warpline consume` is about to call a renderer: the reservation id, the Handoff record id and the amount set aside, in integer micro-USD. |
 | `handoff.tried` | A try ended: the reservation it settles, the Handoff, the outcome, the requested and served model ids, the cost in micro-USD or null, its basis, and the Judgment's byte count and sha256 when there was text. |
 | `segment.opened` | The first line of a segment file. One opened by `warpline audit pass-over` names each line it passed over, by its position and sha256, as `passed_over`. |
 | `segment.sealed` | The last line of a segment file that is full or old. |
 | `checkpoint.recorded` | The head as it stood, so it can be exported and checked later. |
 
-The `consume` verb writes `handoff.reserved` before each renderer call and
+`warpline consume` writes `handoff.reserved` before each renderer call and
 `handoff.tried` when the try ends, before the Judgment or the record is
 written (§ 17). The last three kinds in the table are written by the store
 itself, never by a caller.
@@ -5203,18 +5203,17 @@ The checks after the short prefix run in a fixed order, `unknown`,
 fails is the one named. An Answer to an expired Ask that also carries a wrong
 prefix is refused as `expired`.
 
-## 17. The `consume` verb
+## 17. `warpline consume`
 
-The `consume` verb is a one-shot pass, run outside the engine, that answers open
-Handoff records: it renders each one's prompt through the configured renderer
-and writes the Judgment where the Handoff says. The sections below fill in as
-the verb lands.
+`warpline consume` is a one-shot pass, run outside the engine, that answers
+open Handoff records: it renders each one's prompt through the configured
+renderer and writes the Judgment where the Handoff says.
 
 ### Settings
 
 `consume` is a block in `<home>/preferences.json`. Absent or `null`, every key
 takes its default. The block is parsed apart from the file (§ 6): an unusable
-block never stops an advance, and the `consume` verb refuses its pass, naming
+block never stops an advance, and `warpline consume` refuses its pass, naming
 the first failing key path and never a value.
 
 | Key | Default | Rule |
@@ -5300,7 +5299,7 @@ or a refused pass, exits 1.
 | `<home>/handoffs/<id>.lock` | Every rewrite of the record: a supersede, a withdrawal and a try's settle. Held for one read and one write; a settle also appends its one `handoff.tried` line and writes the Judgment inside it. Never held across a model call. |
 
 The lock order is the state lock, then a record lock, then the audit lock, and
-separately `.consume.lock`, then the audit lock. The `consume` verb never takes
+separately `.consume.lock`, then the audit lock. `warpline consume` never takes
 the state lock or the run lock. A claim does not serialise writers, so `deny`
 can still withdraw a claimed record.
 
@@ -5337,3 +5336,39 @@ cost is known in advance only when `consume.prices` has an entry for the
 requested model. With either cap set and no such entry, the Handoff is refused
 before any reservation or call. The `openai-compatible` renderer's retries are
 calls inside one try, under one reservation.
+
+### Running it
+
+```
+warpline consume [--plugin <name>]... [--json]
+```
+
+With no arguments the pass covers every open Handoff. `--plugin` narrows it to
+one plugin's Handoffs, and repeated, to each plugin named. A value that is not
+a plugin name is a usage error, and the refusal does not repeat the value.
+There is no flag naming one Handoff and no dry run.
+
+`--json` writes one newline-terminated JSON document on stdout with these
+fields: `answered`, `discarded` and `held`, lists of record ids; `failed`,
+`refused` and `skipped`, lists of `{ "id", "reason" }`; `unreadable`, a list of
+record file names; and `refusal`, always `null` in a document, because a pass
+that could not run writes none. Without `--json` the command prints one line
+per Handoff: `answered <id>`, `failed <id>: <reason>`,
+`refused <id>: <reason>`, `skipped <id>: <reason>`, `discarded <id>`,
+`held <id>` or `unreadable <name>`, or `Nothing to do.` when there were none.
+Neither form carries Judgment text or a configuration value: only record ids,
+fixed reasons and key paths.
+
+An unreadable record is reported under `--plugin` too, whatever plugin its file
+name suggests. Its plugin is in the record, and the record could not be read.
+
+### Exit codes
+
+The codes are contract surface. A scheduler unit or a monitoring check may key
+on them without parsing the output.
+
+| Code | Meaning |
+|------|---------|
+| `0` | Every claimed Handoff was answered, or there was nothing to do. A Handoff another live consumer holds does not count. |
+| `1` | A try failed; a Handoff was refused, discarded or skipped; a cap left one open; a record was unreadable; or the pass could not run. A pass that could not run writes its reason to stderr and nothing to stdout, under `--json` too. |
+| `2` | A usage error: an unknown flag, a positional argument, or a `--plugin` value that is not a plugin name. The usage goes to stderr, and nothing runs. |

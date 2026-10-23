@@ -85,7 +85,7 @@ The reason is the same one the string arm has: the scanner runs in a session
 with the operator's rights, so the set of files a plugin can make it open must
 be bounded by the home and not by the plugin.
 
-`output_path` is optional. It names where the `consume` verb writes the
+`output_path` is optional. It names where `warpline consume` writes the
 Judgment, and it is a path relative to the warpline home under the same rule as
 `context_path`: an absolute path, a drive letter or a `..` segment is refused at
 the parse boundary, by name and never by value. Warpline writes the file; the
