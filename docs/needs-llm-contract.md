@@ -86,11 +86,17 @@ with the operator's rights, so the set of files a plugin can make it open must
 be bounded by the home and not by the plugin.
 
 `output_path` is optional. It names where `warpline consume` writes the
-Judgment, and it is a path relative to the warpline home under the same rule as
-`context_path`: an absolute path, a drive letter or a `..` segment is refused at
-the parse boundary, by name and never by value. Warpline writes the file; the
-model never does. A handoff without one is not answered by `consume`. It
-reaches the Handoff record below, and only the structured arm carries it.
+Judgment, and it names a file under `judgments/`: a path relative to the
+warpline home that starts `judgments/`, names a file below that directory, and
+has no `..` segment. Anything else, an absolute path, a drive letter, a `..`
+segment, `judgments/` itself or a path outside it, is refused at the parse
+boundary, by name and never by value. The files that hold authority
+(`.session-approval`, `standing-grants.json`, `principals.json`,
+`preferences.json`, `plugins/`, `config/`, `handoffs/`) are all outside
+`judgments/`, so no Judgment opens a gate or changes a setting. Warpline writes
+the file; the model never does. A handoff without one is not answered by
+`consume`. It reaches the Handoff record below, and only the structured arm
+carries it.
 
 The runtime classifies a handoff on **either** arm — one predicate,
 `isHandoff` in `invoke-plugin.ts`, reads the field or the prefix. `status:
@@ -163,8 +169,8 @@ Its fields:
 - `plugin`: the plugin that handed off.
 - `task`: what judgment is asked for.
 - `context_path`: the payload's path, or `null` when the handoff names none.
-- `output_path`: where the Judgment is written, relative to the home, or
-  `null` when the handoff names none.
+- `output_path`: where the Judgment is written, a path under `judgments/`
+  relative to the home, or `null` when the handoff names none.
 - `tries`: every try at the record's judgment, oldest first, starting empty.
   A try is only appended and never rewritten. Each one carries `at`,
   `reservation_id`, `requested` (the model asked for), `served` (the model that
@@ -294,16 +300,21 @@ record stays `open`:
 - `the context file is over 8 MiB`
 - `the context file could not be read (<code>)` for any other read error
 
-**The output path.** `output_path` must resolve inside the home on the
-filesystem, symbolic links included. Before a try is reserved, the deepest
-part of `<home>/<output_path>`'s directory that exists must resolve inside the
-home before any directory is made, and the directory is checked again once it
-is made. A path that resolves elsewhere is refused with `output_path resolves
-outside the home`, with no reservation and no model call, and nothing is made
-outside the home. The directory is checked a third time right before the
-write. If it has moved outside the home during the call, the try is `failed`
-with the same reason and nothing is written. warpline writes the Judgment
-there atomically, as the text's UTF-8 bytes.
+**The output path.** The directory of `<home>/<output_path>` must resolve
+under `<home>/judgments` on the filesystem, symbolic links included. It is
+compared with the home's real path joined with `judgments`, so a `judgments`
+that is itself a link is refused. warpline makes `<home>/judgments` when it is
+missing. Before a try is reserved, the deepest part of the Judgment's
+directory that exists must resolve under it before any directory is made, and
+the directory is checked again once it is made. A path that resolves elsewhere
+is refused with `output_path resolves outside the judgments directory`, with
+no reservation and no model call, and nothing is made outside it. The
+directory is checked a third time right before the write. If it has moved
+outside `<home>/judgments` during the call, the try is `failed` with the same
+reason and nothing is written. warpline writes the Judgment there atomically,
+as the text's UTF-8 bytes. A record whose `output_path` is outside
+`judgments/`, one written before this rule, is refused with that same reason
+and stays `open`. Nothing moves it or closes it.
 
 **A successful try.** The text is an answer only when it is non-empty after
 trimming and at most `consume.max_output_bytes` UTF-8 bytes. Text of exactly

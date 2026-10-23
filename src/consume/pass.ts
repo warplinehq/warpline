@@ -2,8 +2,9 @@
  * pass — one consume pass, run by the `consume` verb, outside the engine.
  *
  * Nothing the engine imports reaches this directory. A pass never reads the
- * state document or its gate list: a Judgment is a file under the home, and
- * it opens no gate.
+ * state document or its gate list: a Judgment is a file under
+ * `<home>/judgments`, which holds no file the gate, the engine or the
+ * preferences read, and it opens no gate.
  *
  * A Handoff is live only while its record's state is `open`, and that state is
  * re-read under the record lock right before the Judgment is written. One try
@@ -167,12 +168,19 @@ async function recordTry(
 /** The largest context file a try sends. Under the claude CLI's 10 MB stdin cap, so a prompt is never cut there. */
 export const CONTEXT_MAX_BYTES = 8 * 1024 * 1024
 
-const OUTSIDE_OUTPUT = 'output_path resolves outside the home'
+/** The one directory under the home a Judgment is written to. */
+const JUDGMENTS = 'judgments'
 
-/** `p` through every link, when that lands on the home or below it; null when it lands elsewhere. Throws as `realpath` does. */
-async function resolveInside(home: string, p: string): Promise<string | null> {
-  const [h, r] = await Promise.all([realpath(home), realpath(p)])
-  return r === h || r.startsWith(h + sep) ? r : null
+const OUTSIDE_OUTPUT = 'output_path resolves outside the judgments directory'
+
+/**
+ * `p` through every link, when that lands on `base` or below it; null when it
+ * lands elsewhere. `base` is a real path the caller resolved. Throws as
+ * `realpath` does.
+ */
+async function resolveInside(base: string, p: string): Promise<string | null> {
+  const r = await realpath(p)
+  return r === base || r.startsWith(base + sep) ? r : null
 }
 
 /**
@@ -184,7 +192,7 @@ async function readContext(home: string, contextPath: string | null): Promise<{ 
   if (contextPath === null) return { text: null }
   let real: string | null
   try {
-    real = await resolveInside(home, isAbsolute(contextPath) ? contextPath : join(home, contextPath))
+    real = await resolveInside(await realpath(home), isAbsolute(contextPath) ? contextPath : join(home, contextPath))
   } catch (err) {
     return { reason: errnoOf(err) === 'ENOENT' ? 'the context file is missing' : `the context file could not be read (${errnoOf(err)})` }
   }
@@ -211,19 +219,30 @@ async function readContext(home: string, contextPath: string | null): Promise<{ 
 }
 
 /**
- * The Judgment's absolute path with its directory made, or a fixed reason.
- * The deepest existing ancestor must resolve inside the home before anything
- * is made, so a link out of the home never gets a directory made through it,
- * and the made directory is checked again.
+ * The Judgment's absolute path with its directory made, and the real path of
+ * the judgments directory, or a fixed reason. That real path is the home's
+ * real path joined with `judgments`, never one resolved through a link at
+ * `<home>/judgments`, so a `judgments` that is a link is refused. The deepest
+ * existing ancestor must resolve inside it before anything is made, so a link
+ * out never gets a directory made through it, and the made directory is
+ * checked again.
  */
-async function prepareOutput(home: string, outputPath: string): Promise<{ target: string } | { reason: string }> {
+async function prepareOutput(home: string, outputPath: string): Promise<{ target: string; root: string } | { reason: string }> {
   const target = join(home, outputPath)
   const parent = dirname(target)
+  let root: string
   try {
+    root = join(await realpath(home), JUDGMENTS)
+    // Made first, so the walk below never stops at the home itself. A link here is EEXIST, and the walk refuses it.
+    try {
+      await mkdir(join(home, JUDGMENTS))
+    } catch (err) {
+      if (errnoOf(err) !== 'EEXIST') throw err
+    }
     let ancestor = parent
     for (;;) {
       try {
-        if ((await resolveInside(home, ancestor)) === null) return { reason: OUTSIDE_OUTPUT }
+        if ((await resolveInside(root, ancestor)) === null) return { reason: OUTSIDE_OUTPUT }
         break
       } catch (err) {
         if (errnoOf(err) !== 'ENOENT' || dirname(ancestor) === ancestor) throw err
@@ -231,11 +250,11 @@ async function prepareOutput(home: string, outputPath: string): Promise<{ target
       }
     }
     await mkdir(parent, { recursive: true })
-    if ((await resolveInside(home, parent)) === null) return { reason: OUTSIDE_OUTPUT }
+    if ((await resolveInside(root, parent)) === null) return { reason: OUTSIDE_OUTPUT }
   } catch (err) {
     return { reason: `the output directory could not be made (${errnoOf(err)})` }
   }
-  return { target }
+  return { target, root }
 }
 
 /** Why a renderer's text is not an answer, or null when it is. */
@@ -258,10 +277,11 @@ const STOPPED = 'the consumer holding the claim stopped'
 
 const CLOSED_DURING = 'the Handoff closed before the try ended'
 
-/** The sha256 of the file at `p` when it resolves inside the home, or null when it is missing, outside or unreadable. */
+/** The sha256 of the file at `p` when it resolves inside `<home>/judgments`, or null when it is missing, outside or unreadable. */
 async function shaInside(home: string, p: string): Promise<string | null> {
   try {
-    const real = await resolveInside(home, p)
+    const root = join(await realpath(home), JUDGMENTS)
+    const real = await resolveInside(root, p)
     return real === null ? null : createHash('sha256').update(await readFile(real)).digest('hex')
   } catch {
     return null
@@ -498,7 +518,7 @@ export async function consumePass(o: {
         result.refused.push({ id, reason: output.reason })
         continue
       }
-      const target = output.target
+      const { target, root } = output
 
       // Before every tool-enabled try: the run_as user must not reach the home.
       if (tools !== undefined) {
@@ -563,7 +583,7 @@ export async function consumePass(o: {
               // Checked again at write time: the directory may have been swapped for a link out during the call.
               let inside: boolean
               try {
-                inside = (await resolveInside(home, dirname(target))) !== null
+                inside = (await resolveInside(root, dirname(target))) !== null
               } catch (err) {
                 return { try: await tryOf('failed', `the output directory could not be resolved (${errnoOf(err)})`), close: false }
               }

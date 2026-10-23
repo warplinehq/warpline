@@ -228,7 +228,10 @@ const CONTEXT_PATH_SHAPE =
 
 /** The same sentence for the Judgment's output path, refused by name the same way. */
 const OUTPUT_PATH_SHAPE =
-  'needs_llm.output_path must be a path relative to the warpline home, with no parent-directory segment'
+  'needs_llm.output_path must be a path to a file under judgments/ in the warpline home, with no parent-directory segment'
+
+/** The one directory a Judgment may be written to. Nothing under it is read as authority. */
+const JUDGMENTS_PREFIX = 'judgments/'
 
 /**
  * Does this path resolve inside the warpline home, whatever that home is?
@@ -245,6 +248,17 @@ function resolvesInsideHome(p: string): boolean {
   if (p.startsWith('/') || p.startsWith('\\')) return false
   if (/^[A-Za-z]:[\\/]/.test(p)) return false
   return !p.split(/[\\/]/).includes('..')
+}
+
+/** Does this path name a file under `judgments/` in the home? The directory itself is not a file. */
+function namesAJudgment(p: string): boolean {
+  return (
+    resolvesInsideHome(p) &&
+    p.startsWith(JUDGMENTS_PREFIX) &&
+    p.length > JUDGMENTS_PREFIX.length &&
+    !p.endsWith('/') &&
+    !p.endsWith('\\')
+  )
 }
 
 /**
@@ -264,8 +278,12 @@ export const NeedsLlmSchema = z.object({
   task: z.string(),
   /** Path to the payload, RELATIVE to the warpline home. */
   context_path: z.string().min(1).refine(resolvesInsideHome, { message: CONTEXT_PATH_SHAPE }),
-  /** Where warpline writes the Judgment, RELATIVE to the warpline home. The model never writes it. */
-  output_path: z.string().min(1).refine(resolvesInsideHome, { message: OUTPUT_PATH_SHAPE }).optional(),
+  /**
+   * Where warpline writes the Judgment: a file under `judgments/`, RELATIVE to
+   * the warpline home. The model never writes it, and nothing under
+   * `judgments/` is read as authority.
+   */
+  output_path: z.string().min(1).refine(namesAJudgment, { message: OUTPUT_PATH_SHAPE }).optional(),
 })
 
 export type NeedsLlm = z.infer<typeof NeedsLlmSchema>

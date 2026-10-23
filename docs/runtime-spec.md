@@ -5284,7 +5284,9 @@ try runs in this order:
 A refused `handoff.tried` append writes no Judgment and no try, and leaves the
 reservation open, so the window counts it in full. The Judgment is the
 renderer's text byte for byte. The model writes nothing, and no Judgment opens
-a gate: the pass never reads the state document or its gate list.
+a gate: the pass never reads the state document or its gate list. The pass
+writes a Judgment only under `<home>/judgments/`, which holds no file the gate,
+the engine or the preferences read.
 
 A pass reports each Handoff as answered, failed, refused, skipped, discarded,
 held or unreadable. Held means another live consumer holds its claim. It is the
@@ -5378,20 +5380,20 @@ the latest `handoff.reserved` for the Handoff that no try on the record names.
 With none, the pass goes on as usual.
 
 When that reservation's `handoff.tried` says `answered` and the file at
-`<home>/<output_path>` exists with the sha256 that line records, the record is
-marked `answered` with a `recovered` try. It carries the reservation id, the
-models and the cost from that line. No call is made, no reservation is
-appended, and no `handoff.tried` is written: the dead holder's own line is the
-try's anchor.
+`<home>/<output_path>` resolves under `<home>/judgments` and has the sha256
+that line records, the record is marked `answered` with a `recovered` try. It
+carries the reservation id, the models and the cost from that line. No call is
+made, no reservation is appended, and no `handoff.tried` is written: the dead
+holder's own line is the try's anchor.
 
 Anything else is a `failed` try with the reason `the consumer holding the claim
-stopped`: the file is missing, its sha256 differs, or the line said something
-other than `answered`. A holder that died before its `handoff.tried` (killed
-during the call) gets one written first, with outcome `failed`, a null cost and
-basis `unknown`, so the line still comes before the try. That try counts
-against `consume.max_tries`, and a normal try follows when one is left. A call
-killed before its `handoff.tried` keeps its full reservation in the window,
-since a null cost counts in full.
+stopped`: the file is missing or outside `<home>/judgments`, its sha256
+differs, or the line said something other than `answered`. A holder that died
+before its `handoff.tried` (killed during the call) gets one written first,
+with outcome `failed`, a null cost and basis `unknown`, so the line still comes
+before the try. That try counts against `consume.max_tries`, and a normal try
+follows when one is left. A call killed before its `handoff.tried` keeps its
+full reservation in the window, since a null cost counts in full.
 
 A consumer killed after it wrote the Judgment but before it marked the record
 can leave that file behind a record that is then withdrawn or superseded. The
