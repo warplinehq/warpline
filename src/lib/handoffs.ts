@@ -16,7 +16,8 @@
  * serialises writers. The lock order is the state lock, then a record lock,
  * then the audit lock.
  *
- * Nothing writes `open` over a record that exists, and a closed record's
+ * Nothing writes `open` over a record that exists: the record is created by a
+ * link, which cannot replace a file. A closed record's
  * `state` is never rewritten: a try that arrives after it closed is appended
  * as `discarded`. A record's `state` alone says whether its run's judgment is
  * still asked for. Whether the run's outcome is accepted is its gate's
@@ -37,7 +38,7 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { atomicWriteJson } from './fs-atomic.js'
+import { atomicCreateJson, atomicWriteJson } from './fs-atomic.js'
 import { acquireLock, releaseHeld } from './pid-lock.js'
 import { isPluginName } from '../schemas/plugin-name.js'
 import { makeSkillError, type SkillResult } from '../schemas/skill-result.js'
@@ -194,9 +195,13 @@ async function withRecordLock<T>(dir: string, id: string, timeoutMs: number, fn:
 }
 
 /**
- * Write one open record, then supersede this plugin's older open ones. Only a
+ * Create one open record, then supersede this plugin's older open ones. Only a
  * failed write of the new record throws. `created_at` is clamped above every
  * one this plugin has, so two handoffs in one millisecond still order.
+ *
+ * A record that already exists for this run and plugin is left as it is,
+ * whatever its state, and returned, read with `readRunRecord`'s rules. No
+ * supersede pass runs then: the write that created it ran one.
  */
 export async function writeHandoff(dir: string, input: HandoffInput, now = Date.now()): Promise<Handoff> {
   if (!RUN_ID.test(input.run_id)) throw refuse('run id')
@@ -220,7 +225,11 @@ export async function writeHandoff(dir: string, input: HandoffInput, now = Date.
     state: 'open',
     closed_at: null,
   }
-  await atomicWriteJson(join(dir, `${id}.json`), record)
+  if (!(await atomicCreateJson(join(dir, `${id}.json`), record))) {
+    const existing = await readRunRecord(dir, input.run_id, input.plugin)
+    if (existing === null) throw Object.assign(new Error(`Handoff record ${id}.json is missing`), { code: 'ENOENT' })
+    return existing.record
+  }
 
   try {
     // Re-listed after the write, so a racing writer's record is seen.

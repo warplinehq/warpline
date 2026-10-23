@@ -246,6 +246,13 @@ A state this build never writes is closed too, and a reader reads it as closed,
 never as unreadable. Adding a closed state does not raise
 `min_reader_version`, because no reader acts on one.
 
+**A record is created once.** The first write for a run and plugin creates
+the file, by a link that cannot replace one. A later write for the same run
+and plugin leaves the existing record as it is, whatever its state, supersedes
+nothing, and returns that record. So an answered record is never reset to
+open, and the next pass never pays for its judgment again. An existing record
+that cannot be read makes the later write fail, and nothing is written.
+
 **Every rewrite takes the record's write lock.** Supersede, withdraw and a
 settling try each take `<home>/handoffs/<id>.lock`, read the record again under
 it, and write only from what they read. So a try that settles while a
