@@ -88,9 +88,9 @@ be bounded by the home and not by the plugin.
 `output_path` is optional. It names where `warpline consume` writes the
 Judgment, and it names a file under `judgments/`: a path relative to the
 warpline home that starts `judgments/`, names a file below that directory, and
-has no `..` segment. Anything else, an absolute path, a drive letter, a `..`
-segment, `judgments/` itself or a path outside it, is refused at the parse
-boundary, by name and never by value. The files that hold authority
+has no empty, `.` or `..` segment. Anything else, an absolute path, a drive
+letter, a `..` segment, `judgments/` itself or a path outside it, is refused at
+the parse boundary, by name and never by value. The files that hold authority
 (`.session-approval`, `standing-grants.json`, `principals.json`,
 `preferences.json`, `plugins/`, `config/`, `handoffs/`) are all outside
 `judgments/`, so no Judgment opens a gate or changes a setting. Warpline writes

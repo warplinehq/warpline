@@ -250,15 +250,14 @@ function resolvesInsideHome(p: string): boolean {
   return !p.split(/[\\/]/).includes('..')
 }
 
-/** Does this path name a file under `judgments/` in the home? The directory itself is not a file. */
+/**
+ * Does this path name a file under `judgments/` in the home? It does when every
+ * segment names something, so an empty or `.` segment is refused and
+ * `judgments/.` cannot name the directory itself. `judgments/` alone ends in an
+ * empty segment.
+ */
 function namesAJudgment(p: string): boolean {
-  return (
-    resolvesInsideHome(p) &&
-    p.startsWith(JUDGMENTS_PREFIX) &&
-    p.length > JUDGMENTS_PREFIX.length &&
-    !p.endsWith('/') &&
-    !p.endsWith('\\')
-  )
+  return resolvesInsideHome(p) && p.startsWith(JUDGMENTS_PREFIX) && !p.split(/[\\/]/).some((s) => s === '' || s === '.')
 }
 
 /**
