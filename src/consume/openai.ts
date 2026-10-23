@@ -9,14 +9,16 @@
  * caller, read from `WARPLINE_CONSUME_API_KEY`, and leaves only as a bearer
  * header.
  *
- * It calls again, at most twice, only when nothing was answered: a refused
- * connect, or HTTP 429, 502, 503 or 504. A timeout, any other status or a
- * failure after the call was sent ends the try, since the endpoint may have
- * done the work. A non-2xx answer costs nothing, so a try's cost is the cost
- * its 200 carries: reported (the `x-litellm-response-cost` header, then the
- * body's `usage.cost`) before computed (the price table for the requested
- * model, from the token counts) before unknown. A try with no 200 has no cost,
- * which keeps the caller's full reservation.
+ * It calls again, at most twice, only when the server says it did no work: a
+ * refused connect, HTTP 429, or HTTP 503 (unable to handle the request, RFC
+ * 9110 § 15.6.4). A 502 or 504 comes from a gateway whose upstream may have
+ * finished and billed the generation, so it ends the try with cost unknown and
+ * the caller's full reservation counts, as a timeout, any other status and a
+ * failure after the call was sent do. A 429 or 503 costs nothing, so a try's
+ * cost is the cost its 200 carries: reported (the `x-litellm-response-cost`
+ * header, then the body's `usage.cost`) before computed (the price table for
+ * the requested model, from the token counts) before unknown. A try with no
+ * 200 has no cost, which keeps the caller's full reservation.
  *
  * Every refusal reason names a status or a fixed phrase. None names the
  * endpoint, the credential or a price.
@@ -24,7 +26,7 @@
 import { toMicroUp, type CostBasis, type PriceTable, type Rendered } from './renderers.js'
 
 export const CONSUME_API_KEY_ENV = 'WARPLINE_CONSUME_API_KEY'
-export const OPENAI_RETRY_STATUSES = [429, 502, 503, 504] as const
+export const OPENAI_RETRY_STATUSES = [429, 503] as const
 export const OPENAI_MAX_CALLS = 3
 export const OPENAI_TIMEOUT_MS = 300_000
 const PAUSE_MS = 500

@@ -5377,8 +5377,11 @@ refused, and the Handoff stays open.
 The `claude-code` renderer always reports a cost. With `openai-compatible` a
 cost is known in advance only when `consume.prices` has an entry for the
 requested model. With either cap set and no such entry, the Handoff is refused
-before any reservation or call. The `openai-compatible` renderer's retries are
-calls inside one try, under one reservation.
+before any reservation or call. The `openai-compatible` renderer calls again,
+at most twice, only after a refused connect, HTTP 429 or HTTP 503, and those
+calls are inside one try, under one reservation. A 502 or 504 ends the try with
+its cost unknown, because a gateway can answer one after the provider billed
+the generation, so the full reservation counts.
 
 The window and a Handoff's unsettled tries are read from the whole audit store,
 and a line that can't be read is never read as nothing. A line in the store
