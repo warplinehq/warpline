@@ -161,8 +161,9 @@ describe('warpline consume', () => {
   test('one answered and one left open by a spent window cap exits 1, naming consume.max_usd_per_window', async () => {
     const h = home()
     prefs(h, { model: MODEL, max_usd_per_call: 0.01, max_usd_per_window: 0.01 })
+    // Two plugins: a second Handoff for the same plugin would supersede the first.
     await handoff(h, 'run-1', 'prod')
-    await handoff(h, 'run-2', 'prod')
+    await handoff(h, 'run-2', 'other')
     await withClaude({ usd: 0.01 }, async () => {
       const r = await capture(['consume', '--json'])
       expect(r.code).toBe(1)
@@ -170,8 +171,8 @@ describe('warpline consume', () => {
       expect(doc.answered).toHaveLength(1)
       expect(doc.refused).toHaveLength(1)
       expect(doc.refused[0]?.reason).toContain('consume.max_usd_per_window')
-      const refusedRun = (doc.refused[0]?.id ?? '').split('.')[0] as string
-      expect((await readHandoff(join(h.home, 'handoffs'), refusedRun, 'prod'))?.state).toBe('open')
+      const [refusedRun, refusedPlugin] = (doc.refused[0]?.id ?? '').split('.') as [string, string]
+      expect((await readHandoff(join(h.home, 'handoffs'), refusedRun, refusedPlugin))?.state).toBe('open')
       // P6: the summary carries ids, fixed reasons and counts, never a configured value.
       expect(r.stdout).not.toContain(MODEL)
       expect(r.stdout).not.toContain('JUDGMENT_TEXT_SENTINEL')
