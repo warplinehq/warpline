@@ -17,7 +17,7 @@
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import * as audit from '../../lib/audit-log.js'
@@ -262,6 +262,43 @@ describe('could not look is never zero', () => {
     const records = await handoffRecords()
     expect(records).toHaveLength(1)
     expect(() => spend.sumWindow(records, Date.now(), HOUR)).toThrow('the spend window could not be read')
+  })
+
+  /** One reservation of 50 000 stamped now, then a line that is not a record. Resolves that line's seq. */
+  async function storeWithUnreadableLine(): Promise<number> {
+    await reserved(50_000, Date.now())
+    const dir = join(home, 'audit')
+    const name = readdirSync(dir)
+      .filter((n) => n.endsWith('.jsonl'))
+      .sort()
+      .at(-1)!
+    appendFileSync(join(dir, name), 'not a record\n')
+    for await (const l of audit.readCompleteLines(statePath, 0)) if (l.record === undefined) return l.seq
+    throw new Error('the line that is not a record was not found')
+  }
+
+  test('a line that is not a record makes the reserve refuse', async () => {
+    await storeWithUnreadableLine()
+    expect(await spend.reserve(opts())).toEqual({ reserved: false, reason: 'the spend window could not be read' })
+    await expect(spend.windowSpend(statePath, Date.now(), HOUR)).rejects.toThrow('the spend window could not be read')
+    expect(present(lockPath)).toBe(false)
+  })
+
+  test('a line that is not a record makes unsettledReservations throw', async () => {
+    await storeWithUnreadableLine()
+    await expect(spend.unsettledReservations(statePath, 'run-1.prod', new Set())).rejects.toThrow(
+      'the spend window could not be read',
+    )
+  })
+
+  test('a line passed over by audit pass-over is left out, and the reserve goes on', async () => {
+    const bad = await storeWithUnreadableLine()
+    await audit.passOver(statePath, [bad])
+    expect(await spend.windowSpend(statePath, Date.now(), HOUR)).toBe(50_000)
+    const unsettled = await spend.unsettledReservations(statePath, 'run-1.prod', new Set())
+    expect(unsettled).toHaveLength(1)
+    expect(unsettled[0]).toMatchObject({ amountMicro: 50_000, tried: null })
+    expect(await spend.reserve(opts())).toMatchObject({ reserved: true, amountMicro: 50_000 })
   })
 
   test('a reservation whose time does not parse, or whose data is missing, throws', () => {
