@@ -4,6 +4,8 @@
 # `PROBE:` in the prompt, and the names (never the values) of its env.
 if [ "$1" = "--version" ]; then echo '2.1.305 (Claude Code)'; exit 0; fi
 prompt=$(cat)
+# `SLEEP:<path>`: a judge still running at the deadline. exec keeps the pid, so a signal to it reaches the sleeper.
+case "$prompt" in SLEEP:*) echo $$ > "${prompt#SLEEP:}"; exec sleep 60 ;; esac
 home=${prompt#*PROBE:}
 home=${home%%[[:space:]]*}
 if touch "$home/judge-was-here" 2>/dev/null; then write=ok; else write=denied; fi
