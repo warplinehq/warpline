@@ -264,8 +264,9 @@ export function readClaudeResult(
 }
 
 /**
- * Fresh empty dirs under `/tmp` for one child, all removed afterwards: a cwd
- * and a HOME, or for a judge only a cwd of mode 0755, which the judge's user
+ * Fresh empty dirs under `/tmp` for one child, removed once `fn` settles, which
+ * for a timed-out child is after it exited or was sent SIGKILL: a cwd and a
+ * HOME, or for a judge only a cwd of mode 0755, which the judge's user
  * can enter. sudo gives the judge its own HOME, so none is made for it.
  */
 async function withScratch<T>(judge: boolean, fn: (cwd: string, home: string | null) => Promise<T>): Promise<T> {
@@ -283,13 +284,14 @@ async function withScratch<T>(judge: boolean, fn: (cwd: string, home: string | n
 
 /**
  * Run one child to its end or its deadline. At the deadline the child gets
- * SIGTERM, and SIGKILL `graceMs` later if it has not closed. SIGTERM goes first
+ * SIGTERM, and SIGKILL `graceMs` later if it has not exited. SIGTERM goes first
  * because a tool-enabled child is sudo, which relays SIGTERM to the judge;
  * SIGKILL cannot be relayed, so on its own it would end sudo and leave the
- * judge running as another user the operator cannot signal. The call still
- * settles at the deadline: a grandchild holding stdout must not hold the caller
- * too. The kill timer is not unref'd, so a one-shot pass cannot exit before it
- * fires.
+ * judge running as another user the operator cannot signal. Past the deadline
+ * the call settles when the child exits, or right after SIGKILL is sent,
+ * whichever comes first. So a one-shot pass never exits with a kill pending,
+ * and a grandchild holding stdout holds the caller for at most `graceMs` past
+ * the deadline.
  */
 function runChild(
   bin: string,
@@ -299,30 +301,36 @@ function runChild(
   return new Promise((resolve) => {
     const chunks: Buffer[] = []
     let settled = false
+    let timedOut = false
     let killTimer: ReturnType<typeof setTimeout> | undefined
-    const settle = (timedOut: boolean) => {
+    const settle = () => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      resolve({ stdout: Buffer.concat(chunks).toString('utf8'), timedOut })
-    }
-    const ended = () => {
       clearTimeout(killTimer)
-      settle(false)
+      resolve({ stdout: Buffer.concat(chunks).toString('utf8'), timedOut })
     }
     const child = spawn(bin, argv, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'ignore'] })
     const timer = setTimeout(() => {
+      timedOut = true
       child.kill('SIGTERM')
-      killTimer = setTimeout(() => child.kill('SIGKILL'), o.graceMs)
-      settle(true)
+      killTimer = setTimeout(() => {
+        child.kill('SIGKILL')
+        settle()
+      }, o.graceMs)
     }, o.timeoutMs)
     child.stdout.on('data', (c: Buffer) => chunks.push(c))
     // A child that exits without reading stdin breaks the pipe; its stdout still decides.
     child.stdin.on('error', () => {})
-    child.on('error', ended)
-    // A grandchild can hold stdout past the child's exit; a pid that exited is never signalled.
-    child.on('exit', () => clearTimeout(killTimer))
-    child.on('close', ended)
+    // After the deadline an error is a refused kill (EPERM), and the exit or the SIGKILL still settles.
+    child.on('error', () => {
+      if (!timedOut) settle()
+    })
+    // Past the deadline the exit settles, not the close, so a grandchild holding stdout cannot hold the caller.
+    child.on('exit', () => {
+      if (timedOut) settle()
+    })
+    child.on('close', settle)
     child.stdin.end(o.stdin)
   })
 }
