@@ -75,6 +75,7 @@ export const AUDIT_KINDS = [
   'preferences.observed',
   'ask.raised',
   'ask.answered',
+  'handoff.reserved',
   'handoff.tried',
   'segment.opened',
   'segment.sealed',
@@ -112,6 +113,8 @@ const PrincipalId = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/)
 const PrefKey = z.string().regex(/^[a-z_]+(\.[a-z_]+)?$/)
 const Iso = z.iso.datetime()
 const Seq = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+/** An amount in integer micro-USD. */
+const Micro = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const SemVer = z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/)
 const Scope = z.union([z.literal('*'), CarriedPluginName])
 /** A standing grant id: 12 lowercase hex, the rule the gate's `newStandingId` makes. */
@@ -129,6 +132,21 @@ export const OS_USER_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/
  * note can ride in on it.
  */
 export const EVIDENCE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,199}$/
+/**
+ * A model id as an operator configures it or a provider reports it, as a
+ * bounded token: a bare id (`claude-opus-5`), a dated or vendor-prefixed one
+ * (`claude-haiku-4-5@20251001`, `us.anthropic.claude-opus-4-8`), a Bedrock
+ * ARN or a suffixed alias (`opus[1m]`). Whitespace, control characters,
+ * quotes, `?`, `&` and `=` are refused, and so is anything over 200 characters.
+ */
+export const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,199}$/
+/** A Handoff record id: its run id and plugin name, joined by one dot. */
+export const HANDOFF_ID = /^[A-Za-z0-9_-]{1,128}\.[a-z][a-z0-9-]{0,63}$/
+/**
+ * How a try ended, as `handoff.tried` records it. A recovery is not one: it
+ * makes no call and reserves nothing, so it rides the Handoff record only.
+ */
+export const TRIED_OUTCOMES = ['answered', 'failed', 'discarded', 'refused'] as const
 /** An Ask id: 12 lowercase hex, drawn apart from the Ask's nonce. */
 const AskId = z.string().regex(/^[0-9a-f]{12}$/)
 /** What an Ask is about: a plugin, or a standing grant by its id. */
@@ -310,9 +328,26 @@ const DATA = {
     raised_at: Iso,
     decide_ms: z.number().int().nonnegative(),
   }),
-  // Pending: nothing may be written under this until the work that defines
-  // it lands and replaces the schema.
-  'handoff.tried': z.never(),
+  // The amount a try sets aside before it calls a model. Never the prompt,
+  // the endpoint, a price or the Judgment text.
+  'handoff.reserved': z.strictObject({
+    reservation_id: Urn,
+    handoff: z.string().regex(HANDOFF_ID),
+    amount_micro_usd: Micro,
+  }),
+  // How a try ended and what it cost. The Judgment text never rides it, only
+  // its byte count and sha256, both null when the renderer returned no text.
+  'handoff.tried': z.strictObject({
+    reservation_id: Urn,
+    handoff: z.string().regex(HANDOFF_ID),
+    outcome: z.enum(TRIED_OUTCOMES),
+    requested: z.string().regex(MODEL_ID),
+    served: z.string().regex(MODEL_ID).nullable(),
+    cost_micro_usd: Micro.nullable(),
+    cost_basis: z.enum(['reported', 'computed', 'unknown']),
+    bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+    sha256: Hex.nullable(),
+  }),
 } as const satisfies Record<AuditKind, z.ZodType>
 
 export type AuditData<K extends AuditKind> = z.infer<(typeof DATA)[K]>

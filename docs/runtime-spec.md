@@ -4065,9 +4065,8 @@ It is stored in the next record's `warplineprev`, or nowhere if there is none.
 records. `source` plus `id` is unique per record, as CloudEvents requires,
 because the seq is contiguous within one home.
 
-`data` holds identifiers, closed enums, lowercase hex sha256 digests and ISO
-times. It never holds approved content, a secret value or a configuration
-value. Each kind's fields are a strict schema: an unknown key, a malformed
+`data` holds identifiers, closed enums, lowercase hex sha256 digests, ISO times and integer micro-USD amounts. It never holds approved content or a secret value. Two values it carries come from configuration: the model ids on `handoff.tried`, under a bounded token shape, and a reservation's amount, which equals the per-call spend cap when one is set.
+Each kind's fields are a strict schema: an unknown key, a malformed
 digest or a line longer than 16384 bytes is refused, nothing is written, and the
 refusal's message names the kind and a fixed reason, never a value from the
 data.
@@ -4096,14 +4095,14 @@ The set is closed. A kind outside it cannot be written.
 | `preferences.observed` | The preferences file changed without a warpline command. |
 | `ask.raised` | An Ask is about to be stored (§ 16): its `id`, `kind`, `scope`, `plugin` (null for a standing grant's renewal), `digest`, `raised_at` and `expires_at`. Never its nonce or its summary. |
 | `ask.answered` | An Answer is about to close an Ask (§ 16): the Ask's `id`, `kind`, `scope`, `digest` and `raised_at`; the `answer`; `principal`, the registered id that answered, never null; `via`, the id it came through, or null; `os_user`, the account that ran the command, or `unknown` when it cannot be read or is not an account-name token, recorded beside the principal and never used as one; `evidence`, a bounded reference token with no whitespace, `?`, `&`, `=` or `@`, or null; `assurance`, always `asserted` in this release; and `decide_ms`, the ms from the Ask's `raised_at` to the Answer, never from a reminder. |
-| `handoff.tried` | A handoff tried. |
+| `handoff.reserved` | warpline consume is about to call a renderer: the reservation id, the Handoff record id and the amount set aside, in integer micro-USD. |
+| `handoff.tried` | A try ended: the reservation it settles, the Handoff, the outcome, the requested and served model ids, the cost in micro-USD or null, its basis, and the Judgment's byte count and sha256 when there was text. |
 | `segment.opened` | The first line of a segment file. One opened by `warpline audit pass-over` names each line it passed over, by its position and sha256, as `passed_over`. |
 | `segment.sealed` | The last line of a segment file that is full or old. |
 | `checkpoint.recorded` | The head as it stood, so it can be exported and checked later. |
 
-Nothing writes `handoff.tried` yet. Its schema admits nothing, so an append
-under it is refused until the work that writes it lands and defines its
-fields. The last three
+Nothing writes `handoff.reserved` or `handoff.tried` yet. warpline consume
+is their writer, and their fields are fixed as above. The last three
 kinds in the table are written by the store itself, never by a caller.
 
 Each `grants` entry on a `fire.intent` names its `issuer`. A session window's
