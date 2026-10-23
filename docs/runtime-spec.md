@@ -5377,6 +5377,16 @@ requested model. With either cap set and no such entry, the Handoff is refused
 before any reservation or call. The `openai-compatible` renderer's retries are
 calls inside one try, under one reservation.
 
+The window and a Handoff's unsettled tries are read from the whole audit store,
+and a line that can't be read is never read as nothing. A line in the store
+that is not a record refuses the reservation under `consume.max_usd_per_window`
+with `the spend window could not be read`, and refuses every claim with `the
+audit store could not be read for the unsettled tries`. `warpline audit
+pass-over <seq>` (§ 14) passes such a line over. Once passed over it counts as
+nothing, so a reservation it held is gone from the window. A line in a sealed
+segment can't be passed over, so nothing in this runtime clears it, and only a
+store restored from an export does.
+
 ### A try that ended without settling
 
 A try's `handoff.reserved` line is its write-ahead anchor. A reservation for

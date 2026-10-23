@@ -7,10 +7,15 @@
  * full, so a killed call keeps its whole reservation. `.consume.lock` covers
  * only read, check and append, so model calls run in parallel.
  *
+ * Both readers here scan the whole store, and a line in it that is not a
+ * record throws, because what it held is unknown. Once `warpline audit
+ * pass-over` has passed such a line over, it counts as nothing, as it does for
+ * the walk and `resolve`.
+ *
  * Money is integer micro-USD throughout.
  */
 import { randomUUID } from 'node:crypto'
-import { appendAudit, readCompleteLines, type StoredRecord } from '../lib/audit-log.js'
+import { appendAudit, readCompleteLines, type StoredLine, type StoredRecord } from '../lib/audit-log.js'
 import { acquireLock, releaseHeld } from '../lib/pid-lock.js'
 
 export const CONSUME_LOCK_NAME = '.consume.lock'
@@ -51,11 +56,19 @@ export function sumWindow(records: Iterable<StoredRecord>, nowMs: number, window
   return total
 }
 
-/** The window's spend, read from the audit store behind `statePath`. */
+/** A line that is not a record and was not passed over: what it held is unknown, so a reader cannot count it as nothing. */
+const unreadableLine = (l: StoredLine): boolean => l.record === undefined && !l.passedOver
+
+/**
+ * The window's spend, read from the audit store behind `statePath`. A line
+ * that is not a record throws (`unreadableLine`), unless `warpline audit
+ * pass-over` passed it over, and then it counts as nothing.
+ */
 export async function windowSpend(statePath: string, nowMs: number, windowSeconds: number): Promise<number> {
   const records: StoredRecord[] = []
   // ponytail: scans the whole store per read; reading only segments that overlap the window is the upgrade path.
   for await (const l of readCompleteLines(statePath, 0)) {
+    if (unreadableLine(l)) throw new Error(UNREADABLE)
     if (l.record?.type === RESERVED || l.record?.type === TRIED) records.push(l.record)
   }
   return sumWindow(records, nowMs, windowSeconds)
@@ -81,7 +94,9 @@ export type UnsettledReservation = { reservationId: string; amountMicro: number;
  * the record's tries already name), in store order, oldest first, each with
  * the `handoff.tried` that names it or null for that. Empty when every
  * reservation is known. A line that cannot be read throws, because could not
- * look is never nothing to reconcile.
+ * look is never nothing to reconcile. That includes a line that is not a
+ * record (`unreadableLine`), unless `warpline audit pass-over` passed it over,
+ * and then it counts as nothing.
  */
 export async function unsettledReservations(
   statePath: string,
@@ -91,6 +106,7 @@ export async function unsettledReservations(
   const unnamed: { reservationId: string; amountMicro: number }[] = []
   const tries = new Map<string, TriedLine>()
   for await (const l of readCompleteLines(statePath, 0)) {
+    if (unreadableLine(l)) throw new Error(UNREADABLE)
     const r = l.record
     if ((r?.type !== RESERVED && r?.type !== TRIED) || r.data?.handoff !== handoff) continue
     const id: unknown = r.data.reservation_id
