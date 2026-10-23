@@ -243,10 +243,7 @@ describe('the pass wiring', () => {
     const probe = spyOn(runAs, 'judgeCannotEnterHome').mockResolvedValue({ ok: true })
     const render = spyOn(cc, 'renderClaudeCode').mockResolvedValue(ANSWERED)
     spies.push(probe, render)
-    let r: pass.PassResult | null = null
-    await withClaude(async (env) => {
-      r = await run(home, env)
-    })
+    const r = await withClaude((env) => run(home, env))
     expect(r).toEqual({ ...EMPTY, answered: [ID] })
     expect(probe).toHaveBeenCalledTimes(1)
     expect(probe.mock.calls[0]!.slice(0, 2)).toEqual([JUDGE, realpathSync(home)])
