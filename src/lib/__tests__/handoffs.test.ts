@@ -273,6 +273,35 @@ describe('supersede', () => {
     expect(bytes('run-1.prod.json')).toBe(afterSecond)
     expect(raw('run-1.prod.json').state).toBe('superseded')
   })
+
+  test('an answered record survives a second write for its run, which returns it as it is', async () => {
+    await write('run-1', 'prod', T0)
+    const t: lib.Try = {
+      at: new Date(T0 + 10).toISOString(),
+      reservation_id: 'res-1',
+      requested: 'model-a',
+      served: 'model-a',
+      cost_micro_usd: 1200,
+      cost_basis: 'reported',
+      outcome: 'answered',
+      reason: null,
+    }
+    await lib.settleTry(
+      dir,
+      'run-1.prod',
+      async () => ({ try: t, close: true }),
+      async () => t,
+      T0 + 10,
+    )
+    const before = bytes('run-1.prod.json')
+
+    const again = await write('run-1', 'prod', T0 + 20)
+
+    expect(again.state).toBe('answered')
+    expect(again.tries?.length).toBe(1)
+    expect(bytes('run-1.prod.json')).toBe(before)
+    expect(readdirSync(dir).filter((n) => n.includes('.tmp-'))).toEqual([])
+  })
 })
 
 describe('the writer refuses an id that is not a file name', () => {
