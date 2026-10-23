@@ -59,7 +59,6 @@ const INTERNAL = ['segment.opened', 'segment.sealed', 'checkpoint.recorded']
 
 /** Kinds with no emit call yet, each naming the roadmap work that wires it. */
 const PENDING: Record<string, string> = {
-  'handoff.reserved': 'warpline consume',
   'handoff.tried': 'warpline consume',
 }
 
@@ -220,7 +219,7 @@ describe('every record kind has an emit call or a pending entry', () => {
     const { sites, offenders } = real()
     expect(offenders).toEqual([])
     expect(census(EXPECTED_KINDS, INTERNAL, sites, PENDING, offenders)).toEqual([])
-    expect(Object.keys(PENDING)).toEqual(['handoff.reserved', 'handoff.tried'])
+    expect(Object.keys(PENDING)).toEqual(['handoff.tried'])
     const wired = EXPECTED_KINDS.filter((k) => !INTERNAL.includes(k) && !(k in PENDING))
     for (const kind of wired) expect(sites[kind]?.length ?? 0).toBeGreaterThan(0)
     expect(INTERNAL.length + wired.length + Object.keys(PENDING).length).toBe(EXPECTED_KINDS.length)
