@@ -3,12 +3,13 @@
  *
  * One try is one non-streaming `POST <endpoint>/chat/completions` carrying the
  * model, the prompt as one user message and `stream: false`, and no token-limit
- * field. It calls again, at most twice, only when nothing was answered: a
- * refused connect, or HTTP 429, 502, 503 or 504. A timeout, any other status or
- * a failure after the call was sent ends the try. A try's cost is the cost its
- * 200 carries: reported (the `x-litellm-response-cost` header, then the body's
- * `usage.cost`) before computed (the price table, from the token counts) before
- * unknown. A try with no 200 has no cost, so the caller keeps its full
+ * field. It calls again, at most twice, only when the server did no work: a
+ * refused connect, or HTTP 429 or 503. A 502 or 504 can follow an upstream
+ * generation a gateway already billed, so it ends the try, as a timeout, any
+ * other status or a failure after the call was sent do. A try's cost is the
+ * cost its 200 carries: reported (the `x-litellm-response-cost` header, then the
+ * body's `usage.cost`) before computed (the price table, from the token counts)
+ * before unknown. A try with no 200 has no cost, so the caller keeps its full
  * reservation. A refusal reason names a status or a fixed phrase, never the
  * endpoint, the credential or a price.
  *
@@ -104,12 +105,24 @@ describe('calls again only when nothing was answered', () => {
     })
   })
 
-  for (const s of [429, 502, 504]) {
+  for (const s of [429]) {
     test(`a ${s} is called again`, async () => {
       await withOpenAiStub([status(s), ok()], async (stub) => {
         const r = await render(stub.url)
         expect(r).toMatchObject({ ok: true, calls: 2 })
         expect(stub.calls()).toBe(2)
+      })
+    })
+  }
+
+  // A gateway answers these after its upstream may have finished and billed the generation.
+  for (const s of [502, 504]) {
+    test(`a ${s} is one call and ends the try with no cost`, async () => {
+      await withOpenAiStub([status(s), ok()], async (stub) => {
+        const r = await render(stub.url)
+        expect(r).toMatchObject({ ok: false, text: null, calls: 1, cost_micro_usd: null, cost_basis: 'unknown' })
+        expect(r.reason).toBe(`the endpoint answered HTTP ${s}`)
+        expect(stub.calls()).toBe(1)
       })
     })
   }
@@ -154,7 +167,7 @@ describe('calls again only when nothing was answered', () => {
 
   test('the limits are the published constants', () => {
     expect(openai.OPENAI_MAX_CALLS).toBe(3)
-    expect([...openai.OPENAI_RETRY_STATUSES]).toEqual([429, 502, 503, 504])
+    expect([...openai.OPENAI_RETRY_STATUSES]).toEqual([429, 503])
     expect(openai.OPENAI_TIMEOUT_MS).toBe(300_000)
     expect(openai.CONSUME_API_KEY_ENV).toBe('WARPLINE_CONSUME_API_KEY')
   })
