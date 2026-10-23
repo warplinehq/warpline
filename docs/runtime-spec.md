@@ -5391,8 +5391,9 @@ with `the spend window could not be read`, and refuses every claim with `the
 audit store could not be read for the unsettled tries`. `warpline audit
 pass-over <seq>` (§ 14) passes such a line over. Once passed over it counts as
 nothing, so a reservation it held is gone from the window. A line in a sealed
-segment can't be passed over, so nothing in this runtime clears it, and only a
-store restored from an export does.
+segment can't be passed over, and it has no recovery in this build. Restoring
+an older export by hand drops every later reservation, try and fire record, so
+don't clear it that way.
 
 ### A try that ended without settling
 
