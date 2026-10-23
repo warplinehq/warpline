@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { SkillResult } from '../../schemas/skill-result.js'
+import { NeedsLlmSchema, type SkillResult } from '../../schemas/skill-result.js'
 // The module this file pins before it exists, read through the namespace so
 // each export is named where it is used.
 import * as lib from '../handoffs.js'
@@ -44,7 +44,7 @@ function bytes(name: string): string {
   return readFileSync(join(dir, name), 'utf-8')
 }
 
-function result(summary: string, needsLlm?: { task: string; context_path: string }): SkillResult {
+function result(summary: string, needsLlm?: { task: string; context_path: string; output_path?: string }): SkillResult {
   return {
     status: 'skipped',
     phases_completed: [],
@@ -94,6 +94,8 @@ describe('a handoff becomes one open record the reader finds', () => {
       plugin: 'prod',
       task: 'Summarise the brief',
       context_path: 'state/brief.json',
+      output_path: null,
+      tries: [],
       created_at: new Date(T0).toISOString(),
       state: 'open',
       closed_at: null,
@@ -113,17 +115,53 @@ describe('the record takes its task and context path from the result', () => {
         context_path: 'state/brief.json',
       }),
     )
-    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'Summarise the brief', context_path: 'state/brief.json' })
+    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'Summarise the brief', context_path: 'state/brief.json', output_path: null })
   })
 
   test('a prefix-only summary gives its task and its Context: path, raw', () => {
     const fields = lib.handoffFields('run-1', 'prod', result('[needs-llm] Triage 2 new feed entries. Context: /tmp/payload.json'))
-    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'Triage 2 new feed entries', context_path: '/tmp/payload.json' })
+    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'Triage 2 new feed entries', context_path: '/tmp/payload.json', output_path: null })
   })
 
   test('a prefix-only summary with no Context: gives the whole remainder and a null path', () => {
     const fields = lib.handoffFields('run-1', 'prod', result('[needs-llm] summarise the brief'))
-    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'summarise the brief', context_path: null })
+    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'summarise the brief', context_path: null, output_path: null })
+  })
+})
+
+describe('the record carries where its Judgment goes', () => {
+  test('a write with an output path carries it', async () => {
+    await lib.writeHandoff(dir, { run_id: 'run-1', plugin: 'prod', task: 't', context_path: null, output_path: 'state/x.md' }, T0)
+    expect(raw('run-1.prod.json').output_path).toBe('state/x.md')
+    expect(raw('run-1.prod.json').tries).toEqual([])
+  })
+
+  test('handoffFields copies needs_llm.output_path, and gives null without it', () => {
+    const withPath = lib.handoffFields(
+      'run-1',
+      'prod',
+      result('[needs-llm] Draft. Context: state/brief.json', { task: 'Draft', context_path: 'state/brief.json', output_path: 'state/x.md' }),
+    )
+    expect(withPath.output_path).toBe('state/x.md')
+    const without = lib.handoffFields('run-1', 'prod', result('[needs-llm] Draft', { task: 'Draft', context_path: 'state/brief.json' }))
+    expect(without.output_path).toBeNull()
+  })
+
+  test('a record written before output_path and tries existed still reads as open', async () => {
+    mkdirSync(dir)
+    writeFileSync(join(dir, 'run-1.prod.json'), JSON.stringify(openRecord('run-1', 'prod', T0), null, 2))
+    expect(await openIds()).toEqual(['run-1.prod'])
+  })
+
+  test('needs_llm.output_path outside the home is refused by name, never by value', () => {
+    expect(NeedsLlmSchema.parse({ task: 't', context_path: 'state/a.json', output_path: 'state/x.md' }).output_path).toBe('state/x.md')
+    for (const bad of ['../x', '/abs/x', 'C:\\x']) {
+      const parsed = NeedsLlmSchema.safeParse({ task: 't', context_path: 'state/a.json', output_path: bad })
+      expect(parsed.success).toBe(false)
+      const message = parsed.error!.issues.map((i) => i.message).join('\n')
+      expect(message).toContain('needs_llm.output_path')
+      expect(message).not.toContain(bad)
+    }
   })
 })
 
