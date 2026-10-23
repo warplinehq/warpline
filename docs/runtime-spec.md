@@ -4104,9 +4104,10 @@ The set is closed. A kind outside it cannot be written.
 | `segment.sealed` | The last line of a segment file that is full or old. |
 | `checkpoint.recorded` | The head as it stood, so it can be exported and checked later. |
 
-Nothing writes `handoff.reserved` or `handoff.tried` yet. warpline consume
-is their writer, and their fields are fixed as above. The last three
-kinds in the table are written by the store itself, never by a caller.
+The `consume` verb writes `handoff.reserved` before each renderer call and
+`handoff.tried` when the try ends, before the Judgment or the record is
+written (§ 17). The last three kinds in the table are written by the store
+itself, never by a caller.
 
 Each `grants` entry on a `fire.intent` names its `issuer`. A session window's
 issuer is whichever active principal, human or machine, last named that scope
@@ -5248,3 +5249,91 @@ in `consume.tools` gets no tools. A change to either key is on the audit record
 like every other change to the file: `preference.set` for a
 `warpline prefs set consume.tools '<json>'`, and `preferences.observed` for a
 hand edit (§ 14). The opt-in has no verb and no audit kind of its own.
+
+### The pass
+
+One pass answers the open Handoff records once, oldest first, and then exits.
+It lists the open records, keeping only the plugins it was asked for. With none
+left, it stops there. Otherwise it reads `preferences.json` once, puts the read
+on the audit record (`preferences.observed`, § 14), and judges the `consume`
+block. It then sets up the renderer: for `claude-code`, the first executable
+`claude` on PATH, at version 2.1.305 or later; for `openai-compatible`, the
+endpoint. A failure in any of these refuses the whole pass by name, and no
+Handoff is touched.
+
+For each record the pass first runs the refusals that need no claim: no model
+set for its plugin, no `output_path`, and an unknown cost basis under a spend
+cap (below). A refusal names its reason and adds no try. The pass then claims
+the Handoff, and from there the claim is released however the try ends. One
+try runs in this order:
+
+1. The record is re-read. One found `answered` was finished by another
+   consumer after this pass listed it: there is nothing to do, and it is not
+   reported. One found in any other state that is not `open` (withdrawn,
+   superseded, or a state this build does not know) is skipped as no longer
+   open.
+2. `handoff.reserved` is appended under `.consume.lock`.
+3. The renderer is called, outside every lock. The prompt is the task, or the
+   task, a blank line and the context file's text.
+4. Under the record lock the record is re-read. While it is `open`,
+   `handoff.tried` is appended, then the Judgment is written atomically to
+   `<home>/<output_path>`, then the record gains the try and, when the try
+   answered, `state: "answered"` and `closed_at`. A record that closed during
+   the call gains a `discarded` try, and its state is left as it is.
+
+A refused `handoff.tried` append writes no Judgment and no try, and leaves the
+reservation open, so the window counts it in full. The Judgment is the
+renderer's text byte for byte. The model writes nothing, and no Judgment opens
+a gate: the pass never reads the state document or its gate list.
+
+A pass reports each Handoff as answered, failed, refused, skipped, discarded,
+held or unreadable. Held means another live consumer holds its claim. It is the
+one report besides answered that leaves the exit code at 0. Any other report,
+or a refused pass, exits 1.
+
+### Three locks
+
+| Lock | Covers |
+|---|---|
+| `<home>/handoffs/.consume.lock` | Reading the spend window, checking the caps and appending one reservation. Never held across a model call. |
+| `<home>/handoffs/<id>.claim` | One consumer answering one Handoff. It is never waited on: a live holder's Handoff is reported held. Only a dead holder on this host is broken, and a holder this host cannot judge is never broken. |
+| `<home>/handoffs/<id>.lock` | Every rewrite of the record: a supersede, a withdrawal and a try's settle. Held for one read and one write; a settle also appends its one `handoff.tried` line and writes the Judgment inside it. Never held across a model call. |
+
+The lock order is the state lock, then a record lock, then the audit lock, and
+separately `.consume.lock`, then the audit lock. The `consume` verb never takes
+the state lock or the run lock. A claim does not serialise writers, so `deny`
+can still withdraw a claimed record.
+
+### Tries
+
+Each try is appended to the record's `tries` list, and never rewritten.
+
+| Field | Meaning |
+|---|---|
+| `at` | When the try settled, as an ISO time. |
+| `reservation_id` | The `handoff.reserved` line this try settles. |
+| `requested` | The model id the try asked for. |
+| `served` | The model id the provider reported, or null when it reported none or one outside the model-id shape. |
+| `cost_micro_usd` | What the try cost, in integer micro-USD, or null when it is unknown. |
+| `cost_basis` | `reported` by the provider, `computed` from `consume.prices`, or `unknown`. |
+| `outcome` | `answered`, `failed`, `discarded`, `refused` or `recovered`. |
+| `reason` | Why the try did not answer, as a fixed phrase, or null. |
+
+`answered` closes the record. `failed` leaves it open for a later pass.
+`discarded` is a try that ended after the record closed.
+
+### Spend caps
+
+A reservation's amount is `consume.max_usd_per_call`, or 0 with no cap, and it
+is appended even at 0 so every try has its anchor on the audit record. A window
+sums the reservations stamped in it: each at its settled cost, and an open or
+costless one at its full amount, so a killed call keeps its whole reservation.
+A call can cost more than it reserved, and then it counts at its cost. A
+reservation that would take the window past `consume.max_usd_per_window` is
+refused, and the Handoff stays open.
+
+The `claude-code` renderer always reports a cost. With `openai-compatible` a
+cost is known in advance only when `consume.prices` has an entry for the
+requested model. With either cap set and no such entry, the Handoff is refused
+before any reservation or call. The `openai-compatible` renderer's retries are
+calls inside one try, under one reservation.
