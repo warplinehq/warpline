@@ -5,8 +5,10 @@
  * blank line and the context file's text. The file must realpath inside the
  * home, be at most 8 MiB and be UTF-8, or the Handoff is refused with no call.
  *
- * The output rule (Pitfall 9): the Judgment's directory must realpath inside
- * the home before it is made, after it is made, and again at write time.
+ * The output rule (Pitfall 9): the Judgment's directory must realpath under
+ * `<home>/judgments` before it is made, after it is made, and again at write
+ * time. Every file that holds authority is in the home, outside judgments/,
+ * so a Judgment aimed at one is refused by name with no call.
  *
  * The answer rules (SPEC R9): a successful try's text is non-empty after
  * trimming and at most `consume.max_output_bytes` UTF-8 bytes, and a Handoff
@@ -29,7 +31,8 @@ import * as claim from '../claim.js'
 import * as pass from '../pass.js'
 
 const ID = 'run-1.prod'
-const OUTPUT = 'state/prod.judgment.md'
+const OUTPUT = 'judgments/prod.judgment.md'
+const OUTSIDE = 'output_path resolves outside the judgments directory'
 const MODEL = 'claude-opus-5'
 const FLOOR_VERSION = '2.1.305 (Claude Code)'
 
@@ -230,16 +233,79 @@ describe('a context file the pass will not send is refused, with no reservation 
   })
 })
 
-describe('the Judgment is written only inside the home', () => {
-  for (const output of ['state/out/j.md', 'state/out/sub/j.md']) {
-    test(`output_path ${output} under a symlink to a dir outside: output_path resolves outside the home, and nothing is made there`, async () => {
+describe('a Judgment is written only under judgments/', () => {
+  /** The Handoff is refused with the outside reason: no reservation, no call, and the record untouched. */
+  async function refusedOutside(home: string): Promise<void> {
+    await withClaude({}, async (env, calls) => {
+      const r = await run(home, env)
+      expect(r).toEqual({ ...EMPTY, refused: [{ id: ID, reason: OUTSIDE }] })
+      expect(pass.exitCodeFor(r)).toBe(1)
+      expect(calls()).toBe(0)
+    })
+    expect(reserved(home)).toEqual([])
+    expect(await record(home)).toMatchObject({ state: 'open', tries: [] })
+  }
+
+  // Each record is written raw, so the pass's own check is the only thing that can refuse it.
+  for (const p of ['.session-approval', 'preferences.json', 'handoffs/x.json', 'plugins/p/handler.ts']) {
+    test(`output_path ${p} names an authority file: refused by name, with no reservation, no call and nothing written`, async () => {
+      const home = await makeHome({ consume: { model: MODEL } }, { output_path: p })
+      const target = join(home, p)
+      const bytes = present(target) ? readFileSync(target) : null
+      await refusedOutside(home)
+      if (bytes === null) expect(present(target)).toBe(false)
+      else expect(readFileSync(target)).toEqual(bytes)
+      if (p.startsWith('plugins/')) expect(present(join(home, 'plugins'))).toBe(false)
+    })
+  }
+
+  test('a judgments directory that is a link to the home is refused, and nothing lands in the home', async () => {
+    const home = await makeHome({ consume: { model: MODEL } }, { output_path: 'judgments/.session-approval' })
+    symlinkSync(home, join(home, 'judgments'))
+    await refusedOutside(home)
+    expect(present(join(home, '.session-approval'))).toBe(false)
+  })
+
+  test('a sibling that only shares the prefix, judgments-evil/x.md, is refused', async () => {
+    const home = await makeHome({ consume: { model: MODEL } }, { output_path: 'judgments-evil/x.md' })
+    // Made first, so the deepest existing ancestor is the sibling itself and not the home.
+    mkdirSync(join(home, 'judgments-evil'))
+    await refusedOutside(home)
+    expect(readdirSync(join(home, 'judgments-evil'))).toEqual([])
+  })
+
+  test('the judgments directory swapped for a link to the home during the call: the try fails and nothing lands in the home', async () => {
+    const home = await makeHome({ consume: { model: MODEL } }, { output_path: 'judgments/x.md' })
+    const dir = join(home, 'judgments')
+    // The fake runs this before it answers: the directory the pass made becomes a link to the home.
+    const before = `rm -rf '${dir}' && ln -s '${home}' '${dir}'`
+    await withClaude({ before }, async (env, calls) => {
+      expect(await run(home, env)).toEqual({ ...EMPTY, failed: [{ id: ID, reason: OUTSIDE }] })
+      expect(calls()).toBe(1)
+    })
+    expect(present(join(home, 'x.md'))).toBe(false)
+    const rec = await record(home)
+    expect(rec?.state).toBe('open')
+    expect(rec?.tries?.[0]).toMatchObject({ outcome: 'failed', reason: OUTSIDE })
+  })
+
+  test('a Judgment under judgments/ in a directory not yet made is written', async () => {
+    const home = await makeHome({ consume: { model: MODEL } }, { output_path: 'judgments/new/j.md' })
+    await withClaude({ text: 'the judgment' }, async (env) => {
+      expect(await run(home, env)).toEqual({ ...EMPTY, answered: [ID] })
+    })
+    expect(readFileSync(join(home, 'judgments', 'new', 'j.md'), 'utf-8')).toBe('the judgment')
+  })
+
+  for (const output of ['judgments/out/j.md', 'judgments/out/sub/j.md']) {
+    test(`output_path ${output} under a symlink to a dir outside: ${OUTSIDE}, and nothing is made there`, async () => {
       const outside = temp('warpline-rules-outside-')
       const home = await makeHome({ consume: { model: MODEL } }, { output_path: output })
-      mkdirSync(join(home, 'state'), { recursive: true })
-      symlinkSync(outside, join(home, 'state', 'out'))
+      mkdirSync(join(home, 'judgments'), { recursive: true })
+      symlinkSync(outside, join(home, 'judgments', 'out'))
       await withClaude({}, async (env, calls) => {
         const r = await run(home, env)
-        expect(r).toEqual({ ...EMPTY, refused: [{ id: ID, reason: 'output_path resolves outside the home' }] })
+        expect(r).toEqual({ ...EMPTY, refused: [{ id: ID, reason: OUTSIDE }] })
         expect(calls()).toBe(0)
       })
       expect(readdirSync(outside)).toEqual([])
@@ -248,33 +314,33 @@ describe('the Judgment is written only inside the home', () => {
     })
   }
 
-  test('an output_path that climbs out of the home with ..: output_path resolves outside the home', async () => {
+  test(`an output_path that climbs out of the home with ..: ${OUTSIDE}`, async () => {
     const escaped = `warpline-rules-escaped-${process.pid}-${Date.now()}`
     dirs.push(join(tmpdir(), escaped))
     const home = await makeHome({ consume: { model: MODEL } }, { output_path: `../${escaped}/j.md` })
     await withClaude({}, async (env, calls) => {
       const r = await run(home, env)
-      expect(r.refused).toEqual([{ id: ID, reason: 'output_path resolves outside the home' }])
+      expect(r.refused).toEqual([{ id: ID, reason: OUTSIDE }])
       expect(calls()).toBe(0)
     })
     expect(existsSync(join(tmpdir(), escaped))).toBe(false)
   })
 
-  test('a parent swapped for a symlink out during the renderer call: the try fails with output_path resolves outside the home, and nothing lands outside', async () => {
+  test(`a parent swapped for a symlink out during the renderer call: the try fails with ${OUTSIDE}, and nothing lands outside`, async () => {
     const outside = temp('warpline-rules-outside-')
-    const home = await makeHome({ consume: { model: MODEL } }, { output_path: 'state/out/j.md' })
-    const parent = join(home, 'state', 'out')
+    const home = await makeHome({ consume: { model: MODEL } }, { output_path: 'judgments/out/j.md' })
+    const parent = join(home, 'judgments', 'out')
     // The fake runs this before it answers: the parent the pass checked becomes a link out of the home.
     const before = `rm -rf '${parent}' && ln -s '${outside}' '${parent}'`
     await withClaude({ before }, async (env, calls) => {
       const r = await run(home, env)
-      expect(r).toEqual({ ...EMPTY, failed: [{ id: ID, reason: 'output_path resolves outside the home' }] })
+      expect(r).toEqual({ ...EMPTY, failed: [{ id: ID, reason: OUTSIDE }] })
       expect(calls()).toBe(1)
     })
     expect(readdirSync(outside)).toEqual([])
     const rec = await record(home)
     expect(rec?.state).toBe('open')
-    expect(rec?.tries?.[0]).toMatchObject({ outcome: 'failed', reason: 'output_path resolves outside the home' })
+    expect(rec?.tries?.[0]).toMatchObject({ outcome: 'failed', reason: OUTSIDE })
     expect(tried(home)[0]).toMatchObject({ outcome: 'failed' })
   })
 })

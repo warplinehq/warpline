@@ -153,15 +153,33 @@ describe('the record carries where its Judgment goes', () => {
     expect(await openIds()).toEqual(['run-1.prod'])
   })
 
-  test('needs_llm.output_path outside the home is refused by name, never by value', () => {
-    expect(NeedsLlmSchema.parse({ task: 't', context_path: 'state/a.json', output_path: 'state/x.md' }).output_path).toBe('state/x.md')
-    for (const bad of ['../x', '/abs/x', 'C:\\x']) {
-      const parsed = NeedsLlmSchema.safeParse({ task: 't', context_path: 'state/a.json', output_path: bad })
+  test('needs_llm.output_path outside judgments/ is refused by name, never by value', () => {
+    const parse = (output_path: string) => NeedsLlmSchema.safeParse({ task: 't', context_path: 'state/a.json', output_path })
+    const messageOf = (output_path: string) => {
+      const parsed = parse(output_path)
       expect(parsed.success).toBe(false)
-      const message = parsed.error!.issues.map((i) => i.message).join('\n')
+      return parsed.error!.issues.map((i) => i.message).join('\n')
+    }
+    expect(NeedsLlmSchema.parse({ task: 't', context_path: 'state/a.json', output_path: 'judgments/x.md' }).output_path).toBe('judgments/x.md')
+    const refused = [
+      'state/x.md',
+      '.session-approval',
+      'preferences.json',
+      'handoffs/x.json',
+      'plugins/p/handler.ts',
+      'judgments-evil/x.md',
+      'judgments/../x.md',
+      '../x',
+      '/abs/x',
+      'C:\\x',
+    ]
+    for (const bad of refused) {
+      const message = messageOf(bad)
       expect(message).toContain('needs_llm.output_path')
       expect(message).not.toContain(bad)
     }
+    // The directory itself is not a file under it. Its name is part of the fixed message, so there is no never-by-value check here.
+    for (const bad of ['judgments', 'judgments/']) expect(messageOf(bad)).toContain('needs_llm.output_path')
   })
 })
 
