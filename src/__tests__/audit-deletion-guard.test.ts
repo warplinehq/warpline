@@ -46,6 +46,8 @@ const DELETION = String.raw`\b(unlink|rm|rmdir|rename|truncate|ftruncate)(Sync)?
 const EXPECTED: Record<string, number> = {
   'src/board/state-manager.ts': 2,
   'src/cli/scaffold.ts': 2,
+  // The renderer's own temp cwd and HOME under /tmp, removed after each call.
+  'src/consume/claude-code.ts': 1,
   'src/lib/fs-atomic.ts': 3,
   'src/lib/jsonl-logger.ts': 1,
   // The token-checked release (the end of a hold and the exit hook), a gone

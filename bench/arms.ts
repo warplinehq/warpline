@@ -16,6 +16,13 @@ import { dirname, join, resolve } from 'node:path'
 import { runAdvance, type AdvanceResult } from 'warpline'
 import { EngineStateSchema } from 'warpline/schemas/engine-state'
 import { RunLogSchema } from 'warpline/schemas/run-log'
+import {
+  API_ERROR_REASON,
+  asRecord,
+  ISOLATION_REMOVED_TOOLS,
+  ISOLATION_SETTINGS,
+  readClaudeResult,
+} from '../src/consume/claude-code.js'
 import { gradeHome, type GradeResult } from './grade.js'
 import type { BenchDisposition, BenchRunRecord, TokenClasses } from './record.js'
 import { GRADED_PATHS, NOTES_PATH } from './seed.js'
@@ -216,9 +223,6 @@ export interface ResolvedDisposition {
   truncation_subtype: string | null
 }
 
-/** The terminal reason that means the provider, not the arm. */
-const API_ERROR_REASON = 'api_error'
-
 /**
  * The two subtypes that mean a stop point tripped.
  *
@@ -227,12 +231,6 @@ const API_ERROR_REASON = 'api_error'
  * neither is a value this harness chooses.
  */
 const TRUNCATED_SUBTYPES: ReadonlySet<string> = new Set(['error_max_turns', 'error_max_budget_usd'])
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {}
-}
 
 /**
  * An integer, or null when the key is not there.
@@ -272,10 +270,11 @@ function numberOr(source: Record<string, unknown>, key: string, fallback: number
  */
 export function parseClaudeResult(raw: unknown, arm: ArmId): ParsedClaudeResult {
   const result = asRecord(raw)
-  const is_error = result.is_error === true
+  const core = readClaudeResult(raw, PINNED_MODEL)
+  const is_error = core.isError
   const terminal_reason = typeof result.terminal_reason === 'string' ? result.terminal_reason : null
 
-  if (is_error && terminal_reason === API_ERROR_REASON) throw new ApiUnavailableError(arm, terminal_reason)
+  if (core.apiError) throw new ApiUnavailableError(arm, API_ERROR_REASON)
 
   const usage = asRecord(result.usage)
   return {
@@ -290,35 +289,8 @@ export function parseClaudeResult(raw: unknown, arm: ArmId): ParsedClaudeResult 
     subtype: typeof result.subtype === 'string' ? result.subtype : '',
     is_error,
     terminal_reason,
-    model_id: selectModelId(result.modelUsage),
+    model_id: core.served,
   }
-}
-
-/**
- * Which of the per-model usage keys names the model that did the work.
- *
- * MEASURED, and the reason this is not `keys[0]`: a session that uses a tool
- * reports TWO models, and the auxiliary one is inserted FIRST. A real smoke
- * iteration of all three arms returned `claude-haiku-4-5-20251001` — 912 input
- * tokens for one internal step — ahead of the pinned model that served every
- * turn. Taking the first key would stamp every record in the published set with
- * a model that did none of the work, and the method's own requirement that the
- * id be one string across the whole set would then be checking the auxiliary
- * model rather than the measured one.
- *
- * So the key is SELECTED by matching the pinned id, and the KEY is what is
- * returned — the dated canonical form when the tool reports one. This is still
- * a read-back rather than an echo, and it is the stronger version of it: a run
- * the pinned model never served returns null, and null is not a publishable
- * record, so a silent model substitution stops the set instead of entering it.
- */
-function selectModelId(modelUsage: unknown): string | null {
-  for (const [key, entry] of Object.entries(asRecord(modelUsage))) {
-    const canonical = asRecord(entry).canonicalModel
-    const named = typeof canonical === 'string' ? canonical : ''
-    if (key.startsWith(PINNED_MODEL) || named.startsWith(PINNED_MODEL)) return key
-  }
-  return null
 }
 
 /**
@@ -431,29 +403,7 @@ export const SESSION_BUDGET = '5'
 /** The plugin source the consumer session is pointed at, absolute. */
 export const CONSUMER_PLUGIN_PATH = join(REPO_ROOT, 'plugin')
 
-/**
- * The sandbox every isolated session runs in: on, no host allowed, no escape
- * hatch for an unsandboxed command, and the filesystem left exactly as a public
- * session has it.
- *
- * A tracked constant and not a config value, so no configuration can weaken it
- * and the pre-registration freezes one reviewable literal.
- */
-export const ISOLATION_SETTINGS = {
-  sandbox: {
-    enabled: true,
-    filesystem: { disabled: true },
-    network: { allowedDomains: [], strictAllowlist: true },
-    allowUnsandboxedCommands: false,
-  },
-} as const
-
-/**
- * The in-process tools an isolated session has removed by bare name. The
- * sandbox covers subprocesses and not these, and a bare name removes the tool
- * from the session outright, which a command-text pattern does not.
- */
-export const ISOLATION_REMOVED_TOOLS = ['WebFetch', 'WebSearch', 'RemoteTrigger'] as const
+export { ISOLATION_SETTINGS, ISOLATION_REMOVED_TOOLS }
 
 /** How a session is run. Both default to the public behaviour. */
 export interface SessionOptions {
