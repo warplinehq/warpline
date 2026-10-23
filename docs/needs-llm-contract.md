@@ -328,7 +328,10 @@ not `answered`, `recovered` or `discarded`. The count is read from the
 record's `tries` and stored nowhere else. Once a record has
 `consume.max_tries` counted tries, it is skipped with `the Handoff has used
 consume.max_tries tries`, with no model call. It is checked before the claim
-and again under it. The record stays `open`, and the pass exits `1` for it.
+and again under it. Under the claim, before that check, every reservation for
+the record that no try names is settled onto it first (runtime-spec § 17), so a
+paid try that ended without settling still counts. The record stays `open`, and
+the pass exits `1` for it.
 
 No refusal or skip above reserves anything or adds a try, and a claim it
 took is released.

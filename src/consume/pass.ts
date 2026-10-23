@@ -16,13 +16,19 @@
  * the reservation and the settle take a lock. Every reason is a fixed phrase,
  * a key path or an errno code, never a configuration value.
  *
- * A pass that breaks a dead holder's claim reconciles what that holder left
- * before it tries. The holder's try is the latest reservation for the
- * Handoff that no try on the record names. When its `handoff.tried` says
- * `answered` and the file at `output_path` has the recorded sha256, the paid
- * answer is marked `recovered`, with no call and no reservation. Anything else
- * is that try appended as `failed`, with a `handoff.tried` written first when
- * the holder died before its own, and it counts against `consume.max_tries`.
+ * A reservation is a try's write-ahead anchor. A `handoff.reserved` line for
+ * a Handoff that no try on its record names is a try that ended without
+ * settling, however it ended: a kill, a Judgment or record write that failed,
+ * a refused `handoff.tried` append, a record lock not taken in time. Under the
+ * claim no other consumer can be in a try on that Handoff, so on every claim,
+ * before any new try, the pass settles each such reservation onto the record,
+ * oldest first. When its `handoff.tried` says `answered` and the file under
+ * `judgments/` has the recorded sha256, the paid answer is marked `recovered`,
+ * with no call and no reservation. Anything else is a `failed` try, with a
+ * `handoff.tried` written first when it has none, and it counts against
+ * `consume.max_tries`; once the record has closed it is `discarded`. A
+ * renderer that rejects is a failed render with no cost, settled as any other,
+ * so it leaves no reservation unnamed and the pass goes on.
  *
  * A plugin with a `consume.tools` entry runs its tries with those tools, as
  * the `consume.run_as` user, and only after a probe the kernel answers says
@@ -49,7 +55,7 @@ import {
 import { CONSUME_API_KEY_ENV, expectedOpenAiBasis, renderOpenAi } from './openai.js'
 import { toMicroUp, type CostBasis, type Rendered } from './renderers.js'
 import { judgeCannotEnterHome } from './run-as.js'
-import { CONSUME_LOCK_NAME, reserve, unsettledReservation, type TriedLine } from './spend.js'
+import { CONSUME_LOCK_NAME, reserve, unsettledReservations, type TriedLine } from './spend.js'
 
 type Entry = { id: string; reason: string }
 
@@ -87,6 +93,16 @@ const errnoOf = (err: unknown): string => {
   const code = (err as { code?: unknown } | null)?.code
   return typeof code === 'string' ? code : 'unknown'
 }
+
+/** A renderer that rejected, as a failed render with no cost, so the settle records it as any other. */
+const couldNotRun = (err: unknown): Rendered => ({
+  ok: false,
+  text: null,
+  served: null,
+  cost_micro_usd: null,
+  cost_basis: 'unknown',
+  reason: `the renderer could not run (${errnoOf(err)})`,
+})
 
 /** What the renderer switch needs, set up once per pass, keyed by the closed renderer setting. */
 type Setup =
@@ -273,7 +289,7 @@ const MAX_TRIES_USED = 'the Handoff has used consume.max_tries tries'
 
 const MISMATCH_REFUSED = 'the served model differs from the requested one'
 
-const STOPPED = 'the consumer holding the claim stopped'
+const UNSETTLED = 'the try ended without being settled'
 
 const CLOSED_DURING = 'the Handoff closed before the try ended'
 
@@ -290,7 +306,7 @@ async function shaInside(home: string, p: string): Promise<string | null> {
 
 const basisOf = (b: string): CostBasis => (b === 'reported' || b === 'computed' ? b : 'unknown')
 
-/** The record's try for a stopped holder's `handoff.tried` line, with the outcome and reason given. */
+/** The record's try for an unsettled try's `handoff.tried` line, with the outcome and reason given. */
 const mirrorTry = (reservationId: string, t: TriedLine, outcome: TryOutcome, reason: string | null, at: number): Try => ({
   at: new Date(at).toISOString(),
   reservation_id: reservationId,
@@ -376,7 +392,7 @@ export async function consumePass(o: {
   const capped = capPerCallMicro !== null || capWindowMicro !== null
 
   // 4. Each open record.
-  for (const h of open) {
+  handoffs: for (const h of open) {
     const id = h.id
     // Refusals that need no claim add no try.
     const requested = settings.models[h.plugin] ?? settings.model
@@ -433,73 +449,77 @@ export async function consumePass(o: {
       const home = warplineHome()
       let counted = countedTries(current)
 
-      // A dead holder's claim was broken: settle what it left before any try.
-      if (claimed.broke) {
-        let dead: Awaited<ReturnType<typeof unsettledReservation>>
+      // Every reservation no try on the record names is a try that ended without settling. Under the claim no
+      // other consumer is in a try here, so each is settled onto the record first, oldest first.
+      let unsettled: Awaited<ReturnType<typeof unsettledReservations>>
+      try {
+        unsettled = await unsettledReservations(statePath, id, new Set((current.tries ?? []).map((t) => t.reservation_id)))
+      } catch {
+        result.refused.push({ id, reason: 'the audit store could not be read for the unsettled tries' })
+        continue
+      }
+      let recovered = false
+      let closed = false
+      for (const dead of unsettled) {
+        const { reservationId, tried } = dead
+        const paid =
+          tried !== null &&
+          tried.outcome === 'answered' &&
+          tried.sha256 !== null &&
+          (await shaInside(home, join(home, outputPath))) === tried.sha256
+        // The unsettled try, as `outcome`. With no `handoff.tried` for it, one is written first.
+        const deadTry = (outcome: Exclude<TryOutcome, 'recovered'>): Promise<Try> =>
+          tried === null
+            ? recordTry(
+                statePath,
+                id,
+                reservationId,
+                outcome,
+                requested,
+                null,
+                { ok: false, text: null, served: null, cost_micro_usd: null, cost_basis: 'unknown', reason: UNSETTLED },
+                null,
+                now,
+                UNSETTLED,
+              )
+            : Promise.resolve(mirrorTry(reservationId, tried, outcome, UNSETTLED, now()))
+        let settled: { state: string; try: Try }
         try {
-          dead = await unsettledReservation(statePath, id, new Set((current.tries ?? []).map((t) => t.reservation_id)))
-        } catch {
-          result.refused.push({ id, reason: 'the audit store could not be read for the stopped consumer' })
-          continue
+          settled = paid
+            ? await settleTry(
+                dir,
+                id,
+                async () => ({ try: mirrorTry(reservationId, tried!, 'recovered', null, now()), close: true }),
+                async () => mirrorTry(reservationId, tried!, 'discarded', CLOSED_DURING, now()),
+                now(),
+              )
+            : await settleTry(
+                dir,
+                id,
+                async () => {
+                  const o = tried?.outcome
+                  return { try: await deadTry(o === 'refused' || o === 'discarded' ? o : 'failed'), close: false }
+                },
+                () => deadTry('discarded'),
+                now(),
+              )
+        } catch (err) {
+          // The reservations not yet settled stay unnamed, so the next claim settles them.
+          if (err instanceof TryNotRecorded) result.refused.push({ id, reason: 'the audit store could not record the try' })
+          else result.failed.push({ id, reason: `the try could not be settled (${errnoOf(err)})` })
+          continue handoffs
         }
-        if (dead !== null) {
-          const { reservationId, tried } = dead
-          const paid =
-            tried !== null &&
-            tried.outcome === 'answered' &&
-            tried.sha256 !== null &&
-            (await shaInside(home, join(home, outputPath))) === tried.sha256
-          // The holder's own try, as `outcome`. With no `handoff.tried` from it, one is written first.
-          const deadTry = (outcome: Exclude<TryOutcome, 'recovered'>): Promise<Try> =>
-            tried === null
-              ? recordTry(
-                  statePath,
-                  id,
-                  reservationId,
-                  outcome,
-                  requested,
-                  null,
-                  { ok: false, text: null, served: null, cost_micro_usd: null, cost_basis: 'unknown', reason: STOPPED },
-                  null,
-                  now,
-                  STOPPED,
-                )
-              : Promise.resolve(mirrorTry(reservationId, tried, outcome, STOPPED, now()))
-          let settled: { state: string; try: Try }
-          try {
-            settled = paid
-              ? await settleTry(
-                  dir,
-                  id,
-                  async () => ({ try: mirrorTry(reservationId, tried!, 'recovered', null, now()), close: true }),
-                  async () => mirrorTry(reservationId, tried!, 'discarded', CLOSED_DURING, now()),
-                  now(),
-                )
-              : await settleTry(
-                  dir,
-                  id,
-                  async () => {
-                    const o = tried?.outcome
-                    return { try: await deadTry(o === 'refused' || o === 'discarded' ? o : 'failed'), close: false }
-                  },
-                  () => deadTry('discarded'),
-                  now(),
-                )
-          } catch (err) {
-            if (err instanceof TryNotRecorded) result.refused.push({ id, reason: 'the audit store could not record the try' })
-            else result.failed.push({ id, reason: `the try could not be settled (${errnoOf(err)})` })
-            continue
-          }
-          if (settled.try.outcome === 'recovered') {
-            result.answered.push(id)
-            continue
-          }
-          if (settled.state !== 'open') {
-            result.discarded.push(id)
-            continue
-          }
-          if (settled.try.outcome !== 'discarded') counted += 1
-        }
+        if (settled.try.outcome === 'recovered') recovered = true
+        else if (settled.state !== 'open') closed = true
+        else if (settled.try.outcome !== 'discarded') counted += 1
+      }
+      if (recovered) {
+        result.answered.push(id)
+        continue
+      }
+      if (closed) {
+        result.discarded.push(id)
+        continue
       }
 
       // Re-read under the claim: another consumer may have spent the last try since the listing.
@@ -555,14 +575,19 @@ export async function consumePass(o: {
         continue
       }
 
-      const rendered = await render(setup, {
-        model: requested,
-        prompt,
-        capMicro: capPerCallMicro,
-        settings,
-        parentEnv: o.parentEnv,
-        tools,
-      })
+      let rendered: Rendered
+      try {
+        rendered = await render(setup, {
+          model: requested,
+          prompt,
+          capMicro: capPerCallMicro,
+          settings,
+          parentEnv: o.parentEnv,
+          tools,
+        })
+      } catch (err) {
+        rendered = couldNotRun(err)
+      }
       const served = rendered.served !== null && MODEL_ID.test(rendered.served) ? rendered.served : null
       const textBytes = rendered.text === null ? null : Buffer.from(rendered.text, 'utf-8')
       // Exact inequality, and no reported model counts. A call that returned no text served nothing to compare.

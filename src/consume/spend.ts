@@ -73,19 +73,22 @@ export type TriedLine = {
 
 const isStringOrNull = (v: unknown): v is string | null => v === null || typeof v === 'string'
 
+/** A reservation no try on its record names, with the `handoff.tried` that names it, or null for that. */
+export type UnsettledReservation = { reservationId: string; amountMicro: number; tried: TriedLine | null }
+
 /**
- * The latest `handoff.reserved` for `handoff` whose id is not in `known` (the
- * ids the record's tries already name), with the `handoff.tried` that names
- * it, or null for that when there is none. Null when every reservation is
- * known. A line that cannot be read throws, because could not look is never
- * nothing to reconcile.
+ * Every `handoff.reserved` for `handoff` whose id is not in `known` (the ids
+ * the record's tries already name), in store order, oldest first, each with
+ * the `handoff.tried` that names it or null for that. Empty when every
+ * reservation is known. A line that cannot be read throws, because could not
+ * look is never nothing to reconcile.
  */
-export async function unsettledReservation(
+export async function unsettledReservations(
   statePath: string,
   handoff: string,
   known: ReadonlySet<string>,
-): Promise<{ reservationId: string; amountMicro: number; tried: TriedLine | null } | null> {
-  let latest: { reservationId: string; amountMicro: number } | null = null
+): Promise<UnsettledReservation[]> {
+  const unnamed: { reservationId: string; amountMicro: number }[] = []
   const tries = new Map<string, TriedLine>()
   for await (const l of readCompleteLines(statePath, 0)) {
     const r = l.record
@@ -95,7 +98,7 @@ export async function unsettledReservation(
     if (r.type === RESERVED) {
       const amount: unknown = r.data.amount_micro_usd
       if (!isMicro(amount)) throw new Error(UNREADABLE)
-      if (!known.has(id)) latest = { reservationId: id, amountMicro: amount }
+      if (!known.has(id)) unnamed.push({ reservationId: id, amountMicro: amount })
       continue
     }
     const d = r.data
@@ -118,7 +121,7 @@ export async function unsettledReservation(
       sha256: d.sha256,
     })
   }
-  return latest === null ? null : { ...latest, tried: tries.get(latest.reservationId) ?? null }
+  return unnamed.map((u) => ({ ...u, tried: tries.get(u.reservationId) ?? null }))
 }
 
 export type ReserveOutcome = { reserved: true; reservationId: string; amountMicro: number } | { reserved: false; reason: string }

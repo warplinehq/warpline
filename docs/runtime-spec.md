@@ -5271,18 +5271,23 @@ try runs in this order:
    reported. One found in any other state that is not `open` (withdrawn,
    superseded, or a state this build does not know) is skipped as no longer
    open.
-2. A tool-enabled try runs the `run_as` probes (below), and a refusal ends it
+2. Every `handoff.reserved` for the Handoff that no try on the record names is
+   settled onto the record first, oldest first (below).
+3. A tool-enabled try runs the `run_as` probes (below), and a refusal ends it
    here. Then `handoff.reserved` is appended under `.consume.lock`.
-3. The renderer is called, outside every lock. The prompt is the task, or the
-   task, a blank line and the context file's text.
-4. Under the record lock the record is re-read. While it is `open`,
+4. The renderer is called, outside every lock. The prompt is the task, or the
+   task, a blank line and the context file's text. A renderer that cannot run
+   is a `failed` try with the reason `the renderer could not run (<code>)` and
+   no cost, settled as in step 5, and the pass goes on to the next Handoff.
+5. Under the record lock the record is re-read. While it is `open`,
    `handoff.tried` is appended, then the Judgment is written atomically to
    `<home>/<output_path>`, then the record gains the try and, when the try
    answered, `state: "answered"` and `closed_at`. A record that closed during
    the call gains a `discarded` try, and its state is left as it is.
 
 A refused `handoff.tried` append writes no Judgment and no try, and leaves the
-reservation open, so the window counts it in full. The Judgment is the
+reservation open, so the window counts it in full. The next claim records that
+try as `failed` (below). The Judgment is the
 renderer's text byte for byte. The model writes nothing, and no Judgment opens
 a gate: the pass never reads the state document or its gate list. The pass
 writes a Judgment only under `<home>/judgments/`, which holds no file the gate,
@@ -5324,8 +5329,8 @@ Each try is appended to the record's `tries` list, and never rewritten.
 `answered` closes the record. `failed` leaves it open for a later pass.
 `discarded` is a try that ended after the record closed. `refused` is a try
 whose served model differed under `consume.model_mismatch: refuse` (below); it
-leaves the record open. `recovered` is an answer a stopped consumer paid for
-and wrote but did not mark (below); it closes the record.
+leaves the record open. `recovered` is an answer a try paid for and wrote but
+did not settle onto the record (below); it closes the record.
 
 ### Model mismatch
 
@@ -5372,28 +5377,46 @@ requested model. With either cap set and no such entry, the Handoff is refused
 before any reservation or call. The `openai-compatible` renderer's retries are
 calls inside one try, under one reservation.
 
-### A consumer that stops
+### A try that ended without settling
 
-A claim whose holder is dead on this host is broken, and the consumer that
-breaks it settles what that holder left before it tries. The holder's try is
-the latest `handoff.reserved` for the Handoff that no try on the record names.
-With none, the pass goes on as usual.
+A try's `handoff.reserved` line is its write-ahead anchor. A reservation for
+the Handoff that no try on the record names is a try that ended without
+settling, however it ended. A kill leaves one. So does a Judgment write or a
+record write that failed, a refused `handoff.tried` append, and a record lock
+not taken in time.
 
-When that reservation's `handoff.tried` says `answered` and the file at
+On every claim, before any new try, the pass settles each such reservation
+onto the record, oldest first. It can, because under the claim no other
+consumer can be in a try on this Handoff: a claim is broken only when its
+holder's pid is dead. With none, the pass goes on as usual.
+
+When a reservation's `handoff.tried` says `answered` and the file at
 `<home>/<output_path>` resolves under `<home>/judgments` and has the sha256
 that line records, the record is marked `answered` with a `recovered` try. It
 carries the reservation id, the models and the cost from that line. No call is
-made, no reservation is appended, and no `handoff.tried` is written: the dead
-holder's own line is the try's anchor.
+made, no reservation is appended, and no `handoff.tried` is written: the line
+already there is the try's anchor.
 
-Anything else is a `failed` try with the reason `the consumer holding the claim
-stopped`: the file is missing or outside `<home>/judgments`, its sha256
-differs, or the line said something other than `answered`. A holder that died
-before its `handoff.tried` (killed during the call) gets one written first,
-with outcome `failed`, a null cost and basis `unknown`, so the line still comes
-before the try. That try counts against `consume.max_tries`, and a normal try
-follows when one is left. A call killed before its `handoff.tried` keeps its
-full reservation in the window, since a null cost counts in full.
+Anything else is a `failed` try with the reason `the try ended without being
+settled`: the file is missing or outside `<home>/judgments`, its sha256
+differs, or the line said something other than `answered`. A line that said
+`refused` or `discarded` keeps that outcome. A try with no `handoff.tried`
+(killed during the call, or its append refused) gets one written first, with
+outcome `failed`, a null cost and basis `unknown`, so the line still comes
+before the try. The try counts against `consume.max_tries`, and a normal try
+follows when one is left. Once the record has closed, the reservation is
+settled as a `discarded` try instead, and the Handoff is reported discarded.
+
+When the audit store cannot be read for these reservations, the Handoff is
+refused with `the audit store could not be read for the unsettled tries`, and
+no try is made. A settle that fails is reported as any failed settle is, and
+the reservations not yet settled wait for the next claim. A call that ended
+before its `handoff.tried` keeps its full reservation in the window, since a
+null cost counts in full.
+
+One residual stays. A record that closes before its next claim is never claimed
+again, so such a try stays on the audit record only. The window still counts
+it, at its full reservation when no cost was recorded.
 
 A consumer killed after it wrote the Judgment but before it marked the record
 can leave that file behind a record that is then withdrawn or superseded. The

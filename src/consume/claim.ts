@@ -16,11 +16,10 @@ import { join } from 'node:path'
 import { breakStale, holderOf, releaseHeld, takeHeld } from '../lib/pid-lock.js'
 
 /**
- * `broke` is true when a dead holder's claim was removed to take this one, so
- * the pass can reconcile what that holder left. `held` is a live holder on this
- * host, or a break already under way; `foreign` is a holder this host cannot judge.
+ * `held` is a live holder on this host, or a break already under way;
+ * `foreign` is a holder this host cannot judge.
  */
-export type ClaimOutcome = { claimed: true; token: string; broke: boolean } | { claimed: false; why: 'held' | 'foreign' }
+export type ClaimOutcome = { claimed: true; token: string } | { claimed: false; why: 'held' | 'foreign' }
 
 const HELD: ClaimOutcome = { claimed: false, why: 'held' }
 const FOREIGN: ClaimOutcome = { claimed: false, why: 'foreign' }
@@ -31,15 +30,12 @@ const claimPath = (dir: string, id: string) => join(dir, `${id}.claim`)
 export function claimHandoff(dir: string, id: string): ClaimOutcome {
   const path = claimPath(dir, id)
   const token = randomUUID()
-  if (takeHeld(path, token)) return { claimed: true, token, broke: false }
+  if (takeHeld(path, token)) return { claimed: true, token }
   const seen = holderOf(path)
-  if (seen === null) return takeHeld(path, token) ? { claimed: true, token, broke: false } : HELD
+  if (seen === null) return takeHeld(path, token) ? { claimed: true, token } : HELD
   if (seen.gone && seen.token !== null) {
     const broken = breakStale(`${path}.break`, path, seen.token)
-    if ((broken === 'removed' || broken === 'changed') && takeHeld(path, token)) {
-      return { claimed: true, token, broke: broken === 'removed' }
-    }
-    return HELD
+    return (broken === 'removed' || broken === 'changed') && takeHeld(path, token) ? { claimed: true, token } : HELD
   }
   return seen.here && seen.pid !== null ? HELD : FOREIGN
 }
