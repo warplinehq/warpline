@@ -1044,13 +1044,16 @@ the file. A missing file is the built-in defaults. The strictness has one
 accepted cost: a key added by a later release is refused by an earlier one, so
 remove it before downgrading.
 
-The `notify` block is the one exception. The file-level read accepts it without
-judging it, and it is parsed on its own. An unusable block, an empty `argv` for
-example, does not refuse the file: the advance raises and sends no Ask, and
-nothing else changes (§ 16). An unusable block is reported as unusable, never
-read as unset. The Answer verbs read the block too, and with it unset or
-unusable they treat no Ask as open (§ 16). An earlier build refuses a file carrying `notify` as an unknown
-key, so remove it before downgrading.
+There are two exceptions, the `notify` block and the `consume` block. The
+file-level read accepts each without judging it, and each is parsed on its own.
+An unusable `notify` block, an empty `argv` for example, does not refuse the
+file: the advance raises and sends no Ask, and nothing else changes (§ 16). The
+Answer verbs read the block too, and with it unset or unusable they treat no Ask
+as open (§ 16). An unusable `consume` block never stops an advance: the
+`consume` verb refuses its pass, naming the first failing key path (§ 17). An
+unusable block is reported as unusable, never read as unset. An earlier build
+refuses a file carrying `notify` or `consume` as an unknown key, so remove it
+before downgrading.
 
 Every production read of `preferences.json` is checked against the audit store
 (§ 14): an advance, once it holds the run lock and before it uses any value, and
@@ -5198,3 +5201,50 @@ The checks after the short prefix run in a fixed order, `unknown`,
 `superseded`, `expired`, `nonce reused`, `digest mismatch`, and the first that
 fails is the one named. An Answer to an expired Ask that also carries a wrong
 prefix is refused as `expired`.
+
+## 17. The `consume` verb
+
+The `consume` verb is a one-shot pass, run outside the engine, that answers open
+Handoff records: it renders each one's prompt through the configured renderer
+and writes the Judgment where the Handoff says. The sections below fill in as
+the verb lands.
+
+### Settings
+
+`consume` is a block in `<home>/preferences.json`. Absent or `null`, every key
+takes its default. The block is parsed apart from the file (§ 6): an unusable
+block never stops an advance, and the `consume` verb refuses its pass, naming
+the first failing key path and never a value.
+
+| Key | Default | Rule |
+|---|---|---|
+| `consume.renderer` | `"claude-code"` | `"claude-code"` or `"openai-compatible"` |
+| `consume.model` | none | a model id: a letter or digit, then letters, digits and `._:/@[]-`, at most 200 characters |
+| `consume.models` | `{}` | a map from plugin name to model id, used over `consume.model` for that plugin |
+| `consume.endpoint` | none | an `http` or `https` URL with no credentials, query or fragment; the `openai-compatible` base URL |
+| `consume.max_usd_per_call` | none | a USD amount; the most one try may reserve |
+| `consume.max_usd_per_window` | none | a USD amount; the most the whole home may spend in one window. Needs `consume.max_usd_per_call` set beside it |
+| `consume.window_seconds` | `86400` | an integer, `1` or more; the length of the rolling window |
+| `consume.prices` | `{}` | a map from model id to `{ "usd_per_mtok_in": <USD>, "usd_per_mtok_out": <USD> }`, the price per million tokens in and out |
+| `consume.model_mismatch` | `"record"` | `"record"` or `"refuse"`; what a try does when the served model is not the requested one |
+| `consume.max_tries` | `3` | an integer, `1` or more; failed tries after which a Handoff is skipped |
+| `consume.max_output_bytes` | `1048576` | an integer, `1` or more; the most Judgment text, in UTF-8 bytes |
+| `consume.tools` | `{}` | a map from plugin name to a non-empty list of tool names, each a letter then letters, digits and `_`, at most 64 characters |
+| `consume.run_as` | none | an OS account name; the account a tool-enabled try runs as |
+
+Money is USD with at most six decimal places. `0.000001` is accepted, and
+`0.0000001`, `1e-7` and a negative amount are refused by key path. Every record
+holds integer micro-USD, so a setting converts exactly. A window cap needs a
+per-call cap set beside it, because the per-call cap is the amount each try
+reserves; a window cap alone is refused at `consume.max_usd_per_window`.
+
+The `openai-compatible` credential is read only from the
+`WARPLINE_CONSUME_API_KEY` environment variable and never from this file. No
+key in the block holds one, a key such as `api_key` is refused as unknown, and
+an endpoint carrying a user, a password or a query is refused.
+
+`consume.tools` and `consume.run_as` are the tool opt-in. A plugin with no entry
+in `consume.tools` gets no tools. A change to either key is on the audit record
+like every other change to the file: `preference.set` for a
+`warpline prefs set consume.tools '<json>'`, and `preferences.observed` for a
+hand edit (§ 14). The opt-in has no verb and no audit kind of its own.
