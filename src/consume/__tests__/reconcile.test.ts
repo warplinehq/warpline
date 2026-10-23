@@ -22,7 +22,7 @@
 import { afterEach, describe, expect, spyOn, test } from 'bun:test'
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { withFakeClaude } from '../../../test-utils/fake-claude.js'
@@ -355,5 +355,32 @@ describe('a try that ended without settling', () => {
       expect(rec?.tries?.[0]).toMatchObject({ outcome: 'recovered', reservation_id: deadReservation })
       expect(reserved(home)).toHaveLength(1)
     })
+  })
+})
+
+describe('the audit store could not be read', () => {
+  test('a line that is not a record in a sealed segment refuses the claim before any call', async () => {
+    const home = await makeHome({})
+    // The reservations name another Handoff, so the unreadable line is the only reason left to refuse.
+    await withHome(home, async () => {
+      const statePath = engineStatePath()
+      const data = () => ({ reservation_id: `urn:uuid:${randomUUID()}`, handoff: 'run-9.other', amount_micro_usd: 0 })
+      await appendAudit(statePath, 'handoff.reserved', data())
+      await appendAudit(statePath, 'handoff.reserved', data(), { maxSegmentBytes: 1 })
+    })
+    const segments = readdirSync(join(home, 'audit'))
+      .filter((f) => f.endsWith('.jsonl'))
+      .sort()
+    expect(segments).toHaveLength(2)
+    // A sealed segment: a line in the active one stops every append, and the pass refuses before any claim.
+    appendFileSync(join(home, 'audit', segments[0]!), 'not a record\n')
+    await withClaude(0, async (env, calls) => {
+      const r = await run(home, env)
+      expect(r.refusal).toBeNull()
+      expect(r.refused).toEqual([{ id: ID, reason: 'the audit store could not be read for the unsettled tries' }])
+      expect(r.answered).toEqual([])
+      expect(calls()).toBe(0)
+    })
+    expect((await record(home))?.state).toBe('open')
   })
 })
