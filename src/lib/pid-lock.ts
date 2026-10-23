@@ -6,8 +6,9 @@
  * is gone is judged here and nowhere else, so every lock breaks for the same
  * reason and keeps for the same reason.
  *
- * It imports only `node:*` and `./host-identity.js`, and keeps no held state
- * of its own: each caller records what it holds.
+ * It imports only `node:*` and `./host-identity.js`. It keeps one held set,
+ * for the locks other than the audit store's, released on process exit; the
+ * audit store records its own hold.
  */
 import { readFileSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
@@ -164,5 +165,49 @@ export function release(path: string, token: string): boolean {
     return true
   } catch {
     return false
+  }
+}
+
+/** The locks taken through `takeHeld` and not yet released, by path, with their tokens. */
+const held = new Map<string, string>()
+
+// Every held lock, released when the process ends through `process.exit`
+// inside its hold, as the audit store's hook does. It does not run on SIGKILL.
+process.on('exit', () => {
+  for (const [path, token] of held) release(path, token)
+})
+
+/** `take`, recording the lock in the held set when it is made. */
+export function takeHeld(path: string, token: string): boolean {
+  const made = take(path, token)
+  if (made) held.set(path, token)
+  return made
+}
+
+/** `release`, dropping the lock from the held set. */
+export function releaseHeld(path: string, token: string): boolean {
+  const released = release(path, token)
+  held.delete(path)
+  return released
+}
+
+/**
+ * Take the lock at `lockPath`, waiting up to `timeoutMs`, and return its
+ * token. A lock whose holder is gone on this machine is broken through the
+ * break file at `breakPath`; any other holder is waited on. Past the deadline
+ * it throws with `code: 'EBUSY'`. No lock is broken for its age.
+ */
+export async function acquireLock(lockPath: string, breakPath: string, timeoutMs = 10_000): Promise<string> {
+  const token = randomUUID()
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    if (takeHeld(lockPath, token)) return token
+    const seen = holderOf(lockPath)
+    if (seen?.gone && seen.token !== null) {
+      const broken = breakStale(breakPath, lockPath, seen.token)
+      if (broken === 'removed' || broken === 'changed') continue
+    }
+    if (Date.now() >= deadline) throw Object.assign(new Error('lock not acquired in time'), { code: 'EBUSY' })
+    await new Promise((r) => setTimeout(r, 50))
   }
 }

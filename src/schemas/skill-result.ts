@@ -226,6 +226,10 @@ export type StoredOutputRecord = z.infer<typeof StoredOutputRecordSchema>
 const CONTEXT_PATH_SHAPE =
   'needs_llm.context_path must be a path relative to the warpline home, with no parent-directory segment'
 
+/** The same sentence for the Judgment's output path, refused by name the same way. */
+const OUTPUT_PATH_SHAPE =
+  'needs_llm.output_path must be a path relative to the warpline home, with no parent-directory segment'
+
 /**
  * Does this path resolve inside the warpline home, whatever that home is?
  *
@@ -260,6 +264,8 @@ export const NeedsLlmSchema = z.object({
   task: z.string(),
   /** Path to the payload, RELATIVE to the warpline home. */
   context_path: z.string().min(1).refine(resolvesInsideHome, { message: CONTEXT_PATH_SHAPE }),
+  /** Where warpline writes the Judgment, RELATIVE to the warpline home. The model never writes it. */
+  output_path: z.string().min(1).refine(resolvesInsideHome, { message: OUTPUT_PATH_SHAPE }).optional(),
 })
 
 export type NeedsLlm = z.infer<typeof NeedsLlmSchema>

@@ -85,6 +85,13 @@ The reason is the same one the string arm has: the scanner runs in a session
 with the operator's rights, so the set of files a plugin can make it open must
 be bounded by the home and not by the plugin.
 
+`output_path` is optional. It names where the `consume` verb writes the
+Judgment, and it is a path relative to the warpline home under the same rule as
+`context_path`: an absolute path, a drive letter or a `..` segment is refused at
+the parse boundary, by name and never by value. Warpline writes the file; the
+model never does. A handoff without one is not answered by `consume`. It
+reaches the Handoff record below, and only the structured arm carries it.
+
 The runtime classifies a handoff on **either** arm — one predicate,
 `isHandoff` in `invoke-plugin.ts`, reads the field or the prefix. `status:
 'skipped'` is still required by both: the field alone does not turn a
@@ -156,10 +163,23 @@ Its fields:
 - `plugin`: the plugin that handed off.
 - `task`: what judgment is asked for.
 - `context_path`: the payload's path, or `null` when the handoff names none.
+- `output_path`: where the Judgment is written, relative to the home, or
+  `null` when the handoff names none.
+- `tries`: every try at the record's judgment, oldest first, starting empty.
+  A try is only appended and never rewritten. Each one carries `at`,
+  `reservation_id`, `requested` (the model asked for), `served` (the model that
+  answered, or `null`), `cost_micro_usd` (or `null`), `cost_basis`
+  (`reported`, `computed` or `unknown`), `outcome` (`answered`, `failed`,
+  `discarded`, `refused` or `recovered`) and `reason` (or `null`). A reader
+  accepts any string as an `outcome` or a `cost_basis`, as it does for `state`.
 - `created_at`: when the record was written.
-- `state`: `open`, `superseded` or `withdrawn`.
+- `state`: `open`, `superseded`, `withdrawn` or `answered`. A try closes an
+  open record `answered`.
 - `closed_at`: `null` while the record is open, and the time it closed once it
   is not.
+
+A record written before `output_path` and `tries` existed has neither key, and
+reads as it did.
 
 `task` and `context_path` come from the structured `needs_llm` field when the
 result carries it. Otherwise they come from the summary: `task` is the text
@@ -183,8 +203,9 @@ until that plugin's next handoff.
 A newer handoff for the same plugin marks every older open record of that
 plugin `superseded` and sets its `closed_at`. A superseded record never opens
 again. The new record is written first, so a plugin never ends with no open
-record. No lock is taken, so two writers racing can leave two open records
-until that plugin's next handoff.
+record. Each record it rewrites is rewritten under that record's write lock,
+described below, but the pass as a whole is not serialised, so two writers
+racing can leave two open records until that plugin's next handoff.
 
 **A denied run's record is withdrawn.** `warpline deny` that discards a
 plugin's live parked result marks that run's record `withdrawn` and sets
@@ -216,9 +237,24 @@ it again records the denial.
 
 **A reader acts only on an open record.** Every other state is closed.
 A state this build never writes is closed too, and a reader reads it as closed,
-never as unreadable. Supersede and withdraw each move only an open record, so
-two of them racing leave it closed in one state or the other. Adding a closed
-state does not raise `min_reader_version`, because no reader acts on one.
+never as unreadable. Adding a closed state does not raise
+`min_reader_version`, because no reader acts on one.
+
+**Every rewrite takes the record's write lock.** Supersede, withdraw and a
+settling try each take `<home>/handoffs/<id>.lock`, read the record again under
+it, and write only from what they read. So a try that settles while a
+supersede is between its read and its write lands after it, and never writes
+over it. The lock is held for one read and one write, plus the writer's one
+audit record, never across a model call. A holder gone on this machine is
+broken through `<id>.lock.break`. Any other holder is waited on, and a writer
+that waits past its limit stops with `EBUSY`, which `deny` names. Three objects
+have three locks: the spend lock `.consume.lock`, the claim `<id>.claim`, and
+this record write lock. The claim never serialises writers. The lock order is
+the state lock, then a record lock, then the audit lock.
+
+A closed record's `state` is never rewritten. A try that arrives after it
+closed is appended as `discarded`, and `state` and `closed_at` are left as
+they are, so a withdrawn or superseded record never becomes `answered`.
 
 The `needs-llm` scanner finds handoffs by listing this directory, and it keeps
 only open records.
