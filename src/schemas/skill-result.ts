@@ -228,7 +228,7 @@ const CONTEXT_PATH_SHAPE =
 
 /** The same sentence for the Judgment's output path, refused by name the same way. */
 const OUTPUT_PATH_SHAPE =
-  'needs_llm.output_path must be a path to a file under judgments/ in the warpline home, with no parent-directory segment'
+  'needs_llm.output_path must be a path to a file under judgments/ in the warpline home, with no empty, `.` or `..` segment'
 
 /** The one directory a Judgment may be written to. Nothing under it is read as authority. */
 const JUDGMENTS_PREFIX = 'judgments/'
