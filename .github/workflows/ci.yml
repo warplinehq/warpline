@@ -86,7 +86,7 @@ jobs:
             while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done
           done
           sudo -u warpop "$bun_bin" --version
-          sudo -u warpop -H env PATH="$PATH" CI=true WARPLINE_CI_RUN_AS=warpline-judge WARPLINE_CI_OPERATOR=warpop \
+          sudo -u warpop -H env PATH="$PATH" CI=true WARPLINE_CI_OPERATOR=warpop \
             "$bun_bin" test ./ci/run-as-real-user.test.ts
       # Sharded per top-level src dir, inherited from the source repo's
       # hard-won pattern: mock.module is process-global, so sharding isolates
