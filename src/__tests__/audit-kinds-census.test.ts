@@ -48,6 +48,7 @@ const EXPECTED_KINDS = [
   'preferences.observed',
   'ask.raised',
   'ask.answered',
+  'handoff.reserved',
   'handoff.tried',
   'segment.opened',
   'segment.sealed',
@@ -57,9 +58,7 @@ const EXPECTED_KINDS = [
 const INTERNAL = ['segment.opened', 'segment.sealed', 'checkpoint.recorded']
 
 /** Kinds with no emit call yet, each naming the roadmap work that wires it. */
-const PENDING: Record<string, string> = {
-  'handoff.tried': 'warpline consume',
-}
+const PENDING: Record<string, string> = {}
 
 // By absolute path: the bare names resolve here to a tool that honours ignore
 // files, and it has returned a false zero over this repository before.
@@ -214,11 +213,11 @@ describe('the record kinds are a closed set', () => {
 })
 
 describe('every record kind has an emit call or a pending entry', () => {
-  test('the real tree: no offender, the one pending kind, and every other kind called', () => {
+  test('the real tree: no offender, no pending kind, and every other kind called', () => {
     const { sites, offenders } = real()
     expect(offenders).toEqual([])
     expect(census(EXPECTED_KINDS, INTERNAL, sites, PENDING, offenders)).toEqual([])
-    expect(Object.keys(PENDING)).toEqual(['handoff.tried'])
+    expect(Object.keys(PENDING)).toEqual([])
     const wired = EXPECTED_KINDS.filter((k) => !INTERNAL.includes(k) && !(k in PENDING))
     for (const kind of wired) expect(sites[kind]?.length ?? 0).toBeGreaterThan(0)
     expect(INTERNAL.length + wired.length + Object.keys(PENDING).length).toBe(EXPECTED_KINDS.length)
@@ -311,7 +310,8 @@ describe('every record kind has an emit call or a pending entry', () => {
       const planted = emitSites(paths, dir)
       expect(planted.offenders).toEqual([])
       const merged = { ...sites, ...planted.sites }
-      expect(census(EXPECTED_KINDS, INTERNAL, merged, PENDING, [])).toEqual([
+      // The real list is empty now, so the rule is shown on a planted entry.
+      expect(census(EXPECTED_KINDS, INTERNAL, merged, { 'handoff.tried': 'warpline consume' }, [])).toEqual([
         'handoff.tried: pending (warpline consume), yet has an emit call in wired.ts',
       ])
     })

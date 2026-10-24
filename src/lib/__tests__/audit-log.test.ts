@@ -158,8 +158,8 @@ describe('audit store: what it refuses writes nothing and echoes nothing', () =>
     })
   }
 
-  for (const kind of ['handoff.tried']) {
-    test(`the pending kind ${kind}, whose schema admits nothing yet`, async () => {
+  for (const kind of ['handoff.reserved', 'handoff.tried']) {
+    test(`the handoff kind ${kind} with no fields`, async () => {
       await refuses(() => anyAppend(statePath, kind, {}))
     })
   }

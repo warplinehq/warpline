@@ -604,41 +604,214 @@ terminal is what makes it match the scheduled case.
 ## Running the automated judgment consumer with less privilege
 
 A fleet running unattended has a second half: something that reads the
-`[needs-llm]` handoffs and writes judgment back. That consumer is where
-untrusted plugin content meets a model, which is why this section exists.
+`[needs-llm]` handoffs and writes judgment back. warpline ships that consumer as
+`warpline consume`. One pass answers the open Handoff records that name an
+`output_path`, oldest first, and exits. For each one it sends the task and the
+context file to one model, writes the text that comes back as the Judgment at
+the record's `output_path`, and records the try with the model it asked for,
+the model that served it and what it cost. It checks the spend caps before any
+call. It runs tool-less unless you opt a plugin in, and the engine never
+invokes it: you schedule it beside the advance. `runtime-spec.md` § 17 is the
+contract. This section is how to run it with as little reach as it needs,
+because the consumer is where untrusted plugin content meets a model.
 
-This is guidance and not a shipped artifact. **No settings profile is included
-here, deliberately.** A profile would be a support surface tracking some
-harness vendor's schedule, and the consumer might be an interactive session, an
-API worker or another harness entirely. What follows is what to narrow, not how
-your particular consumer spells it.
+**Context goes verbatim to the configured provider.** The task and the context
+file leave the machine as they are, with nothing redacted, so residency is a
+choice of endpoint: configure the provider, region or gateway the data is
+allowed to reach, and no other.
 
-**Narrow the consumer to two capabilities.** It needs to read the warpline home
-and write judgment files into it. That is all. No send tools, no arbitrary
-shell, no network reach beyond the model it is talking to. Anything past those
-two is surface a successful injection gets to use.
+### The unit
 
-**Run it as a dedicated non-privileged user**, and never as a system-level
-daemon or a system-level unit. A user-level systemd unit and a launchd user
-agent are both sufficient for everything on this page, and neither needs root.
+Run it as yourself, from a user-level unit or your own crontab. It needs
+nothing root has. The home is pinned the same way as the advance's (step 1
+above), and the credentials come from an environment file only you can read.
 
-**Two operating-system controls here are enforced rather than advisory**, and
-both are on the launchd side. `launchctl(1)` states them on the same entry:
-"per-user configuration files (LaunchAgents) must be owned by root (if they are
-located in `/Library/LaunchAgents`) or the user loading them (if they are
-located in `$HOME/Library/LaunchAgents`)" and "Configuration files must disallow
-group and world writes." The page also gives the reason, which is the reason to
-care: "These restrictions are in place for security reasons, as allowing
-writability to a launchd configuration file allows one to specify which
-executable will be launched." Hence the `chmod 644` in the install steps, and
-the agent owned by you.
+```ini
+# ~/.config/systemd/user/warpline-consume.service
+[Unit]
+Description=Warpline consume
 
-**This section documents a permission narrowing. It does not claim to solve
-prompt injection.** Nothing here prevents a crafted plugin output from steering
-a model. What the narrowing buys is a bound on what a successful attempt can
-reach: a consumer that cannot send and cannot shell out cannot be made to. Treat
-that as damage control and not as a fix, and keep the consumer's reachable
-surface as small as the two capabilities above.
+[Service]
+Type=oneshot
+Environment=WARPLINE_HOME=/home/operator/.warpline
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/operator/.config/warpline/consume.env
+ExecStart=/usr/bin/node /opt/warpline/node_modules/.bin/warpline consume
+```
+
+```ini
+# ~/.config/systemd/user/warpline-consume.timer
+[Unit]
+Description=Warpline consume, five minutes after each advance tick
+
+[Timer]
+OnCalendar=*:5/15
+
+[Install]
+WantedBy=timers.target
+```
+
+Or, from cron, on either platform:
+
+```
+PATH=/usr/local/bin:/usr/bin:/bin
+5,20,35,50 * * * * set -a; . /home/operator/.config/warpline/consume.env; set +a; WARPLINE_HOME=/home/operator/.warpline /usr/bin/node /opt/warpline/node_modules/.bin/warpline consume
+```
+
+The environment file holds the key and nothing else:
+
+```bash
+# /home/operator/.config/warpline/consume.env
+ANTHROPIC_API_KEY=<a dedicated, spend-limited key>
+```
+
+```bash
+chmod 600 /home/operator/.config/warpline/consume.env
+chmod 700 /home/operator/.warpline
+```
+
+- **Credentials live in the 0600 file, never on the command line.** A unit file
+  or a crontab line is often readable by other accounts, and a process's argv
+  is readable by every local user. For the same reason, do not put the key in
+  a launchd plist's `EnvironmentVariables`: the plist sits at mode 644. On
+  macOS the crontab line above is the simpler form.
+- **The home is 0700.** It holds the preferences, the grants, the audit record
+  and every plugin's state. Nothing but you needs into it.
+- **`--bare` cannot use a subscription login.** The `claude-code` renderer runs
+  `claude -p --bare`, which never reads a subscription's OAuth login or the
+  keychain. So `consume` needs `ANTHROPIC_API_KEY`, or Bedrock or Vertex
+  credentials (`CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX` with that
+  cloud's own variables), in its environment. Only a fixed list of provider,
+  cloud and proxy variables reaches the child, and the rest of the unit's
+  environment stays behind. The `openai-compatible` renderer reads its key from
+  `WARPLINE_CONSUME_API_KEY` only, never from `preferences.json`.
+- **`claude` must be on the unit's `PATH`.** The renderer runs the first
+  executable `claude` it finds there, at version 2.1.305 or later, and a
+  scheduler's `PATH` is not your shell's (step 2 above).
+- **Two passes may overlap.** Each Handoff is claimed by one pass, and the
+  other reports it `held` and still exits `0`. There is no lock to configure.
+
+### The settings
+
+Set them in `<home>/preferences.json` with `warpline prefs set`, or by hand:
+
+```bash
+warpline prefs set consume.model '"<the exact served model id>"'
+warpline prefs set consume.max_usd_per_call 0.5
+warpline prefs set consume.max_usd_per_window 10
+```
+
+- **Configure the exact served model id**, the dated form the provider reports,
+  never an alias. The `claude` CLI reports the dated id for an alias, so a
+  requested alias mismatches on every call: each try raises a warning notice,
+  and under `consume.model_mismatch: refuse` the Handoff is never answered.
+  `consume.models` sets a model per plugin.
+- **Cap the spend.** `consume.max_usd_per_call` is the most one try may
+  reserve. `consume.max_usd_per_window` is the most the whole home may spend in
+  one `consume.window_seconds` window, a day by default, and it needs the
+  per-call cap set beside it. The `claude-code` renderer always reports a cost.
+  The `openai-compatible` one knows a cost in advance only when
+  `consume.prices` has an entry for the model, and with either cap set and no
+  entry, the Handoff is refused before any call.
+
+### The exit codes
+
+| Code | Meaning | What to do |
+|---|---|---|
+| `0` | Every claimed Handoff was answered, or there was nothing to do. | Nothing. |
+| `1` | Something needs eyes: a try failed; a Handoff was refused, skipped or discarded; a cap left one open; a record was unreadable; a mismatch notice could not be written; or the pass could not run, with its reason on stderr. | Read the output. A Handoff left open is tried again on the next pass, until `consume.max_tries` of its tries have not answered. |
+| `2` | A usage error. Nothing ran. | The unit's command line is wrong. Fix it. |
+
+### Opting a plugin into tools
+
+A try has no tools by default: the model gets the prompt and returns text, and
+that is all it can do. `consume.tools.<plugin>` lists tools for one plugin, and
+then that plugin's tries run as a second OS account, `consume.run_as`, stepped
+down to through sudo. Opt in only where the judgment needs it.
+
+**Opting a plugin into tools is a trust grant.** The judge runs with the
+provider credential in its environment, and a file tool can read it, for
+example through `/proc/self/environ` on Linux, and put it in its Judgment text.
+Use a dedicated, spend-limited key for consume.
+
+1. **Create the judge account with its own writable home.** The CLI keeps its
+   own state there. On Linux:
+
+   ```bash
+   sudo useradd --create-home warpline-judge
+   ```
+
+   On macOS, create a standard account with a home folder in System Settings.
+
+2. **Close both homes to it.** The judge must be unable to enter or read the
+   warpline home and your OS home:
+
+   ```bash
+   chmod 700 /home/operator/.warpline
+   chmod 700 ~
+   ```
+
+   On macOS a home directory is mode 0755 by default, so the tool opt-in does
+   not run there until you run `chmod 700 ~`.
+
+3. **Install `claude` outside your OS home**, for example at
+   `/usr/local/bin/claude`, and keep that directory on the unit's `PATH`. The
+   judge runs that binary, and after `chmod 700 ~` it cannot reach one under
+   your home.
+
+4. **Add exactly two sudoers rules**, with `visudo`. On Linux:
+
+   ```
+   operator ALL=(warpline-judge) NOPASSWD:SETENV: /usr/local/bin/claude
+   operator ALL=(warpline-judge) NOPASSWD: /usr/bin/test
+   ```
+
+   On macOS, where there is no `/usr/bin/test`:
+
+   ```
+   operator ALL=(warpline-judge) NOPASSWD:SETENV: /usr/local/bin/claude
+   operator ALL=(warpline-judge) NOPASSWD: /bin/test
+   ```
+
+   `operator` is the account the unit runs as, `warpline-judge` is
+   `consume.run_as`, and `/usr/local/bin/claude` is the absolute path of the
+   `claude` consume finds first on the unit's `PATH`. Each rule names one
+   absolute binary and no argument pattern. Do not widen either one: a
+   wildcard, an argument pattern or an `env` program gives everything that runs
+   as you a wider door into the judge account than consume needs. consume
+   starts the judge as `sudo -n -u <run_as> --preserve-env=<names> <claude>`,
+   passing the variable names and never their values, so no credential sits in
+   the process table. `SETENV` is what lets those named variables past sudo's
+   environment checks. That is acceptable only because the judge has less
+   authority than you: what the variables can do, they do as an account with
+   less reach. The second rule runs the probes.
+
+5. **Turn it on.**
+
+   ```bash
+   warpline prefs set consume.run_as '"warpline-judge"'
+   warpline prefs set consume.tools '{"<plugin>": ["Read", "Grep"]}'
+   ```
+
+Before every tool-enabled try, consume checks that the judge can neither enter
+nor read either home. A probe still running after 10 seconds is killed and
+counts as one that could not check, and that refuses the Handoff: could not
+look never reads as cannot reach. A refusal adds no try and spends nothing.
+
+**Secrets outside both homes are protected only by your own permissions on
+them.** The probes check the two homes and nothing else. A credential file in
+`/etc`, on a shared mount or in another account's readable directory is
+reachable by the judge whenever its mode lets the judge read it.
+
+Even with tools, the model writes no Judgment itself. Its text comes back as
+text, and warpline writes it.
+
+**This narrows what a successful prompt injection can reach. It does not
+prevent one.** Nothing here stops a crafted plugin output from steering the
+model. Tool-less, a steered model can only write a bad Judgment, and no
+Judgment opens a gate. With tools, it can do what those tools can do as the
+judge account. Treat the narrowing as damage control and not as a fix, and keep
+the tool lists short.
 
 ## Where these facts came from
 

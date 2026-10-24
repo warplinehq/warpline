@@ -52,6 +52,42 @@ jobs:
       # import `warpline/schemas/*` and `warpline/lib/paths`, which resolve by
       # package self-reference through the exports map into dist/.
       - run: bun run build
+      # The tool opt-in on a real kernel: a tool-enabled try runs as a second
+      # user, `warpline-judge`, who must fail to write into the home or list
+      # it. The test runs as `warpop`, an account holding only the two narrow
+      # sudoers rules an operator would install, because `runner` holds
+      # blanket sudo and a pass as `runner` would prove nothing about them.
+      # The listings below put that on record. The test lives in ci/, outside
+      # the sharded loop, so only this step runs it, and it fails rather than
+      # skips on Linux CI if the two variables go missing.
+      - name: run_as real-user test (Linux)
+        run: |
+          set -euo pipefail
+          sudo useradd -m warpline-judge
+          sudo useradd -m warpop
+          # Not left to the image's HOME_MODE: the judge must not reach the operator's OS home either.
+          sudo chmod 700 /home/warpop
+          sudo install -d -m 0755 /opt/warpline-ci/bin
+          sudo install -m 0755 test-utils/ci-judge-claude.sh /opt/warpline-ci/bin/claude
+          printf '%s\n' \
+            'warpop ALL=(warpline-judge) NOPASSWD:SETENV: /opt/warpline-ci/bin/claude' \
+            'warpop ALL=(warpline-judge) NOPASSWD: /usr/bin/test' \
+            | sudo tee /etc/sudoers.d/warpline-ci >/dev/null
+          sudo chmod 0440 /etc/sudoers.d/warpline-ci
+          sudo visudo -cf /etc/sudoers.d/warpline-ci
+          sudo -l -U runner
+          sudo -l -U warpop
+          sudo -V
+          bun_bin=$(command -v bun)
+          # warpop must reach the checkout, dist/ and the bun binary.
+          sudo chmod -R o+rX "$GITHUB_WORKSPACE"
+          for p in "$GITHUB_WORKSPACE" "$bun_bin" "$(readlink -f "$bun_bin")"; do
+            d=$(dirname "$p")
+            while [ "$d" != / ]; do sudo chmod o+x "$d"; d=$(dirname "$d"); done
+          done
+          sudo -u warpop "$bun_bin" --version
+          sudo -u warpop -H env PATH="$PATH" CI=true WARPLINE_CI_RUN_AS=warpline-judge WARPLINE_CI_OPERATOR=warpop \
+            "$bun_bin" test ./ci/run-as-real-user.test.ts
       # Sharded per top-level src dir, inherited from the source repo's
       # hard-won pattern: mock.module is process-global, so sharding isolates
       # cross-dir leaks. Overkill at this size; correct at the size this repo

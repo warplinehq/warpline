@@ -271,9 +271,13 @@ npx warpline renew <grant-id> --principal ops
 
 # Clear the session approval
 npx warpline revoke
+
+# Answer each open Handoff once with the configured model, outside the engine;
+# the Judgment lands where the Handoff says, and the exit code says if anything needs eyes
+npx warpline consume
 ```
 
-Those fifteen subcommands are the whole CLI surface. `advance` is the one a
+Those sixteen subcommands are the whole CLI surface. `advance` is the one a
 scheduler calls, and its exit codes are contract surface —
 [the exit code table](docs/runtime-spec.md#11-exit-codes) is what a monitor
 keys on. The same work is also a library call, `runAdvance()` from the package

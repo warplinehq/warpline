@@ -393,3 +393,32 @@ describe('prefs set notify', () => {
     expect(ofType(SET)).toHaveLength(0)
   })
 })
+
+describe('the consume tool opt-in is on the record', () => {
+  test('prefs set consume.tools lands in the file and on one preference.set record keyed consume.tools', async () => {
+    const { code, stderr } = await prefs('set', 'consume.tools', JSON.stringify({ prod: ['Read', 'Grep'] }))
+
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    const bytes = readFileSync(prefsFile())
+    expect((JSON.parse(bytes.toString('utf-8')) as { consume: unknown }).consume).toEqual({
+      tools: { prod: ['Read', 'Grep'] },
+    })
+    const sets = ofType(SET)
+    expect(sets).toHaveLength(1)
+    expect(sets[0]!.data).toEqual({ key: 'consume.tools', old: null, new: sha(bytes) })
+  })
+
+  test('an empty tool list exits 1, names consume.tools.prod, and leaves the file and the store as they were', async () => {
+    expect((await prefs('set', 'consume.tools', JSON.stringify({ prod: ['Read'] }))).code).toBe(0)
+    const before = await snapshotHome(home.root)
+    const count = lines().length
+
+    const { code, stderr } = await prefs('set', 'consume.tools', '{"prod":[]}')
+
+    expect(code).toBe(1)
+    expect(stderr).toContain('consume.tools.prod')
+    expect(lines()).toHaveLength(count)
+    expect(await snapshotHome(home.root)).toEqual(before)
+  })
+})

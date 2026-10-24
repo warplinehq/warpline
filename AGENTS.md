@@ -49,6 +49,8 @@ bun run typecheck           # build, then tsc --noEmit (strict; no
 - `src/board/` — engine-events, state-manager
 - `src/cli/` — the `warpline` verbs (advance, approve, deny, resolve, run-plugin, …) and board-cli
 - `src/lib/` — fs-atomic, jsonl-logger, api-budget, preferences, paths
+- `src/consume/` — the consumer outside the engine: pass, renderers, spend, claim, run-as
+- `ci/` — CI-only tests run by a dedicated workflow step
 - `docs/` — doctrine, runtime-spec, board-spec, needs-llm-contract, plugin-authoring
 - `examples/plugins/` — fresh-written examples; never port private plugins here
 

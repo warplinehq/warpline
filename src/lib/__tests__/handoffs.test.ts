@@ -17,7 +17,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { SkillResult } from '../../schemas/skill-result.js'
+import { NeedsLlmSchema, type SkillResult } from '../../schemas/skill-result.js'
 // The module this file pins before it exists, read through the namespace so
 // each export is named where it is used.
 import * as lib from '../handoffs.js'
@@ -44,7 +44,7 @@ function bytes(name: string): string {
   return readFileSync(join(dir, name), 'utf-8')
 }
 
-function result(summary: string, needsLlm?: { task: string; context_path: string }): SkillResult {
+function result(summary: string, needsLlm?: { task: string; context_path: string; output_path?: string }): SkillResult {
   return {
     status: 'skipped',
     phases_completed: [],
@@ -94,6 +94,8 @@ describe('a handoff becomes one open record the reader finds', () => {
       plugin: 'prod',
       task: 'Summarise the brief',
       context_path: 'state/brief.json',
+      output_path: null,
+      tries: [],
       created_at: new Date(T0).toISOString(),
       state: 'open',
       closed_at: null,
@@ -113,18 +115,95 @@ describe('the record takes its task and context path from the result', () => {
         context_path: 'state/brief.json',
       }),
     )
-    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'Summarise the brief', context_path: 'state/brief.json' })
+    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'Summarise the brief', context_path: 'state/brief.json', output_path: null })
   })
 
   test('a prefix-only summary gives its task and its Context: path, raw', () => {
     const fields = lib.handoffFields('run-1', 'prod', result('[needs-llm] Triage 2 new feed entries. Context: /tmp/payload.json'))
-    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'Triage 2 new feed entries', context_path: '/tmp/payload.json' })
+    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'Triage 2 new feed entries', context_path: '/tmp/payload.json', output_path: null })
   })
 
   test('a prefix-only summary with no Context: gives the whole remainder and a null path', () => {
     const fields = lib.handoffFields('run-1', 'prod', result('[needs-llm] summarise the brief'))
-    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'summarise the brief', context_path: null })
+    expect(fields).toEqual({ run_id: 'run-1', plugin: 'prod', task: 'summarise the brief', context_path: null, output_path: null })
   })
+})
+
+describe('the record carries where its Judgment goes', () => {
+  test('a write with an output path carries it', async () => {
+    await lib.writeHandoff(dir, { run_id: 'run-1', plugin: 'prod', task: 't', context_path: null, output_path: 'state/x.md' }, T0)
+    expect(raw('run-1.prod.json').output_path).toBe('state/x.md')
+    expect(raw('run-1.prod.json').tries).toEqual([])
+  })
+
+  test('handoffFields copies needs_llm.output_path, and gives null without it', () => {
+    const withPath = lib.handoffFields(
+      'run-1',
+      'prod',
+      result('[needs-llm] Draft. Context: state/brief.json', { task: 'Draft', context_path: 'state/brief.json', output_path: 'state/x.md' }),
+    )
+    expect(withPath.output_path).toBe('state/x.md')
+    const without = lib.handoffFields('run-1', 'prod', result('[needs-llm] Draft', { task: 'Draft', context_path: 'state/brief.json' }))
+    expect(without.output_path).toBeNull()
+  })
+
+  test('a record written before output_path and tries existed still reads as open', async () => {
+    mkdirSync(dir)
+    writeFileSync(join(dir, 'run-1.prod.json'), JSON.stringify(openRecord('run-1', 'prod', T0), null, 2))
+    expect(await openIds()).toEqual(['run-1.prod'])
+  })
+
+  test('needs_llm.output_path outside judgments/ is refused by name, never by value', () => {
+    const parse = (output_path: string) => NeedsLlmSchema.safeParse({ task: 't', context_path: 'state/a.json', output_path })
+    const messageOf = (output_path: string) => {
+      const parsed = parse(output_path)
+      expect(parsed.success).toBe(false)
+      return parsed.error!.issues.map((i) => i.message).join('\n')
+    }
+    expect(NeedsLlmSchema.parse({ task: 't', context_path: 'state/a.json', output_path: 'judgments/x.md' }).output_path).toBe('judgments/x.md')
+    const refused = [
+      'state/x.md',
+      '.session-approval',
+      'preferences.json',
+      'handoffs/x.json',
+      'plugins/p/handler.ts',
+      'judgments-evil/x.md',
+      'judgments/../x.md',
+      '../x',
+      '/abs/x',
+      'C:\\x',
+    ]
+    for (const bad of refused) {
+      const message = messageOf(bad)
+      expect(message).toContain('needs_llm.output_path')
+      expect(message).not.toContain(bad)
+    }
+    // The directory itself is not a file under it. Its name is part of the fixed message, so there is no never-by-value check here.
+    for (const bad of ['judgments', 'judgments/']) expect(messageOf(bad)).toContain('needs_llm.output_path')
+  })
+
+  test.each(['judgments/.', 'judgments//.', 'judgments/./.'])(
+    'needs_llm.output_path %s names the judgments directory itself and is refused by name',
+    (output_path) => {
+      const parsed = NeedsLlmSchema.safeParse({ task: 't', context_path: 'state/a.json', output_path })
+      expect(parsed.success).toBe(false)
+      const message = parsed.error!.issues.map((i) => i.message).join('\n')
+      expect(message).toContain('needs_llm.output_path')
+      expect(message).not.toContain(output_path)
+    },
+  )
+
+  test.each(['judgments/a//b.md', 'judgments/./b.md'])(
+    'needs_llm.output_path %s has an empty or . segment, and the refusal states the whole rule',
+    (output_path) => {
+      const parsed = NeedsLlmSchema.safeParse({ task: 't', context_path: 'state/a.json', output_path })
+      expect(parsed.success).toBe(false)
+      const message = parsed.error!.issues.map((i) => i.message).join('\n')
+      expect(message).toContain('needs_llm.output_path')
+      expect(message).not.toContain(output_path)
+      expect(message).toContain('no empty, `.` or `..` segment')
+    },
+  )
 })
 
 describe('supersede', () => {
@@ -216,6 +295,35 @@ describe('supersede', () => {
 
     expect(bytes('run-1.prod.json')).toBe(afterSecond)
     expect(raw('run-1.prod.json').state).toBe('superseded')
+  })
+
+  test('an answered record survives a second write for its run, which returns it as it is', async () => {
+    await write('run-1', 'prod', T0)
+    const t: lib.Try = {
+      at: new Date(T0 + 10).toISOString(),
+      reservation_id: 'res-1',
+      requested: 'model-a',
+      served: 'model-a',
+      cost_micro_usd: 1200,
+      cost_basis: 'reported',
+      outcome: 'answered',
+      reason: null,
+    }
+    await lib.settleTry(
+      dir,
+      'run-1.prod',
+      async () => ({ try: t, close: true }),
+      async () => t,
+      T0 + 10,
+    )
+    const before = bytes('run-1.prod.json')
+
+    const again = await write('run-1', 'prod', T0 + 20)
+
+    expect(again.state).toBe('answered')
+    expect(again.tries?.length).toBe(1)
+    expect(bytes('run-1.prod.json')).toBe(before)
+    expect(readdirSync(dir).filter((n) => n.includes('.tmp-'))).toEqual([])
   })
 })
 

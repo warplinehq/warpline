@@ -32,12 +32,12 @@
  * naming them, so a kind passed any other way is invisible to it.
  */
 import { mkdir, open, readdir, readFile, stat } from 'node:fs/promises'
-import { createReadStream, readFileSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
+import { createReadStream, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { RefusalReasonSchema } from '../schemas/run-log.js'
-import { deriveHost, isProcessAlive } from './host-identity.js'
+import { breakStale, holderOf, release, take, type Holder } from './pid-lock.js'
 import { ASSURANCE_LEVELS } from './assurance.js'
 
 /** The longest stored line, newline included. The tail read holds four. */
@@ -75,6 +75,7 @@ export const AUDIT_KINDS = [
   'preferences.observed',
   'ask.raised',
   'ask.answered',
+  'handoff.reserved',
   'handoff.tried',
   'segment.opened',
   'segment.sealed',
@@ -112,6 +113,8 @@ const PrincipalId = z.string().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/)
 const PrefKey = z.string().regex(/^[a-z_]+(\.[a-z_]+)?$/)
 const Iso = z.iso.datetime()
 const Seq = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+/** An amount in integer micro-USD. */
+const Micro = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)
 const SemVer = z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/)
 const Scope = z.union([z.literal('*'), CarriedPluginName])
 /** A standing grant id: 12 lowercase hex, the rule the gate's `newStandingId` makes. */
@@ -129,6 +132,21 @@ export const OS_USER_NAME = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/
  * note can ride in on it.
  */
 export const EVIDENCE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,199}$/
+/**
+ * A model id as an operator configures it or a provider reports it, as a
+ * bounded token: a bare id (`claude-opus-5`), a dated or vendor-prefixed one
+ * (`claude-haiku-4-5@20251001`, `us.anthropic.claude-opus-4-8`), a Bedrock
+ * ARN or a suffixed alias (`opus[1m]`). Whitespace, control characters,
+ * quotes, `?`, `&` and `=` are refused, and so is anything over 200 characters.
+ */
+export const MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,199}$/
+/** A Handoff record id: its run id and plugin name, joined by one dot. */
+export const HANDOFF_ID = /^[A-Za-z0-9_-]{1,128}\.[a-z][a-z0-9-]{0,63}$/
+/**
+ * How a try ended, as `handoff.tried` records it. A recovery is not one: it
+ * makes no call and reserves nothing, so it rides the Handoff record only.
+ */
+export const TRIED_OUTCOMES = ['answered', 'failed', 'discarded', 'refused'] as const
 /** An Ask id: 12 lowercase hex, drawn apart from the Ask's nonce. */
 const AskId = z.string().regex(/^[0-9a-f]{12}$/)
 /** What an Ask is about: a plugin, or a standing grant by its id. */
@@ -310,9 +328,26 @@ const DATA = {
     raised_at: Iso,
     decide_ms: z.number().int().nonnegative(),
   }),
-  // Pending: nothing may be written under this until the work that defines
-  // it lands and replaces the schema.
-  'handoff.tried': z.never(),
+  // The amount a try sets aside before it calls a model. Never the prompt,
+  // the endpoint, a price or the Judgment text.
+  'handoff.reserved': z.strictObject({
+    reservation_id: Urn,
+    handoff: z.string().regex(HANDOFF_ID),
+    amount_micro_usd: Micro,
+  }),
+  // How a try ended and what it cost. The Judgment text never rides it, only
+  // its byte count and sha256, both null when the renderer returned no text.
+  'handoff.tried': z.strictObject({
+    reservation_id: Urn,
+    handoff: z.string().regex(HANDOFF_ID),
+    outcome: z.enum(TRIED_OUTCOMES),
+    requested: z.string().regex(MODEL_ID),
+    served: z.string().regex(MODEL_ID).nullable(),
+    cost_micro_usd: Micro.nullable(),
+    cost_basis: z.enum(['reported', 'computed', 'unknown']),
+    bytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable(),
+    sha256: Hex.nullable(),
+  }),
 } as const satisfies Record<AuditKind, z.ZodType>
 
 export type AuditData<K extends AuditKind> = z.infer<(typeof DATA)[K]>
@@ -677,145 +712,6 @@ let queue: Promise<unknown> = Promise.resolve()
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-let ourHostMemo: { value: string | null } | undefined
-
-/**
- * This machine as a lock names it: § 12's machine identifier, and on Linux
- * that joined by `:` to the pid namespace (`/proc/self/ns/pid`), then by `:`
- * to the boot id (`/proc/sys/kernel/random/boot_id`). Null when any part
- * cannot be had, or the boot id is empty. Memoized, because a process never
- * changes machine, pid namespace or boot.
- *
- * The namespace keeps containers that share `/etc/machine-id` apart. The boot
- * id keeps cloned machines apart, since they share a machine id and the root
- * namespace inode. It also keeps a pid from before a reboot from being tested
- * after it. A mismatch reads as another machine, so the lock is kept.
- * On Linux, a lock left by a crash just before a reboot therefore needs
- * removal by hand. Elsewhere the host outlives a reboot, so a pid from before
- * it is tested after it: a free one is broken, and a reused one reads alive,
- * as the note below says.
- *
- * ponytail: a dead holder whose pid is reused reads alive, and fails closed.
- * A process start time in the identity is the upgrade path: Linux
- * `/proc/PID/stat` field 22, and on macOS a `ps` spawn.
- */
-function ourHost(): string | null {
-  if (ourHostMemo === undefined) {
-    let value = deriveHost()
-    if (value !== null && process.platform === 'linux') {
-      try {
-        const ns = readlinkSync('/proc/self/ns/pid')
-        const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf-8').trim()
-        value = boot === '' ? null : `${value}:${ns}:${boot}`
-      } catch {
-        value = null
-      }
-    }
-    ourHostMemo = { value }
-  }
-  return ourHostMemo.value
-}
-
-/**
- * Make `path` a symbolic link whose text names its holder:
- * `{ token, pid, host, at }`. True when made, false when something is already
- * at the path, and any other error is thrown.
- *
- * One call makes the entry and its text together, so a lock or break file is
- * never empty or half-written (atomic even over NFS, per Mercurial). It is
- * synchronous, so `held` is set in the same stretch. The text stays far below
- * any link-length limit.
- */
-function take(path: string, token: string): boolean {
-  try {
-    symlinkSync(JSON.stringify({ token, pid: process.pid, host: ourHost(), at: Date.now() }), path)
-    return true
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false
-    throw err
-  }
-}
-
-/** A lock or break file as this writer can judge it. */
-type Holder = { token: string | null; pid: number | null; here: boolean; gone: boolean }
-
-/**
- * Who holds the lock or break file at `path`, as far as this writer can tell.
- * Null only when nothing is there.
- *
- * Anything that is not a link whose text parses to an object (a directory, a
- * plain file, any other text) names no holder: no token, no pid, not here, not
- * gone. Otherwise `token` is its string token and `pid` its positive process
- * id, each null when it names none. `here` is true when it names a host equal
- * to this writer's known one. `gone` is true only when it names a token, a pid
- * and this machine, and no such process runs.
- *
- * It reads no time, and a holder it cannot name is never gone.
- */
-function holderOf(path: string): Holder | null {
-  let named: { token?: unknown; pid?: unknown; host?: unknown }
-  try {
-    const parsed: unknown = JSON.parse(readlinkSync(path, 'utf8'))
-    if (typeof parsed !== 'object' || parsed === null) return { token: null, pid: null, here: false, gone: false }
-    named = parsed
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
-    return { token: null, pid: null, here: false, gone: false }
-  }
-  const token = typeof named.token === 'string' ? named.token : null
-  const pid = typeof named.pid === 'number' && Number.isSafeInteger(named.pid) && named.pid > 0 ? named.pid : null
-  const host = ourHost()
-  const here = host !== null && typeof named.host === 'string' && named.host === host
-  return { token, pid, here, gone: token !== null && pid !== null && here && !isProcessAlive(pid) }
-}
-
-/**
- * Remove a lock whose holder is gone, one writer at a time, and only the lock
- * that was judged.
- *
- * It makes `.lock.break` the way a lock is made. When something is already
- * there it stops: no branch removes or clears a break file this writer did not
- * make. Under its own break file it reads the lock again and judges it again,
- * and removes it only while it still names `token` and its holder is still
- * gone. Then it removes its own break file. Its outcomes:
- *
- * - 'removed': the judged lock is gone, removed here or already.
- * - 'changed': the lock is no longer the one judged (gone, another token, or a
- *   holder that no longer reads as gone), and the caller judges it again at once.
- * - 'kept': the removal itself failed for the judged token: making the break
- *   file threw, or removing the lock threw.
- * - 'break file held': something is already at `.lock.break`.
- *
- * The second judgment is mandatory (Mercurial; GnuPG T5884 is the bug without
- * it). The break runs with no await, and a gone holder cannot release, so the
- * lock cannot change between the second judgment and the removal (review
- * WR-04). The bare break-file removal is safe because no other writer removes
- * or replaces a break file, and nothing awaits between making and removing it
- * (review IN-01 and WR-02), short of a removal by hand inside that window,
- * which § 14 Writing names.
- */
-function breakStale(dir: string, lockPath: string, token: string): 'removed' | 'kept' | 'changed' | 'break file held' {
-  const breakPath = join(dir, '.lock.break')
-  try {
-    if (!take(breakPath, randomUUID())) return 'break file held'
-  } catch {
-    return 'kept'
-  }
-  try {
-    const now = holderOf(lockPath)
-    if (now === null || now.token !== token || !now.gone) return 'changed'
-    unlinkSync(lockPath)
-    return 'removed'
-  } catch (err) {
-    // A lock already gone is as good as removed.
-    return (err as NodeJS.ErrnoException).code === 'ENOENT' ? 'removed' : 'kept'
-  } finally {
-    try {
-      unlinkSync(breakPath)
-    } catch {}
-  }
-}
-
 /**
  * Why a wait for the lock ended without it, built from the lock as it stands
  * when the wait ends: `now` is the lock read then, `breakHere` whether
@@ -879,7 +775,7 @@ async function acquire(dir: string, lockPath: string, kind: string, timeoutMs: n
     let notRemoved: string | null = null
     const seen = holderOf(lockPath)
     if (seen?.gone && seen.token !== null) {
-      const broken = breakStale(dir, lockPath, seen.token)
+      const broken = breakStale(join(dir, '.lock.break'), lockPath, seen.token)
       if (broken === 'removed' || broken === 'changed') continue
       if (broken === 'kept') notRemoved = seen.token
     }
@@ -888,22 +784,6 @@ async function acquire(dir: string, lockPath: string, kind: string, timeoutMs: n
       throw new AuditAppendError(kind, lockRefusal(holderOf(lockPath), holderOf(join(dir, '.lock.break')) !== null, notRemoved))
     }
     await sleep(LOCK_POLL_MS)
-  }
-}
-
-/**
- * Remove `path` only while it still holds `token`, and say whether this call
- * removed it. Gone, unreadable or another token: not this caller's to remove.
- * Synchronous, so the exit hook can call it.
- */
-function release(path: string, token: string): boolean {
-  try {
-    const named = JSON.parse(readlinkSync(path, 'utf8')) as { token?: unknown } | null
-    if (named?.token !== token) return false
-    unlinkSync(path)
-    return true
-  } catch {
-    return false
   }
 }
 

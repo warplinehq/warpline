@@ -1044,13 +1044,16 @@ the file. A missing file is the built-in defaults. The strictness has one
 accepted cost: a key added by a later release is refused by an earlier one, so
 remove it before downgrading.
 
-The `notify` block is the one exception. The file-level read accepts it without
-judging it, and it is parsed on its own. An unusable block, an empty `argv` for
-example, does not refuse the file: the advance raises and sends no Ask, and
-nothing else changes (§ 16). An unusable block is reported as unusable, never
-read as unset. The Answer verbs read the block too, and with it unset or
-unusable they treat no Ask as open (§ 16). An earlier build refuses a file carrying `notify` as an unknown
-key, so remove it before downgrading.
+There are two exceptions, the `notify` block and the `consume` block. The
+file-level read accepts each without judging it, and each is parsed on its own.
+An unusable `notify` block, an empty `argv` for example, does not refuse the
+file: the advance raises and sends no Ask, and nothing else changes (§ 16). The
+Answer verbs read the block too, and with it unset or unusable they treat no Ask
+as open (§ 16). An unusable `consume` block never stops an advance:
+`warpline consume` refuses its pass, naming the first failing key path (§ 17). An
+unusable block is reported as unusable, never read as unset. An earlier build
+refuses a file carrying `notify` or `consume` as an unknown key, so remove it
+before downgrading.
 
 Every production read of `preferences.json` is checked against the audit store
 (§ 14): an advance, once it holds the run lock and before it uses any value, and
@@ -4065,9 +4068,8 @@ It is stored in the next record's `warplineprev`, or nowhere if there is none.
 records. `source` plus `id` is unique per record, as CloudEvents requires,
 because the seq is contiguous within one home.
 
-`data` holds identifiers, closed enums, lowercase hex sha256 digests and ISO
-times. It never holds approved content, a secret value or a configuration
-value. Each kind's fields are a strict schema: an unknown key, a malformed
+`data` holds identifiers, closed enums, lowercase hex sha256 digests, ISO times and integer micro-USD amounts. It never holds approved content or a secret value. Two values it carries come from configuration: the model ids on `handoff.tried`, under a bounded token shape, and a reservation's amount, which equals the per-call spend cap when one is set.
+Each kind's fields are a strict schema: an unknown key, a malformed
 digest or a line longer than 16384 bytes is refused, nothing is written, and the
 refusal's message names the kind and a fixed reason, never a value from the
 data.
@@ -4096,15 +4098,16 @@ The set is closed. A kind outside it cannot be written.
 | `preferences.observed` | The preferences file changed without a warpline command. |
 | `ask.raised` | An Ask is about to be stored (§ 16): its `id`, `kind`, `scope`, `plugin` (null for a standing grant's renewal), `digest`, `raised_at` and `expires_at`. Never its nonce or its summary. |
 | `ask.answered` | An Answer is about to close an Ask (§ 16): the Ask's `id`, `kind`, `scope`, `digest` and `raised_at`; the `answer`; `principal`, the registered id that answered, never null; `via`, the id it came through, or null; `os_user`, the account that ran the command, or `unknown` when it cannot be read or is not an account-name token, recorded beside the principal and never used as one; `evidence`, a bounded reference token with no whitespace, `?`, `&`, `=` or `@`, or null; `assurance`, always `asserted` in this release; and `decide_ms`, the ms from the Ask's `raised_at` to the Answer, never from a reminder. |
-| `handoff.tried` | A handoff tried. |
+| `handoff.reserved` | `warpline consume` is about to call a renderer: the reservation id, the Handoff record id and the amount set aside, in integer micro-USD. |
+| `handoff.tried` | A try ended: the reservation it settles, the Handoff, the outcome, the requested and served model ids, the cost in micro-USD or null, its basis, and the Judgment's byte count and sha256 when there was text. |
 | `segment.opened` | The first line of a segment file. One opened by `warpline audit pass-over` names each line it passed over, by its position and sha256, as `passed_over`. |
 | `segment.sealed` | The last line of a segment file that is full or old. |
 | `checkpoint.recorded` | The head as it stood, so it can be exported and checked later. |
 
-Nothing writes `handoff.tried` yet. Its schema admits nothing, so an append
-under it is refused until the work that writes it lands and defines its
-fields. The last three
-kinds in the table are written by the store itself, never by a caller.
+`warpline consume` writes `handoff.reserved` before each renderer call and
+`handoff.tried` when the try ends, before the Judgment or the record is
+written (§ 17). The last three kinds in the table are written by the store
+itself, never by a caller.
 
 Each `grants` entry on a `fire.intent` names its `issuer`. A session window's
 issuer is whichever active principal, human or machine, last named that scope
@@ -5199,3 +5202,382 @@ The checks after the short prefix run in a fixed order, `unknown`,
 `superseded`, `expired`, `nonce reused`, `digest mismatch`, and the first that
 fails is the one named. An Answer to an expired Ask that also carries a wrong
 prefix is refused as `expired`.
+
+## 17. `warpline consume`
+
+`warpline consume` is a one-shot pass, run outside the engine, that answers
+open Handoff records: it renders each one's prompt through the configured
+renderer and writes the Judgment where the Handoff says.
+
+### Settings
+
+`consume` is a block in `<home>/preferences.json`. Absent or `null`, every key
+takes its default. The block is parsed apart from the file (§ 6): an unusable
+block never stops an advance, and `warpline consume` refuses its pass, naming
+the first failing key path and never a value.
+
+| Key | Default | Rule |
+|---|---|---|
+| `consume.renderer` | `"claude-code"` | `"claude-code"` or `"openai-compatible"` |
+| `consume.model` | none | a model id: a letter or digit, then letters, digits and `._:/@[]-`, at most 200 characters |
+| `consume.models` | `{}` | a map from plugin name to model id, used over `consume.model` for that plugin |
+| `consume.endpoint` | none | an `http` or `https` URL with no credentials, query or fragment; the `openai-compatible` base URL |
+| `consume.max_usd_per_call` | none | a USD amount; the most one try may reserve |
+| `consume.max_usd_per_window` | none | a USD amount; the most the whole home may spend in one window. Needs `consume.max_usd_per_call` set beside it |
+| `consume.window_seconds` | `86400` | an integer, `1` or more; the length of the rolling window |
+| `consume.prices` | `{}` | a map from model id to `{ "usd_per_mtok_in": <USD>, "usd_per_mtok_out": <USD> }`, the price per million tokens in and out |
+| `consume.model_mismatch` | `"record"` | `"record"` or `"refuse"`; what a try does when the served model is not the requested one |
+| `consume.max_tries` | `3` | an integer, `1` or more; failed tries after which a Handoff is skipped |
+| `consume.max_output_bytes` | `1048576` | an integer, `1` or more; the most Judgment text, in UTF-8 bytes |
+| `consume.tools` | `{}` | a map from plugin name to a non-empty list of tool names, each a letter then letters, digits and `_`, at most 64 characters |
+| `consume.run_as` | none | an OS account name; the account a tool-enabled try runs as |
+
+Money is USD with at most six decimal places. `0.000001` is accepted, and
+`0.0000001`, `1e-7` and a negative amount are refused by key path. Every record
+holds integer micro-USD, so a setting converts exactly. A window cap needs a
+per-call cap set beside it, because the per-call cap is the amount each try
+reserves; a window cap alone is refused at `consume.max_usd_per_window`.
+
+The `openai-compatible` credential is read only from the
+`WARPLINE_CONSUME_API_KEY` environment variable and never from this file. No
+key in the block holds one, a key such as `api_key` is refused as unknown, and
+an endpoint carrying a user, a password or a query is refused.
+
+`consume.tools` and `consume.run_as` are the tool opt-in. A plugin with no entry
+in `consume.tools` gets no tools. A change to either key is on the audit record
+like every other change to the file: `preference.set` for a
+`warpline prefs set consume.tools '<json>'`, and `preferences.observed` for a
+hand edit (§ 14). The opt-in has no verb and no audit kind of its own.
+
+### The pass
+
+One pass answers the open Handoff records once, oldest first, and then exits.
+It lists the open records, keeping only the plugins it was asked for. With none
+left, it stops there. Otherwise it reads `preferences.json` once, puts the read
+on the audit record (`preferences.observed`, § 14), and judges the `consume`
+block. It then sets up the renderer: for `claude-code`, the first executable
+`claude` on PATH, at version 2.1.305 or later; for `openai-compatible`, the
+endpoint. A failure in any of these refuses the whole pass by name, and no
+Handoff is touched.
+
+For each record the pass first runs the refusals that need no claim: no model
+set for its plugin, no `output_path`, a tool opt-in that cannot run (below),
+and an unknown cost basis under a spend cap (below). A refusal names its reason and adds no try. The pass then claims
+the Handoff, and from there the claim is released however the try ends. One
+try runs in this order:
+
+1. The record is re-read. One found `answered` was finished by another
+   consumer after this pass listed it: there is nothing to do, and it is not
+   reported. One found in any other state that is not `open` (withdrawn,
+   superseded, or a state this build does not know) is skipped as no longer
+   open.
+2. Every `handoff.reserved` for the Handoff that no try on the record names is
+   settled onto the record first, oldest first (below).
+3. A tool-enabled try runs the `run_as` probes (below), and a refusal ends it
+   here. Then `handoff.reserved` is appended under `.consume.lock`.
+4. The renderer is called, outside every lock. The prompt is the task, or the
+   task, a blank line and the context file's text. A renderer that cannot run
+   is a `failed` try with the reason `the renderer could not run (<code>)` and
+   no cost, settled as in step 5, and the pass goes on to the next Handoff.
+   After 10 minutes the try is `failed` with the reason
+   `the renderer did not answer in time` if the renderer child is still
+   running, or if it exited but a process it started still holds its output
+   open. A child still running is sent SIGTERM, then SIGKILL 5 seconds later if
+   it is still there, and the call returns as soon as the child exits or
+   SIGKILL is sent. A child that already exited is sent nothing, and the call
+   returns at the deadline.
+5. Under the record lock the record is re-read. While it is `open`,
+   `handoff.tried` is appended, then the Judgment is written atomically to
+   `<home>/<output_path>`, then the record gains the try and, when the try
+   answered, `state: "answered"` and `closed_at`. A record that closed during
+   the call gains a `discarded` try, and its state is left as it is.
+
+A refused `handoff.tried` append writes no Judgment and no try, and leaves the
+reservation open, so the window counts it in full. The next claim records that
+try as `failed` (below). The Judgment is the
+renderer's text byte for byte. The model writes nothing, and no Judgment opens
+a gate: the pass never reads the state document or its gate list. The pass
+writes a Judgment only under `<home>/judgments/`, which holds no file the gate,
+the engine or the preferences read.
+
+A pass reports each Handoff as answered, failed, refused, skipped, discarded,
+held or unreadable. Held means another live consumer holds its claim. It is the
+one report besides answered that leaves the exit code at 0. Any other report,
+or a refused pass, exits 1.
+
+### Three locks
+
+| Lock | Covers |
+|---|---|
+| `<home>/handoffs/.consume.lock` | Reading the spend window, checking the caps and appending one reservation. Never held across a model call. |
+| `<home>/handoffs/<id>.claim` | One consumer answering one Handoff. It is never waited on: a live holder's Handoff is reported held. Only a dead holder on this host is broken, and a holder this host cannot judge is never broken. |
+| `<home>/handoffs/<id>.lock` | Every rewrite of the record: a supersede, a withdrawal and a try's settle. Held for one read and one write; a settle also appends its one `handoff.tried` line and writes the Judgment inside it. Never held across a model call. |
+
+The lock order is the state lock, then a record lock, then the audit lock, and
+separately `.consume.lock`, then the audit lock. `warpline consume` never takes
+the state lock or the run lock. A claim does not serialise writers, so `deny`
+can still withdraw a claimed record.
+
+### Tries
+
+Each try is appended to the record's `tries` list, and never rewritten.
+
+| Field | Meaning |
+|---|---|
+| `at` | When the try settled, as an ISO time. |
+| `reservation_id` | The `handoff.reserved` line this try settles. |
+| `requested` | The model id the try asked for. |
+| `served` | The model id the provider reported, or null when it reported none or one outside the model-id shape. |
+| `cost_micro_usd` | What the try cost, in integer micro-USD, or null when it is unknown. |
+| `cost_basis` | `reported` by the provider, `computed` from `consume.prices`, or `unknown`. |
+| `outcome` | `answered`, `failed`, `discarded`, `refused` or `recovered`. |
+| `reason` | Why the try did not answer, as a fixed phrase, or null. |
+
+`answered` closes the record. `failed` leaves it open for a later pass.
+`discarded` is a try that ended after the record closed. `refused` is a try
+whose served model differed under `consume.model_mismatch: refuse` (below); it
+leaves the record open. `recovered` is an answer a try paid for and wrote but
+did not settle onto the record (below); it closes the record.
+
+### Model mismatch
+
+A try mismatches when the renderer returned text and the served model is not
+exactly the requested one. The comparison is exact string inequality: a
+requested `x` served as `x-20261001` is a mismatch. A null served model, one
+the provider did not report or reported outside the model-id shape, is a
+mismatch too. A call that returned no text served nothing, so it is never a
+mismatch; it is a `failed` try.
+
+Every mismatch raises one board `notice` of severity `warning`, whose
+`metadata_json` is `{ "event": "model_mismatch", "handoff", "requested",
+"served" }` (board-spec § 5). Both model ids are escaped for a terminal. The
+notice carries no Judgment text and no other configuration value.
+
+Under `consume.model_mismatch: record`, the default, the try goes on as if the
+models matched, and an answered try writes the Judgment. Under `refuse`, no
+Judgment is written: the try is `refused`, its `handoff.tried` line says so,
+and the Handoff stays `open`. A `refused` try counts against
+`consume.max_tries`, so a Handoff that keeps being served another model stops
+being tried.
+
+Configure the exact served id. The `claude` CLI reports the dated id for an
+alias, so a requested alias mismatches on every call, and under `refuse` it is
+never answered. The check sees only what the provider reports: a gateway that
+restamps the served model hides a substitution from it.
+
+A notice that cannot be written leaves the try as it settled, and the pass
+reports the Handoff `unannounced`, which exits 1.
+
+### Spend caps
+
+A reservation's amount is `consume.max_usd_per_call`, or 0 with no cap, and it
+is appended even at 0 so every try has its anchor on the audit record. A window
+sums the reservations stamped in it: each at its settled cost, and an open or
+costless one at its full amount, so a killed call keeps its whole reservation.
+A call can cost more than it reserved, and then it counts at its cost. A
+reservation that would take the window past `consume.max_usd_per_window` is
+refused, and the Handoff stays open.
+
+The `claude-code` renderer always reports a cost. With `openai-compatible` a
+cost is known in advance only when `consume.prices` has an entry for the
+requested model. With either cap set and no such entry, the Handoff is refused
+before any reservation or call. The `openai-compatible` renderer calls again,
+at most twice, only after a refused connect, HTTP 429 or HTTP 503, and those
+calls are inside one try, under one reservation. A 502 or 504 ends the try with
+its cost unknown, because a gateway can answer one after the provider billed
+the generation, so the full reservation counts.
+
+The window and a Handoff's unsettled tries are read from the whole audit store,
+and a line that can't be read is never read as nothing. A line in the store
+that is not a record refuses the reservation under `consume.max_usd_per_window`
+with `the spend window could not be read`, and refuses every claim with `the
+audit store could not be read for the unsettled tries`. `warpline audit
+pass-over <seq>` (§ 14) passes such a line over. Once passed over it counts as
+nothing, so a reservation it held is gone from the window. A line in a sealed
+segment can't be passed over, and it has no recovery in this build. Restoring
+an older export by hand drops every later reservation, try and fire record, so
+don't clear it that way.
+
+### A try that ended without settling
+
+A try's `handoff.reserved` line is its write-ahead anchor. A reservation for
+the Handoff that no try on the record names is a try that ended without
+settling, however it ended. A kill leaves one. So does a Judgment write or a
+record write that failed, a refused `handoff.tried` append, and a record lock
+not taken in time.
+
+On every claim, before any new try, the pass settles each such reservation
+onto the record, oldest first. It can, because under the claim no other
+consumer can be in a try on this Handoff: a claim is broken only when its
+holder's pid is dead. With none, the pass goes on as usual.
+
+When a reservation's `handoff.tried` says `answered` and the file at
+`<home>/<output_path>` resolves under `<home>/judgments` and has the sha256
+that line records, the record is marked `answered` with a `recovered` try. It
+carries the reservation id, the models and the cost from that line. No call is
+made, no reservation is appended, and no `handoff.tried` is written: the line
+already there is the try's anchor.
+
+Anything else is a `failed` try with the reason `the try ended without being
+settled`: the file is missing or outside `<home>/judgments`, its sha256
+differs, or the line said something other than `answered`. A line that said
+`refused` or `discarded` keeps that outcome. A try with no `handoff.tried`
+(killed during the call, or its append refused) gets one written first, with
+outcome `failed`, a null cost and basis `unknown`, so the line still comes
+before the try. The try counts against `consume.max_tries`, and a normal try
+follows when one is left. Once the record has closed, the reservation is
+settled as a `discarded` try instead, and the Handoff is reported discarded.
+
+When the audit store cannot be read for these reservations, the Handoff is
+refused with `the audit store could not be read for the unsettled tries`, and
+no try is made. A settle that fails is reported as any failed settle is, and
+the reservations not yet settled wait for the next claim. A call that ended
+before its `handoff.tried` keeps its full reservation in the window, since a
+null cost counts in full.
+
+One residual stays. A record that closes before its next claim is never claimed
+again, so such a try stays on the audit record only. The window still counts
+it, at its full reservation when no cost was recorded.
+
+A consumer killed after it wrote the Judgment but before it marked the record
+can leave that file behind a record that is then withdrawn or superseded. The
+file stays where it is, and nothing deletes it. It needs a kill within
+milliseconds of the write, and the record's state still says the judgment is
+no longer asked for.
+
+### Tools and run_as
+
+A try is tool-less by default. A plugin gets tools only when
+`consume.tools.<plugin>` lists them, and then only the tools listed. The opt-in
+needs `consume.run_as` too: the OS account the try runs as. Two refusals run
+before the claim, with no reservation and no call. A tool entry with
+`consume.run_as` unset is refused as `consume.tools is set for this plugin and
+consume.run_as is not`, and one under the `openai-compatible` renderer as
+`consume.tools needs the claude-code renderer`. No refusal, try or report names
+the `run_as` value.
+
+The judge runs as that second user, stepped down to through sudo, and never as
+root. The kernel's permission check is the boundary. Claude's sandbox is
+defense in depth on top of it.
+
+**The probes.** Before every tool-enabled try, after the claim and before the
+reservation, the pass runs five probes as the `run_as` user. `<test>` is
+`/bin/test` on darwin and `/usr/bin/test` elsewhere, `<home>` is the home's
+real path, and `<os home>` is the real path of the operator's OS home, the
+home directory of the account consume runs as.
+
+1. `/usr/bin/sudo -n -u <run_as> <test> -d /`, the control, must exit 0.
+2. `/usr/bin/sudo -n -u <run_as> <test> -x <home>` must exit 1.
+3. `/usr/bin/sudo -n -u <run_as> <test> -r <home>` must exit 1.
+4. `/usr/bin/sudo -n -u <run_as> <test> -x <os home>` must exit 1.
+5. `/usr/bin/sudo -n -u <run_as> <test> -r <os home>` must exit 1.
+
+Both homes are probed even when the home is inside the OS home. The control
+exists because sudo itself exits 1 when it refuses, the same code `test` uses
+for false. Without it, a refused sudo would read as cannot reach. A `-x` probe
+that exits 0 refuses the Handoff as `the run_as user can enter the home`, and
+a `-r` probe that exits 0 as `the run_as user can read the home`. A failed
+control, a missing sudo, a probe that could not start and any other exit
+refuse it as `whether the run_as user can reach the home could not be
+checked`. On the OS home the same three refusals read `the run_as user can
+enter the operator's OS home`, `the run_as user can read the operator's OS
+home` and `whether the run_as user can reach the operator's OS home could not
+be checked`. An OS home that is not an absolute path, or whose real path
+cannot be found, is refused as that last one. A probe still running after 10
+seconds is killed and counts as one that could not start. No refusal names a
+path. The probes stop at the first refusal. A refusal adds no try and no
+reservation, and the claim is released.
+
+**The command.** The try's child starts as
+
+```
+/usr/bin/sudo -n -u <run_as> --preserve-env=<names> <abs claude> <argv>
+```
+
+The spawn's env is the tool-less allowlist without `HOME`. `--preserve-env`
+names those variables and carries no value, so no credential is on the process
+table, and no `env` program runs. `-n` never prompts.
+
+At the deadline the child gets SIGTERM first, because sudo passes it on to the
+judge. SIGKILL would end sudo alone and leave the judge running as `run_as`,
+beyond the operator's reach. SIGKILL follows only if sudo is still there after
+the 5 second grace.
+
+**The sudoers rules.** The operator adds two, each naming one absolute binary
+with no argument pattern:
+
+```
+<operator> ALL=(<run_as>) NOPASSWD:SETENV: <abs claude>
+<operator> ALL=(<run_as>) NOPASSWD: <test>
+```
+
+`SETENV` lets the passed variables skip sudo's environment checks. That is
+acceptable only because `run_as` has less authority than the operator: what
+the variables can do, they do as a user with less reach.
+
+**The argv.** `-p --bare --tools <list> --allowedTools <list>
+--permission-prompts none --output-format json --model <model>
+--no-session-persistence --setting-sources '' --strict-mcp-config --settings
+<sandbox settings>`, then `--max-budget-usd` when a per-call cap is set, and
+last `--disallowedTools WebFetch WebSearch RemoteTrigger`, which takes every
+argument after it. `--tools` sets which tools exist and `--allowedTools`
+approves them, so the list goes to both. The sandbox settings are a fixed
+literal: sandbox on, no network host allowed, no unsandboxed command. No bypass
+permission mode is ever passed.
+
+**The cwd and HOME.** The child's cwd is a fresh `/tmp/warpline-judge-*`
+directory of mode 0755, owned by the operator, so the judge can enter it but
+not write it. It is removed after the call. The judge's HOME is its own, set by
+sudo, and the account needs a writable home for the CLI's own state.
+
+**What it protects.** The `run_as` user must not be able to enter the home or
+the operator's OS home, or the probes refuse. Mode 0700 on each does it. On
+macOS a home directory is mode 0755 by default, so the tool opt-in does not run
+there until the operator runs `chmod 700 ~`. Secrets outside both are
+protected only by the operator's own permissions on them: the probes check the
+two homes and nothing else. Even with tools, the model writes no Judgment. Its
+text comes back as text, and warpline writes it.
+
+**The credential.** Opting a plugin into tools is a trust grant. The judge runs
+with the provider credential in its environment, and a file tool can read it,
+for example through `/proc/self/environ` on Linux, and put it in its Judgment
+text. Use a dedicated, spend-limited key for consume.
+
+### Running it
+
+```
+warpline consume [--plugin <name>]... [--json]
+```
+
+With no arguments the pass covers every open Handoff. `--plugin` narrows it to
+one plugin's Handoffs, and repeated, to each plugin named. A value that is not
+a plugin name is a usage error, and the refusal does not repeat the value.
+There is no flag naming one Handoff and no dry run.
+
+`--json` writes one newline-terminated JSON document on stdout with these
+fields: `answered`, `discarded` and `held`, lists of record ids; `failed`,
+`refused` and `skipped`, lists of `{ "id", "reason" }`; `unreadable`, a list of
+record file names; `unannounced`, a list of record ids whose mismatch notice
+could not be written; and `refusal`, always `null` in a document, because a
+pass that could not run writes none. Without `--json` the command prints one
+line per Handoff: `answered <id>`, `failed <id>: <reason>`,
+`refused <id>: <reason>`, `skipped <id>: <reason>`, `discarded <id>`,
+`held <id>` or `unreadable <name>`, or `Nothing to do.` when there were none,
+and one more line, `unannounced <id>: the mismatch notice could not be
+written`, for each Handoff in `unannounced`.
+Neither form carries Judgment text or a configuration value: only record ids,
+fixed reasons and key paths.
+
+An unreadable record is reported under `--plugin` too, whatever plugin its file
+name suggests. Its plugin is in the record, and the record could not be read.
+
+### Exit codes
+
+The codes are contract surface. A scheduler unit or a monitoring check may key
+on them without parsing the output.
+
+| Code | Meaning |
+|------|---------|
+| `0` | Every claimed Handoff was answered, or there was nothing to do. A Handoff another live consumer holds does not count. |
+| `1` | A try failed; a Handoff was refused, discarded or skipped; a cap left one open; a record was unreadable; a mismatch notice could not be written; or the pass could not run. A pass that could not run writes its reason to stderr and nothing to stdout, under `--json` too. |
+| `2` | A usage error: an unknown flag, a positional argument, or a `--plugin` value that is not a plugin name. The usage goes to stderr, and nothing runs. |
