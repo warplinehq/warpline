@@ -192,6 +192,18 @@ describe('the record carries where its Judgment goes', () => {
       expect(message).not.toContain(output_path)
     },
   )
+
+  test.each(['judgments/a//b.md', 'judgments/./b.md'])(
+    'needs_llm.output_path %s has an empty or . segment, and the refusal states the whole rule',
+    (output_path) => {
+      const parsed = NeedsLlmSchema.safeParse({ task: 't', context_path: 'state/a.json', output_path })
+      expect(parsed.success).toBe(false)
+      const message = parsed.error!.issues.map((i) => i.message).join('\n')
+      expect(message).toContain('needs_llm.output_path')
+      expect(message).not.toContain(output_path)
+      expect(message).toContain('no empty, `.` or `..` segment')
+    },
+  )
 })
 
 describe('supersede', () => {
