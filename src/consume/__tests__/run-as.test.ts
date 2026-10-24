@@ -531,6 +531,31 @@ describe('the deadline', () => {
     expect(elapsed).toBeGreaterThanOrEqual(1_000)
     expect(r).toMatchObject({ ok: false, reason: 'the renderer did not answer in time' })
   }, 15_000)
+
+  test('a child that exited before the deadline while a process it started holds stdout is sent nothing, and the call returns at the deadline', async () => {
+    const dir = temp('warpline-run-as-early-exit-')
+    const grandchildPid = join(dir, 'grandchild.pid')
+    const claude = script(dir, 'claude', ['#!/bin/sh', 'sleep 30 &', `echo $! > '${grandchildPid}'`, 'exit 0'])
+    const kill = spyOn(ChildProcess.prototype, 'kill')
+    spies.push(kill)
+
+    // The deadline leaves room for a freshly written script's first exec, so the child has exited before it.
+    const started = Date.now()
+    const r = await cc.renderClaudeCode({
+      bin: claude,
+      model: MODEL,
+      prompt: 'p',
+      capMicro: null,
+      parentEnv: { PATH: '/usr/bin:/bin' },
+      timeoutMs: 1_000,
+      killGraceMs: 2_000,
+    })
+    const elapsed = Date.now() - started
+    await readPid(grandchildPid)
+    expect(elapsed).toBeLessThan(2_000)
+    expect(kill).not.toHaveBeenCalled()
+    expect(r).toMatchObject({ ok: false, reason: 'the renderer did not answer in time' })
+  }, 15_000)
 })
 
 describe('the sudo spawn', () => {
