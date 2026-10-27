@@ -532,14 +532,20 @@ describe('the deadline', () => {
     expect(r).toMatchObject({ ok: false, reason: 'the renderer did not answer in time' })
   }, 15_000)
 
-  test('a child that exited before the deadline while a process it started holds stdout is sent nothing, and the call returns at the deadline', async () => {
+  test('a child that exited with a partial result before the deadline, while a process it started holds stdout, is sent nothing and fails with its cost unknown the grace after its exit', async () => {
     const dir = temp('warpline-run-as-early-exit-')
     const grandchildPid = join(dir, 'grandchild.pid')
-    const claude = script(dir, 'claude', ['#!/bin/sh', 'sleep 30 &', `echo $! > '${grandchildPid}'`, 'exit 0'])
+    const claude = script(dir, 'claude', [
+      '#!/bin/sh',
+      `printf '{"type":"result","is_err'`,
+      'sleep 30 &',
+      `echo $! > '${grandchildPid}'`,
+      'exit 0',
+    ])
     const kill = spyOn(ChildProcess.prototype, 'kill')
     spies.push(kill)
 
-    // The deadline leaves room for a freshly written script's first exec, so the child has exited before it.
+    // The deadline leaves room for a freshly written script's first exec, so the child exits before it, and the grace runs past it.
     const started = Date.now()
     const r = await cc.renderClaudeCode({
       bin: claude,
@@ -547,14 +553,46 @@ describe('the deadline', () => {
       prompt: 'p',
       capMicro: null,
       parentEnv: { PATH: '/usr/bin:/bin' },
-      timeoutMs: 1_000,
-      killGraceMs: 2_000,
+      timeoutMs: 2_000,
+      killGraceMs: 3_000,
     })
     const elapsed = Date.now() - started
     await readPid(grandchildPid)
-    expect(elapsed).toBeLessThan(2_000)
+    expect(r).toMatchObject({
+      ok: false,
+      reason: 'the renderer printed no result',
+      cost_micro_usd: null,
+      cost_basis: 'unknown',
+    })
     expect(kill).not.toHaveBeenCalled()
-    expect(r).toMatchObject({ ok: false, reason: 'the renderer did not answer in time' })
+    expect(elapsed).toBeGreaterThan(2_900)
+  }, 15_000)
+
+  test('a child that printed a complete result and exited before the deadline, while a process it started holds stdout, is answered with its reported cost the grace after its exit', async () => {
+    const dir = temp('warpline-run-as-early-answer-')
+    const grandchildPid = join(dir, 'grandchild.pid')
+    const line =
+      '{"type":"result","subtype":"success","is_error":false,"result":"answered","total_cost_usd":0.012345,"modelUsage":{"claude-opus-5":{}}}'
+    const claude = script(dir, 'claude', ['#!/bin/sh', `echo '${line}'`, 'sleep 30 &', `echo $! > '${grandchildPid}'`, 'exit 0'])
+    const kill = spyOn(ChildProcess.prototype, 'kill')
+    spies.push(kill)
+
+    const started = Date.now()
+    const r = await cc.renderClaudeCode({
+      bin: claude,
+      model: MODEL,
+      prompt: 'p',
+      capMicro: null,
+      parentEnv: { PATH: '/usr/bin:/bin' },
+      timeoutMs: 5_000,
+      killGraceMs: 1_000,
+    })
+    const elapsed = Date.now() - started
+    await readPid(grandchildPid)
+    expect(elapsed).toBeLessThan(4_000)
+    expect(r).toMatchObject({ ok: true, text: 'answered', cost_micro_usd: 12_345, cost_basis: 'reported' })
+    expect(kill).not.toHaveBeenCalled()
+    expect(elapsed).toBeGreaterThan(900)
   }, 15_000)
 })
 

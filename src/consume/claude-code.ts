@@ -283,15 +283,17 @@ async function withScratch<T>(judge: boolean, fn: (cwd: string, home: string | n
 }
 
 /**
- * Run one child to its end or its deadline. A child still running at the
- * deadline gets SIGTERM, then SIGKILL `graceMs` later if it has not exited.
+ * Run one child to its end or its deadline. A child that exits before the
+ * deadline is never signalled. The call settles when its stdout closes, or
+ * `graceMs` after the exit if a process it started still holds stdout, and the
+ * bytes read by then decide. A child still running at the deadline gets
+ * SIGTERM, then SIGKILL `graceMs` later if it has not exited.
  * SIGTERM goes first because a tool-enabled child is sudo, which relays
  * SIGTERM to the judge; SIGKILL cannot be relayed, so on its own it would end
  * sudo and leave the judge running as another user the operator cannot signal.
  * Past the deadline the call settles when the child exits, or right after
  * SIGKILL is sent, whichever comes first. So a one-shot pass never exits with a
- * kill pending. A child that already exited, while a process it started still
- * holds stdout, is sent nothing, and the call settles at the deadline.
+ * kill pending.
  */
 function runChild(
   bin: string,
@@ -302,22 +304,19 @@ function runChild(
     const chunks: Buffer[] = []
     let settled = false
     let timedOut = false
-    let exited = false
-    let killTimer: ReturnType<typeof setTimeout> | undefined
+    let graceTimer: ReturnType<typeof setTimeout> | undefined
     const settle = () => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      clearTimeout(killTimer)
+      clearTimeout(graceTimer)
       resolve({ stdout: Buffer.concat(chunks).toString('utf8'), timedOut })
     }
     const child = spawn(bin, argv, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'ignore'] })
     const timer = setTimeout(() => {
       timedOut = true
-      // The child already exited and a process it started holds stdout, so an exited pid is never signalled.
-      if (exited) return settle()
       child.kill('SIGTERM')
-      killTimer = setTimeout(() => {
+      graceTimer = setTimeout(() => {
         child.kill('SIGKILL')
         settle()
       }, o.graceMs)
@@ -330,9 +329,11 @@ function runChild(
       if (!timedOut) settle()
     })
     // Past the deadline the exit settles, not the close, so a grandchild holding stdout cannot hold the caller.
+    // Before the deadline the deadline is dropped, and stdout is read for `graceMs` more before the bytes decide.
     child.on('exit', () => {
-      exited = true
-      if (timedOut) settle()
+      if (timedOut || settled) return settle()
+      clearTimeout(timer)
+      graceTimer = setTimeout(settle, o.graceMs)
     })
     child.on('close', settle)
     child.stdin.end(o.stdin)

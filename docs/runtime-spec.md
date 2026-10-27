@@ -5279,13 +5279,15 @@ try runs in this order:
    task, a blank line and the context file's text. A renderer that cannot run
    is a `failed` try with the reason `the renderer could not run (<code>)` and
    no cost, settled as in step 5, and the pass goes on to the next Handoff.
-   After 10 minutes the try is `failed` with the reason
-   `the renderer did not answer in time` if the renderer child is still
-   running, or if it exited but a process it started still holds its output
-   open. A child still running is sent SIGTERM, then SIGKILL 5 seconds later if
-   it is still there, and the call returns as soon as the child exits or
-   SIGKILL is sent. A child that already exited is sent nothing, and the call
-   returns at the deadline.
+   A renderer child still running after 10 minutes makes the try `failed` with
+   the reason `the renderer did not answer in time`. It is sent SIGTERM, then
+   SIGKILL 5 seconds later if it is still there, and the call returns as soon
+   as the child exits or SIGKILL is sent. A child that exits before then is
+   sent nothing. If a process it started still holds its output open, the call
+   returns 5 seconds after the exit, and what the child printed by then is read
+   as for any other exit: a complete result is answered with its reported
+   cost, and a partial one is `failed` with `the renderer printed no result`
+   and its cost unknown, so the full reservation counts.
 5. Under the record lock the record is re-read. While it is `open`,
    `handoff.tried` is appended, then the Judgment is written atomically to
    `<home>/<output_path>`, then the record gains the try and, when the try
