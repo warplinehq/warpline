@@ -5498,7 +5498,11 @@ reservation, and the claim is released.
 
 The spawn's env is the tool-less allowlist without `HOME`. `--preserve-env`
 names those variables and carries no value, so no credential is on the process
-table, and no `env` program runs. `-n` never prompts.
+table, and no `env` program runs. `-n` never prompts. On Linux, sudo's PAM
+session for `run_as` may add machine-wide names from files such as
+`/etc/environment` and `/etc/default/locale` and, for a name outside sudo's
+`env_keep`, replace the value consume passed, so keep secrets out of those
+world-readable files.
 
 At the deadline the child gets SIGTERM first, because sudo passes it on to the
 judge. SIGKILL would end sudo alone and leave the judge running as `run_as`,

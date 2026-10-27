@@ -78,6 +78,8 @@ jobs:
           sudo -l -U runner
           sudo -l -U warpop
           sudo -V
+          # The files pam_env reads in the judge's sudo session; the env-name case allows the names they list.
+          cat /etc/environment /etc/default/locale || true
           bun_bin=$(command -v bun)
           # warpop must reach the checkout, dist/ and the bun binary.
           sudo chmod -R o+rX "$GITHUB_WORKSPACE"

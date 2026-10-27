@@ -12,11 +12,19 @@
  * On Linux CI it fails instead of skipping when the step's variables are
  * unset: a deleted or half-edited step must go red, never quietly green.
  *
- * The allowed env names are a starting set. When the first pushed run shows a
- * name that this sudo or PAM adds (for example from `pam_env`) outside it, the
- * case fails, and the set grows by that exact name in a fix commit quoting the
- * run's log line. Never by a prefix or a wildcard, and never by a name that
- * carries a secret.
+ * The allowed env names are the consumer's own, sudo's fixed set, the shell's
+ * own, and every name listed in a file pam_env reads in the judge's sudo
+ * session (`/etc/environment` and `/etc/default/locale` on Ubuntu). They are
+ * read from the machine the test runs on, names and never values, so the set
+ * follows the runner image instead of pinning one. A missing file lists no
+ * name, which only makes the check stricter. The planted secret and the names
+ * only the operator's env carries never pass, even when such a file lists one.
+ *
+ * When a name outside that set reaches the judge, the case fails, so find where
+ * it comes from before widening anything. A name sudo itself sets joins
+ * SUDO_NAMES by that exact name, and another file pam_env reads joins
+ * PAM_ENV_FILES, each in a fix commit quoting the run's log line. Never widen by
+ * a prefix or a wildcard, and never by a name that carries a secret.
  */
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
@@ -61,12 +69,40 @@ function sudoCommands(listing: string): string[] {
   return out
 }
 
-/** Names the judge may see: the consumer's own and passed-through, sudo's fixed set, and the shell's own. */
+/** Planted in the operator's env, it must never reach the judge. */
+const SECRET = 'WARPLINE_TEST_SECRET'
+
+/** The files Ubuntu's sudo PAM stack hands pam_env: `readenv=1`, and `envfile=/etc/default/locale`. */
+const PAM_ENV_FILES = ['/etc/environment', '/etc/default/locale']
+
+/** The names each file sets, never the values. A missing file sets none. */
+export function pamEnvNames(files: string[]): Set<string> {
+  const names = new Set<string>()
+  for (const f of files) {
+    if (!existsSync(f)) continue
+    for (const m of readFileSync(f, 'utf-8').matchAll(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=/gm)) names.add(m[1]!)
+  }
+  return names
+}
+
+/**
+ * Names the judge may see: the consumer's own and passed-through, sudo's fixed
+ * set, the shell's own, and the names the PAM env files list.
+ */
 const consumerNames = new Set<string>([...Object.keys(buildConsumeEnv({}, '/x', '/x')), ...CLAUDE_ENV_PASSTHROUGH])
 const SUDO_NAMES = new Set(['TERM', 'PATH', 'HOME', 'MAIL', 'SHELL', 'LOGNAME', 'USER', 'USERNAME'])
 const SHELL_NAMES = new Set(['PWD', 'SHLVL', '_', 'OLDPWD'])
-const allowedName = (n: string): boolean =>
-  consumerNames.has(n) || SUDO_NAMES.has(n) || n.startsWith('SUDO_') || SHELL_NAMES.has(n)
+
+/** Refused even when a PAM file lists one. */
+const operatorOnly = (n: string): boolean =>
+  n === SECRET || n === 'CI' || n.startsWith('WARPLINE_CI_') || n.startsWith('GITHUB_')
+
+export const allows =
+  (pam: Set<string>) =>
+  (n: string): boolean =>
+    !operatorOnly(n) &&
+    (consumerNames.has(n) || SUDO_NAMES.has(n) || n.startsWith('SUDO_') || SHELL_NAMES.has(n) || pam.has(n))
+const allowedName = allows(pamEnvNames(PAM_ENV_FILES))
 
 describe('the guard', () => {
   test('Linux CI with neither variable fails instead of skipping', () => {
@@ -98,6 +134,26 @@ describe('the sudo -l parse', () => {
   })
 })
 
+describe('the PAM env files', () => {
+  const missing = '/nonexistent/warpline-pam-env'
+  test('names only, from KEY=value and export lines, and a comment, a blank line or a missing file adds none', () => {
+    const dir = mkdtempSync('/tmp/warpline-pam-')
+    try {
+      const f = join(dir, 'environment')
+      writeFileSync(f, 'ImageOS=ubuntu24\nexport JAVA_HOME=/usr/lib/jvm/x\n  QUOTED="a=b c"\n# COMMENTED=1\n\nnot a line\n')
+      expect([...pamEnvNames([f, missing])].sort()).toEqual(['ImageOS', 'JAVA_HOME', 'QUOTED'])
+      expect(pamEnvNames([missing]).size).toBe(0)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  test('the secret and operator-only names never pass, even when a PAM file lists them', () => {
+    const listed = ['ImageOS', SECRET, 'CI', 'WARPLINE_CI_RUN_AS', 'GITHUB_TOKEN']
+    expect(listed.filter(allows(new Set(listed)))).toEqual(['ImageOS'])
+    expect(allows(new Set())('ImageOS')).toBe(false)
+  })
+})
+
 const guard = ciGuard(process.platform, process.env)
 const REASON = 'the real-user test did not run: WARPLINE_CI_RUN_AS or WARPLINE_CI_OPERATOR is unset on Linux CI'
 
@@ -113,7 +169,6 @@ if (guard === 'fail') {
   const PREFS = { consume: { model: 'claude-opus-5', tools: { prod: ['Read'] }, run_as: judge } }
   const ID = 'run-1.prod'
   const OUTPUT = 'judgments/prod.judgment.md'
-  const SECRET = 'WARPLINE_TEST_SECRET'
 
   /** A 0700 home under /tmp, which the judge can reach, holding one opted-in Handoff. */
   async function makeHome(): Promise<string> {
