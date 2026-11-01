@@ -594,6 +594,28 @@ describe('the deadline', () => {
     expect(kill).not.toHaveBeenCalled()
     expect(elapsed).toBeGreaterThan(900)
   }, 15_000)
+
+  test('a child that printed a complete result and exited with nothing holding its stdout is answered at the close, not the grace after its exit', async () => {
+    const dir = temp('warpline-run-as-close-')
+    const line =
+      '{"type":"result","subtype":"success","is_error":false,"result":"answered","total_cost_usd":0.012345,"modelUsage":{"claude-opus-5":{}}}'
+    const claude = script(dir, 'claude', ['#!/bin/sh', `echo '${line}'`, 'exit 0'])
+
+    // The grace is longer than the bound, so only the close can settle the call inside it.
+    const started = Date.now()
+    const r = await cc.renderClaudeCode({
+      bin: claude,
+      model: MODEL,
+      prompt: 'p',
+      capMicro: null,
+      parentEnv: { PATH: '/usr/bin:/bin' },
+      timeoutMs: 60_000,
+      killGraceMs: 5_000,
+    })
+    const elapsed = Date.now() - started
+    expect(elapsed).toBeLessThan(2_000)
+    expect(r).toMatchObject({ ok: true, text: 'answered', cost_micro_usd: 12_345, cost_basis: 'reported' })
+  }, 15_000)
 })
 
 describe('the sudo spawn', () => {
