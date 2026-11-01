@@ -79,7 +79,7 @@ jobs:
           sudo -l -U warpop
           sudo -V
           # The names set in the files pam_env reads in the judge's sudo session, never their values. The env-name case allows these names.
-          sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p' /etc/environment /etc/default/locale || true
+          LC_ALL=C sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*$/\2/p' /etc/environment /etc/default/locale || true
           bun_bin=$(command -v bun)
           # warpop must reach the checkout, dist/ and the bun binary.
           sudo chmod -R o+rX "$GITHUB_WORKSPACE"

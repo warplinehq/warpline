@@ -8,7 +8,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { isProcessAlive } from '../lib/host-identity.js'
@@ -20,6 +20,14 @@ const RULES = [
   'warpop ALL=(warpline-judge) NOPASSWD:SETENV: /opt/warpline-ci/bin/claude',
   'warpop ALL=(warpline-judge) NOPASSWD: /usr/bin/test',
 ]
+
+const PAM_FILES = ' /etc/environment /etc/default/locale || true'
+const PAM_LIST = `LC_ALL=C sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*$/\\2/p'${PAM_FILES}`
+const pamListLines = () =>
+  ci
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.endsWith(PAM_FILES))
 
 describe('the real-user CI step', () => {
   test.each([
@@ -85,6 +93,33 @@ describe('the real-user CI step', () => {
           // Already gone.
         }
       }
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('the PAM listing is the one names-only line, and nothing cats the files', () => {
+    expect(pamListLines()).toEqual([PAM_LIST])
+    expect(ci).not.toMatch(/\bcat\s+\/etc\/(environment|default\/locale)/)
+  })
+
+  // GNU sed only: under a UTF-8 locale its `.` stops at a byte that is not UTF-8.
+  test.skipIf(process.platform !== 'linux')('the PAM listing prints names only, even after a byte that is not UTF-8', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'warpline-ci-pam-'))
+    try {
+      const file = join(dir, 'environment')
+      writeFileSync(file, Buffer.from('A=secret\nexport B="x=secret"\nC=pre\xffsecret\n', 'latin1'))
+      const line = pamListLines()[0]
+      expect(line).toBeDefined()
+      const cmd = `${line.slice(0, -PAM_FILES.length)} "$1"`
+      const run = (c: string) => spawnSync('bash', ['-c', c, 'bash', file], { env: { PATH: '/usr/bin:/bin', LC_ALL: 'C.UTF-8' } })
+      // The control: with LC_ALL=C and the end anchor cut, the line prints the tail.
+      // Without C.UTF-8, sed falls back to C and prints names only, so the case fails.
+      const control = run(cmd.replace('LC_ALL=C ', '').replace('.*$/', '.*/'))
+      expect(control.stdout.toString('latin1')).toBe('A\nB\nC\xffsecret\n')
+      const r = run(cmd)
+      expect(r.status).toBe(0)
+      expect(r.stdout.toString('latin1')).toBe('A\nB\nC\n')
+    } finally {
       rmSync(dir, { recursive: true, force: true })
     }
   })
