@@ -5507,7 +5507,10 @@ an `ANTHROPIC_BASE_URL` that consume's environment does not set. And for a
 name not in sudo's `env_keep`, a file can replace the value consume passed,
 even for the three `CLAUDE_CODE_DISABLE_*` settings consume sets to `1`. For
 the three settings and the provider, cloud and proxy variables consume may
-pass on, keeping the names out of those files stops both.
+pass on, keeping the names out of those files stops both. A file can add any
+name, not only these, and the judge reads more than consume passes, such as
+`CLAUDE_CODE_USE_FOUNDRY` or a lowercase `https_proxy`. Keep every name
+`claude` reads out of those files.
 
 `env_keep` stops only the second case, because for a name in it sudo keeps the
 value consume passed but still adds the name when consume did not pass it. The
