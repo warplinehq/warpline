@@ -30,6 +30,10 @@ only.
    means there is nothing to do: say so and stop. It is never an error.
 2. Read each record and keep the ones whose `state` field is `"open"`. Ignore
    `superseded` records: a newer handoff from the same plugin replaced them.
+   Of the open ones, keep only those that name no `output_path` and have no
+   `<id>.claim` file beside them in `handoffs/`. A record with an
+   `output_path` is answered by `warpline consume`, and a claim means a
+   consumer is answering it now: leave both alone, so you never race it.
    Report a record you cannot parse, or one whose `min_reader_version` is above
    1, to the operator by file name, and do not follow it.
 3. For each kept record, read `task` (the judgment asked for), `plugin`,
@@ -44,6 +48,17 @@ only.
    goes to the `feed-triage` skill. If no consumer skill for that plugin is
    installed, report the outstanding handoff rather than improvising the
    judgment yourself.
+
+## Unattended runs
+
+This skill is for an interactive session. Do not run it headless on a
+schedule. For unattended judgment, schedule `warpline consume` under a
+dedicated account, as warpline's scheduler recipe shows
+(`docs/scheduler-recipe.md`, "Running the automated judgment consumer with
+less privilege"). It runs tool-less by default and answers the records that
+name an `output_path`. It sends each record's task and context verbatim to the
+configured provider, so where that data goes, and so its residency, is a
+choice of endpoint.
 
 ## What you must NOT do
 

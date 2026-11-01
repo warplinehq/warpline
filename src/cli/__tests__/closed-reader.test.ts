@@ -286,6 +286,8 @@ const ROWS: Row[] = [
   { argv: ['audit', 'head'], code: 0 },
   { argv: ['prefs', 'set', 'max_sends_per_day', '20'], code: 0 },
   { argv: ['principal', 'add', 'ops', '--type', 'human'], code: 0 },
+  // No Handoff in this home, so the pass prints `Nothing to do.` and calls no model.
+  { argv: ['consume'], code: 0 },
   {
     argv: ['renew', 'aaaaaaaaaaaa', '--principal', 'ops'],
     code: 0,

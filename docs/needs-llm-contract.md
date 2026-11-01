@@ -85,6 +85,20 @@ The reason is the same one the string arm has: the scanner runs in a session
 with the operator's rights, so the set of files a plugin can make it open must
 be bounded by the home and not by the plugin.
 
+`output_path` is optional. It names where `warpline consume` writes the
+Judgment, and it names a file under `judgments/`: a path relative to the
+warpline home that starts `judgments/`, names a file below that directory, and
+has no empty, `.` or `..` segment. Anything else, an absolute path, a drive
+letter, a `..` segment, an empty or `.` segment, `judgments/` itself or a path
+outside it, is refused at the parse boundary, by name and never by value. The
+files that hold authority
+(`.session-approval`, `standing-grants.json`, `principals.json`,
+`preferences.json`, `plugins/`, `config/`, `handoffs/`) are all outside
+`judgments/`, so no Judgment opens a gate or changes a setting. Warpline writes
+the file; the model never does. A handoff without one is not answered by
+`consume`. It reaches the Handoff record below, and only the structured arm
+carries it.
+
 The runtime classifies a handoff on **either** arm — one predicate,
 `isHandoff` in `invoke-plugin.ts`, reads the field or the prefix. `status:
 'skipped'` is still required by both: the field alone does not turn a
@@ -156,10 +170,23 @@ Its fields:
 - `plugin`: the plugin that handed off.
 - `task`: what judgment is asked for.
 - `context_path`: the payload's path, or `null` when the handoff names none.
+- `output_path`: where the Judgment is written, a path under `judgments/`
+  relative to the home, or `null` when the handoff names none.
+- `tries`: every try at the record's judgment, oldest first, starting empty.
+  A try is only appended and never rewritten. Each one carries `at`,
+  `reservation_id`, `requested` (the model asked for), `served` (the model that
+  answered, or `null`), `cost_micro_usd` (or `null`), `cost_basis`
+  (`reported`, `computed` or `unknown`), `outcome` (`answered`, `failed`,
+  `discarded`, `refused` or `recovered`) and `reason` (or `null`). A reader
+  accepts any string as an `outcome` or a `cost_basis`, as it does for `state`.
 - `created_at`: when the record was written.
-- `state`: `open`, `superseded` or `withdrawn`.
+- `state`: `open`, `superseded`, `withdrawn` or `answered`. A try closes an
+  open record `answered`.
 - `closed_at`: `null` while the record is open, and the time it closed once it
   is not.
+
+A record written before `output_path` and `tries` existed has neither key, and
+reads as it did.
 
 `task` and `context_path` come from the structured `needs_llm` field when the
 result carries it. Otherwise they come from the summary: `task` is the text
@@ -183,8 +210,9 @@ until that plugin's next handoff.
 A newer handoff for the same plugin marks every older open record of that
 plugin `superseded` and sets its `closed_at`. A superseded record never opens
 again. The new record is written first, so a plugin never ends with no open
-record. No lock is taken, so two writers racing can leave two open records
-until that plugin's next handoff.
+record. Each record it rewrites is rewritten under that record's write lock,
+described below, but the pass as a whole is not serialised, so two writers
+racing can leave two open records until that plugin's next handoff.
 
 **A denied run's record is withdrawn.** `warpline deny` that discards a
 plugin's live parked result marks that run's record `withdrawn` and sets
@@ -216,9 +244,31 @@ it again records the denial.
 
 **A reader acts only on an open record.** Every other state is closed.
 A state this build never writes is closed too, and a reader reads it as closed,
-never as unreadable. Supersede and withdraw each move only an open record, so
-two of them racing leave it closed in one state or the other. Adding a closed
-state does not raise `min_reader_version`, because no reader acts on one.
+never as unreadable. Adding a closed state does not raise
+`min_reader_version`, because no reader acts on one.
+
+**A record is created once.** The first write for a run and plugin creates
+the file, by a link that cannot replace one. A later write for the same run
+and plugin leaves the existing record as it is, whatever its state, supersedes
+nothing, and returns that record. So an answered record is never reset to
+open, and the next pass never pays for its judgment again. An existing record
+that cannot be read makes the later write fail, and nothing is written.
+
+**Every rewrite takes the record's write lock.** Supersede, withdraw and a
+settling try each take `<home>/handoffs/<id>.lock`, read the record again under
+it, and write only from what they read. So a try that settles while a
+supersede is between its read and its write lands after it, and never writes
+over it. The lock is held for one read and one write, plus the writer's one
+audit record, never across a model call. A holder gone on this machine is
+broken through `<id>.lock.break`. Any other holder is waited on, and a writer
+that waits past its limit stops with `EBUSY`, which `deny` names. Three objects
+have three locks: the spend lock `.consume.lock`, the claim `<id>.claim`, and
+this record write lock. The claim never serialises writers. The lock order is
+the state lock, then a record lock, then the audit lock.
+
+A closed record's `state` is never rewritten. A try that arrives after it
+closed is appended as `discarded`, and `state` and `closed_at` are left as
+they are, so a withdrawn or superseded record never becomes `answered`.
 
 The `needs-llm` scanner finds handoffs by listing this directory, and it keeps
 only open records.
@@ -234,9 +284,78 @@ A content-class plugin whose Handoff record cannot be written is a failed fire,
 so its approval is left `indeterminate`, as
 [runtime-spec.md](runtime-spec.md) § 10 describes.
 
+## How `warpline consume` answers a record
+
+`warpline consume` reads an open record, sends one prompt to the configured
+provider, and writes the text that comes back as the Judgment. Each rule below
+is checked by `consumePass` in `pass.ts`.
+
+**The prompt.** With `context_path: null` the prompt is the `task` alone,
+byte for byte. Otherwise it is the `task`, a blank line, then the context
+file's text. The prompt is sent verbatim to the configured provider.
+
+**The context file.** A relative `context_path` joins the home, and an
+absolute one is used as written. Either way the path must resolve inside the
+home on the filesystem, symbolic links included, and the file is read only
+through that resolved path. The file must be UTF-8 and at most 8 MiB
+(`CONTEXT_MAX_BYTES`, under the claude CLI's 10 MB stdin limit). Otherwise the
+Handoff is refused by name, with no reservation and no model call, and the
+record stays `open`:
+
+- `the context path resolves outside the home`
+- `the context file is missing`
+- `the context file is not UTF-8`
+- `the context file is over 8 MiB`
+- `the context file could not be read (<code>)` for any other read error
+
+**The output path.** The directory of `<home>/<output_path>` must resolve
+under `<home>/judgments` on the filesystem, symbolic links included. It is
+compared with the home's real path joined with `judgments`, so a `judgments`
+that is itself a link is refused. warpline makes `<home>/judgments` when it is
+missing. Before a try is reserved, the deepest part of the Judgment's
+directory that exists must resolve under it before any directory is made, and
+the directory is checked again once it is made. A path that resolves elsewhere
+is refused with `output_path resolves outside the judgments directory`, with
+no reservation and no model call, and nothing is made outside it. The
+directory is checked a third time right before the write. If it has moved
+outside `<home>/judgments` during the call, the try is `failed` with the same
+reason and nothing is written. warpline writes the Judgment there atomically,
+as the text's UTF-8 bytes. A record whose `output_path` is outside
+`judgments/`, one written before this rule, is refused with that same reason
+and stays `open`. Nothing moves it or closes it.
+
+**A successful try.** The text is an answer only when it is non-empty after
+trimming and at most `consume.max_output_bytes` UTF-8 bytes. Text of exactly
+that many bytes is an answer. Otherwise the try is `failed` with reason `the
+text was empty` or `the text is over consume.max_output_bytes`, nothing is
+written, the record stays `open`, and the try's `handoff.tried` line still
+carries the text's byte count and sha256.
+
+**Max tries.** A try counts against `consume.max_tries` when its `outcome` is
+not `answered`, `recovered` or `discarded`. The count is read from the
+record's `tries` and stored nowhere else. Once a record has
+`consume.max_tries` counted tries, it is skipped with `the Handoff has used
+consume.max_tries tries`, with no model call. It is checked before the claim
+and again under it. Under the claim, before that check, every reservation for
+the record that no try names is settled onto it first (runtime-spec § 17), so a
+paid try that ended without settling still counts. The record stays `open`, and
+the pass exits `1` for it.
+
+No refusal or skip above reserves anything or adds a try, and a claim it
+took is released.
+
 ## Who consumes the handoff
 
-A **companion skill** — a Claude Code skill (see `skills/needs-llm-template/`)
+Two consumers ship, and a record has exactly one of them:
+
+- **`warpline consume`**, the headless one, answers the open records that name
+  an `output_path`. It runs outside the engine, on a schedule or by hand, and
+  writes the Judgment itself (above, and `runtime-spec.md` § 17).
+- **The `needs-llm` skill**, the interactive one, takes the rest: the open
+  records with no `output_path` and no `<id>.claim` beside them. It routes each
+  one to a companion skill.
+
+A **companion skill** is a Claude Code skill (see `skills/needs-llm-template/`)
 that an orchestrating Claude session runs. The loop:
 
 1. Deterministic pass: the engine runs due plugins. The v0.1 entry point is
@@ -248,7 +367,9 @@ that an orchestrating Claude session runs. The loop:
    agent, or a skill that wraps the engine) scans for open Handoff records.
    That scanner ships as the `needs-llm` skill in the `warpline` Claude Code
    plugin: it globs `<home>/handoffs/*.json`, keeps the records whose `state`
-   is `open`, and reads each one's `task` and `context_path`. A relative path
+   is `open`, drops the ones that name an `output_path` or have a `<id>.claim`
+   beside them, since those are `warpline consume`'s, and reads each kept
+   one's `task` and `context_path`. A relative path
    joins the home and an absolute one is used as is. A missing `handoffs/`
    means there is nothing to do.
 3. For each, it dispatches the matching companion skill with the payload. The
@@ -286,9 +407,12 @@ for one plugin's handoffs. It sits under a **scanner**, and the two are not the
 same thing:
 
 - **`needs-llm`** is the generic scanner. One skill, plugin-agnostic: it finds
-  every open Handoff record regardless of which plugin emitted it, and routes
-  each handoff to the consumer named after the emitting plugin. It reads only
-  paths resolving inside the warpline home.
+  the open Handoff records regardless of which plugin emitted them, and routes
+  each handoff to the consumer named after the emitting plugin. It skips a
+  record that names an `output_path` or has a `<id>.claim` beside it: that one
+  is answered by `warpline consume`, the headless consumer that ships with
+  warpline, and the skill never races it. It reads only paths resolving inside
+  the warpline home.
 - **`feed-triage`** is the shipped example of a consumer. It takes the payload
   the scanner resolved and writes its judgment to one declared path,
   `<warpline home>/state/feed-triage.judgment.md` — a file, not a side effect

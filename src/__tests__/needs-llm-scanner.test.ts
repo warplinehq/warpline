@@ -55,4 +55,18 @@ describe('the needs-llm scanner skill', () => {
     expect(text).toContain('Only paths resolving inside the warpline home may be read')
     expect(text).toContain('## What you must NOT do')
   })
+
+  test("the scanner skill leaves consume's records to warpline consume", () => {
+    const text = flat(skill())
+    // The keep rule is step 2, from its open-state sentence to step 3.
+    const start = text.indexOf('keep the ones whose `state` field is `"open"`.')
+    const end = text.indexOf(' 3. ', start)
+    expect(start).toBeGreaterThan(-1)
+    expect(end).toBeGreaterThan(start)
+    const keep = text.slice(start, end)
+    expect(keep).toContain('`output_path`')
+    expect(keep).toContain('.claim')
+    expect(keep).toContain('`warpline consume`')
+    expect(text).toContain('verbatim to the configured provider')
+  })
 })

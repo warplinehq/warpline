@@ -13,6 +13,7 @@
   },
   "include": [
     "bench/**/*.ts",
+    "ci/**/*.ts",
     "src/**/*.ts",
     "examples/**/*.ts",
     "test-utils/**/*.ts",

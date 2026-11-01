@@ -55,6 +55,7 @@ Commands:
   audit      Print the record's head, export it, check it against a Checkpoint, or pass over a line its walk stops on
   prefs      Set one guardrail in preferences.json, on the record
   principal  Add, disable or list the people and machines who may act
+  consume    Answer the open Handoff records once each, outside the engine
 
   --help     Show this message
 `
@@ -155,6 +156,11 @@ export async function main(argv: string[]): Promise<number> {
 
       case 'principal': {
         const { run } = await import('./principal.js')
+        return await run(rest)
+      }
+
+      case 'consume': {
+        const { run } = await import('./consume.js')
         return await run(rest)
       }
 

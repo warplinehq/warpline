@@ -12,12 +12,15 @@
  *   4. On failure (serialise / write / rename), best-effort unlink the temp file
  *      so we never leak half-written artefacts alongside the target.
  *
+ * The create variant, `atomicCreateJson`, links the temp file instead of
+ * renaming it, so a file already at the path is never replaced.
+ *
  * `atomicWriteJson`'s optional `mode` is set on the temp file by the write and
  * again by `chmod` before the rename: the write's mode is masked by the umask,
  * and the rename installs the temp inode, so the target ends up with exactly
  * that mode whatever the old file had.
  */
-import { writeFile, rename, mkdir, readFile, unlink, chmod, open } from 'node:fs/promises'
+import { writeFile, rename, link, mkdir, readFile, unlink, chmod, open } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
 function tmpSuffix(): string {
@@ -58,6 +61,28 @@ export async function atomicWriteJson<T>(path: string, value: T, opts: { mode?: 
   } catch (err) {
     await bestEffortUnlink(tmp)
     throw err
+  }
+}
+
+/**
+ * Create `path` holding `value` as pretty-printed JSON, only if nothing is
+ * there. Returns true when it created the file, false when a file already
+ * stood at `path` (`EEXIST`), which is left as it is. Any other error is
+ * thrown. The temp file is removed either way.
+ */
+export async function atomicCreateJson<T>(path: string, value: T): Promise<boolean> {
+  await mkdir(dirname(path), { recursive: true })
+  const tmp = `${path}${tmpSuffix()}`
+  const serialised = JSON.stringify(value, null, 2)
+  try {
+    await writeFile(tmp, serialised, 'utf-8')
+    await link(tmp, path)
+    return true
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false
+    throw err
+  } finally {
+    await bestEffortUnlink(tmp)
   }
 }
 

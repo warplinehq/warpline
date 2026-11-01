@@ -16,6 +16,9 @@
  *   isQuietHours()     — check if current time is within quiet hours window
  *   NotifySchema       — the `notify` block, strict
  *   parseNotify()      — judges the `notify` block on its own
+ *   ConsumeSchema      — the `consume` block, strict
+ *   ConsumeSettings    — the `consume` block, parsed with its defaults
+ *   parseConsume()     — judges the `consume` block on its own
  *
  * Written atomically and Zod-validated on write — a half-written or
  * malformed preferences file must not be loadable. Strict on read too: an
@@ -23,17 +26,23 @@
  *
  * Two rules. Every key fails closed: a file holding an unusable value throws
  * `PreferencesInvalidError`, and nothing runs on it (the 2026-09-30 decision).
- * The one exception is the `notify` block. The file-level parse accepts it
- * unvalidated, and `parseNotify` judges it on its own, so a broken block makes
- * an advance raise and send no Ask while every other guardrail still applies.
- * An unusable block is reported as unusable, never as unset: could not look is
- * not none. `prefs set` validates the block strictly either way.
+ * The two exceptions are the `notify` and `consume` blocks. The file-level
+ * parse accepts each unvalidated, and `parseNotify` / `parseConsume` judge them
+ * on their own, so a broken `notify` makes an advance raise and send no Ask, and
+ * a broken `consume` refuses only the `consume` pass, while every other
+ * guardrail still applies. An unusable block is reported as unusable, never as
+ * unset: could not look is not none. `prefs set` validates a block strictly
+ * either way.
  *
- * Downgrade cost: an earlier build refuses a file carrying `notify` as an
- * unknown key, so remove the key before downgrading.
+ * Imports nothing under `src/consume/`: the engine reads this module.
+ *
+ * Downgrade cost: an earlier build refuses a file carrying `notify` or
+ * `consume` as an unknown key, so remove the key before downgrading.
  */
 import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
+import { isPluginName } from '../schemas/plugin-name.js'
+import { MODEL_ID, OS_USER_NAME } from './audit-log.js'
 import { atomicWriteJson } from './fs-atomic.js'
 
 // -----------------------------------------------------------------------
@@ -98,6 +107,68 @@ export const NotifySchema = z.strictObject({
 
 export type NotifySettings = z.infer<typeof NotifySchema>
 
+/**
+ * A USD amount exact to the micro-dollar: the decimal form `String`
+ * gives has at most six places, so `1e-7` is refused. Capped where a
+ * micro-USD integer stays safe, because every record holds micro-USD.
+ */
+const Usd = z
+  .number()
+  .nonnegative()
+  .max(Math.floor(Number.MAX_SAFE_INTEGER / 1e6))
+  .refine((v) => /^\d+(\.\d{1,6})?$/.test(String(v)), {
+    params: { expected: 'a USD amount with at most 6 decimal places' },
+  })
+
+const ModelId = z.string().regex(MODEL_ID)
+const PluginKey = z.string().refine(isPluginName, { params: { expected: 'a plugin name' } })
+
+/**
+ * The openai-compatible base URL. No credential rides in it: userinfo, a
+ * query and a fragment are refused, because the key is read only from
+ * `WARPLINE_CONSUME_API_KEY` and this file's digest goes on the audit record.
+ */
+const Endpoint = z.string().refine(
+  (v) => {
+    if (!URL.canParse(v)) return false
+    const u = new URL(v)
+    return (u.protocol === 'http:' || u.protocol === 'https:') && !u.username && !u.password && !u.search && !u.hash
+  },
+  { params: { expected: 'an http or https URL with no credentials, query or fragment' } },
+)
+
+/**
+ * The operator's settings for the `consume` verb. Strict, and parsed apart from
+ * the file by `parseConsume`. `tools` and `run_as` are the tool opt-in:
+ * a change to either is on the audit record as `preference.set` or
+ * `preferences.observed`, so the opt-in has no verb or audit kind of its own.
+ * A window cap needs a per-call cap beside it, because the per-call cap is the
+ * amount each try reserves.
+ */
+export const ConsumeSchema = z
+  .strictObject({
+    renderer: z.enum(['claude-code', 'openai-compatible']).default('claude-code'),
+    model: ModelId.optional(),
+    /** A model per plugin, over `model`. */
+    models: z.record(PluginKey, ModelId).default({}),
+    endpoint: Endpoint.optional(),
+    max_usd_per_call: Usd.optional(),
+    max_usd_per_window: Usd.optional(),
+    window_seconds: z.number().int().min(1).default(86400),
+    prices: z.record(ModelId, z.strictObject({ usd_per_mtok_in: Usd, usd_per_mtok_out: Usd })).default({}),
+    model_mismatch: z.enum(['record', 'refuse']).default('record'),
+    max_tries: z.number().int().min(1).default(3),
+    max_output_bytes: z.number().int().min(1).default(1048576),
+    tools: z.record(PluginKey, z.array(z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/)).min(1)).default({}),
+    run_as: z.string().regex(OS_USER_NAME).optional(),
+  })
+  .refine((c) => c.max_usd_per_window === undefined || c.max_usd_per_call !== undefined, {
+    path: ['max_usd_per_window'],
+    params: { expected: 'a per-call cap set beside it' },
+  })
+
+export type ConsumeSettings = z.infer<typeof ConsumeSchema>
+
 export const PreferencesSchema = z.strictObject({
   max_sends_per_day: z.number().int().min(0).default(20),
   review_gate: z.boolean().default(true),
@@ -111,6 +182,9 @@ export const PreferencesSchema = z.strictObject({
   // degrades instead of refusing the file. No default: a home that never sets
   // it reads and writes the bytes it did before the block existed.
   notify: z.unknown().optional(),
+  // The same, judged by `parseConsume`: a broken block refuses the `consume`
+  // pass by key path and never an advance. No default, for the same bytes.
+  consume: z.unknown().optional(),
 })
 
 export type Preferences = z.infer<typeof PreferencesSchema>
@@ -126,6 +200,7 @@ const SHAPES: Record<string, readonly string[]> = {
   quiet_hours: Object.keys(QuietHoursSchema.shape),
   retention: Object.keys(RetentionSchema.shape),
   notify: Object.keys(NotifySchema.shape),
+  consume: Object.keys(ConsumeSchema.shape),
 }
 
 /** Every settable key, dotted: each top-level key, and each key of the objects under one. */
@@ -260,11 +335,12 @@ export function setPreference(prefs: Preferences, key: string, value: unknown, p
   next[top] = sub === undefined ? value : { ...((next[top] as Record<string, unknown> | null) ?? {}), [sub]: value }
   const result = PreferencesSchema.safeParse(next)
   if (!result.success) throw new PreferencesInvalidError(prefsPath, describeIssues(result.error.issues, key))
-  if (top === 'notify') {
+  const schema: z.ZodType | undefined = top === 'notify' ? NotifySchema : top === 'consume' ? ConsumeSchema : undefined
+  if (schema !== undefined) {
     // The file-level parse does not judge the block, so the set does, strictly.
-    const block = NotifySchema.nullable().safeParse(result.data.notify ?? null)
+    const block = schema.nullable().safeParse((result.data as Record<string, unknown>)[top] ?? null)
     if (!block.success) {
-      const issues = block.error.issues.map((issue) => ({ ...issue, path: ['notify', ...issue.path] }) as Issue)
+      const issues = block.error.issues.map((issue) => ({ ...issue, path: [top, ...issue.path] }) as Issue)
       throw new PreferencesInvalidError(prefsPath, describeIssues(issues, key))
     }
   }
@@ -281,10 +357,18 @@ export function parseNotify(raw: unknown): { notify: NotifySettings | null } | {
   if (raw === undefined || raw === null) return { notify: null }
   const result = NotifySchema.safeParse(raw)
   if (result.success) return { notify: result.data }
-  const issue = result.error.issues[0] as Issue
-  const path = ['notify', ...issue.path.map(String)]
-  if (issue.code === 'unrecognized_keys' && issue.keys[0] !== undefined) path.push(issue.keys[0])
-  return { unusable: path.join('.') }
+  return { unusable: unusablePath('notify', result.error.issues[0] as Issue) }
+}
+
+/**
+ * The `consume` block judged on its own. Absent or `null` is every default,
+ * since the verb runs without one. A block the schema refuses is `{ unusable }`,
+ * naming the first failing key path the way `parseNotify` does.
+ */
+export function parseConsume(raw: unknown): { consume: ConsumeSettings } | { unusable: string } {
+  const result = ConsumeSchema.safeParse(raw ?? {})
+  if (result.success) return { consume: result.data }
+  return { unusable: unusablePath('consume', result.error.issues[0] as Issue) }
 }
 
 // -----------------------------------------------------------------------
@@ -329,6 +413,21 @@ export function isQuietHours(prefs: Preferences, now?: Date): boolean {
 type Issue = z.core.$ZodIssue
 
 /**
+ * An issue's key path. A refused record key is part of the value the operator
+ * typed, so the path stops at the record that holds it.
+ */
+function keyPath(issue: Issue): PropertyKey[] {
+  return issue.code === 'invalid_key' ? issue.path.slice(0, -1) : issue.path
+}
+
+/** The first failing key path under `top`, with an unknown key's own name. */
+function unusablePath(top: string, issue: Issue): string {
+  const path = [top, ...keyPath(issue).map(String)]
+  if (issue.code === 'unrecognized_keys' && issue.keys[0] !== undefined) path.push(issue.keys[0])
+  return path.join('.')
+}
+
+/**
  * One clause per issue, joined by '; '. Built from the key path, the issue
  * code and schema-side fields (expected, minimum, pattern, keys) only.
  * `issue.message` and `issue.input` are never read: upstream prose can start
@@ -340,48 +439,53 @@ type Issue = z.core.$ZodIssue
 function describeIssues(issues: readonly Issue[], typed?: string): string {
   const clauses: string[] = []
   for (const issue of issues) {
-    const parent = issue.path.map(String).join('.')
+    const parent = keyPath(issue).map(String).join('.')
     if (issue.code === 'unrecognized_keys') {
-      const accepted = (SHAPES[parent] ?? []).map((k) => JSON.stringify(k)).join(', ')
+      const names = (SHAPES[parent] ?? []).map((k) => JSON.stringify(k)).join(', ')
+      // An object under a record, a price entry for one, has no row in SHAPES.
+      const accepted = names ? ` (accepted here: ${names})` : ''
       // A key inside a value the operator typed is part of that value, and is
       // never repeated: say only that the typed key's value holds one.
       if (typed !== undefined && (parent === typed || parent.startsWith(`${typed}.`))) {
-        clauses.push(`key ${JSON.stringify(parent)} holds a key that is not accepted (accepted here: ${accepted})`)
+        clauses.push(`key ${JSON.stringify(parent)} holds a key that is not accepted${accepted}`)
         continue
       }
       for (const key of issue.keys) {
         const full = parent ? `${parent}.${key}` : key
-        clauses.push(`key ${JSON.stringify(full)} is not accepted (accepted here: ${accepted})`)
+        clauses.push(`key ${JSON.stringify(full)} is not accepted${accepted}`)
       }
       continue
     }
     const where = parent ? `key ${JSON.stringify(parent)}` : 'the file'
-    let expected: string
-    switch (issue.code) {
-      case 'invalid_type':
-        expected = `expected ${issue.expected}`
-        break
-      case 'too_small':
-        expected = `expected ${String(issue.minimum)} or more`
-        break
-      case 'too_big':
-        expected = `expected ${String(issue.maximum)} or less`
-        break
-      case 'custom':
-        // The schema's own words, set where the check is declared.
-        expected = typeof issue.params?.expected === 'string' ? `expected ${issue.params.expected}` : issue.code
-        break
-      case 'invalid_format':
-        expected = issue.pattern
-          ? `expected a string matching ${issue.pattern}`
-          : `expected format ${issue.format}`
-        break
-      default:
-        expected = issue.code
-    }
-    clauses.push(`${where}: ${expected}`)
+    clauses.push(`${where}: ${expectedOf(issue)}`)
   }
   return clauses.join('; ')
+}
+
+/** What the schema expected, from schema-side fields only. */
+function expectedOf(issue: Issue): string {
+  switch (issue.code) {
+    case 'invalid_type':
+      return `expected ${issue.expected}`
+    case 'too_small':
+      return `expected ${String(issue.minimum)} or more`
+    case 'too_big':
+      return `expected ${String(issue.maximum)} or less`
+    case 'custom':
+      // The schema's own words, set where the check is declared.
+      return typeof issue.params?.expected === 'string' ? `expected ${issue.params.expected}` : issue.code
+    case 'invalid_format':
+      return issue.pattern ? `expected a string matching ${issue.pattern}` : `expected format ${issue.format}`
+    case 'invalid_value':
+      return `expected one of ${issue.values.map((v) => JSON.stringify(v)).join(', ')}`
+    case 'invalid_key': {
+      // The refused key itself is never named; `keyPath` already dropped it.
+      const inner = issue.issues[0]
+      return inner ? `holds a key that is not accepted, ${expectedOf(inner)}` : issue.code
+    }
+    default:
+      return issue.code
+  }
 }
 
 function isEnoent(err: unknown): boolean {

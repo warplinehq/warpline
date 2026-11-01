@@ -6,17 +6,23 @@
  * record's natural key, and the filename stem is its id. A newer handoff for a
  * plugin supersedes that plugin's older open records.
  *
- * **It takes no lock.** Two functions rewrite a record: the supersede pass in
- * `writeHandoff`, and `withdrawHandoff`. Each moves only an `open` record to a
- * closed state, and nothing writes `open` over a record that exists. So two of
- * them racing leave the record closed: the race can change which closed state
- * it ends in, never whether it is open. A later writer that records something
- * a closed state must keep, a consumption, has to coordinate with both before
- * it writes one, and must re-read `state` under that coordination so it never
- * acts on a closed record. A record's `state` alone says whether its run's
- * judgment is still asked for. Whether the run's outcome is accepted is its
- * gate's question, in the state document, and `approve` answers that one
- * without reading a record.
+ * **Every rewrite takes the record's write lock.** Three functions rewrite a
+ * record: the supersede pass in `writeHandoff`, `withdrawHandoff`, and
+ * `settleTry`. Each takes `<id>.lock`, re-reads the record under it, and
+ * writes only from what it re-read, so a try that settles while a supersede
+ * is between its read and its write is never written over. The lock is held
+ * for one read and one write, plus the caller's one audit append, never
+ * across a model call. The claim `<id>.claim` is a different object and never
+ * serialises writers. The lock order is the state lock, then a record lock,
+ * then the audit lock.
+ *
+ * Nothing writes `open` over a record that exists: the record is created by a
+ * link, which cannot replace a file. A closed record's
+ * `state` is never rewritten: a try that arrives after it closed is appended
+ * as `discarded`. A record's `state` alone says whether its run's judgment is
+ * still asked for. Whether the run's outcome is accepted is its gate's
+ * question, in the state document, and `approve` answers that one without
+ * reading a record.
  *
  * **It imports nothing from the runtime or the board, and resolves no home.**
  * Every function takes the directory from its caller: the engine derives it
@@ -32,7 +38,8 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { z } from 'zod'
-import { atomicWriteJson } from './fs-atomic.js'
+import { atomicCreateJson, atomicWriteJson } from './fs-atomic.js'
+import { acquireLock, releaseHeld } from './pid-lock.js'
 import { isPluginName } from '../schemas/plugin-name.js'
 import { makeSkillError, type SkillResult } from '../schemas/skill-result.js'
 
@@ -44,6 +51,36 @@ const RUN_ID = /^[A-Za-z0-9_-]{1,128}$/
 
 const Iso = z.iso.datetime()
 
+/** How long a rewrite waits for a record's write lock before it refuses with `EBUSY`. */
+export const RECORD_LOCK_TIMEOUT_MS = 10_000
+
+/** How one try ended, as the writer records it. The reader accepts any string here, as it does for `state`. */
+export type TryOutcome = 'answered' | 'failed' | 'discarded' | 'refused' | 'recovered'
+
+/** One try at a record's judgment. Appended to `tries`, never rewritten. */
+export type Try = {
+  at: string
+  reservation_id: string
+  requested: string
+  served: string | null
+  cost_micro_usd: number | null
+  cost_basis: 'reported' | 'computed' | 'unknown'
+  outcome: TryOutcome
+  reason: string | null
+}
+
+/** A stored try. Not strict, and its closed sets are read as any string. */
+const TrySchema = z.object({
+  at: Iso,
+  reservation_id: z.string(),
+  requested: z.string(),
+  served: z.string().nullable(),
+  cost_micro_usd: z.number().int().nonnegative().nullable(),
+  cost_basis: z.string(),
+  outcome: z.string(),
+  reason: z.string().nullable(),
+})
+
 /** One stored Handoff. Not strict: a key a later build adds is ignored, and a narrowing one bumps the reader version. */
 const HandoffSchema = z.object({
   min_reader_version: z.number().int().positive(),
@@ -52,6 +89,9 @@ const HandoffSchema = z.object({
   plugin: z.string().refine(isPluginName),
   task: z.string(),
   context_path: z.string().nullable(),
+  // Both absent on a record written before they existed.
+  output_path: z.string().nullable().optional(),
+  tries: z.array(TrySchema).optional(),
   created_at: Iso,
   // Any string: a reader acts only on `open` and reads every other state as closed, one a later build adds included.
   state: z.string(),
@@ -59,7 +99,7 @@ const HandoffSchema = z.object({
 })
 
 export type Handoff = z.infer<typeof HandoffSchema>
-export type HandoffInput = { run_id: string; plugin: string; task: string; context_path: string | null }
+export type HandoffInput = { run_id: string; plugin: string; task: string; context_path: string | null; output_path?: string | null }
 
 type ReadRecord = { name: string; raw: Record<string, unknown>; record: Handoff } | { name: string; unreadable: true }
 
@@ -129,23 +169,39 @@ const CONTEXT = 'Context: '
  */
 export function handoffFields(runId: string, plugin: string, result: SkillResult): HandoffInput {
   if (result.needs_llm !== undefined) {
-    return { run_id: runId, plugin, task: result.needs_llm.task, context_path: result.needs_llm.context_path }
+    const n = result.needs_llm
+    return { run_id: runId, plugin, task: n.task, context_path: n.context_path, output_path: n.output_path ?? null }
   }
   const rest = result.summary.startsWith(PREFIX) ? result.summary.slice(PREFIX.length) : result.summary
   const at = rest.indexOf(CONTEXT)
   const task = (at === -1 ? rest : rest.slice(0, at)).trim().replace(/\.$/, '')
   const contextPath = at === -1 ? null : rest.slice(at + CONTEXT.length).trim()
-  return { run_id: runId, plugin, task, context_path: contextPath }
+  return { run_id: runId, plugin, task, context_path: contextPath, output_path: null }
 }
 
 function refuse(half: 'run id' | 'plugin name'): Error {
   return Object.assign(new Error(`Handoff ${half} is not a file name`), { code: 'EINVAL' })
 }
 
+/** Run `fn` holding the record's write lock, released however `fn` ends. */
+async function withRecordLock<T>(dir: string, id: string, timeoutMs: number, fn: () => Promise<T>): Promise<T> {
+  const lockPath = join(dir, `${id}.lock`)
+  const token = await acquireLock(lockPath, join(dir, `${id}.lock.break`), timeoutMs)
+  try {
+    return await fn()
+  } finally {
+    releaseHeld(lockPath, token)
+  }
+}
+
 /**
- * Write one open record, then supersede this plugin's older open ones. Only a
+ * Create one open record, then supersede this plugin's older open ones. Only a
  * failed write of the new record throws. `created_at` is clamped above every
  * one this plugin has, so two handoffs in one millisecond still order.
+ *
+ * A record that already exists for this run and plugin is left as it is,
+ * whatever its state, and returned, read with `readRunRecord`'s rules. No
+ * supersede pass runs then: the write that created it ran one.
  */
 export async function writeHandoff(dir: string, input: HandoffInput, now = Date.now()): Promise<Handoff> {
   if (!RUN_ID.test(input.run_id)) throw refuse('run id')
@@ -163,17 +219,27 @@ export async function writeHandoff(dir: string, input: HandoffInput, now = Date.
     plugin: input.plugin,
     task: input.task,
     context_path: input.context_path,
+    output_path: input.output_path ?? null,
+    tries: [],
     created_at: new Date(floor).toISOString(),
     state: 'open',
     closed_at: null,
   }
-  await atomicWriteJson(join(dir, `${id}.json`), record)
+  if (!(await atomicCreateJson(join(dir, `${id}.json`), record))) {
+    const existing = await readRunRecord(dir, input.run_id, input.plugin)
+    if (existing === null) throw Object.assign(new Error(`Handoff record ${id}.json is missing`), { code: 'ENOENT' })
+    return existing.record
+  }
 
   try {
     // Re-listed after the write, so a racing writer's record is seen.
     for (const r of await recordsFor(dir, input.plugin)) {
       if (!('record' in r) || r.record.state !== 'open' || !older(r.record, record)) continue
-      await atomicWriteJson(join(dir, r.name), { ...r.raw, state: 'superseded', closed_at: record.created_at })
+      await withRecordLock(dir, r.record.id, RECORD_LOCK_TIMEOUT_MS, async () => {
+        const now = await readRecord(dir, r.name)
+        if (!('record' in now) || now.record.state !== 'open' || !older(now.record, record)) return
+        await atomicWriteJson(join(dir, r.name), { ...now.raw, state: 'superseded', closed_at: record.created_at })
+      })
     }
   } catch {
     // Two open records is the state a race already leaves; the next handoff reconciles them.
@@ -214,14 +280,71 @@ export async function readHandoff(dir: string, runId: string, plugin: string): P
 /**
  * Withdraw the open record of one run's handoff, at `closedAt`.
  * The read rules are `readRunRecord`'s: no record returns false, and a record that cannot be read throws.
- * A record that is not `open` returns false and is not written: a closed record is never rewritten.
- * An open record is rewritten as `withdrawn` and the function returns true; a write error is thrown.
+ * A record that is not `open` returns false and is not written: a closed record's `state` is never rewritten.
+ * An open record is rewritten as `withdrawn`, read again under its write lock first, and the function returns true.
+ * A write error is thrown, and a lock not taken within `lockTimeoutMs` throws with `code: 'EBUSY'`.
  */
-export async function withdrawHandoff(dir: string, runId: string, plugin: string, closedAt: string): Promise<boolean> {
-  const r = await readRunRecord(dir, runId, plugin)
-  if (r === null || r.record.state !== 'open') return false
-  await atomicWriteJson(join(dir, r.name), { ...r.raw, state: 'withdrawn', closed_at: closedAt })
-  return true
+export async function withdrawHandoff(
+  dir: string,
+  runId: string,
+  plugin: string,
+  closedAt: string,
+  lockTimeoutMs = RECORD_LOCK_TIMEOUT_MS,
+): Promise<boolean> {
+  // No record, or a closed one, takes no lock: a closed record never opens again.
+  const seen = await readRunRecord(dir, runId, plugin)
+  if (seen === null || seen.record.state !== 'open') return false
+  return withRecordLock(dir, seen.record.id, lockTimeoutMs, async () => {
+    const r = await readRunRecord(dir, runId, plugin)
+    if (r === null || r.record.state !== 'open') return false
+    await atomicWriteJson(join(dir, r.name), { ...r.raw, state: 'withdrawn', closed_at: closedAt })
+    return true
+  })
+}
+
+/**
+ * Settle one try at record `id` under its write lock, and return the state
+ * written and the try.
+ *
+ * The record is re-read under the lock with `readRunRecord`'s rules: a missing
+ * one throws with `code: 'ENOENT'`, an unreadable one with `EINVAL`, and an id
+ * that is not `<run_id>.<plugin>` with `EINVAL` before any path is built. When
+ * the re-read state is `open`, `onOpen` gives the try and whether it closes
+ * the record `answered`. On any other state, `onClosed` gives the try, it is
+ * appended, and `state` and `closed_at` are left as they are, so a withdrawn
+ * or superseded record never becomes `answered`. A try is only appended. A
+ * callback that throws writes nothing.
+ */
+export async function settleTry(
+  dir: string,
+  id: string,
+  onOpen: (r: Handoff) => Promise<{ try: Try; close: boolean }>,
+  onClosed: (r: Handoff) => Promise<Try>,
+  now = Date.now(),
+  lockTimeoutMs = RECORD_LOCK_TIMEOUT_MS,
+): Promise<{ state: string; try: Try }> {
+  const parts = id.split('.')
+  if (parts.length !== 2 || !RUN_ID.test(parts[0]!) || !isPluginName(parts[1])) {
+    throw Object.assign(new Error('Handoff id is not a file name'), { code: 'EINVAL' })
+  }
+  const [runId, plugin] = parts as [string, string]
+  return withRecordLock(dir, id, lockTimeoutMs, async () => {
+    const r = await readRunRecord(dir, runId, plugin)
+    if (r === null) throw Object.assign(new Error(`Handoff record ${id}.json is missing`), { code: 'ENOENT' })
+    const prior = Array.isArray(r.raw.tries) ? (r.raw.tries as unknown[]) : []
+    if (r.record.state === 'open') {
+      const { try: t, close } = await onOpen(r.record)
+      await atomicWriteJson(join(dir, r.name), {
+        ...r.raw,
+        tries: [...prior, t],
+        ...(close ? { state: 'answered', closed_at: new Date(now).toISOString() } : {}),
+      })
+      return { state: close ? 'answered' : 'open', try: t }
+    }
+    const t = await onClosed(r.record)
+    await atomicWriteJson(join(dir, r.name), { ...r.raw, tries: [...prior, t] })
+    return { state: r.record.state, try: t }
+  })
 }
 
 /** The open records, oldest first, and the names of files that could not be read. A missing directory is empty. */
