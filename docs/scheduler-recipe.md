@@ -658,7 +658,7 @@ PATH=/usr/local/bin:/usr/bin:/bin
 5,20,35,50 * * * * set -a; . /home/operator/.config/warpline/consume.env; set +a; WARPLINE_HOME=/home/operator/.warpline /usr/bin/node /opt/warpline/node_modules/.bin/warpline consume
 ```
 
-The environment file holds the key and nothing else:
+The environment file holds the credential and nothing else:
 
 ```bash
 # /home/operator/.config/warpline/consume.env
@@ -677,14 +677,17 @@ chmod 700 /home/operator/.warpline
   macOS the crontab line above is the simpler form.
 - **The home is 0700.** It holds the preferences, the grants, the audit record
   and every plugin's state. Nothing but you needs into it.
-- **`--bare` cannot use a subscription login.** The `claude-code` renderer runs
-  `claude -p --bare`, which never reads a subscription's OAuth login or the
-  keychain. So `consume` needs `ANTHROPIC_API_KEY`, or Bedrock or Vertex
-  credentials (`CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX` with that
-  cloud's own variables), in its environment. Only a fixed list of provider,
-  cloud and proxy variables reaches the child, and the rest of the unit's
-  environment stays behind. The `openai-compatible` renderer reads its key from
-  `WARPLINE_CONSUME_API_KEY` only, never from `preferences.json`.
+- **`--bare` never reads the `claude` login.** The `claude-code` renderer runs
+  `claude -p --bare`, which never reads the keychain or the login `claude`
+  stores. So `consume` needs `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or
+  Bedrock or Vertex credentials (`CLAUDE_CODE_USE_BEDROCK` or
+  `CLAUDE_CODE_USE_VERTEX` with that cloud's own variables), in its
+  environment. Put an `ANTHROPIC_AUTH_TOKEN` in the 0600 file, as you would the
+  key. An OAuth access token expires, so you supply a current one. Only a fixed
+  list of provider, cloud and proxy variables reaches the child, and the rest
+  of the unit's environment stays behind. The `openai-compatible` renderer
+  reads its key from `WARPLINE_CONSUME_API_KEY` only, never from
+  `preferences.json`.
 - **`claude` must be on the unit's `PATH`.** The renderer runs the first
   executable `claude` it finds there, at version 2.1.305 or later, and a
   scheduler's `PATH` is not your shell's (step 2 above).
@@ -786,13 +789,20 @@ Use a dedicated, spend-limited key for consume.
    authority than you: what the variables can do, they do as an account with
    less reach. The second rule runs the probes.
 
-   On Linux, sudo's PAM session for the judge may add machine-wide names from
-   files such as `/etc/environment` and `/etc/default/locale` and, for a name
-   outside sudo's `env_keep`, replace the value consume passed, even for the
-   three `CLAUDE_CODE_DISABLE_*` settings consume sets to `1` and the provider,
-   cloud and proxy variables it passes on. Keep those names out of those files,
-   or add the ones consume passes to your `env_keep`, so sudo keeps the passed
-   value:
+   On Linux, sudo's PAM session for the judge may set names from machine-wide
+   files such as `/etc/environment` and `/etc/default/locale`. Two cases change
+   what the judge runs with. A file can add a name consume did not pass, such
+   as an `ANTHROPIC_BASE_URL` that the unit's environment does not set. And for
+   a name not in sudo's `env_keep`, a file can replace the value consume
+   passed, even for the three `CLAUDE_CODE_DISABLE_*` settings consume sets to
+   `1`. For the three settings and the provider, cloud and proxy variables
+   consume may pass on, keeping the names out of those files stops both.
+
+   `env_keep` stops only the second case, because for a name in it sudo keeps
+   the value consume passed but still adds the name when consume did not pass
+   it. The three settings are always passed, so this line in your `env_keep`
+   keeps each at `1`. It covers no other name. The line is optional and is not
+   a sudoers rule:
 
    ```
    Defaults:operator env_keep += "CLAUDE_CODE_DISABLE_MODEL_ACCESS_FALLBACK CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"

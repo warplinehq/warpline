@@ -210,6 +210,7 @@ reaches.
   Judgment itself, records every try with the model it asked for, the model
   that served it and what it cost, and enforces the spend caps before any
   call. The engine never invokes it: you schedule it, or run it by hand. Its
-  headless call cannot use a subscription login, so it needs an API key or
+  headless call never reads the keychain or the `claude` login, so it needs a
+  credential in its environment: an API key, an `ANTHROPIC_AUTH_TOKEN` or
   cloud provider credentials. An interactive session running the `needs-llm`
   skill covers the records it leaves, and works under a subscription.

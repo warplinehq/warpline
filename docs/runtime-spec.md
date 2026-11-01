@@ -5286,10 +5286,7 @@ try runs in this order:
    deadline is sent nothing. If a process it started still holds its output
    open, the call returns 5 seconds after the exit, or when the output closes
    if that is sooner, and the bytes read from the output by then are decided
-   as for any other exit. So a complete answer keeps its reported cost, and
-   output that is not one complete result is `failed` with
-   `the renderer printed no result` and its cost unknown, so the full
-   reservation counts. A process the child started is not signalled by
+   as for any other exit. A process the child started is not signalled by
    consume and may outlive the try, even an answered one.
 5. Under the record lock the record is re-read. While it is `open`,
    `handoff.tried` is appended, then the Judgment is written atomically to
@@ -5501,14 +5498,21 @@ reservation, and the claim is released.
 
 The spawn's env is the tool-less allowlist without `HOME`. `--preserve-env`
 names those variables and carries no value, so no credential is on the process
-table, and no `env` program runs. `-n` never prompts. On Linux, sudo's PAM
-session for `run_as` may add machine-wide names from files such as
-`/etc/environment` and `/etc/default/locale` and, for a name outside sudo's
-`env_keep`, replace the value consume passed, even for the three
-`CLAUDE_CODE_DISABLE_*` settings consume sets to `1` and the provider, cloud
-and proxy variables it passes on. Keep those names out of those files, or add
-the ones consume passes to the operator's `env_keep`, so sudo keeps the passed
-value:
+table, and no `env` program runs. `-n` never prompts.
+
+On Linux, sudo's PAM session for `run_as` may set names from machine-wide
+files such as `/etc/environment` and `/etc/default/locale`. Two cases change
+what the judge runs with. A file can add a name consume did not pass, such as
+an `ANTHROPIC_BASE_URL` that consume's environment does not set. And for a
+name not in sudo's `env_keep`, a file can replace the value consume passed,
+even for the three `CLAUDE_CODE_DISABLE_*` settings consume sets to `1`. For
+the three settings and the provider, cloud and proxy variables consume may
+pass on, keeping the names out of those files stops both.
+
+`env_keep` stops only the second case, because for a name in it sudo keeps the
+value consume passed but still adds the name when consume did not pass it. The
+three settings are always passed, so this line in the operator's `env_keep`
+keeps each at `1`. It covers no other name:
 
 ```
 Defaults:<operator> env_keep += "CLAUDE_CODE_DISABLE_MODEL_ACCESS_FALLBACK CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
