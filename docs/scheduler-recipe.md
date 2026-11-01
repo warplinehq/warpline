@@ -790,26 +790,9 @@ Use a dedicated, spend-limited key for consume.
    less reach. The second rule runs the probes.
 
    On Linux, sudo's PAM session for the judge may set names from machine-wide
-   files such as `/etc/environment` and `/etc/default/locale`. Two cases change
-   what the judge runs with. A file can add a name consume did not pass, such
-   as an `ANTHROPIC_BASE_URL` that the unit's environment does not set. And for
-   a name not in sudo's `env_keep`, a file can replace the value consume
-   passed, even for the three `CLAUDE_CODE_DISABLE_*` settings consume sets to
-   `1`. For the three settings and the provider, cloud and proxy variables
-   consume may pass on, keeping the names out of those files stops both. A file
-   can add any name, not only these, and the judge reads more than consume
-   passes, such as `CLAUDE_CODE_USE_FOUNDRY` or a lowercase `https_proxy`.
-   Keep every name `claude` reads out of those files.
-
-   `env_keep` stops only the second case, because for a name in it sudo keeps
-   the value consume passed but still adds the name when consume did not pass
-   it. The three settings are always passed, so this line in your `env_keep`
-   keeps each at `1`. It covers no other name. Add it with `visudo` beside the
-   two rules if you want it. It is a `Defaults` entry, not a rule:
-
-   ```
-   Defaults:operator env_keep += "CLAUDE_CODE_DISABLE_MODEL_ACCESS_FALLBACK CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
-   ```
+   files such as `/etc/environment` and `/etc/default/locale`. A file can add a
+   name consume did not pass, or replace a value consume passed. PAM env files
+   are trusted input to the judge, like sudoers, and consume cannot filter them.
 
 5. **Turn it on.**
 

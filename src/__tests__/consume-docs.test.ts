@@ -128,43 +128,38 @@ function recipeStep4(): string {
   return s.slice(start, end)
 }
 
-const pamAdd = (who: string, env: string) =>
-  `On Linux, sudo's PAM session for ${who} may set names from machine-wide files such as \`/etc/environment\` and \`/etc/default/locale\`. Two cases change what the judge runs with. A file can add a name consume did not pass, such as an \`ANTHROPIC_BASE_URL\` that ${env} does not set. And for a name not in sudo's \`env_keep\`, a file can replace the value consume passed, even for the three \`CLAUDE_CODE_DISABLE_*\` settings consume sets to \`1\`. For the three settings and the provider, cloud and proxy variables consume may pass on, keeping the names out of those files stops both. A file can add any name, not only these, and the judge reads more than consume passes, such as \`CLAUDE_CODE_USE_FOUNDRY\` or a lowercase \`https_proxy\`. Keep every name \`claude\` reads out of those files.`
-const pamKeep = (whose: string) =>
-  `\`env_keep\` stops only the second case, because for a name in it sudo keeps the value consume passed but still adds the name when consume did not pass it. The three settings are always passed, so this line in ${whose} \`env_keep\` keeps each at \`1\`. It covers no other name`
-const SETTINGS = 'CLAUDE_CODE_DISABLE_MODEL_ACCESS_FALLBACK CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'
+const pamTrusted = (who: string) =>
+  `On Linux, sudo's PAM session for ${who} may set names from machine-wide files such as \`/etc/environment\` and \`/etc/default/locale\`. A file can add a name consume did not pass, or replace a value consume passed. PAM env files are trusted input to the judge, like sudoers, and consume cannot filter them.`
 
-/** No sentence offers both remedies as alternatives: none names `env_keep`, a file and `or` together, however it is worded. */
-function joinedRemedies(text: string): string[] {
-  return text.split(/(?<=[.:])\s+/).filter((s) => s.includes('env_keep') && /\bfiles?\b/.test(s) && /\bor\b/.test(s))
+/** Every paragraph in `raw` that opens the PAM statement, whitespace-collapsed. */
+function pamParagraphs(raw: string): string[] {
+  return raw
+    .split(/\n\s*\n/)
+    .map((p) => flat(p).trim())
+    .filter((p) => p.startsWith("On Linux, sudo's PAM session for"))
 }
 
-describe('the PAM paragraphs say which remedy stops which case', () => {
-  test('§ 17 The command. carries both paragraphs, its fence unchanged, and no joined remedy', () => {
-    const raw = specRegion('### Tools and run_as', '### Running it')
-    const text = flat(raw)
-    expect(text).toContain(pamAdd('`run_as`', "consume's environment"))
-    expect(text).toContain(`${pamKeep("the operator's")}:`)
-    expect(text).not.toContain('the ones consume passes')
-    expect(text).not.toContain('so sudo keeps the passed value')
-    expect(joinedRemedies(text)).toEqual([])
-    // The line is unchanged, matched as a whole line.
-    expect(raw.split('\n')).toContain(`Defaults:<operator> env_keep += "${SETTINGS}"`)
-    // Each paragraph starts after a blank line, which collapsing would hide.
-    expect(raw).toContain("\n\nOn Linux, sudo's PAM session for `run_as` may set")
-    expect(raw).toContain('\n\n`env_keep` stops only the second case,')
+describe('the PAM paragraphs say the files are trusted input and name no remedy', () => {
+  test('§ 17 The command. says the PAM env files are trusted input, in one paragraph and no more', () => {
+    expect(pamParagraphs(specRegion('### Tools and run_as', '### Running it'))).toEqual([pamTrusted('`run_as`')])
   })
 
-  test('recipe step 4 carries both paragraphs, says the line is optional, its fence unchanged', () => {
-    const raw = recipeStep4()
-    const text = flat(raw)
-    expect(text).toContain(pamAdd('the judge', "the unit's environment"))
-    expect(text).toContain(`${pamKeep('your')}. Add it with \`visudo\` beside the two rules if you want it. It is a \`Defaults\` entry, not a rule:`)
-    expect(text).not.toContain('the ones consume passes')
-    expect(joinedRemedies(text)).toEqual([])
-    expect(raw.split('\n')).toContain(`   Defaults:operator env_keep += "${SETTINGS}"`)
-    expect(raw).toContain("\n\n   On Linux, sudo's PAM session for the judge may set")
-    expect(raw).toContain('\n\n   `env_keep` stops only the second case,')
+  test('recipe step 4 says the PAM env files are trusted input, in one paragraph and no more', () => {
+    expect(pamParagraphs(recipeStep4())).toEqual([pamTrusted('the judge')])
+  })
+
+  test('§ 17 Tools and run_as carries no env_keep and no Defaults line', () => {
+    const raw = specRegion('### Tools and run_as', '### Running it')
+    expect(raw).toContain("sudo's PAM session for `run_as`")
+    expect(raw).not.toContain('env_keep')
+    expect(raw.split('\n').filter((l) => /^\s*Defaults\b/.test(l))).toEqual([])
+  })
+
+  test('the recipe consumer section carries no env_keep and no Defaults line', () => {
+    const raw = recipeSection()
+    expect(raw).toContain("sudo's PAM session for the judge")
+    expect(raw).not.toContain('env_keep')
+    expect(raw.split('\n').filter((l) => /^\s*Defaults\b/.test(l))).toEqual([])
   })
 
   test('§ 17 step 4 states its early-exit outcome once, without the deleted gloss', () => {
