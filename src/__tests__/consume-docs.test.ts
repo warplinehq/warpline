@@ -159,7 +159,7 @@ describe('the PAM paragraphs say which remedy stops which case', () => {
     const raw = recipeStep4()
     const text = flat(raw)
     expect(text).toContain(pamAdd('the judge', "the unit's environment"))
-    expect(text).toContain(`${pamKeep('your')}. The line is optional and is not a sudoers rule:`)
+    expect(text).toContain(`${pamKeep('your')}. Add it with \`visudo\` beside the two rules if you want it. It is a \`Defaults\` entry, not a rule:`)
     expect(text).not.toContain('the ones consume passes')
     expect(joinedRemedies(text)).toEqual([])
     expect(raw.split('\n')).toContain(`   Defaults:operator env_keep += "${SETTINGS}"`)
@@ -181,7 +181,7 @@ describe('the --bare credential names ANTHROPIC_AUTH_TOKEN where it is promised'
   test('the recipe --bare bullet names the token and keeps no-keychain', () => {
     const text = flat(recipeSection())
     expect(text).toContain(
-      "- **`--bare` never reads the `claude` login.** The `claude-code` renderer runs `claude -p --bare`, which never reads the keychain or the login `claude` stores. So `consume` needs `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or Bedrock or Vertex credentials (`CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX` with that cloud's own variables), in its environment. Put an `ANTHROPIC_AUTH_TOKEN` in the 0600 file, as you would the key. An OAuth access token expires, so you supply a current one.",
+      "- **`--bare` never reads the `claude` login.** The `claude-code` renderer runs `claude -p --bare`, which never reads the keychain or the login `claude` stores. So `consume` needs `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or Bedrock or Vertex credentials (`CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX` with that cloud's own variables), in its environment. Put an `ANTHROPIC_AUTH_TOKEN` in the 0600 file, as you would the key. If the token is an OAuth access token, it expires, and the file needs a current one before each run.",
     )
     expect(text).toContain('The environment file holds the credential and nothing else:')
     expect(text).not.toContain('cannot use a subscription login')

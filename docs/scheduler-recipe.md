@@ -683,11 +683,11 @@ chmod 700 /home/operator/.warpline
   Bedrock or Vertex credentials (`CLAUDE_CODE_USE_BEDROCK` or
   `CLAUDE_CODE_USE_VERTEX` with that cloud's own variables), in its
   environment. Put an `ANTHROPIC_AUTH_TOKEN` in the 0600 file, as you would the
-  key. An OAuth access token expires, so you supply a current one. Only a fixed
-  list of provider, cloud and proxy variables reaches the child, and the rest
-  of the unit's environment stays behind. The `openai-compatible` renderer
-  reads its key from `WARPLINE_CONSUME_API_KEY` only, never from
-  `preferences.json`.
+  key. If the token is an OAuth access token, it expires, and the file needs a
+  current one before each run. Only a fixed list of provider, cloud and proxy
+  variables reaches the child, and the rest of the unit's environment stays
+  behind. The `openai-compatible` renderer reads its key from
+  `WARPLINE_CONSUME_API_KEY` only, never from `preferences.json`.
 - **`claude` must be on the unit's `PATH`.** The renderer runs the first
   executable `claude` it finds there, at version 2.1.305 or later, and a
   scheduler's `PATH` is not your shell's (step 2 above).
@@ -804,8 +804,8 @@ Use a dedicated, spend-limited key for consume.
    `env_keep` stops only the second case, because for a name in it sudo keeps
    the value consume passed but still adds the name when consume did not pass
    it. The three settings are always passed, so this line in your `env_keep`
-   keeps each at `1`. It covers no other name. The line is optional and is not
-   a sudoers rule:
+   keeps each at `1`. It covers no other name. Add it with `visudo` beside the
+   two rules if you want it. It is a `Defaults` entry, not a rule:
 
    ```
    Defaults:operator env_keep += "CLAUDE_CODE_DISABLE_MODEL_ACCESS_FALLBACK CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
