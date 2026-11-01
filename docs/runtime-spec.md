@@ -5282,12 +5282,15 @@ try runs in this order:
    A renderer child still running after 10 minutes makes the try `failed` with
    the reason `the renderer did not answer in time`. It is sent SIGTERM, then
    SIGKILL 5 seconds later if it is still there, and the call returns as soon
-   as the child exits or SIGKILL is sent. A child that exits before then is
-   sent nothing. If a process it started still holds its output open, the call
-   returns 5 seconds after the exit, and what the child printed by then is read
-   as for any other exit: a complete result is answered with its reported
-   cost, and a partial one is `failed` with `the renderer printed no result`
-   and its cost unknown, so the full reservation counts.
+   as the child exits or SIGKILL is sent. A child that exits before the
+   deadline is sent nothing. If a process it started still holds its output
+   open, the call returns 5 seconds after the exit, or when the output closes
+   if that is sooner, and the bytes read from the output by then are decided
+   as for any other exit. So a complete answer keeps its reported cost, and
+   output that is not one complete result is `failed` with
+   `the renderer printed no result` and its cost unknown, so the full
+   reservation counts. A process the child started is not signalled by
+   consume and may outlive the try, even an answered one.
 5. Under the record lock the record is re-read. While it is `open`,
    `handoff.tried` is appended, then the Judgment is written atomically to
    `<home>/<output_path>`, then the record gains the try and, when the try
@@ -5501,8 +5504,15 @@ names those variables and carries no value, so no credential is on the process
 table, and no `env` program runs. `-n` never prompts. On Linux, sudo's PAM
 session for `run_as` may add machine-wide names from files such as
 `/etc/environment` and `/etc/default/locale` and, for a name outside sudo's
-`env_keep`, replace the value consume passed, so keep secrets out of those
-world-readable files.
+`env_keep`, replace the value consume passed, even for the three
+`CLAUDE_CODE_DISABLE_*` settings consume sets to `1` and the provider, cloud
+and proxy variables it passes on. Keep those names out of those files, or add
+the ones consume passes to the operator's `env_keep`, so sudo keeps the passed
+value:
+
+```
+Defaults:<operator> env_keep += "CLAUDE_CODE_DISABLE_MODEL_ACCESS_FALLBACK CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+```
 
 At the deadline the child gets SIGTERM first, because sudo passes it on to the
 judge. SIGKILL would end sudo alone and leave the judge running as `run_as`,

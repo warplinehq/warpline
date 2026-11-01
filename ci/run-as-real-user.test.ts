@@ -207,10 +207,16 @@ if (guard === 'fail') {
         expect(r.refused).toEqual([])
         expect(r.answered).toEqual([ID])
         const text = readFileSync(join(home, OUTPUT), 'utf-8')
-        const m = /^user=([^;]*);write=([^;]*);read=([^;]*);env=(.*)$/.exec(text.trim())
+        const m = /^user=([^;]*);write=([^;]*);read=([^;]*);pins=([^;]*);env=(.*)$/.exec(text.trim())
         expect(m).not.toBeNull()
         expect(m!.slice(1, 4)).toEqual([judge, 'denied', 'denied'])
-        const names = m![4]!.split(',').filter(Boolean)
+        // None of the three is in env_keep, so a PAM env file could replace one.
+        expect(m![4]!.split(',')).toEqual([
+          'CLAUDE_CODE_DISABLE_MODEL_ACCESS_FALLBACK=1',
+          'CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1',
+          'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
+        ])
+        const names = m![5]!.split(',').filter(Boolean)
         expect(names.length).toBeGreaterThan(0)
         expect(names).not.toContain(SECRET)
         expect(names.filter((n) => !allowedName(n))).toEqual([])

@@ -784,11 +784,19 @@ Use a dedicated, spend-limited key for consume.
    the process table. `SETENV` is what lets those named variables past sudo's
    environment checks. That is acceptable only because the judge has less
    authority than you: what the variables can do, they do as an account with
-   less reach. On Linux, sudo's PAM session for the judge may add machine-wide
-   names from files such as `/etc/environment` and `/etc/default/locale` and,
-   for a name outside sudo's `env_keep`, replace the value consume passed, so
-   keep secrets out of those world-readable files. The second rule runs the
-   probes.
+   less reach. The second rule runs the probes.
+
+   On Linux, sudo's PAM session for the judge may add machine-wide names from
+   files such as `/etc/environment` and `/etc/default/locale` and, for a name
+   outside sudo's `env_keep`, replace the value consume passed, even for the
+   three `CLAUDE_CODE_DISABLE_*` settings consume sets to `1` and the provider,
+   cloud and proxy variables it passes on. Keep those names out of those files,
+   or add the ones consume passes to your `env_keep`, so sudo keeps the passed
+   value:
+
+   ```
+   Defaults:operator env_keep += "CLAUDE_CODE_DISABLE_MODEL_ACCESS_FALLBACK CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+   ```
 
 5. **Turn it on.**
 
