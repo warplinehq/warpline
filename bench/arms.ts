@@ -442,7 +442,8 @@ export class OutboundConfigError extends Error {
  * `--safe-mode`. All three were measured on this tool version, and the two
  * rejected ones fail on different halves of the same requirement:
  *
- *   - `--bare` authenticates strictly through an API key or a key helper, and
+ *   - `--bare` takes an API key, a key helper or an `ANTHROPIC_AUTH_TOKEN`,
+ *     and never the subscription credential. And
  *     setting a configuration directory to ANY value — including the real
  *     default path — suppresses the subscription credential, because the
  *     keychain entry is keyed to that variable. So `--bare` cannot authenticate
