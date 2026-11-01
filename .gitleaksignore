@@ -24,3 +24,18 @@ ff9cd11786e518a61fa6307720a86138589712fc:src/runtime/__tests__/secrets.test.ts:g
 # the planted key; it authenticates against nothing, and the `KEY =` name with
 # its entropy (3.90) is what earns it the generic-api-key rule.
 6c8d734b5fec7884dcc2ae12751b62e6baa8ff52:src/runtime/__tests__/audit-sentinels.test.ts:generic-api-key:31
+
+# The claude-code renderer's env test fixture, not a credential.
+# claude-code.test.ts plants one recognisable value in the parent env and
+# asserts that the renderer's child env never carries it, so the file has to
+# hold a literal for the assertion to mean anything. 'planted-secret-6f1c9e'
+# authenticates against nothing, and the `SECRET =` name with its entropy
+# (3.73) is what earns it the generic-api-key rule.
+f384a1e1a14feef175747652e45d02dea0513be7:src/consume/__tests__/claude-code.test.ts:generic-api-key:26
+
+# The tool opt-in's sudo spawn test fixture, not a credential. run-as.test.ts
+# passes 'sentinel-allowed-3b7d' as ANTHROPIC_API_KEY in the parent env and
+# asserts that the value never reaches sudo's argv, where only the name may
+# go. It authenticates against nothing, and the `API_KEY:` name with its
+# entropy (3.65) is what earns it the generic-api-key rule.
+c801862fdaa12884c81c3e8a2e980176721d3337:src/consume/__tests__/run-as.test.ts:generic-api-key:314
