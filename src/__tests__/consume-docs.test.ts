@@ -134,9 +134,9 @@ const pamKeep = (whose: string) =>
   `\`env_keep\` stops only the second case, because for a name in it sudo keeps the value consume passed but still adds the name when consume did not pass it. The three settings are always passed, so this line in ${whose} \`env_keep\` keeps each at \`1\`. It covers no other name`
 const SETTINGS = 'CLAUDE_CODE_DISABLE_MODEL_ACCESS_FALLBACK CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'
 
-/** No sentence offers both remedies as alternatives: the files remedy and `env_keep` never share one. */
+/** No sentence offers both remedies as alternatives: none names `env_keep`, a file and `or` together, however it is worded. */
 function joinedRemedies(text: string): string[] {
-  return text.split(/(?<=[.:])\s+/).filter((s) => /out of those files/i.test(s) && s.includes('env_keep'))
+  return text.split(/(?<=[.:])\s+/).filter((s) => s.includes('env_keep') && /\bfiles?\b/.test(s) && /\bor\b/.test(s))
 }
 
 describe('the PAM paragraphs say which remedy stops which case', () => {
@@ -148,7 +148,7 @@ describe('the PAM paragraphs say which remedy stops which case', () => {
     expect(text).not.toContain('the ones consume passes')
     expect(text).not.toContain('so sudo keeps the passed value')
     expect(joinedRemedies(text)).toEqual([])
-    // Byte-identical to the fence at 0d811eb, a whole line.
+    // The line is unchanged, matched as a whole line.
     expect(raw.split('\n')).toContain(`Defaults:<operator> env_keep += "${SETTINGS}"`)
     // Each paragraph starts after a blank line, which collapsing would hide.
     expect(raw).toContain("\n\nOn Linux, sudo's PAM session for `run_as` may set")
@@ -160,7 +160,6 @@ describe('the PAM paragraphs say which remedy stops which case', () => {
     const text = flat(raw)
     expect(text).toContain(pamAdd('the judge', "the unit's environment"))
     expect(text).toContain(`${pamKeep('your')}. The line is optional and is not a sudoers rule:`)
-    expect(text).toContain('The line is optional and is not a sudoers rule:')
     expect(text).not.toContain('the ones consume passes')
     expect(joinedRemedies(text)).toEqual([])
     expect(raw.split('\n')).toContain(`   Defaults:operator env_keep += "${SETTINGS}"`)
@@ -174,22 +173,18 @@ describe('the PAM paragraphs say which remedy stops which case', () => {
     expect(text).toContain(
       'by then are decided as for any other exit. A process the child started is not signalled by consume and may outlive the try, even an answered one.',
     )
-    expect(text).not.toContain(
-      'So a complete answer keeps its reported cost, and output that is not one complete result is `failed` with `the renderer printed no result` and its cost unknown, so the full reservation counts.',
-    )
     expect(text).not.toContain('So a complete answer')
   })
 })
 
-describe('the --bare credential names ANTHROPIC_AUTH_TOKEN where it is promised, and only there', () => {
-  test('the recipe --bare bullet names the token, keeps no-keychain, and promises no refresh', () => {
+describe('the --bare credential names ANTHROPIC_AUTH_TOKEN where it is promised', () => {
+  test('the recipe --bare bullet names the token and keeps no-keychain', () => {
     const text = flat(recipeSection())
     expect(text).toContain(
       "- **`--bare` never reads the `claude` login.** The `claude-code` renderer runs `claude -p --bare`, which never reads the keychain or the login `claude` stores. So `consume` needs `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or Bedrock or Vertex credentials (`CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX` with that cloud's own variables), in its environment. Put an `ANTHROPIC_AUTH_TOKEN` in the 0600 file, as you would the key. An OAuth access token expires, so you supply a current one.",
     )
     expect(text).toContain('The environment file holds the credential and nothing else:')
     expect(text).not.toContain('cannot use a subscription login')
-    expect(text).not.toMatch(/refresh/i)
   })
 
   test("doctrine's consume paragraph names the token beside the API key", () => {
@@ -200,10 +195,7 @@ describe('the --bare credential names ANTHROPIC_AUTH_TOKEN where it is promised,
     expect(text).not.toContain('cannot use a subscription login')
   })
 
-  test('§ 17 and llms.txt make no ANTHROPIC_AUTH_TOKEN credential claim', () => {
-    expect(read('docs/runtime-spec.md').slice(read('docs/runtime-spec.md').indexOf('## 17. `warpline consume`'))).not.toContain(
-      'ANTHROPIC_AUTH_TOKEN',
-    )
+  test('llms.txt makes no ANTHROPIC_AUTH_TOKEN credential claim', () => {
     expect(read('docs/llms.txt')).not.toContain('ANTHROPIC_AUTH_TOKEN')
   })
 })

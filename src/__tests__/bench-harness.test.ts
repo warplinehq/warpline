@@ -786,9 +786,11 @@ describe('bench harness — the result JSON, parsed and dispositioned', () => {
  *
  * The flag list is asserted POSITIVELY and the two absent flags are asserted
  * BY ABSENCE, because both absences are load-bearing and measured: the minimal
- * flag reads strictly an API key or a key helper and never the subscription
- * credential, and the pinned tool version has no turn-cap flag at all, so
- * passing one would abort every session on an unrecognised argument.
+ * flag never reads the subscription credential (it takes an API key or a key
+ * helper, and `-p --bare` sends an `ANTHROPIC_AUTH_TOKEN` as
+ * `Authorization: Bearer`, seen at claude 2.1.305 and 2.1.316), and the pinned
+ * tool version has no turn-cap flag at all, so passing one would abort every
+ * session on an unrecognised argument.
  */
 describe('bench harness — the three sessions, built', () => {
   const SESSIONS: readonly SessionId[] = ['agent-with-state', 'agent-from-scratch', 'consumer']
