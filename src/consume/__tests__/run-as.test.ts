@@ -33,7 +33,6 @@ import * as pass from '../pass.js'
 import * as runAs from '../run-as.js'
 
 const ID = 'run-1.prod'
-const OUTPUT = 'judgments/prod.judgment.md'
 const TEXT = 'the judgment'
 const MODEL = 'claude-opus-5'
 const FLOOR_VERSION = '2.1.305 (Claude Code)'
